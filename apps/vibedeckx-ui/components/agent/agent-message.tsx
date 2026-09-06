@@ -151,7 +151,7 @@ function renderTextWithVPaste(text: string) {
             {seg.text}
           </span>
         ) : (
-          <VPasteChip key={i} path={seg.path} size={seg.size} />
+          <VPasteChip key={i} path={seg.path} size={seg.size} name={seg.name} />
         )
       )}
     </div>

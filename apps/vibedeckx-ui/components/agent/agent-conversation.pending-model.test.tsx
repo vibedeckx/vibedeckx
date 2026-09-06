@@ -31,10 +31,11 @@ const prepareConversation = vi.fn(async (): Promise<PreparedConversation | null>
 const activateConversation = vi.fn(async (): Promise<EnsuredAgentSession | null> => null);
 const cancelPreparedConversation = vi.fn(async () => {});
 const uploadPaste = vi.fn();
+const uploadAttachment = vi.fn();
 const setModel = vi.fn(async (): Promise<string | null> => null);
 const reviewerRunState = vi.hoisted(() => ({ value: null as WorkflowRun | null }));
 const promptState = vi.hoisted(() => ({
-  submit: null as null | ((message: { text: string; files: [] }) => Promise<void>),
+  submit: null as null | ((message: { text: string; files: { type: "file"; filename: string; mediaType: string; url: string }[] }) => Promise<void>),
   onPasteText: null as null | ((event: unknown, text: string) => void),
 }));
 const draftState = vi.hoisted(() => ({ value: "", set: vi.fn() }));
@@ -105,6 +106,7 @@ vi.mock("@/hooks/use-agent-session", () => ({
     activateConversation,
     cancelPreparedConversation,
     uploadPaste,
+    uploadAttachment,
     stopSession: vi.fn(),
     switchAgentType: vi.fn(),
     setModel,
@@ -305,6 +307,7 @@ describe("AgentConversation pendingModel", () => {
     cancelPreparedConversation.mockReset();
     cancelPreparedConversation.mockResolvedValue(undefined);
     uploadPaste.mockReset();
+    uploadAttachment.mockReset();
     vi.mocked(translateText).mockReset();
     setModel.mockClear();
     promptState.submit = null;
@@ -690,6 +693,107 @@ describe("AgentConversation pendingModel", () => {
       expect(activateConversation).toHaveBeenCalledWith(prepared, '<vpaste path="/tmp/paste" size="2001" />');
       expect(startConversation).not.toHaveBeenCalled();
       expect(cancelPreparedConversation).not.toHaveBeenCalled();
+    });
+
+    // Non-image files have no content-part type in either agent protocol, so
+    // they go to a temp file on the agent's machine (needing an identity up
+    // front, like a paste) and the instruction carries a <vfile/> marker.
+    // Images stay inline as content parts.
+    const pdf = {
+      type: "file" as const,
+      filename: "spec.pdf",
+      mediaType: "application/pdf",
+      url: "data:application/pdf;base64,JVBERi0=",
+    };
+    const png = {
+      type: "file" as const,
+      filename: "shot.png",
+      mediaType: "image/png",
+      url: "data:image/png;base64,iVBORw0=",
+    };
+
+    it("uploads a non-image attachment and activates with a <vfile/> marker", async () => {
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+
+      await act(async () => {
+        await promptState.submit!({ text: "read this", files: [pdf] });
+      });
+
+      expect(uploadAttachment).toHaveBeenCalledWith(
+        { name: "spec.pdf", mediaType: "application/pdf", contentBase64: "JVBERi0=" },
+        "s-new",
+      );
+      expect(activateConversation).toHaveBeenCalledWith(
+        prepared,
+        'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
+      );
+      expect(startConversation).not.toHaveBeenCalled();
+    });
+
+    it("keeps images inline while uploading the other files", async () => {
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+
+      await act(async () => {
+        await promptState.submit!({ text: "both", files: [png, pdf] });
+      });
+
+      expect(uploadAttachment).toHaveBeenCalledTimes(1);
+      expect(activateConversation).toHaveBeenCalledWith(prepared, [
+        { type: "text", text: 'both\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />' },
+        { type: "image", mediaType: "image/png", data: "iVBORw0=" },
+      ]);
+    });
+
+    it("sends an image type the model cannot see (SVG) as a file, not inline", async () => {
+      await renderFirstSend();
+      const svg = { type: "file" as const, filename: "logo.svg", mediaType: "image/svg+xml", url: "data:image/svg+xml;base64,PHN2Zz4=" };
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/logo.svg", name: "logo.svg", size: 5, mediaType: "image/svg+xml" });
+
+      await act(async () => {
+        await promptState.submit!({ text: "use this", files: [svg] });
+      });
+
+      expect(uploadAttachment).toHaveBeenCalledWith(
+        { name: "logo.svg", mediaType: "image/svg+xml", contentBase64: "PHN2Zz4=" },
+        "s-new",
+      );
+      // No image part: the instruction is plain text carrying the marker.
+      expect(activateConversation).toHaveBeenCalledWith(
+        prepared,
+        'use this\n<vfile path="/tmp/att/logo.svg" name="logo.svg" size="5" />',
+      );
+    });
+
+    it("cancels the prepared identity when an attachment upload fails", async () => {
+      await renderFirstSend();
+      uploadAttachment.mockRejectedValue(new Error("The remote worker is too old to receive file attachments. Update it and reconnect."));
+
+      // Rejecting (rather than resolving) is what keeps the attachment in the
+      // composer: PromptInput only clears its files when onSubmit resolves.
+      await act(async () => {
+        await expect(promptState.submit!({ text: "read this", files: [pdf] })).rejects.toThrow(/too old/);
+      });
+
+      expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
+      expect(activateConversation).not.toHaveBeenCalled();
+      expect(startConversation).not.toHaveBeenCalled();
+      expect(draftState.set).toHaveBeenLastCalledWith("read this");
+    });
+
+    it("fails instead of silently dropping an attachment that never became a data URL", async () => {
+      await renderFirstSend();
+
+      await act(async () => {
+        await expect(
+          promptState.submit!({ text: "read this", files: [{ ...pdf, url: "blob:http://x/1" }] }),
+        ).rejects.toThrow(/Could not read spec.pdf/);
+      });
+
+      expect(uploadAttachment).not.toHaveBeenCalled();
+      expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
+      expect(activateConversation).not.toHaveBeenCalled();
     });
   });
 

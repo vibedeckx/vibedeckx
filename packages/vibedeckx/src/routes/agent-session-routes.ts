@@ -9,6 +9,7 @@ import { requireAuth as requireRawAuth } from "../server.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import { writePasteToTempFile } from "../utils/paste-file.js";
+import { writeAttachmentToTempFile, MAX_ATTACHMENT_BYTES } from "../utils/attachment-file.js";
 import { extractUserText } from "../utils/session-title.js";
 import { projectMessagesForBrief } from "../utils/review-brief.js";
 import type { RemoteSessionInfo } from "../server-types.js";
@@ -42,6 +43,8 @@ async function resolveProjectPath(
 // <vpaste/> marker. 64 KB chars is well under any agent-context size limit
 // but cuts off accidental/malicious bloat that would re-render slowly.
 const MESSAGE_TEXT_CHAR_LIMIT = 64 * 1024;
+// Registry key of the worker-side attachment route (reverse-connect-capabilities.ts).
+const ATTACHMENT_CAPABILITY = "http:POST /api/agent-sessions/:param/attachment";
 
 function messageTextLength(content: string | ContentPart[]): number {
   if (typeof content === "string") return content.length;
@@ -1824,6 +1827,20 @@ const routes: FastifyPluginAsync = async (fastify) => {
     });
   });
 
+  // Resolve the worker-side target of a paste/attachment upload. A prepared
+  // (not yet activated) remote session has no mapping and no map entry — only
+  // its durable intent. Upload is exactly the step that runs between prepare
+  // and activate (design §10.1), so resolve it through the intent under the
+  // same project authorization.
+  async function resolveUploadTargetRemoteInfo(sessionId: string, userId: string): Promise<RemoteSessionInfo | null> {
+    const mapped = await getAuthorizedRemoteSessionInfo(sessionId, userId);
+    if (mapped) return mapped;
+    const intent = await fastify.storage.remoteSessionCreationIntents.getByLocal(sessionId);
+    if (!intent || intent.status !== "pending" || !intent.prepare_operation_id) return null;
+    if (!(await fastify.storage.projects.getById(intent.project_id, userId))) return null;
+    return { remoteServerId: intent.remote_server_id, remoteSessionId: intent.remote_session_id, branch: intent.branch ?? null };
+  }
+
   // Save a pasted blob of text to a temp file on the agent's execution machine.
   // For remote sessions, proxies through so the file lands on the remote host.
   fastify.post<{
@@ -1839,17 +1856,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (req.params.sessionId.startsWith("remote-")) {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
-      // A prepared (not yet activated) remote session has no mapping and no
-      // map entry — only its durable intent. Paste upload is exactly the step
-      // that runs between prepare and activate (design §10.1), so resolve it
-      // through the intent under the same project authorization.
-      const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId)
-        ?? await (async (): Promise<RemoteSessionInfo | null> => {
-          const intent = await fastify.storage.remoteSessionCreationIntents.getByLocal(req.params.sessionId);
-          if (!intent || intent.status !== "pending" || !intent.prepare_operation_id) return null;
-          if (!(await fastify.storage.projects.getById(intent.project_id, userId))) return null;
-          return { remoteServerId: intent.remote_server_id, remoteSessionId: intent.remote_session_id, branch: intent.branch ?? null };
-        })();
+      const remoteInfo = await resolveUploadTargetRemoteInfo(req.params.sessionId, userId);
       if (!remoteInfo) {
         return reply.code(404).send({ error: "Remote session not found" });
       }
@@ -1879,6 +1886,97 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const msg = err instanceof Error ? err.message : String(err);
       req.log?.error({ err }, "[paste] failed to write temp file");
       return reply.code(500).send({ error: `Failed to write paste: ${msg}` });
+    }
+  });
+
+  // Save a non-image attachment from the composer to a temp file on the
+  // agent's execution machine. Images ride inline as content parts (both agent
+  // protocols have an image type); everything else has no protocol type, so it
+  // lands on disk and the message carries a `<vfile path name size />` marker
+  // the agent follows with its own tooling — the same shape as `/paste`.
+  // Body is base64 JSON rather than multipart so the identical payload can be
+  // forwarded over the reverse-connect tunnel to a worker.
+  fastify.post<{
+    Params: { sessionId: string };
+    Body: { name?: unknown; mediaType?: unknown; contentBase64?: unknown };
+  }>("/api/agent-sessions/:sessionId/attachment", { bodyLimit: 12 * 1024 * 1024 }, async (req, reply) => {
+    const { name, mediaType, contentBase64 } = req.body ?? {};
+    if (typeof name !== "string" || name.length === 0) {
+      return reply.code(400).send({ error: "name must be a non-empty string" });
+    }
+    if (typeof contentBase64 !== "string" || contentBase64.length === 0) {
+      return reply.code(400).send({ error: "contentBase64 must be a non-empty string" });
+    }
+    if (mediaType !== undefined && typeof mediaType !== "string") {
+      return reply.code(400).send({ error: "mediaType must be a string" });
+    }
+    // Reject oversize payloads before decoding (base64 is 4/3 of raw size).
+    if (contentBase64.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4) {
+      return reply.code(413).send({
+        error: `Attachment exceeds ${Math.floor(MAX_ATTACHMENT_BYTES / (1024 * 1024))}MB`,
+        errorCode: "attachment_too_large",
+      });
+    }
+
+    if (req.params.sessionId.startsWith("remote-")) {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const remoteInfo = await resolveUploadTargetRemoteInfo(req.params.sessionId, userId);
+      if (!remoteInfo) {
+        return reply.code(404).send({ error: "Remote session not found" });
+      }
+      // Additive tunnel capability: never probe an old worker with a 404 when
+      // its handshake already tells us it cannot serve the route.
+      const server = await fastify.storage.remoteServers.getById(remoteInfo.remoteServerId);
+      const supported = server?.worker_capabilities?.includes(ATTACHMENT_CAPABILITY);
+      if (server && Array.isArray(server.worker_capabilities) && !supported) {
+        return reply.code(409).send({
+          error: "The remote worker is too old to receive file attachments. Update it and reconnect.",
+          errorCode: "worker_unsupported",
+        });
+      }
+      const result = await proxyAuto(
+        remoteInfo.remoteServerId,
+        "POST",
+        `/api/agent-sessions/${remoteInfo.remoteSessionId}/attachment`,
+        { name, mediaType, contentBase64 }
+      );
+      if (!result.ok) {
+        const status = proxyStatus(result);
+        if (status === 404) {
+          return reply.code(409).send({
+            error: "The remote worker is too old to receive file attachments. Update it and reconnect.",
+            errorCode: "worker_unsupported",
+          });
+        }
+        return reply.code(status).send({
+          error: `Remote proxy failed: ${result.errorCode || "unknown"}`,
+          errorCode: result.errorCode,
+          attempts: result.attempts,
+          totalDurationMs: result.totalDurationMs,
+          detail: result.data,
+        });
+      }
+      return reply.code(proxyStatus(result)).send(result.data);
+    }
+
+    const data = Buffer.from(contentBase64, "base64");
+    if (data.length === 0) {
+      return reply.code(400).send({ error: "contentBase64 is not valid base64" });
+    }
+    if (data.length > MAX_ATTACHMENT_BYTES) {
+      return reply.code(413).send({
+        error: `Attachment exceeds ${Math.floor(MAX_ATTACHMENT_BYTES / (1024 * 1024))}MB`,
+        errorCode: "attachment_too_large",
+      });
+    }
+    try {
+      const written = await writeAttachmentToTempFile(name, data);
+      return reply.code(200).send({ ...written, mediaType: typeof mediaType === "string" ? mediaType : null });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      req.log?.error({ err }, "[attachment] failed to write temp file");
+      return reply.code(500).send({ error: `Failed to write attachment: ${msg}` });
     }
   });
 

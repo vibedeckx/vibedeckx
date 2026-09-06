@@ -9,6 +9,8 @@ import {
   type AgentMessage,
   type ContentPart,
   type UploadedPaste,
+  type AttachmentUploadInput,
+  type UploadedAttachment,
   type AgentSession,
   type EnsuredAgentSession,
   type PreparedConversation,
@@ -77,6 +79,7 @@ import { SessionHistoryDropdown } from "./session-history-dropdown";
 import { ConversationAnchorHold } from "./conversation-anchor-hold";
 import { QuotePopover, appendQuote } from "./quote-popover";
 import { ReviewDialog } from "./review-dialog";
+import { vfileMarker } from "./vpaste-chip";
 
 /** Only renders the attachment header when there are files attached */
 function AttachmentHeader() {
@@ -187,6 +190,16 @@ function formatPasteSize(bytes: number): string {
   return `${Math.round(kb)}KB`;
 }
 
+/**
+ * Image types the model accepts as an inline image block. Anything else
+ * (SVG, HEIC, TIFF, BMP, ...) would be rejected by the API, so it goes to the
+ * agent's machine as a file instead.
+ */
+const INLINE_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+function isInlineImageType(mediaType: string | undefined): boolean {
+  return mediaType !== undefined && INLINE_IMAGE_TYPES.has(mediaType.toLowerCase());
+}
+
 function pasteTokenFor(id: number, bytes: number): string {
   return `[📎 paste #${id} (${formatPasteSize(bytes)})]`;
 }
@@ -282,6 +295,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     activateConversation,
     cancelPreparedConversation,
     uploadPaste,
+    uploadAttachment,
     stopSession,
     switchAgentType,
     setModel,
@@ -805,11 +819,46 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     return result;
   }
 
+  /**
+   * Upload every non-image attachment to the agent's machine and return the
+   * `<vfile/>` markers to append to the message. Throws on the first failure
+   * (including an attachment whose blob → data URL conversion failed, which
+   * would otherwise be dropped silently).
+   */
+  async function materializeAttachments(
+    files: PromptInputMessage["files"],
+    upload: (file: AttachmentUploadInput, sessionId?: string) => Promise<UploadedAttachment>,
+    sessionId?: string
+  ): Promise<string[]> {
+    const markers: string[] = [];
+    for (const file of files) {
+      const name = file.filename || "attachment";
+      const base64Match = file.url?.match(/^data:[^;,]*(?:;[^;,]*)*;base64,(.+)$/);
+      if (!base64Match) {
+        throw new Error(`Could not read ${name}`);
+      }
+      const uploaded = await upload(
+        { name, mediaType: file.mediaType || undefined, contentBase64: base64Match[1] },
+        sessionId
+      );
+      markers.push(vfileMarker(uploaded));
+    }
+    return markers;
+  }
+
   const handleSubmit = async (message: PromptInputMessage) => {
     const submissionOrigin = displayedWorkspaceRef.current;
     if (!submissionOrigin) return;
     const rawText = message.text;
+    // Model-visible images ride inline as content parts (both agent protocols
+    // have an image type). Every other file — including `image/*` types the
+    // model does not accept, e.g. SVG or HEIC — is uploaded to the agent's
+    // machine and referenced by a `<vfile/>` marker, like a long paste.
+    const imageFiles = message.files.filter((f) => isInlineImageType(f.mediaType));
+    const otherFiles = message.files.filter((f) => !isInlineImageType(f.mediaType));
     const hasFiles = message.files.length > 0;
+    const hasImages = imageFiles.length > 0;
+    const hasAttachments = otherFiles.length > 0;
     const hasPastes = pastes.length > 0;
     const trimmedRaw = rawText.trim();
     if (!trimmedRaw && !hasFiles) return;
@@ -834,7 +883,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // Plain text needs no identity up front and goes through one `start`.
     let targetSessionId: string | undefined = session?.id;
     let prepared: PreparedConversation | null = null;
-    const needsUploadTarget = !session && (hasPastes || trimmedRaw.length > PASTE_TO_FILE_THRESHOLD);
+    const needsUploadTarget = !session && (hasPastes || hasAttachments || trimmedRaw.length > PASTE_TO_FILE_THRESHOLD);
     if (needsUploadTarget) {
       prepared = await prepareConversation(permissionMode, pendingModel);
       if (!prepared) {
@@ -884,6 +933,26 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       }
     }
 
+    // Upload non-image attachments and append their markers after the paste
+    // handling, so the markers themselves never get wrapped into a paste file.
+    if (hasAttachments) {
+      try {
+        const markers = await materializeAttachments(otherFiles, uploadAttachment, targetSessionId);
+        processedText = [processedText, ...markers].filter(Boolean).join("\n");
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Failed to upload attachment";
+        await abandonPrepared();
+        if (isOriginDraftDisplayed(submissionOrigin)) {
+          toast.error("Attachment upload failed", { description: msg });
+          setInput(rawText);
+        }
+        // Rethrow: PromptInput clears its attachments only when onSubmit
+        // resolves, so a rejected submit keeps the files in the composer for
+        // a retry (too large / old worker / transient network).
+        throw e;
+      }
+    }
+
     // Clear pastes state now that they've been materialized into the outgoing message.
     const capturedPastes = pastes;
     const capturedNextPasteId = nextPasteId;
@@ -892,16 +961,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       setNextPasteId(1);
     }
 
-    // Build content: plain string when no files, ContentPart[] when files are attached
+    // Build content: plain string when no images, ContentPart[] when images are attached
     let content: string | ContentPart[];
-    if (!hasFiles) {
+    if (!hasImages) {
       content = processedText;
     } else {
       const parts: ContentPart[] = [];
       if (processedText) {
         parts.push({ type: "text", text: processedText });
       }
-      for (const file of message.files) {
+      for (const file of imageFiles) {
         if (file.mediaType && file.url) {
           // Extract base64 data from data URL (format: "data:mediaType;base64,DATA")
           const base64Match = file.url.match(/^data:[^;]+;base64,(.+)$/);
@@ -1414,10 +1483,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         />
         <PromptInput
           onSubmit={handleSubmit}
-          accept="image/*"
           className="w-full"
         >
-          {/* Attachment thumbnails — only rendered when images are attached */}
+          {/* Attachment thumbnails/chips — only rendered when files are attached */}
           <AttachmentHeader />
           <div className="relative flex w-full flex-col">
             {/* Translate badge row — only when enabled */}
@@ -1440,7 +1508,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 <PromptInputActionMenuTrigger className="ml-1" />
 
                 <PromptInputActionMenuContent>
-                  <PromptInputActionAddAttachments label="Add images" />
+                  <PromptInputActionAddAttachments label="Add files" />
                   <PromptInputActionMenuItem
                     onSelect={() => {
                       setTranslateEnabled(!translateEnabled);

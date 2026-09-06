@@ -1,10 +1,8 @@
 import { chmod, mkdir, open } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-
-const PASTE_DIR = path.join(tmpdir(), "vibedeckx-pastes");
+import { PASTE_DIR, sweepStaleTempFiles } from "./temp-file-sweep.js";
 
 // Pastes can contain secrets (API keys, .env contents, tokens). Restrict the
 // directory and each file to the vibedeckx process owner only, and refuse to
@@ -30,5 +28,6 @@ export async function writePasteToTempFile(content: string): Promise<WrittenPast
   } finally {
     await handle.close();
   }
+  void sweepStaleTempFiles();
   return { path: filePath, size: Buffer.byteLength(content, "utf8") };
 }

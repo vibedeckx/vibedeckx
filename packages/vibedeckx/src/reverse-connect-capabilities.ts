@@ -65,6 +65,10 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   // intact; no unconditional-delete fallback is safe under a concurrent send.
   "http:POST /api/agent-sessions/:param/discard-if-empty": { since: "0.3.33", summary: "仅在空会话时删除" },
   "http:POST /api/agent-sessions/:param/paste": { since: "0.2.0", summary: "粘贴图片/长文本" },
+  // Additive: the hub checks this key (and treats a 404 the same way) before
+  // uploading, answering `worker_unsupported` so the UI can tell the user to
+  // update the worker instead of silently sending a message without the file.
+  "http:POST /api/agent-sessions/:param/attachment": { since: "0.3.37", summary: "非图片附件落临时文件" },
   "http:POST /api/agent-sessions/:param/stop": { since: "0.2.0", summary: "停止会话 turn" },
   "http:POST /api/agent-sessions/:param/restart": { since: "0.2.0", summary: "重启会话进程" },
   "http:POST /api/agent-sessions/:param/agent-type": { since: "0.2.0", summary: "切换 agent 类型" },

@@ -320,6 +320,51 @@ async function uploadPasteToSession(
   return response.json();
 }
 
+export interface UploadedAttachment {
+  path: string;
+  name: string;
+  size: number;
+  mediaType: string | null;
+}
+
+export interface AttachmentUploadInput {
+  name: string;
+  mediaType?: string;
+  /** Raw bytes as base64 (no data-URL prefix). */
+  contentBase64: string;
+}
+
+/**
+ * Non-image composer attachments go to a temp file on the agent's machine
+ * (same shape as pastes); the message then carries a `<vfile/>` marker.
+ * Failures surface the server's message verbatim — `worker_unsupported`
+ * (old remote worker) and `attachment_too_large` are the actionable ones.
+ */
+async function uploadAttachmentToSession(
+  sessionId: string,
+  file: AttachmentUploadInput
+): Promise<UploadedAttachment> {
+  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/attachment`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(file),
+  });
+
+  if (!response.ok) {
+    let message = `Failed to upload ${file.name} [${response.status}]`;
+    try {
+      const body = await response.json();
+      if (typeof body?.error === "string" && body.error) message = body.error;
+    } catch {
+      // ignore parse errors
+    }
+    console.error(`[AgentSession] /attachment failed: status=${response.status}, sessionId=${sessionId}, name=${file.name}`);
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
 async function restartSessionApi(sessionId: string, agentType?: AgentType): Promise<void> {
   const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/restart`, {
     method: "POST",
@@ -1708,6 +1753,17 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     [session?.id]
   );
 
+  const uploadAttachment = useCallback(
+    async (file: AttachmentUploadInput, sessionId?: string): Promise<UploadedAttachment> => {
+      const targetSessionId = sessionId || session?.id;
+      if (!targetSessionId) {
+        throw new Error("No session id available for attachment upload");
+      }
+      return uploadAttachmentToSession(targetSessionId, file);
+    },
+    [session?.id]
+  );
+
   // Stop session - sends stop signal to the running agent process
   const stopSession = useCallback(async () => {
     if (!session?.id) return;
@@ -2775,6 +2831,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     sendEnsuredMessage,
     discardEnsuredSessionIfEmpty,
     uploadPaste,
+    uploadAttachment,
     stopSession,
     restartSession,
     switchAgentType,
