@@ -205,6 +205,19 @@ export function useResidentSessions(
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
 
+  // Sessions whose process we have seen die. A seed is an insert-time snapshot
+  // (see `upsertResidentSession`) and can be handed to us *after* that death —
+  // its frozen "running" status would then re-insert a row the process event
+  // had just dropped, leaving a stopped session pulsing blue forever. The
+  // existing-row branch of `upsertResidentSession` cannot catch that case:
+  // there is no row left to keep the status of. Entries clear when the same
+  // session reports a live process again (wake / restart). Not cleared on a
+  // project switch: session ids are unique across projects, and the set only
+  // ever gates the seed path — `refresh()` reads `/alive`, which by definition
+  // only returns sessions that do hold a process, so it can always re-add a
+  // row this set would have blocked.
+  const deadSessionIdsRef = useRef<Set<string>>(new Set());
+
   // Write-through so the next visit to this project can seed.
   useEffect(() => {
     if (projectId) residentSessionListCache.set(projectId, sessions);
@@ -294,6 +307,7 @@ export function useResidentSessions(
   useEffect(() => {
     if (!seedSession || !seedSession.processAlive) return;
     if (!projectId || seedSession.projectId !== projectId) return;
+    if (deadSessionIdsRef.current.has(seedSession.id)) return;
     setSessions((prev) => upsertResidentSession(prev, seedSession));
   }, [projectId, seedSession]);
 
@@ -305,9 +319,11 @@ export function useResidentSessions(
       const branch = typeof event.branch === "string" ? event.branch : null;
       if (!sessionId || alive === null) return;
       if (!alive) {
+        deadSessionIdsRef.current.add(sessionId);
         setSessions((prev) => prev.filter((session) => session.id !== sessionId));
         return;
       }
+      deadSessionIdsRef.current.delete(sessionId);
       refresh().catch((error) => console.warn("[ResidentSessions] process refresh failed:", error));
       if (branch !== null) {
         setSessions((prev) =>

@@ -387,17 +387,14 @@ export default function Home() {
     // primary channel, but WS can deliver while the shared SSE stream is
     // stale — and the write-through is idempotent.
     if (title.trim()) updateCachedSessionTitle(sessionId, title.trim());
-    if (!currentProject?.id || !title.trim()) return;
-    setResidentSessionSeed((prev) => ({
-      id: sessionId,
-      projectId: currentProject.id,
-      branch: prev?.id === sessionId ? prev.branch : selectedBranch,
-      title,
-      status: prev?.id === sessionId ? prev.status : 'running',
-      processAlive: true,
-      updated_at: prev?.id === sessionId ? prev.updated_at : new Date().toISOString(),
-    }));
-  }, [currentProject?.id, selectedBranch]);
+    // The sidebar row is deliberately NOT re-seeded from here. `useResidentSessions`
+    // owns the row title through the global `session:title` SSE channel, which
+    // updates it in place; re-seeding instead re-published the *start*
+    // snapshot (`status: 'running'`, `processAlive: true`). Title generation
+    // takes ~1-2s, so hitting Stop right after the first message let that
+    // stale seed land after the session's process-death event had already
+    // dropped the row — re-inserting it as running, blue and pulsing, forever.
+  }, []);
 
   // New Conversation seeds "idle" so the dot turns gray immediately. The
   // backend doesn't emit anything when the user clicks New Conv (no DB
