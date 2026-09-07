@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { resolveWorktreePath, conventionalWorktreePath, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, setRootWorkspaceAnchor, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache, planWorktreeAdd, applyWorktreeAdd, canonicalPath, deleteBranchAfterRemoval, type RetainedBranch, type SetAnchorResult } from "../utils/worktree-paths.js";
+import { resolveWorktreePath, conventionalWorktreePath, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, setRootWorkspaceAnchor, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache, planWorktreeAdd, applyWorktreeAdd, canonicalPath, deleteBranchAfterRemoval, liveWorktreeRecord, worktreeRecordExists, type RetainedBranch, type SetAnchorResult } from "../utils/worktree-paths.js";
 import { ensurePathProjectId } from "../utils/path-project.js";
 import { registerReportedWorktrees, type ReportedWorktree } from "../workspace-binding-backfill.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
@@ -75,6 +75,37 @@ async function ensurePathProject(fastify: FastifyInstance, projectPath: string):
   const project = await fastify.storage.projects.getById(projectId);
   if (!project) throw new Error(`Path project '${projectId}' was not persisted`);
   return project;
+}
+
+/**
+ * Remove the worktree, treating "it was already gone" as done rather than as a
+ * failure — a partial multi-target delete otherwise traps the user: retrying
+ * fails on the target that already succeeded, and no click ever converges.
+ *
+ * The evidence for "already gone" is Git's answer *after* the attempt, not a
+ * pre-check. `git worktree remove` reporting `not a working tree` is not proof
+ * on its own (the path could be wrong, and the state can change between a check
+ * and the removal), and a re-query that cannot reach Git proves nothing either
+ * — both keep the original error. Only a live, uncached, unfiltered record
+ * saying no such worktree exists lets the failure be swallowed, and the stale
+ * record that a hand-deleted directory leaves behind is pruned so it stops
+ * holding the branch.
+ */
+function removeWorktreeIfPresent(
+  execFileSync: typeof import("child_process").execFileSync,
+  projectPath: string,
+  worktreePath: string,
+): void {
+  try {
+    execFileSync("git", ["worktree", "remove", worktreePath], {
+      cwd: projectPath,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+  } catch (error) {
+    if (worktreeRecordExists(projectPath, worktreePath) !== false) throw error;
+    pruneWorktrees(projectPath);
+  }
 }
 
 /**
@@ -370,20 +401,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
         worktreePath: worktreeAbsPath,
       });
 
-      let branchToDelete: string | null = null;
+      // The branch Git records for this tree, falling back to the workspace's
+      // own name when there is no record (or Git cannot say).
+      let branchToDelete = branch;
       try {
-        const entries = parseGitWorktreeList(projectPath);
-        const match = entries.find((e) => e.path === worktreeAbsPath);
-        if (match) branchToDelete = match.branch;
+        branchToDelete = liveWorktreeRecord(projectPath, worktreeAbsPath)?.branch ?? branch;
       } catch {
-        // Continue without branch deletion
+        // Fall back to the requested branch.
       }
 
-      execFileSync("git", ["worktree", "remove", worktreeAbsPath], {
-        cwd: projectPath,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      removeWorktreeIfPresent(execFileSync, projectPath, worktreeAbsPath);
       worktreeRemoved = true;
       invalidateWorktreeListCache(projectPath);
 
@@ -871,20 +898,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
           worktreePath: worktreeAbsPath,
         });
 
-        let branchToDelete: string | null = null;
+        let branchToDelete = branch;
         try {
-          const entries = parseGitWorktreeList(project.path!);
-          const match = entries.find((e) => e.path === worktreeAbsPath);
-          if (match) branchToDelete = match.branch;
+          branchToDelete = liveWorktreeRecord(project.path!, worktreeAbsPath)?.branch ?? branch;
         } catch {
-          // Failed to get branch info, continue without deleting branch
+          // Fall back to the requested branch.
         }
 
-        execFileSync("git", ["worktree", "remove", worktreeAbsPath], {
-          cwd: project.path!,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-        });
+        removeWorktreeIfPresent(execFileSync, project.path!, worktreeAbsPath);
         worktreeRemoved = true;
         invalidateWorktreeListCache(project.path!);
 

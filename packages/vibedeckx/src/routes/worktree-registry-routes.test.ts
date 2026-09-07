@@ -238,6 +238,98 @@ describe("worktree routes persisted identity", () => {
       .toBe("");
   });
 
+  it("succeeds when the worktree is already gone, so a retry converges", async () => {
+    // What a partial multi-target delete leaves behind: the user clicks Delete
+    // again, and the target that already succeeded must not fail the retry.
+    await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    const first = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const retried = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+
+    expect(retried.statusCode).toBe(200);
+    expect(retried.json()).toEqual({ success: true, branchRetained: null });
+  });
+
+  it("deletes a workspace whose target never got a worktree, branch and all", async () => {
+    // The remote that failed mid-create: the branch is there, the tree is not.
+    execFileSync("git", ["-C", projectPath, "branch", "ghost", "main"]);
+    invalidateWorktreeListCache(projectPath);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "ghost" },
+    });
+
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toEqual({ success: true, branchRetained: null });
+    expect(execFileSync("git", ["-C", projectPath, "branch", "--list", "ghost"], { encoding: "utf-8" }))
+      .toBe("");
+  });
+
+  it("is idempotent on the worker's own path route too", async () => {
+    // The half that runs on a remote: the hub proxies here, so a retry after a
+    // partial failure has to converge on this side as well.
+    await app.inject({
+      method: "POST",
+      url: "/api/path/worktrees",
+      payload: { path: projectPath, branchName: "dev", baseBranch: "main" },
+    });
+    const first = await app.inject({
+      method: "DELETE",
+      url: "/api/path/worktrees",
+      payload: { path: projectPath, branch: "dev" },
+    });
+    expect(first.statusCode).toBe(200);
+
+    const retried = await app.inject({
+      method: "DELETE",
+      url: "/api/path/worktrees",
+      payload: { path: projectPath, branch: "dev" },
+    });
+
+    expect(retried.statusCode).toBe(200);
+    expect(retried.json()).toEqual({ success: true, branchRetained: null });
+  });
+
+  it("keeps the real error when a failed removal left the worktree in place", async () => {
+    // "Already deleted" is only a verdict Git can give. A locked worktree fails
+    // the same call but is still there, so the failure has to reach the user.
+    await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    execFileSync("git", ["-C", projectPath, "worktree", "lock", worktreePath]);
+
+    const refused = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+
+    expect(refused.statusCode).toBe(500);
+    expect(refused.json().error).toMatch(/locked/i);
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
+      .toMatchObject({ status: "error" });
+    expect(existsSync(worktreePath)).toBe(true);
+
+    execFileSync("git", ["-C", projectPath, "worktree", "unlock", worktreePath]);
+  });
+
   it("clears root drift once the user adopts the branch they switched to", async () => {
     // The first listing is what captures the anchor, here "main".
     await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });

@@ -5,6 +5,7 @@ import {
   describeRetainedBranches,
   describeTargetResults,
   targetLabel,
+  targetOutcomeLines,
 } from "@/lib/worktree-target-results";
 
 describe("describeTargetResults", () => {
@@ -118,5 +119,23 @@ describe("describeRetainedBranches", () => {
   it("says nothing when the branch went with the workspace", () => {
     expect(describeRetainedBranches({ local: { success: true } }, null)).toBeNull();
     expect(describeRetainedBranches(undefined, undefined)).toBeNull();
+  });
+});
+
+describe("targetOutcomeLines", () => {
+  it("gives one labelled line per target, with a reason only where it failed", () => {
+    expect(
+      targetOutcomeLines({
+        "5a967959": { success: true, label: "worker3" },
+        "8629d781": { success: false, label: "Mac", error: "not a working tree" },
+      }),
+    ).toEqual([
+      { key: "5a967959", label: "worker3", ok: true, detail: undefined },
+      { key: "8629d781", label: "Mac", ok: false, detail: "not a working tree" },
+    ]);
+  });
+
+  it("is empty without a per-target map", () => {
+    expect(targetOutcomeLines(undefined)).toEqual([]);
   });
 });

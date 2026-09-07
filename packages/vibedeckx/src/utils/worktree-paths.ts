@@ -70,36 +70,45 @@ function isTrustedWorktreePath(projectPath: string, worktreePath: string): boole
   return isSubpath(managedBase, normalizedWorktreePath);
 }
 
-function readWorktreeListFromGit(projectPath: string): Array<{ path: string; branch: string | null }> {
+interface WorktreeRecord {
+  path: string;
+  branch: string | null;
+  /** Git itself says the record is stale — the directory is no longer there. */
+  prunable: boolean;
+}
+
+/** Every record Git currently holds, unfiltered and uncached. Throws if Git cannot answer. */
+function readWorktreeRecords(projectPath: string): WorktreeRecord[] {
   const output = execSync("git worktree list --porcelain", {
     cwd: projectPath,
     encoding: "utf-8",
     stdio: ["pipe", "pipe", "pipe"],
   });
 
-  const entries: Array<{ path: string; branch: string | null }> = [];
-  const blocks = output.trim().split("\n\n");
-
-  for (const block of blocks) {
-    const lines = block.split("\n");
+  const records: WorktreeRecord[] = [];
+  for (const block of output.trim().split("\n\n")) {
     let worktreePath = "";
     let branch: string | null = null;
-    let isPrunable = false;
+    let prunable = false;
 
-    for (const line of lines) {
+    for (const line of block.split("\n")) {
       if (line.startsWith("worktree ")) worktreePath = line.slice(9);
       else if (line.startsWith("branch refs/heads/")) branch = line.slice(18);
-      else if (line === "prunable" || line.startsWith("prunable ")) isPrunable = true;
+      else if (line === "prunable" || line.startsWith("prunable ")) prunable = true;
     }
 
-    // Skip prunable (stale) records and any path outside this project's trusted
-    // worktree base — those can carry attacker-controlled `gitdir` targets.
-    if (worktreePath && !isPrunable && isTrustedWorktreePath(projectPath, worktreePath)) {
-      entries.push({ path: worktreePath, branch });
-    }
+    if (worktreePath) records.push({ path: worktreePath, branch, prunable });
   }
 
-  return entries;
+  return records;
+}
+
+function readWorktreeListFromGit(projectPath: string): Array<{ path: string; branch: string | null }> {
+  // Skip prunable (stale) records and any path outside this project's trusted
+  // worktree base — those can carry attacker-controlled `gitdir` targets.
+  return readWorktreeRecords(projectPath)
+    .filter((record) => !record.prunable && isTrustedWorktreePath(projectPath, record.path))
+    .map(({ path: worktreePath, branch }) => ({ path: worktreePath, branch }));
 }
 
 /** Parse `git worktree list --porcelain`, cached per projectPath for ~10s. */
@@ -233,6 +242,39 @@ export function planWorktreeAdd(
   };
 }
 
+/**
+ * The record Git holds for one worktree path right now, or null when it holds
+ * none. Throws when Git cannot be asked, because for a caller deciding whether
+ * a delete already happened, "the query failed" must never read as "it is gone".
+ *
+ * Deliberately uncached and unfiltered, unlike `parseGitWorktreeList`: a stale
+ * ten-second answer or a record dropped by the trust filter would both turn
+ * into a wrong verdict about whether the tree is still there. A prunable record
+ * counts as absent — that is Git telling us the directory is already gone.
+ */
+export function liveWorktreeRecord(
+  projectPath: string,
+  worktreePath: string,
+): { path: string; branch: string | null } | null {
+  const target = canonicalPath(worktreePath);
+  const match = readWorktreeRecords(projectPath)
+    .find((record) => !record.prunable && canonicalPath(record.path) === target);
+  return match ? { path: match.path, branch: match.branch } : null;
+}
+
+/**
+ * Tri-state form of `liveWorktreeRecord` for the one question a failed delete
+ * asks: is the worktree gone? `null` means Git could not be asked, which is not
+ * evidence of anything and must keep the original failure.
+ */
+export function worktreeRecordExists(projectPath: string, worktreePath: string): boolean | null {
+  try {
+    return liveWorktreeRecord(projectPath, worktreePath) !== null;
+  } catch {
+    return null;
+  }
+}
+
 export interface RetainedBranch {
   branch: string;
   /** Git refused because the branch holds commits no other branch has. */
@@ -248,6 +290,9 @@ export interface RetainedBranch {
  * than swallow it — see `planWorktreeAdd`, which reuses such a branch.
  */
 export function deleteBranchAfterRemoval(projectPath: string, branch: string): RetainedBranch | null {
+  // No such branch (or not a repository at all): nothing was kept, and saying
+  // otherwise would invent a leftover the user has to think about.
+  if (!branchExists(projectPath, branch)) return null;
   try {
     execFileSync("git", ["branch", "-d", branch], {
       cwd: projectPath,

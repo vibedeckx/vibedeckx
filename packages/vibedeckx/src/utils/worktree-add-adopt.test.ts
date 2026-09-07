@@ -10,6 +10,7 @@ import {
   invalidateWorktreeListCache,
   parseGitWorktreeList,
   planWorktreeAdd,
+  worktreeRecordExists,
 } from "./worktree-paths.js";
 
 /** Plan + apply, the way the create routes run them. */
@@ -166,5 +167,64 @@ describe("worktrees behind a symlinked base", () => {
     expect(parseGitWorktreeList(projectPath).map((e) => e.branch)).toEqual(["main", "dev"]);
     expect(addOrAdoptWorktree(projectPath, "dev", "main"))
       .toEqual({ worktreePath: realpathSync(first.worktreePath), adopted: true });
+  });
+});
+
+describe("worktreeRecordExists", () => {
+  let dir: string;
+  let projectPath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "vdx-worktree-record-"));
+    projectPath = path.join(dir, "repo");
+    execFileSync("git", ["init", "-b", "main", projectPath]);
+    execFileSync("git", ["-C", projectPath, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", projectPath, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", projectPath, "commit", "--allow-empty", "-m", "base"]);
+    invalidateWorktreeListCache(projectPath);
+  });
+
+  afterEach(() => {
+    // These cases leave the cached list deliberately stale, so re-read it.
+    invalidateWorktreeListCache(projectPath);
+    for (const entry of parseGitWorktreeList(projectPath)) {
+      if (entry.path !== projectPath) {
+        execFileSync("git", ["-C", projectPath, "worktree", "remove", "--force", entry.path]);
+      }
+    }
+    rmSync(getWorktreeBaseForProject(projectPath), { recursive: true, force: true });
+    invalidateWorktreeListCache(projectPath);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("answers from Git now, not from the cached list", () => {
+    const { worktreePath } = addOrAdoptWorktree(projectPath, "dev", "main");
+    // Warm the ten-second cache, then move on behind its back.
+    expect(parseGitWorktreeList(projectPath)).toHaveLength(2);
+    execFileSync("git", ["-C", projectPath, "worktree", "remove", worktreePath]);
+
+    expect(worktreeRecordExists(projectPath, worktreePath)).toBe(false);
+    expect(parseGitWorktreeList(projectPath)).toHaveLength(2); // cache really was stale
+  });
+
+  it("is true while the worktree is there", () => {
+    const { worktreePath } = addOrAdoptWorktree(projectPath, "dev", "main");
+    expect(worktreeRecordExists(projectPath, worktreePath)).toBe(true);
+  });
+
+  it("counts a hand-deleted directory as gone, since Git marks it prunable", () => {
+    const { worktreePath } = addOrAdoptWorktree(projectPath, "dev", "main");
+    rmSync(worktreePath, { recursive: true, force: true });
+
+    expect(worktreeRecordExists(projectPath, worktreePath)).toBe(false);
+  });
+
+  it("says it cannot tell, rather than 'gone', when Git cannot be asked", () => {
+    const notARepo = mkdtempSync(path.join(tmpdir(), "vdx-not-a-repo-"));
+    try {
+      expect(worktreeRecordExists(notARepo, path.join(notARepo, "dev"))).toBeNull();
+    } finally {
+      rmSync(notARepo, { recursive: true, force: true });
+    }
   });
 });

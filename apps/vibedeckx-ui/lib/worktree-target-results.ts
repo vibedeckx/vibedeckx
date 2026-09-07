@@ -122,3 +122,23 @@ export function describeRetainedBranches(
   const why = retained.unmerged ? " — it has commits that are not merged anywhere else" : "";
   return `Kept the branch '${retained.branch}'${where}${why}`;
 }
+
+export interface TargetOutcomeLine {
+  key: string;
+  label: string;
+  ok: boolean;
+  /** Why it failed. Absent for a target that succeeded. */
+  detail?: string;
+}
+
+/** One line per target, for a result view that shows the whole picture at once. */
+export function targetOutcomeLines(results: WorktreeTargetResults | undefined): TargetOutcomeLine[] {
+  return Object.entries(results ?? {})
+    .filter((entry): entry is [string, WorktreeTargetOutcome] => !!entry[1])
+    .map(([key, outcome]) => ({
+      key,
+      label: targetLabel(key, outcome),
+      ok: outcome.success,
+      detail: outcome.success ? undefined : targetFailureReason(outcome),
+    }));
+}
