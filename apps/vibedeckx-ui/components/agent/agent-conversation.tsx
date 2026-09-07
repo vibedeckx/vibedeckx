@@ -994,16 +994,36 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
      * must reject, or `PromptInput` would clear them again on resolve.
      */
     let detached: AttachmentItem[] = [];
-    const restoreDetached = () => {
-      if (detached.length === 0) return;
-      attachmentListRef.current?.restore(detached);
-      detached = [];
-    };
-    /** Sent for good: the composer owns these blob URLs now, so release them. */
-    const releaseDetached = () => {
+    const revokeDetached = () => {
       for (const item of detached) {
         if (item.url?.startsWith("blob:")) URL.revokeObjectURL(item.url);
       }
+    };
+    /**
+     * Give the chips back to the composer — with their finished uploads, so a
+     * retry re-sends rather than re-uploads (a second upload would prepare a
+     * new identity and lose the activation key this send is still holding).
+     * If the workspace they belong to is no longer on screen there is nowhere
+     * to put them, and their blob URLs are ours to release: they are out of
+     * `PromptInput`'s list, so its unmount cleanup will never see them.
+     */
+    const returnDetached = () => {
+      if (detached.length === 0) return;
+      const ids = detached.map((item) => item.id);
+      if (isOriginDraftDisplayed(submissionOrigin)) {
+        attachmentListRef.current?.restore(detached);
+        uploads.release(ids, false);
+      } else {
+        revokeDetached();
+        uploads.release(ids, true);
+      }
+      detached = [];
+    };
+    /** Sent for good: nothing will ask for these bytes or URLs again. */
+    const releaseDetached = () => {
+      if (detached.length === 0) return;
+      revokeDetached();
+      uploads.release(detached.map((item) => item.id), true);
       detached = [];
     };
 
@@ -1013,8 +1033,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       if (isOriginDraftDisplayed(submissionOrigin)) {
         toast.error(title, { description: error.message });
         setInput(rawText);
-        restoreDetached();
       }
+      returnDetached();
       throw error;
     };
 
@@ -1040,6 +1060,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // the chips have nothing left to represent until something fails.
     if (isOriginDraftDisplayed(submissionOrigin)) {
       detached = attachmentListRef.current?.detach() ?? [];
+      // Their uploads must outlive the empty attachment list, or a restore
+      // would redo them.
+      uploads.retain(detached.map((item) => item.id));
     }
 
     // A paste (or oversize text that becomes one) needs the same upload target
@@ -1181,8 +1204,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           setInput(rawText);
           setPastes(capturedPastes);
           setNextPasteId(capturedNextPasteId);
-          restoreDetached();
         }
+        returnDetached();
         // Reject so PromptInput does not clear the restored attachments.
         if (hasFiles) throw new Error("Failed to start session");
       }

@@ -839,7 +839,9 @@ describe("AgentConversation pendingModel", () => {
       // Switch workspace and prepare a second identity there.
       prepareConversation.mockResolvedValue(preparedB);
       await act(async () => { await render("pB", "featB"); });
-      promptState.files = [pdf];
+      // A fresh pick — ids are per-attachment, so this is not the file the
+      // in-flight submission is still holding.
+      promptState.files = [{ ...pdf, id: "b1" }];
       await render("pB", "featB");
       expect(prepareConversation).toHaveBeenCalledTimes(2);
 
@@ -982,6 +984,79 @@ describe("AgentConversation pendingModel", () => {
         await sending;
       });
       expect(promptState.restored).toEqual([]);
+    });
+
+    it("re-sends rather than re-uploads after a delayed send failure", async () => {
+      // Taking the chips out empties the attachment list, and the list is what
+      // keeps upload records alive. If the record went with it, restoring
+      // would upload again — and that upload prepares a new identity, which
+      // supersedes the activation key this send is still holding, so a retry
+      // would no longer be the same operation.
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+      promptState.files = [pdf];
+      await render("pA", "featA");
+
+      let finishActivate!: (value: null) => void;
+      activateConversation.mockImplementationOnce(() => new Promise((resolve) => { finishActivate = resolve; }));
+      let sending!: Promise<void>;
+      await act(async () => {
+        sending = promptState.submit!({ text: "read this", files: [pdf] });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // A render while the send is in flight — a streaming message would do
+      // the same — is what would prune the record.
+      await render("pA", "featA");
+
+      await act(async () => {
+        finishActivate(null);
+        await expect(sending).rejects.toThrow(/Failed to start session/);
+      });
+
+      expect(promptState.files).toEqual([pdf]);
+      expect(uploadAttachment).toHaveBeenCalledTimes(1);
+      expect(prepareConversation).toHaveBeenCalledTimes(1);
+    });
+
+    it("releases the blob URLs when there is no composer to restore into", async () => {
+      // The items are out of PromptInput's list, so its unmount cleanup can
+      // never revoke them; a submission that fails after the user has left
+      // has to do it.
+      const revokeObjectURL = vi.fn();
+      vi.stubGlobal("URL", Object.assign(URL, { revokeObjectURL }));
+      // The real thing the composer holds is a blob URL, read back through
+      // fetch when the file is picked.
+      vi.stubGlobal("fetch", async () => new Response(new Blob([new Uint8Array([0x25, 0x50, 0x44, 0x46])])));
+      const blobPdf = { ...pdf, url: "blob:http://x/1" };
+      try {
+        await renderFirstSend();
+        uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+        promptState.files = [blobPdf];
+        await render("pA", "featA");
+        // Reading the blob and uploading it settle over several microtasks.
+        await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+        expect(uploadAttachment).toHaveBeenCalledTimes(1);
+
+        let finishActivate!: (value: null) => void;
+        activateConversation.mockImplementationOnce(() => new Promise((resolve) => { finishActivate = resolve; }));
+        let sending!: Promise<void>;
+        await act(async () => {
+          sending = promptState.submit!({ text: "read this", files: [blobPdf] });
+          await new Promise((r) => setTimeout(r, 0));
+        });
+
+        await act(async () => { await render("pB", "featB"); });
+        await act(async () => {
+          finishActivate(null);
+          await expect(sending).rejects.toThrow(/Failed to start session/);
+        });
+
+        expect(promptState.restored).toEqual([]);
+        expect(revokeObjectURL).toHaveBeenCalledWith("blob:http://x/1");
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     it("puts the attachments back when the send fails", async () => {

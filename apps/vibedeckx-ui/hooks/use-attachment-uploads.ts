@@ -76,6 +76,13 @@ export function useAttachmentUploads(options: UseAttachmentUploadsOptions) {
   optionsRef.current = options;
 
   const recordsRef = useRef(new Map<string, AttachmentRecord>());
+  /**
+   * Ids whose finished work must survive their absence from the attachment
+   * list — a submission takes the chips out of the composer the moment it has
+   * their content, and has to be able to put the very same (already uploaded)
+   * attachments back if the send fails.
+   */
+  const retainedRef = useRef(new Set<string>());
   const [statuses, setStatuses] = useState<Map<string, AttachmentUploadStatus>>(new Map());
 
   const setStatus = useCallback((id: string, status: AttachmentUploadStatus) => {
@@ -149,16 +156,39 @@ export function useAttachmentUploads(options: UseAttachmentUploadsOptions) {
       present.add(file.id);
       if (!recordsRef.current.has(file.id)) start(file, file.id);
     }
+    const keep = (id: string) => present.has(id) || retainedRef.current.has(id);
     for (const id of Array.from(recordsRef.current.keys())) {
-      if (!present.has(id)) recordsRef.current.delete(id);
+      if (!keep(id)) recordsRef.current.delete(id);
     }
     setStatuses((prev) => {
       if (prev.size === 0) return prev;
       const next = new Map<string, AttachmentUploadStatus>();
-      for (const [id, status] of prev) if (present.has(id)) next.set(id, status);
+      for (const [id, status] of prev) if (keep(id)) next.set(id, status);
       return next.size === prev.size ? prev : next;
     });
   }, [start]);
+
+  /** Hold these records while their attachments are out of the list. */
+  const retain = useCallback((ids: string[]) => {
+    for (const id of ids) retainedRef.current.add(id);
+  }, []);
+
+  /**
+   * Stop holding them. `drop` also forgets the work itself — for a send that
+   * succeeded, where nothing will ask for those bytes or markers again.
+   */
+  const release = useCallback((ids: string[], drop: boolean) => {
+    for (const id of ids) {
+      retainedRef.current.delete(id);
+      if (drop) recordsRef.current.delete(id);
+    }
+    if (!drop) return;
+    setStatuses((prev) => {
+      const next = new Map(prev);
+      for (const id of ids) next.delete(id);
+      return next.size === prev.size ? prev : next;
+    });
+  }, []);
 
   const retry = useCallback((file: ComposerAttachment) => {
     if (!file.id) return;
@@ -200,7 +230,7 @@ export function useAttachmentUploads(options: UseAttachmentUploadsOptions) {
     [statuses]
   );
 
-  return { track, retry, statusOf, resolve, pending };
+  return { track, retry, retain, release, statusOf, resolve, pending };
 }
 
 export type AttachmentUploads = ReturnType<typeof useAttachmentUploads>;
