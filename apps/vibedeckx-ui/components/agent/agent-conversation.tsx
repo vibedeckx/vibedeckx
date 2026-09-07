@@ -80,6 +80,7 @@ import { ConversationAnchorHold } from "./conversation-anchor-hold";
 import { QuotePopover, appendQuote } from "./quote-popover";
 import { ReviewDialog } from "./review-dialog";
 import { vfileMarker } from "./vpaste-chip";
+import { base64ByteLength, MAX_INLINE_IMAGE_BYTES, sniffInlineImageType, type InlineImageType } from "@/lib/image-sniff";
 
 /** Only renders the attachment header when there are files attached */
 function AttachmentHeader() {
@@ -190,14 +191,32 @@ function formatPasteSize(bytes: number): string {
   return `${Math.round(kb)}KB`;
 }
 
+const DATA_URL_BASE64_RE = /^data:[^;,]*(?:;[^;,]*)*;base64,(.+)$/;
+
 /**
- * Image types the model accepts as an inline image block. Anything else
- * (SVG, HEIC, TIFF, BMP, ...) would be rejected by the API, so it goes to the
- * agent's machine as a file instead.
+ * Decide per attachment whether it rides inline as an image part or goes to
+ * the agent's machine as a file. The decision is made on the bytes, not on
+ * `File.type` (which browsers derive from the extension alone): only JPEG /
+ * PNG / GIF / WebP content is inlined, and with the media type the bytes
+ * actually are, so a mislabeled image is still shown to the model rather than
+ * rejected by the API. Everything else — SVG, HEIC, non-images, files whose
+ * blob → data URL conversion failed, and images over the API's per-image
+ * size limit — takes the file route.
  */
-const INLINE_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
-function isInlineImageType(mediaType: string | undefined): boolean {
-  return mediaType !== undefined && INLINE_IMAGE_TYPES.has(mediaType.toLowerCase());
+function classifyAttachments(files: PromptInputMessage["files"]): {
+  images: { mediaType: InlineImageType; data: string }[];
+  others: PromptInputMessage["files"];
+} {
+  const images: { mediaType: InlineImageType; data: string }[] = [];
+  const others: PromptInputMessage["files"] = [];
+  for (const file of files) {
+    const base64 = file.url?.match(DATA_URL_BASE64_RE)?.[1];
+    const sniffed = base64 ? sniffInlineImageType(base64) : null;
+    const fitsInline = base64 !== undefined && base64ByteLength(base64) <= MAX_INLINE_IMAGE_BYTES;
+    if (base64 && sniffed && fitsInline) images.push({ mediaType: sniffed, data: base64 });
+    else others.push(file);
+  }
+  return { images, others };
 }
 
 function pasteTokenFor(id: number, bytes: number): string {
@@ -833,7 +852,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     const markers: string[] = [];
     for (const file of files) {
       const name = file.filename || "attachment";
-      const base64Match = file.url?.match(/^data:[^;,]*(?:;[^;,]*)*;base64,(.+)$/);
+      const base64Match = file.url?.match(DATA_URL_BASE64_RE);
       if (!base64Match) {
         throw new Error(`Could not read ${name}`);
       }
@@ -851,11 +870,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     if (!submissionOrigin) return;
     const rawText = message.text;
     // Model-visible images ride inline as content parts (both agent protocols
-    // have an image type). Every other file — including `image/*` types the
-    // model does not accept, e.g. SVG or HEIC — is uploaded to the agent's
-    // machine and referenced by a `<vfile/>` marker, like a long paste.
-    const imageFiles = message.files.filter((f) => isInlineImageType(f.mediaType));
-    const otherFiles = message.files.filter((f) => !isInlineImageType(f.mediaType));
+    // have an image type). Every other file is uploaded to the agent's machine
+    // and referenced by a `<vfile/>` marker, like a long paste.
+    const { images: imageFiles, others: otherFiles } = classifyAttachments(message.files);
     const hasFiles = message.files.length > 0;
     const hasImages = imageFiles.length > 0;
     const hasAttachments = otherFiles.length > 0;
@@ -970,14 +987,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       if (processedText) {
         parts.push({ type: "text", text: processedText });
       }
-      for (const file of imageFiles) {
-        if (file.mediaType && file.url) {
-          // Extract base64 data from data URL (format: "data:mediaType;base64,DATA")
-          const base64Match = file.url.match(/^data:[^;]+;base64,(.+)$/);
-          if (base64Match) {
-            parts.push({ type: "image", mediaType: file.mediaType, data: base64Match[1] });
-          }
-        }
+      for (const image of imageFiles) {
+        parts.push({ type: "image", mediaType: image.mediaType, data: image.data });
       }
       content = parts;
     }

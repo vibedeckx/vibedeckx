@@ -705,11 +705,12 @@ describe("AgentConversation pendingModel", () => {
       mediaType: "application/pdf",
       url: "data:application/pdf;base64,JVBERi0=",
     };
+    // Full 8-byte PNG signature: inline routing is decided on the bytes.
     const png = {
       type: "file" as const,
       filename: "shot.png",
       mediaType: "image/png",
-      url: "data:image/png;base64,iVBORw0=",
+      url: "data:image/png;base64,iVBORw0KGgo=",
     };
 
     it("uploads a non-image attachment and activates with a <vfile/> marker", async () => {
@@ -742,8 +743,61 @@ describe("AgentConversation pendingModel", () => {
       expect(uploadAttachment).toHaveBeenCalledTimes(1);
       expect(activateConversation).toHaveBeenCalledWith(prepared, [
         { type: "text", text: 'both\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />' },
-        { type: "image", mediaType: "image/png", data: "iVBORw0=" },
+        { type: "image", mediaType: "image/png", data: "iVBORw0KGgo=" },
       ]);
+    });
+
+    it("inlines a mislabeled image with the media type its bytes actually are", async () => {
+      // `File.type` comes from the extension; a JPEG renamed to .png would be
+      // rejected by the API under image/png. The bytes win.
+      await renderFirstSend();
+      const jpegAsPng = { type: "file" as const, filename: "shot.png", mediaType: "image/png", url: "data:image/png;base64,/9j/4AAQ" };
+
+      await act(async () => {
+        await promptState.submit!({ text: "look", files: [jpegAsPng] });
+      });
+
+      expect(uploadAttachment).not.toHaveBeenCalled();
+      // No upload needed → no prepare; single-shot start with the image part.
+      expect(startConversation).toHaveBeenCalledWith(
+        [{ type: "text", text: "look" }, { type: "image", mediaType: "image/jpeg", data: "/9j/4AAQ" }],
+        "edit", null,
+      );
+    });
+
+    it("sends an image over the inline size limit as a file", async () => {
+      // A real PNG header followed by enough payload to exceed 5 MB raw. The
+      // API would refuse it inline; as a file the agent can still Read it.
+      await renderFirstSend();
+      const rawBytes = 5 * 1024 * 1024 + 3;
+      const head = "iVBORw0KGgo="; // 8-byte PNG signature (with padding)
+      const body = "A".repeat(Math.ceil((rawBytes - 8) / 3) * 4);
+      const big = { type: "file" as const, filename: "huge.png", mediaType: "image/png", url: `data:image/png;base64,${head.slice(0, -1)}${body}` };
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/huge.png", name: "huge.png", size: rawBytes, mediaType: "image/png" });
+
+      await act(async () => {
+        await promptState.submit!({ text: "big", files: [big] });
+      });
+
+      expect(uploadAttachment).toHaveBeenCalledTimes(1);
+      expect(uploadAttachment.mock.calls[0][0].name).toBe("huge.png");
+      expect(activateConversation).toHaveBeenCalledWith(prepared, `big\n<vfile path="/tmp/att/huge.png" name="huge.png" size="${rawBytes}" />`);
+    });
+
+    it("sends a file claiming to be an image but with unknown bytes as a file", async () => {
+      await renderFirstSend();
+      const fake = { type: "file" as const, filename: "fake.png", mediaType: "image/png", url: "data:image/png;base64,aGVsbG8gd29ybGQ=" };
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/fake.png", name: "fake.png", size: 11, mediaType: "image/png" });
+
+      await act(async () => {
+        await promptState.submit!({ text: "hm", files: [fake] });
+      });
+
+      expect(uploadAttachment).toHaveBeenCalledWith(
+        { name: "fake.png", mediaType: "image/png", contentBase64: "aGVsbG8gd29ybGQ=" },
+        "s-new",
+      );
+      expect(activateConversation).toHaveBeenCalledWith(prepared, 'hm\n<vfile path="/tmp/att/fake.png" name="fake.png" size="11" />');
     });
 
     it("sends an image type the model cannot see (SVG) as a file, not inline", async () => {
