@@ -249,8 +249,9 @@ async function routes(fastify: FastifyInstance) {
         // session:status "running" auto-surfaces the reviewer into an open
         // agent window (useSurfaceCommanderSession). The two-phase flow
         // deliberately skips it: the user stays on the source session and
-        // opens the preparing reviewer from the sidebar entry the
-        // session:process emit above just produced.
+        // opens the reviewer from its sidebar row when they choose to. (Until
+        // activation the UI shows a stand-in row from the workflow run itself;
+        // the session:process emit above turns it into the real row.)
         if (!twoPhase) {
           fastify.eventBus.emit({
             type: "session:status",
@@ -604,9 +605,11 @@ async function routes(fastify: FastifyInstance) {
     }
     if (!reviewerSessionId) {
       // Fresh local reviewer: two-phase. Prepare synchronously (fast — run row
-      // + placeholder session, no model calls) so the client gets the run and
-      // the sidebar entry immediately; the intent-brief distillation and the
-      // reviewer's first message happen after this response. A failure past
+      // + pending reviewer identity, no model calls) so the client gets the run
+      // immediately — the UI derives its "preparing review" sidebar row from
+      // that run, since the pending reviewer is in no session listing until
+      // activation; the intent-brief distillation and the reviewer's first
+      // message happen after this response. A failure past
       // this point becomes a failed run + workflow_failed milestone
       // (activateAdhocReview / the engine's preparation timeout own that), so
       // the fire-and-forget below only logs.

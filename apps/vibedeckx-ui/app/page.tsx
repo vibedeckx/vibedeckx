@@ -31,6 +31,9 @@ import { UserMenu } from '@/components/auth/user-menu';
 import { Logo } from '@/components/brand/logo';
 import { RightPanel } from '@/components/right-panel';
 import { AgentConversation, AgentConversationHandle } from '@/components/agent';
+import { PreparingReviewView } from '@/components/agent/preparing-review-view';
+import { usePreparingReviews } from '@/hooks/use-preparing-reviews';
+import { mergePreparingRows, preparingReviewTitle, resolvePreparingSwitch } from '@/hooks/preparing-reviews';
 import type { AgentSession } from '@/hooks/use-agent-session';
 import { ProjectRemotesProvider } from '@/hooks/project-remotes-context';
 import { MainConversation, type MainConversationHandle } from '@/components/conversation';
@@ -88,6 +91,7 @@ export default function Home() {
   // Workspace navigation: a branch change never carries a session pin.
   const selectWorkspace = useCallback((branch: string | null) => {
     setSelection({ branch, sessionId: null });
+    setViewingPreparingRun(null);
   }, []);
   // Pin/unpin a session within the current workspace (session picker, New
   // Conversation, commander auto-surface). The URL itself is written by the
@@ -96,6 +100,13 @@ export default function Home() {
     setSelection((prev) => (prev.sessionId === sessionId ? prev : { ...prev, sessionId }));
   }, []);
   const [residentSessionSeed, setResidentSessionSeed] = useState<ResidentSidebarSession | null>(null);
+  // The stand-in view for a review whose reviewer is still preparing, opened
+  // from its sidebar row or the source conversation's banner. Identity only:
+  // everything shown derives from the preparing-review store, and any other
+  // navigation clears it. While set, the agent conversation is suspended and
+  // hidden — the pending reviewer cannot be loaded, and a null session id
+  // would load the branch's latest session instead.
+  const [viewingPreparingRun, setViewingPreparingRun] = useState<{ projectId: string; runId: string } | null>(null);
 
   // Keep the pinned session in sync with browser back/forward navigation.
   // replaceState doesn't fire popstate, but a pushState elsewhere + browser
@@ -209,7 +220,34 @@ export default function Home() {
     setTarget: setMergeTarget,
     refetch: refetchMergeStatus,
   } = useMergeStatus(currentProject?.id ?? null, worktrees);
-  const residentSessions = useResidentSessions(currentProject?.id ?? null, worktrees, residentSessionSeed);
+  const preparingReviews = usePreparingReviews(currentProject?.id ?? null, selectedBranch);
+  const residentSessions = useResidentSessions(
+    currentProject?.id ?? null,
+    worktrees,
+    residentSessionSeed,
+    { sessionIds: preparingReviews.awaitedSessionIds, tick: preparingReviews.pollTick },
+  );
+  const aliveSessionIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const rows of residentSessions.values()) for (const row of rows) ids.add(row.id);
+    return ids;
+  }, [residentSessions]);
+  const sourceSessionTitle = useCallback((sessionId: string): string | null => {
+    for (const rows of residentSessions.values()) {
+      const row = rows.find((candidate) => candidate.id === sessionId);
+      if (row) return row.title;
+    }
+    return null;
+  }, [residentSessions]);
+  // Sidebar rows: live sessions plus one placeholder per preparing review.
+  const sidebarSessions = useMemo(
+    () => mergePreparingRows(residentSessions, preparingReviews.entries, sourceSessionTitle),
+    [residentSessions, preparingReviews.entries, sourceSessionTitle],
+  );
+  const showPreparingView = viewingPreparingRun !== null && viewingPreparingRun.projectId === currentProject?.id;
+  const viewingPreparingEntry = showPreparingView
+    ? preparingReviews.entries.find((entry) => entry.runId === viewingPreparingRun.runId)
+    : undefined;
   const { tasks, loading: tasksLoading, createTask, updateTask, deleteTask, archive, unarchive, refetch: refetchTasks } = useTasks(currentProject?.id ?? null);
 
   const {
@@ -339,6 +377,7 @@ export default function Home() {
   // resident-session click and the completion-notification click-through.
   const selectBranchSession = useCallback((branch: string | null, sessionId: string) => {
     setSelection({ branch, sessionId });
+    setViewingPreparingRun(null);
     setActivateAgentTabNonce((nonce) => nonce + 1);
     // Selection resolved — end any pending-nav Agent-tab pin (the nonce bump
     // above now owns keeping the Agent tab active).
@@ -349,10 +388,54 @@ export default function Home() {
     touchRecentSessionOpen(sessionId);
   }, []);
 
+  // Open the stand-in view for a preparing review. The row's id is a pending
+  // reviewer that no session read can resolve yet, so it must never reach the
+  // agent-session hook: the selection keeps sessionId null and the hook is
+  // suspended for as long as this view is up.
+  const openPreparingReview = useCallback((projectId: string, runId: string, branch: string | null) => {
+    setViewingPreparingRun({ projectId, runId });
+    setSelection({ branch, sessionId: null });
+    setActivateAgentTabNonce((nonce) => nonce + 1);
+    setSessionNavPending(false);
+    setActiveView('workspace');
+  }, []);
+
   const handleResidentSessionSelect = useCallback((resident: ResidentSidebarSession) => {
+    if (resident.kind === 'preparing-review' && resident.runId) {
+      openPreparingReview(resident.projectId, resident.runId, resident.branch);
+      return;
+    }
     selectBranchSession(resident.branch, resident.id);
     setActiveView('workspace');
-  }, [selectBranchSession]);
+  }, [selectBranchSession, openPreparingReview]);
+
+  const handleViewPreparingReview = useCallback((runId: string) => {
+    const entry = preparingReviews.entries.find((candidate) => candidate.runId === runId);
+    if (entry) openPreparingReview(entry.projectId, entry.runId, entry.branch);
+  }, [preparingReviews.entries, openPreparingReview]);
+
+  // A reviewer that /alive lists has a session of its own from now on, so its
+  // placeholder is retired permanently — otherwise the grey row would return
+  // the moment that process exits or the resident pool hibernates it, while
+  // the run is still active.
+  const markReviewersAppeared = preparingReviews.markAppeared;
+  useEffect(() => {
+    markReviewersAppeared(aliveSessionIds);
+  }, [aliveSessionIds, markReviewersAppeared]);
+
+  // Hand over to the real reviewer conversation once it can actually be
+  // opened: the run left `preparing` AND `/alive` lists the reviewer (a
+  // `waiting_reviewer` frame alone can precede the remote mapping). Only
+  // while the user is still on this view — a switch elsewhere cleared it.
+  useEffect(() => {
+    if (!viewingPreparingRun) return;
+    if (viewingPreparingRun.projectId !== currentProject?.id) {
+      setViewingPreparingRun(null);
+      return;
+    }
+    const decision = resolvePreparingSwitch(viewingPreparingEntry, aliveSessionIds);
+    if (decision.kind === 'switch') selectBranchSession(decision.branch, decision.sessionId);
+  }, [viewingPreparingRun, viewingPreparingEntry, aliveSessionIds, currentProject?.id, selectBranchSession]);
 
   const handleSessionStarted = useCallback((startedSession: AgentSession) => {
     refetchBranchActivity();
@@ -927,8 +1010,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
               setDiffCompareNonce((n) => n + 1);
             }}
             workspaceStatuses={workspaceStatuses}
-            residentSessions={residentSessions}
-            selectedSessionId={urlSessionId}
+            residentSessions={sidebarSessions}
+            selectedSessionId={viewingPreparingEntry ? viewingPreparingEntry.reviewerSessionId : urlSessionId}
             onResidentSessionSelect={handleResidentSessionSelect}
             hasProject={!needsProject}
             projects={projects}
@@ -1049,12 +1132,30 @@ Please proceed step by step and let me know if there are any issues or conflicts
                     project={currentProject}
                     onExecutorModeChange={handleExecutorModeChange}
                     agentSlot={
+                      <>
+                        {showPreparingView && viewingPreparingRun && (
+                          <PreparingReviewView
+                            runId={viewingPreparingRun.runId}
+                            entry={viewingPreparingEntry}
+                            title={viewingPreparingEntry
+                              ? preparingReviewTitle(viewingPreparingEntry, sourceSessionTitle(viewingPreparingEntry.sourceSessionId))
+                              : 'Review'}
+                            onOpenSource={(sourceSessionId, branch) => selectBranchSession(branch, sourceSessionId)}
+                          />
+                        )}
+                        {/* Kept mounted (it deliberately survives workspace
+                            switches) but hidden and suspended behind the
+                            stand-in view. */}
+                        <div className={showPreparingView ? 'hidden' : 'contents'}>
                       <AgentConversation
                         ref={agentRef}
                         projectId={currentProject?.id ?? null}
                         branch={selectedBranch}
                         sessionId={urlSessionId}
-                        navPending={sessionNavPending || branchNavPending}
+                        navPending={sessionNavPending || branchNavPending || showPreparingView}
+                        preparingReviews={preparingReviews.entries}
+                        onReviewStarted={preparingReviews.addRun}
+                        onViewPreparingReview={handleViewPreparingReview}
                         setSessionUrlParam={setSessionUrlParam}
                         onActiveSessionChange={setRenderedSessionId}
                         project={currentProject}
@@ -1070,6 +1171,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
                           setActiveView("schedules");
                         }}
                       />
+                        </div>
+                      </>
                     }
                   />
                 </div>

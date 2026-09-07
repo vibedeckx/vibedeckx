@@ -3234,6 +3234,17 @@ export const api = {
     };
   },
 
+  /**
+   * One run by id, terminal states included — the only read that still sees a
+   * run after it left the active listing. `null` = the server has no such run.
+   */
+  async getWorkflowRun(runId: string): Promise<WorkflowRun | null> {
+    const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}`);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`Failed to fetch workflow run: ${res.status}`);
+    return (await res.json()).run;
+  },
+
   async workflowRunGate(runId: string, action: "approve" | "cancel" | "finalize", editedPayload?: string): Promise<WorkflowRun> {
     const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}/gate`, {
       method: "POST",

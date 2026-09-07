@@ -16,6 +16,13 @@ export interface ResidentSidebarSession {
   status: string;
   processAlive: boolean;
   updated_at?: string;
+  /**
+   * Set on a stand-in row for a review still preparing its reviewer (see
+   * hooks/preparing-reviews.ts). Such a row has no process and no openable
+   * session behind it; consumers must branch on `kind`, not on `status`.
+   */
+  kind?: "preparing-review";
+  runId?: string;
 }
 
 /**
@@ -181,6 +188,14 @@ export function useResidentSessions(
   projectId: string | null,
   worktrees: Worktree[] | undefined,
   seedSession?: ResidentSidebarSession | null,
+  /**
+   * Sessions expected to hold a process soon that are not listed yet — the
+   * reviewers of review runs that left `preparing`. Their `session:process`
+   * event is the normal trigger for a refresh; when it is lost (or lands on
+   * the hub before the remote mapping exists) the placeholder poll keeps
+   * bumping `tick` so the list is re-read until they show up.
+   */
+  awaited?: { sessionIds: string[]; tick: number },
 ): Map<string, ResidentSidebarSession[]> {
   // Keyed on content, not array identity: the cached seed and the network
   // result usually carry the same branches, and a fetch keyed on the array
@@ -303,6 +318,22 @@ export function useResidentSessions(
       );
     }
   }, [connectionState, refresh]);
+
+  // Keyed on content so a re-render with the same awaited set is a no-op; the
+  // tick makes every poll cycle a fresh trigger while something is awaited.
+  const awaitedKey = awaited && awaited.sessionIds.length > 0
+    ? `${awaited.tick}#${awaited.sessionIds.join("\u0000")}`
+    : "";
+  const sessionsRef = useRef(sessions);
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+  useEffect(() => {
+    if (!awaitedKey) return;
+    const ids = awaitedKey.slice(awaitedKey.indexOf("#") + 1).split("\u0000");
+    if (ids.every((id) => sessionsRef.current.some((session) => session.id === id))) return;
+    refresh().catch((error) => console.warn("[ResidentSessions] awaited refresh failed:", error));
+  }, [awaitedKey, refresh]);
 
   useEffect(() => {
     if (!seedSession || !seedSession.processAlive) return;

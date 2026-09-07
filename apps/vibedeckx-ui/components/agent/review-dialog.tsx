@@ -8,6 +8,7 @@ import {
   type ReviewContextMode,
   type ReviewSpan,
   type ReviewerCandidate,
+  type WorkflowRun,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
@@ -140,12 +141,21 @@ export function ReviewDialog({
   sessionId,
   currentAgentType,
   providers,
+  onStarted,
 }: {
   projectId: string;
   branch: string | null;
   sessionId: string | null;
   currentAgentType?: AgentType | null;
   providers?: AgentProviderInfo[];
+  /**
+   * The created run, in the same frame the dialog closes. The reviewer of a
+   * fresh review is a pending identity for the whole distillation window
+   * (tens of seconds) and appears in no listing until activated; the caller
+   * seeds the preparing-review placeholders from this so the user sees the
+   * review exist the moment Start succeeds, not when the first event lands.
+   */
+  onStarted?: (run: WorkflowRun) => void;
 }) {
   const isMac = useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
   const [open, setOpen] = useState(false);
@@ -431,7 +441,7 @@ export function ReviewDialog({
       // nothing was distilled yet, so omit the field and the server distills
       // in the background after it responds.
       const briefFields = pre?.reached ? { intentBrief: pre.brief ?? "" } : {};
-      await api.createWorkflowRun({
+      const run = await api.createWorkflowRun({
         projectId,
         branch,
         sourceSessionId: sessionId,
@@ -443,6 +453,7 @@ export function ReviewDialog({
       });
       setDialogOpen(false);
       setFocus("");
+      onStarted?.(run);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       void api.getReviewerCandidate(projectId, sessionId).then((nextCandidate) => {

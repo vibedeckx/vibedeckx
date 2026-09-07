@@ -108,6 +108,18 @@ function ResidentSessionDot({ status }: { status: string }) {
     );
   }
   if (status === "error") return <span className={cn(base, "bg-red-500")} />;
+  if (status === "preparing") {
+    // Stand-in row for a review whose reviewer is still being prepared (no
+    // process yet): a slow grey pulse, distinct from the blue "running" one.
+    return (
+      <span className={cn(base, "bg-muted-foreground/60")}>
+        <span
+          className="absolute inset-[-2px] rounded-full bg-muted-foreground/60"
+          style={{ animation: "status-dot-pulse 2.4s ease-out infinite", opacity: 0.4 }}
+        />
+      </span>
+    );
+  }
   return <span className={cn(base, "bg-lime-400")} />;
 }
 
@@ -573,7 +585,9 @@ export function AppSidebar({
                                     <span className="truncate text-left">{session.title}</span>
                                   </button>
                                 </TooltipTrigger>
-                                <TooltipContent side="right">{session.title}</TooltipContent>
+                                <TooltipContent side="right">
+                                  {session.kind === "preparing-review" ? `${session.title} · preparing` : session.title}
+                                </TooltipContent>
                               </Tooltip>
                             );
                           })}

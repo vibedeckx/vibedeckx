@@ -14,7 +14,7 @@ import { api, type WorkflowRun } from "@/lib/api";
  * 兜底,复用握手前的请求等于兜底失效。force 请求会替换表里的条目,让随后的
  * 非 force 调用搭这趟新的。
  */
-const inflight = new Map<string, { request: Promise<WorkflowRun[]>; tick: object }>();
+const inflight = new Map<string, { request: Promise<WorkflowRun[]>; tick: object; issuedAt: number }>();
 
 function keyOf(projectId: string, branch: string | null): string {
   return `${projectId}\u0000${branch ?? ""}`;
@@ -88,27 +88,44 @@ export function hasPriorReview(
   return set ? set.has(sessionId) : undefined;
 }
 
-export function fetchActiveWorkflowRuns(
+/**
+ * 同上,外加这趟请求**真正发出**的时刻。共享意味着调用方拿到的可能是别人早先
+ * 发出的 promise,「我调用的时刻」不等于「这份快照的时刻」——把两者混为一谈,
+ * 就会把一条在请求发出之后才产生的记录当成「请求都说没有了,删掉」。需要按快照
+ * 时刻判断新旧的调用方用这个,其余的用下面的薄封装。
+ */
+export function fetchActiveWorkflowRunsAt(
   projectId: string,
   branch: string | null,
   opts?: { force?: boolean },
-): Promise<WorkflowRun[]> {
+): { request: Promise<WorkflowRun[]>; issuedAt: number } {
   const key = keyOf(projectId, branch);
   const tick = thisTick();
   const existing = inflight.get(key);
-  if (existing && (!opts?.force || existing.tick === tick)) return existing.request;
+  if (existing && (!opts?.force || existing.tick === tick)) {
+    return { request: existing.request, issuedAt: existing.issuedAt };
+  }
+  const issuedAt = Date.now();
   const request = api.getActiveWorkflowRuns(projectId, branch).then((payload) => {
     mergeReviewed(key, payload.reviewedSessionIds);
     return payload.runs;
   });
-  const entry = { request, tick };
+  const entry = { request, tick, issuedAt };
   inflight.set(key, entry);
   // 只清理自己那条——被 force 替换后不能误删新的。原 promise 原样返回给调用方,
   // 拒绝也由调用方处理;这里的 catch 只是吞掉 finally 派生链的 unhandled rejection。
   request
     .finally(() => { if (inflight.get(key) === entry) inflight.delete(key); })
     .catch(() => {});
-  return request;
+  return { request, issuedAt };
+}
+
+export function fetchActiveWorkflowRuns(
+  projectId: string,
+  branch: string | null,
+  opts?: { force?: boolean },
+): Promise<WorkflowRun[]> {
+  return fetchActiveWorkflowRunsAt(projectId, branch, opts).request;
 }
 
 /** 测试用:清空 in-flight 表,避免一个用例里永不 resolve 的请求泄漏到下一个。 */

@@ -68,7 +68,7 @@ import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
 import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
 import { useAgentTabFocus } from "@/hooks/agent-tab-focus-context";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
-import type { Project, ExecutionMode, AgentType, AgentProviderInfo } from "@/lib/api";
+import type { Project, ExecutionMode, AgentType, AgentProviderInfo, WorkflowRun } from "@/lib/api";
 import { getAgentProviders, translateText, branchAgentSession, sendAgentSessionMessage, api } from "@/lib/api";
 import { toast } from "sonner";
 import { UserInputMarkers } from "./user-input-markers";
@@ -77,6 +77,8 @@ import { SessionHistoryDropdown } from "./session-history-dropdown";
 import { ConversationAnchorHold } from "./conversation-anchor-hold";
 import { QuotePopover, appendQuote } from "./quote-popover";
 import { ReviewDialog } from "./review-dialog";
+import { ReviewFailedPlaceholder, ReviewPreparingPlaceholder } from "./review-placeholders";
+import type { PreparingReviewEntry } from "@/hooks/preparing-reviews";
 import { MAX_ATTACHMENT_BYTES, formatMegabytes } from "@/lib/attachment-limits";
 import { useAttachmentUploads, type AttachmentUploads } from "@/hooks/use-attachment-uploads";
 
@@ -203,6 +205,17 @@ interface AgentConversationProps {
   onNewConversation?: () => void;
   /** Open the Schedules view — a specific schedule, or the list when null. */
   onOpenSchedule?: (scheduleId: string | null) => void;
+  /**
+   * The project's preparing reviews (hooks/preparing-reviews.ts). Drives the
+   * banner shown on the SOURCE conversation while its review is still
+   * distilling — the only feedback the person who clicked Start gets until
+   * the reviewer exists.
+   */
+  preparingReviews?: PreparingReviewEntry[];
+  /** A review was started from this conversation: the created run, plus the source title for the placeholder row. */
+  onReviewStarted?: (run: WorkflowRun, sourceTitle: string | null) => void;
+  /** Open the stand-in view for a preparing review (same as clicking its sidebar row). */
+  onViewPreparingReview?: (runId: string) => void;
 }
 
 export interface AgentConversationHandle {
@@ -255,7 +268,7 @@ function pasteTokenFor(id: number, bytes: number): string {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onOpenSchedule }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onOpenSchedule, preparingReviews, onReviewStarted, onViewPreparingReview }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
@@ -694,6 +707,19 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const showFailedReview = Boolean(
     session && failedReviewerRun && onlyStartupDiagnostics,
   );
+  // Source side of a review still preparing (banner above the messages).
+  const sourcePreparingReview = session
+    ? preparingReviews?.find(
+      (entry) => entry.sourceSessionId === session.id && entry.run.status === "preparing",
+    )
+    : undefined;
+  // The AI-generated title if it landed while this window was open; the
+  // session object carries no title, so otherwise the caller falls back to
+  // the sidebar row's title for the placeholder's "Review - …" label.
+  const displayedSessionTitle =
+    aiTitleOverride && session && aiTitleOverride.sessionId === session.id
+      ? aiTitleOverride.title
+      : null;
   // These entries are deliberately restricted to system/error: neither
   // renderer consumes AgentConversationContext, so they are safe in the
   // placeholder branches outside the provider used by the full conversation.
@@ -1419,6 +1445,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               sessionId={session?.id ?? null}
               currentAgentType={agentType}
               providers={providers}
+              onStarted={(run) => onReviewStarted?.(run, displayedSessionTitle)}
             />
           )}
           {projectId && (
@@ -1465,6 +1492,30 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         </div>
       </div>
 
+      {sourcePreparingReview && (
+        // The review this conversation just started is still distilling its
+        // brief; its reviewer exists nowhere else yet. Without this line the
+        // person who clicked Start sees nothing for tens of seconds.
+        <div
+          className="flex items-center gap-2 px-4 py-1.5 border-b bg-muted/40 text-xs text-muted-foreground shrink-0"
+          data-testid="source-preparing-review"
+        >
+          <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+          <span className="flex-1 truncate">
+            Preparing review — summarizing this conversation and starting the reviewer
+          </span>
+          {onViewPreparingReview && (
+            <button
+              type="button"
+              className="shrink-0 font-medium text-foreground/80 hover:text-foreground underline-offset-2 hover:underline"
+              onClick={() => onViewPreparingReview(sourcePreparingReview.runId)}
+            >
+              View
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Messages area */}
       <div className="flex-1 min-h-0 relative">
         {/* Smooth resize-follow is only wanted while a turn is streaming into
@@ -1488,26 +1539,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               // distilling its intent brief (two-phase review start). The
               // review prompt lands here as a normal message once activation
               // delivers it; startup diagnostics remain visible underneath.
-              <div className="text-center py-16">
-                <Loader className="h-6 w-6 mx-auto mb-4" />
-                <h3 className="text-sm font-semibold mb-1 text-foreground">Preparing review…</h3>
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  Summarizing the source conversation and briefing the reviewer.
-                  The review will start here automatically — you can leave this window in the meantime.
-                </p>
-                {startupDiagnosticsView}
-              </div>
+              <ReviewPreparingPlaceholder>{startupDiagnosticsView}</ReviewPreparingPlaceholder>
             ) : showFailedReview ? (
-              <div className="text-center py-16">
-                <div className="mx-auto w-12 h-12 rounded-xl bg-destructive/10 flex items-center justify-center mb-4">
-                  <AlertCircle className="h-6 w-6 text-destructive/70" />
-                </div>
-                <h3 className="text-sm font-semibold mb-1 text-foreground">Review setup failed</h3>
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  {failedReviewerRun?.error ?? "The reviewer could not be started."}
-                </p>
+              <ReviewFailedPlaceholder error={failedReviewerRun?.error}>
                 {startupDiagnosticsView}
-              </div>
+              </ReviewFailedPlaceholder>
             ) : !session && messages.length === 0 ? (
               <div className="text-center py-16">
                 {isLoading || (projectId && !isInitialized) ? (
