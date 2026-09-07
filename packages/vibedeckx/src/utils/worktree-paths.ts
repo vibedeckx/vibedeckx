@@ -1,6 +1,7 @@
 import path from "path";
 import { createHash } from "crypto";
 import { execSync, execFileSync } from "child_process";
+import { mkdirSync, realpathSync } from "fs";
 import type { Storage, RegisteredWorkspaceCheckout } from "../storage/types.js";
 
 const WORKTREE_BASE_DIR = "/var/tmp/vibedeckx/worktrees";
@@ -38,15 +39,34 @@ function isSubpath(basePath: string, targetPath: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
+/**
+ * Both sides of a containment test have to be compared after symlinks, or the
+ * same directory reached two ways looks like two places. macOS is the case that
+ * matters: `/var` is a symlink to `/private/var`, so Git reports every managed
+ * worktree as `/private/var/tmp/vibedeckx/...` while `WORKTREE_BASE_DIR` says
+ * `/var/tmp/vibedeckx/...` — string comparison then rejects every one of a Mac
+ * worker's own worktrees as untrusted and it reports no workspaces at all.
+ * Resolving also tightens the check it exists for: a symlink planted inside the
+ * managed base now has to point somewhere still inside it.
+ */
+export function canonicalPath(target: string): string {
+  try {
+    return realpathSync(target);
+  } catch {
+    // Not on disk (yet) — nothing to resolve, and nothing to escape through.
+    return path.resolve(target);
+  }
+}
+
 /** A worktree path is trusted only if it is the project root itself or lives
  *  under this project's own managed worktree base. Git can report stale,
  *  prunable, or otherwise attacker-influenced `.git/worktrees/*` metadata that
  *  points anywhere on disk (e.g. `/etc`); such paths must never be returned to
  *  callers that use them as a filesystem confinement root. */
 function isTrustedWorktreePath(projectPath: string, worktreePath: string): boolean {
-  const normalizedWorktreePath = path.resolve(worktreePath);
-  if (normalizedWorktreePath === path.resolve(projectPath)) return true;
-  const managedBase = path.resolve(getWorktreeBaseForProject(projectPath));
+  const normalizedWorktreePath = canonicalPath(worktreePath);
+  if (normalizedWorktreePath === canonicalPath(projectPath)) return true;
+  const managedBase = canonicalPath(getWorktreeBaseForProject(projectPath));
   return isSubpath(managedBase, normalizedWorktreePath);
 }
 
@@ -129,6 +149,128 @@ export function pruneWorktrees(projectPath: string): void {
 /** Invalidate the cached list for a project — call after add/remove succeeds. */
 export function invalidateWorktreeListCache(projectPath: string): void {
   worktreeListCache.delete(projectPath);
+}
+
+/** True when `refs/heads/<branch>` exists in this repository. */
+function branchExists(projectPath: string, branch: string): boolean {
+  try {
+    execFileSync("git", ["rev-parse", "--verify", `refs/heads/${branch}`], {
+      cwd: projectPath,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export interface WorktreeAddPlan {
+  worktreePath: string;
+  /** The workspace reuses a branch that was already there, so `startPoint` did not apply. */
+  adopted: boolean;
+  /** `git worktree add` arguments, or null when the worktree is already on disk. */
+  addArgs: string[] | null;
+}
+
+/**
+ * Decide how `branch` gets a workspace, reusing whatever already exists:
+ *
+ *   - no such branch        → create it from `startPoint` (`worktree add -b`)
+ *   - branch, no worktree   → check the branch out into a new worktree
+ *   - branch with worktree  → adopt that worktree as is, touching no Git state
+ *
+ * A branch left behind by a deleted workspace used to fail the whole create
+ * ("Branch 'x' already exists"), which was a dead end: the name was taken on
+ * that machine and nothing in the product could free it, so a project whose
+ * remotes disagreed about which branches survived could never be brought back
+ * into line. Adoption is also what makes create idempotent per target — a retry
+ * after a partial multi-target failure converges instead of failing forever on
+ * the target that already succeeded.
+ *
+ * `adopted` is reported rather than hidden: the branch keeps its own history,
+ * so the base branch the user picked was ignored and they need to be told.
+ *
+ * Planning is separate from `applyWorktreeAdd` so callers can register the
+ * checkout they are about to create — at its real path — only once the request
+ * is known to be viable. A rejection here has touched nothing, on disk or in
+ * the registry.
+ */
+export function planWorktreeAdd(
+  projectPath: string,
+  branch: string,
+  startPoint: string,
+): WorktreeAddPlan {
+  const exists = branchExists(projectPath, branch);
+
+  if (exists) {
+    // Records for directories deleted outside Git otherwise masquerade as live
+    // worktrees and would make the branch look un-checkout-able.
+    pruneWorktrees(projectPath);
+    const existing = parseGitWorktreeList(projectPath).find((e) => e.branch === branch);
+    if (existing) {
+      // Canonical, not textual: Git reports the resolved path, so a project
+      // reached through a symlink would otherwise slip past this guard.
+      if (canonicalPath(existing.path) === canonicalPath(projectPath)) {
+        // The main workspace already is this branch; a second workspace on the
+        // same checkout would be one directory under two identities.
+        throw Object.assign(
+          new Error(`Branch '${branch}' is checked out in the main workspace`),
+          { statusCode: 409 },
+        );
+      }
+      return { worktreePath: existing.path, adopted: true, addArgs: null };
+    }
+  }
+
+  const worktreePath = resolveWorktreePath(projectPath, branch);
+  return {
+    worktreePath,
+    adopted: exists,
+    addArgs: exists
+      ? ["worktree", "add", worktreePath, branch]
+      : ["worktree", "add", "-b", branch, worktreePath, startPoint],
+  };
+}
+
+export interface RetainedBranch {
+  branch: string;
+  /** Git refused because the branch holds commits no other branch has. */
+  unmerged: boolean;
+}
+
+/**
+ * Delete the branch a just-removed worktree held, and report it when Git keeps
+ * it instead. `-d` (never `-D`) is deliberate: a branch with unmerged commits
+ * is work the user has not landed anywhere, and deleting a workspace is not
+ * consent to throw that away. But the branch surviving is exactly what makes
+ * the name unavailable later, so the caller has to be able to say so rather
+ * than swallow it — see `planWorktreeAdd`, which reuses such a branch.
+ */
+export function deleteBranchAfterRemoval(projectPath: string, branch: string): RetainedBranch | null {
+  try {
+    execFileSync("git", ["branch", "-d", branch], {
+      cwd: projectPath,
+      encoding: "utf-8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return null;
+  } catch (error) {
+    const stderr = String((error as { stderr?: unknown })?.stderr ?? "");
+    return { branch, unmerged: /not fully merged/i.test(stderr) };
+  }
+}
+
+/** Carry out a plan from `planWorktreeAdd`. A no-op for an adopted worktree. */
+export function applyWorktreeAdd(projectPath: string, plan: WorktreeAddPlan): void {
+  if (!plan.addArgs) return;
+  mkdirSync(getWorktreeBaseForProject(projectPath), { recursive: true });
+  execFileSync("git", plan.addArgs, {
+    cwd: projectPath,
+    encoding: "utf-8",
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  invalidateWorktreeListCache(projectPath);
 }
 
 /** Resolve branch to absolute filesystem path. null = main worktree. */

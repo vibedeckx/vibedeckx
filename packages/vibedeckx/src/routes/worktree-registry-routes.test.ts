@@ -150,6 +150,94 @@ describe("worktree routes persisted identity", () => {
     ]);
   });
 
+  it("refuses to adopt a worktree another workspace still owns", async () => {
+    // Workspace identity survives an agent switching the tree's branch, so the
+    // directory is still `dev`'s. Adopting by live branch would give one tree
+    // two identities, and deleting either would take the other's checkout.
+    await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    execFileSync("git", ["-C", worktreePath, "switch", "-c", "topic"]);
+    invalidateWorktreeListCache(projectPath);
+
+    const conflict = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "topic", baseBranch: "main", targets: ["local"] },
+    });
+
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error).toMatch(/already belongs to workspace 'dev'/);
+    expect(await storage.workspaceRegistry.getByProjectBranch("p1", "topic", "local")).toBeUndefined();
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
+      .toMatchObject({ worktree_path: worktreePath, status: "ready" });
+  });
+
+  it("adopts its own worktree again when a create is retried", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    const first = await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local");
+    invalidateWorktreeListCache(projectPath);
+
+    const retried = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+
+    expect(retried.statusCode).toBe(201);
+    expect(retried.json().worktree).toEqual({ branch: "dev", adopted: true });
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
+      .toMatchObject({ id: first?.checkout.id, worktree_path: worktreePath, status: "ready" });
+  });
+
+  it("reports the branch a delete could not remove", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    // Work that exists nowhere else: `git branch -d` refuses, and the name
+    // stays taken on this machine.
+    execFileSync("git", ["-C", worktreePath, "commit", "--allow-empty", "-m", "unlanded"]);
+    invalidateWorktreeListCache(projectPath);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json().branchRetained).toEqual({ branch: "dev", unmerged: true });
+    expect(execFileSync("git", ["-C", projectPath, "branch", "--list", "dev"], { encoding: "utf-8" }))
+      .toContain("dev");
+  });
+
+  it("reports nothing retained when the branch goes with its workspace", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json().branchRetained).toBeNull();
+    expect(execFileSync("git", ["-C", projectPath, "branch", "--list", "dev"], { encoding: "utf-8" }))
+      .toBe("");
+  });
+
   it("clears root drift once the user adopts the branch they switched to", async () => {
     // The first listing is what captures the anchor, here "main".
     await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });

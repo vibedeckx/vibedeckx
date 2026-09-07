@@ -19,6 +19,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api, type Project, type WorktreeTarget } from "@/lib/api";
+import { adoptedTargets, describeTargetResults } from "@/lib/worktree-target-results";
+import { toast } from "sonner";
 
 interface CreateWorktreeDialogProps {
   projectId: string;
@@ -99,35 +101,18 @@ export function CreateWorktreeDialog({
       );
 
       if (result.partialSuccess) {
-        // Find which target failed
-        const failedTarget = result.results?.remote?.success === false ? "remote" : "local";
-        const failedResult = result.results?.[failedTarget];
-        const failedError = failedResult?.error || "Unknown error";
-        const errorCode = failedResult?.errorCode;
-        const requestId = failedResult?.requestId;
+        setWarning(describeTargetResults(result.results, "created") ?? "Some targets failed");
+      }
 
-        let message: string;
-        switch (errorCode) {
-          case "timeout":
-            message = "Connection to remote server timed out. The remote server may be slow or unreachable.";
-            break;
-          case "network_error":
-            message = "Remote server is not connected. Run the connect command on the remote machine (Settings → Remote Servers → connect token).";
-            break;
-          case "auth_error":
-            message = "Authentication failed with remote server. Copy the current connect command (Settings → Remote Servers → connect token) and re-run it on the remote machine; rotate the token only if you need to replace it.";
-            break;
-          case "server_error":
-            message = `Remote server returned an error: ${failedError}`;
-            break;
-          default:
-            message = `Worktree created locally, but ${failedTarget} creation failed: ${failedError}`;
-            break;
-        }
-        if (requestId) {
-          message += ` (Request ID: ${requestId})`;
-        }
-        setWarning(message);
+      // A target that already had this branch reuses it, so the base branch the
+      // user picked did not apply there. Say so instead of implying a fresh cut.
+      const reused = adoptedTargets(result.results);
+      if (reused.length > 0 || result.worktree.adopted) {
+        // Single-target creates answer flat, with no per-target map to read.
+        const where = reused.length > 0 ? ` on ${reused.join(", ")}` : "";
+        toast.info(`Reused the existing '${branchName.trim()}' branch${where}`, {
+          description: "The workspace keeps that branch's own history.",
+        });
       }
 
       onWorktreeCreated(result.worktree.branch!);

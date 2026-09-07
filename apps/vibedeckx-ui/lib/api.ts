@@ -1,3 +1,5 @@
+import { appendTargetFailures, type RetainedBranch, type WorktreeTargetOutcome } from "@/lib/worktree-target-results";
+
 // ============ Auth Token Management ============
 // `_authToken` is a warm cache of the last-known Clerk session JWT. It exists so
 // that synchronous callers (WebSocket/SSE URL builders) can read a token without
@@ -365,23 +367,24 @@ export type MergeStatusBatchResult =
 
 export type WorktreeTarget = "local" | "remote";
 
-export interface WorktreeTargetResult {
-  success: boolean;
+export interface WorktreeTargetResult extends WorktreeTargetOutcome {
   worktree?: { branch: string };
-  error?: string;
-  errorCode?: string;
-  requestId?: string;
 }
 
+// Keys are "local", "remote" (single-remote projects), or a remote server id
+// (multi-remote projects) — never assume the WorktreeTarget pair.
 export interface WorktreeCreateResult {
-  worktree: Worktree;
-  results?: Partial<Record<WorktreeTarget, WorktreeTargetResult>>;
+  /** `adopted`: the branch already existed on that target and was reused. */
+  worktree: Worktree & { adopted?: boolean };
+  results?: Record<string, WorktreeTargetResult | undefined>;
   partialSuccess?: boolean;
 }
 
 export interface WorktreeDeleteResult {
   success: boolean;
-  results?: Partial<Record<WorktreeTarget, { success: boolean; error?: string }>>;
+  results?: Record<string, WorktreeTargetOutcome | undefined>;
+  /** Single-target deletes answer flat, with no per-target map. */
+  branchRetained?: RetainedBranch | null;
   partialSuccess?: boolean;
 }
 
@@ -1863,7 +1866,8 @@ export const api = {
     // Accept 207 as partial success
     if (!res.ok && res.status !== 207) {
       const error = await res.json();
-      throw new Error(error.error);
+      // An all-targets failure carries the per-target reasons; keep them.
+      throw new Error(appendTargetFailures(error.error, error.results));
     }
     const data = await res.json();
     return {
@@ -1882,12 +1886,13 @@ export const api = {
     // Accept 207 as partial success
     if (!res.ok && res.status !== 207) {
       const error = await res.json();
-      throw new Error(error.error);
+      throw new Error(appendTargetFailures(error.error, error.results));
     }
     const data = await res.json();
     return {
       success: data.success,
       results: data.results,
+      branchRetained: data.branchRetained,
       partialSuccess: res.status === 207,
     };
   },

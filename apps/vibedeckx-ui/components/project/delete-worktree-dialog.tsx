@@ -11,6 +11,8 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { api, type Worktree } from "@/lib/api";
+import { describeRetainedBranches, describeTargetResults } from "@/lib/worktree-target-results";
+import { toast } from "sonner";
 
 interface DeleteWorktreeDialogProps {
   projectId: string;
@@ -42,8 +44,14 @@ export function DeleteWorktreeDialog({
       const result = await api.deleteWorktree(projectId, worktree.branch!);
 
       if (result.partialSuccess) {
-        const remoteError = result.results?.remote?.error || "Unknown error";
-        setWarning(`Local worktree deleted, but remote deletion failed: ${remoteError}`);
+        setWarning(describeTargetResults(result.results, "deleted") ?? "Some targets failed");
+      }
+
+      const retained = describeRetainedBranches(result.results, result.branchRetained);
+      if (retained) {
+        toast.info(retained, {
+          description: "Creating this workspace again will reuse that branch.",
+        });
       }
 
       onWorktreeDeleted();

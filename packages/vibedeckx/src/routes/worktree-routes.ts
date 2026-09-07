@@ -1,8 +1,7 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
-import { mkdir } from "fs/promises";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { resolveWorktreePath, conventionalWorktreePath, getWorktreeBaseForProject, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, setRootWorkspaceAnchor, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache, type SetAnchorResult } from "../utils/worktree-paths.js";
+import { resolveWorktreePath, conventionalWorktreePath, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, setRootWorkspaceAnchor, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache, planWorktreeAdd, applyWorktreeAdd, canonicalPath, deleteBranchAfterRemoval, type RetainedBranch, type SetAnchorResult } from "../utils/worktree-paths.js";
 import { ensurePathProjectId } from "../utils/path-project.js";
 import { registerReportedWorktrees, type ReportedWorktree } from "../workspace-binding-backfill.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
@@ -12,6 +11,8 @@ import type { Project } from "../storage/types.js";
 interface RemoteConfig {
   serverId: string;
   remotePath: string;
+  /** Human name of the remote server, for per-target result messages. */
+  serverName: string;
 }
 
 async function getAllRemoteConfigs(fastify: FastifyInstance, project: Project): Promise<RemoteConfig[]> {
@@ -19,7 +20,33 @@ async function getAllRemoteConfigs(fastify: FastifyInstance, project: Project): 
   return remotes.map((r) => ({
     serverId: r.remote_server_id,
     remotePath: r.remote_path,
+    serverName: r.server_name,
   }));
+}
+
+/**
+ * Per-target outcome of a multi-target create/delete. The map key stays the
+ * wire-compatible one ("local", "remote" for a single remote, otherwise the
+ * remote server id); `label` carries the name to show for that key, since a
+ * caller holding only a server id cannot name it.
+ */
+interface TargetCreateResult {
+  success: boolean;
+  label: string;
+  worktree?: { branch: string };
+  /** This target reused a branch that already existed there. */
+  adopted?: boolean;
+  error?: string;
+  errorCode?: string;
+  requestId?: string;
+}
+
+interface TargetDeleteResult {
+  success: boolean;
+  label: string;
+  /** Set when Git kept the branch (unmerged work), so the name stays taken. */
+  branchRetained?: RetainedBranch | null;
+  error?: string;
 }
 
 /** Returns the primary (first) remote config, or null. Used by endpoints that operate on a single remote. */
@@ -50,10 +77,36 @@ async function ensurePathProject(fastify: FastifyInstance, projectPath: string):
   return project;
 }
 
+/**
+ * Refuse to hand one directory to a second workspace identity.
+ *
+ * A checkout keeps its identity when an agent switches its branch — workspace
+ * `dev` whose tree now sits on `topic` still owns that directory. Adopting by
+ * live branch alone would then register `topic` against the same path, and a
+ * later delete of either workspace would remove the other's checkout.
+ */
+async function assertPathIsFree(
+  fastify: FastifyInstance,
+  opts: { projectId: string; branch: string; targetId: string; worktreePath: string },
+): Promise<void> {
+  const registered = await fastify.storage.workspaceRegistry.listByProject(opts.projectId, opts.targetId);
+  const target = canonicalPath(opts.worktreePath);
+  const owner = registered.find((row) =>
+    row.workspace.branch !== opts.branch
+    && canonicalPath(row.checkout.worktree_path) === target);
+  if (!owner) return;
+  throw Object.assign(
+    new Error(
+      `That worktree already belongs to workspace '${owner.workspace.branch || "main"}'`,
+    ),
+    { statusCode: 409 },
+  );
+}
+
 async function syncRemoteWorktreeList(
   fastify: FastifyInstance,
   projectId: string,
-  remote: RemoteConfig,
+  remote: Pick<RemoteConfig, "serverId" | "remotePath">,
   data: unknown,
 ): Promise<void> {
   const worktrees = (data as { worktrees?: ReportedWorktree[] })?.worktrees;
@@ -226,44 +279,32 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     let pendingCheckoutId: string | null = null;
     try {
-      const { execFileSync } = await import("child_process");
-
-      try {
-        execFileSync("git", ["rev-parse", "--verify", `refs/heads/${trimmedBranch}`], {
-          cwd: projectPath,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        return reply.code(409).send({ error: `Branch '${trimmedBranch}' already exists` });
-      } catch {
-        // Branch doesn't exist, continue
-      }
-
-      const worktreeAbsolutePath = resolveWorktreePath(projectPath, trimmedBranch);
+      // An existing branch is reused rather than refused; `adopted` says which
+      // happened, since an adopted branch ignores the requested base.
+      const plan = planWorktreeAdd(projectPath, trimmedBranch, startPoint);
       const project = await ensurePathProject(fastify, projectPath);
+      await assertPathIsFree(fastify, {
+        projectId: project.id,
+        branch: trimmedBranch,
+        targetId: "local",
+        worktreePath: plan.worktreePath,
+      });
       const pending = await fastify.storage.workspaceRegistry.beginCheckout({
         projectId: project.id,
         branch: trimmedBranch,
         targetId: "local",
-        worktreePath: worktreeAbsolutePath,
+        worktreePath: plan.worktreePath,
         expectedBranch: trimmedBranch,
       });
       pendingCheckoutId = pending.checkout.id;
 
-      await mkdir(getWorktreeBaseForProject(projectPath), { recursive: true });
-
-      execFileSync("git", ["worktree", "add", "-b", trimmedBranch, worktreeAbsolutePath, startPoint], {
-        cwd: projectPath,
-        encoding: "utf-8",
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      invalidateWorktreeListCache(projectPath);
+      applyWorktreeAdd(projectPath, plan);
       await fastify.storage.workspaceRegistry.setCheckoutStatus(pending.checkout.id, "ready");
 
-      console.log(`[worktree] ${requestId} Created: branch=${trimmedBranch}`);
+      console.log(`[worktree] ${requestId} ${plan.adopted ? "Adopted" : "Created"}: branch=${trimmedBranch}`);
 
       return reply.code(201).send({
-        worktree: { branch: trimmedBranch, worktreePath: worktreeAbsolutePath },
+        worktree: { branch: trimmedBranch, worktreePath: plan.worktreePath, adopted: plan.adopted },
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
@@ -274,6 +315,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
       const stderr = (error as { stderr?: string })?.stderr || "";
       console.error(`[worktree] ${requestId} Failed: ${errorMessage}${stderr ? `, stderr: ${stderr}` : ""}`);
+      const statusCode = (error as { statusCode?: number })?.statusCode;
+      if (statusCode) return reply.code(statusCode).send({ error: errorMessage });
       return reply.code(500).send({ error: `Failed to create worktree: ${errorMessage}` });
     }
   });
@@ -344,23 +387,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
       worktreeRemoved = true;
       invalidateWorktreeListCache(projectPath);
 
-      if (branchToDelete) {
-        try {
-          execFileSync("git", ["branch", "-d", branchToDelete], {
-            cwd: projectPath,
-            encoding: "utf-8",
-            stdio: ["pipe", "pipe", "pipe"],
-          });
-        } catch {
-          // Branch deletion failed, not critical
-        }
-      }
+      // A branch Git keeps is the thing that makes this name unavailable later,
+      // so it travels back to the user rather than being swallowed here.
+      const branchRetained = branchToDelete ? deleteBranchAfterRemoval(projectPath, branchToDelete) : null;
 
       if (registered) {
         await fastify.storage.workspaceRegistry.markCheckoutDeleted(registered.checkout.id);
       }
 
-      return reply.code(200).send({ success: true });
+      return reply.code(200).send({ success: true, branchRetained });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       // A busy worktree is a refusal, not a broken checkout: restore the prior
@@ -513,7 +548,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
     } else {
       const targetRemote = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, requestedTarget);
       if (!targetRemote) return reply.code(400).send({ error: "Unknown remote target" });
-      remoteConfig = { serverId: targetRemote.remote_server_id, remotePath: targetRemote.remote_path };
+      remoteConfig = {
+        serverId: targetRemote.remote_server_id,
+        remotePath: targetRemote.remote_path,
+        serverName: targetRemote.server_name,
+      };
     }
 
     if (remoteConfig) {
@@ -578,7 +617,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
     } else {
       const targetRemote = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, requestedTarget);
       if (!targetRemote) return reply.code(400).send({ error: "Unknown remote target" });
-      remoteConfig = { serverId: targetRemote.remote_server_id, remotePath: targetRemote.remote_path };
+      remoteConfig = {
+        serverId: targetRemote.remote_server_id,
+        remotePath: targetRemote.remote_path,
+        serverName: targetRemote.server_name,
+      };
     }
 
     if (remoteConfig) {
@@ -763,21 +806,23 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       // Multiple remotes: delete from all in parallel
-      const results: Record<string, { success: boolean; error?: string }> = {};
+      const results: Record<string, TargetDeleteResult> = {};
       await Promise.allSettled(
         remoteConfigs.map(async (rc) => {
           const key = rc.serverId;
+          const label = rc.serverName;
           try {
             const result = await deleteOnRemote(rc);
             if (result.ok) {
-              results[key] = { success: true };
+              const data = result.data as { branchRetained?: RetainedBranch | null };
+              results[key] = { success: true, label, branchRetained: data?.branchRetained };
             } else {
               const data = result.data as { error?: string };
-              results[key] = { success: false, error: data.error || "Remote deletion failed" };
+              results[key] = { success: false, label, error: data.error || "Remote deletion failed" };
             }
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "Unknown error";
-            results[key] = { success: false, error: errorMessage };
+            results[key] = { success: false, label, error: errorMessage };
           }
         })
       );
@@ -794,7 +839,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     // Local deletion helper
-    const deleteLocal = async () => {
+    const deleteLocal = async (): Promise<RetainedBranch | null> => {
       const { execSync, execFileSync } = await import("child_process");
       const worktreeAbsPath = resolveWorktreePath(project.path!, branch);
       const registered = await fastify.storage.workspaceRegistry
@@ -843,20 +888,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
         worktreeRemoved = true;
         invalidateWorktreeListCache(project.path!);
 
-        if (branchToDelete) {
-          try {
-            execFileSync("git", ["branch", "-d", branchToDelete], {
-              cwd: project.path!,
-              encoding: "utf-8",
-              stdio: ["pipe", "pipe", "pipe"],
-            });
-          } catch {
-            // Branch deletion failed, not critical
-          }
-        }
+        const branchRetained = branchToDelete
+          ? deleteBranchAfterRemoval(project.path!, branchToDelete)
+          : null;
         if (registered) {
           await fastify.storage.workspaceRegistry.markCheckoutDeleted(registered.checkout.id);
         }
+        return branchRetained;
       } catch (error) {
         if (registered && !worktreeRemoved) {
           const message = error instanceof Error ? error.message : "Local deletion failed";
@@ -876,8 +914,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // Local-only project
     if (!hasRemote) {
       try {
-        await deleteLocal();
-        return reply.code(200).send({ success: true });
+        const branchRetained = await deleteLocal();
+        return reply.code(200).send({ success: true, branchRetained });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
         if (errorMessage.includes("uncommitted changes") || error instanceof WorktreeBusyError) {
@@ -888,12 +926,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     // Hybrid project: delete from local + all remotes
-    const results: Record<string, { success: boolean; error?: string }> = {};
+    const results: Record<string, TargetDeleteResult> = {};
 
     // Delete local first
     try {
-      await deleteLocal();
-      results.local = { success: true };
+      results.local = { success: true, label: "local", branchRetained: await deleteLocal() };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       // Local failure: return error immediately, don't attempt remotes
@@ -904,17 +941,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
     await Promise.allSettled(
       remoteConfigs.map(async (rc) => {
         const key = remoteConfigs.length === 1 ? "remote" : rc.serverId;
+        const label = rc.serverName;
         try {
           const remoteResult = await deleteOnRemote(rc);
           if (remoteResult.ok) {
-            results[key] = { success: true };
+            const remoteData = remoteResult.data as { branchRetained?: RetainedBranch | null };
+            results[key] = { success: true, label, branchRetained: remoteData?.branchRetained };
           } else {
             const remoteData = remoteResult.data as { error?: string };
-            results[key] = { success: false, error: remoteData.error || "Remote deletion failed" };
+            results[key] = { success: false, label, error: remoteData.error || "Remote deletion failed" };
           }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : "Unknown error";
-          results[key] = { success: false, error: errorMessage };
+          results[key] = { success: false, label, error: errorMessage };
         }
       })
     );
@@ -1056,24 +1095,25 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       // Multiple remotes: create on all in parallel
-      const results: Record<string, { success: boolean; worktree?: { branch: string }; error?: string; errorCode?: string; requestId?: string }> = {};
+      const results: Record<string, TargetCreateResult> = {};
       const settled = await Promise.allSettled(
         remoteConfigs.map(async (rc) => {
           const key = rc.serverId;
+          const label = rc.serverName;
           console.log(`[worktree] Creating remote worktree: project=${req.params.id}, branch=${trimmedBranch}, serverId=${rc.serverId}`);
           try {
             const result = await createOnRemote(rc);
             if (result.ok) {
-              const data = result.data as { worktree?: { branch: string } };
-              results[key] = { success: true, worktree: data.worktree };
+              const data = result.data as { worktree?: { branch: string; adopted?: boolean } };
+              results[key] = { success: true, label, worktree: data.worktree, adopted: data.worktree?.adopted };
             } else {
               const data = result.data as { error?: string };
               console.error(`[worktree] Remote failed: serverId=${rc.serverId}, requestId=${result.requestId}, error=${JSON.stringify(result.data)}`);
-              results[key] = { success: false, error: data.error || "Remote creation failed", errorCode: result.errorCode, requestId: result.requestId };
+              results[key] = { success: false, label, error: data.error || "Remote creation failed", errorCode: result.errorCode, requestId: result.requestId };
             }
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "Unknown error";
-            results[key] = { success: false, error: errorMessage };
+            results[key] = { success: false, label, error: errorMessage };
           }
         })
       );
@@ -1090,42 +1130,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     // Local creation helper
-    const createLocal = async () => {
-      const { execFileSync } = await import("child_process");
-
-      try {
-        execFileSync("git", ["rev-parse", "--verify", `refs/heads/${trimmedBranch}`], {
-          cwd: project.path!,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        throw new Error(`Branch '${trimmedBranch}' already exists`);
-      } catch (err) {
-        // If it's our own "already exists" error, rethrow
-        if (err instanceof Error && err.message.includes("already exists")) throw err;
-        // Otherwise branch doesn't exist, which is what we want
-      }
-
-      const worktreeAbsolutePath = resolveWorktreePath(project.path!, trimmedBranch);
+    const createLocal = async (): Promise<{ branch: string; adopted: boolean }> => {
+      // Reuses an existing branch instead of refusing it — see planWorktreeAdd.
+      const plan = planWorktreeAdd(project.path!, trimmedBranch, localStartPoint);
+      await assertPathIsFree(fastify, {
+        projectId: project.id,
+        branch: trimmedBranch,
+        targetId: "local",
+        worktreePath: plan.worktreePath,
+      });
       const pending = await fastify.storage.workspaceRegistry.beginCheckout({
         projectId: project.id,
         branch: trimmedBranch,
         targetId: "local",
-        worktreePath: worktreeAbsolutePath,
+        worktreePath: plan.worktreePath,
         expectedBranch: trimmedBranch,
       });
 
       try {
-        await mkdir(getWorktreeBaseForProject(project.path!), { recursive: true });
-
-        execFileSync("git", ["worktree", "add", "-b", trimmedBranch, worktreeAbsolutePath, localStartPoint], {
-          cwd: project.path!,
-          encoding: "utf-8",
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        invalidateWorktreeListCache(project.path!);
+        applyWorktreeAdd(project.path!, plan);
         await fastify.storage.workspaceRegistry.setCheckoutStatus(pending.checkout.id, "ready");
-        return { branch: trimmedBranch };
+        return { branch: trimmedBranch, adopted: plan.adopted };
       } catch (error) {
         const message = error instanceof Error ? error.message : "Local creation failed";
         await fastify.storage.workspaceRegistry
@@ -1142,6 +1167,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(201).send({ worktree });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Unknown error";
+        const statusCode = (error as { statusCode?: number })?.statusCode;
+        if (statusCode) return reply.code(statusCode).send({ error: errorMessage });
         if (errorMessage.includes("already exists")) {
           return reply.code(409).send({ error: errorMessage });
         }
@@ -1150,13 +1177,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     // Multi-target: local + remote(s)
-    const results: Record<string, { success: boolean; worktree?: { branch: string }; error?: string; errorCode?: string; requestId?: string }> = {};
+    const results: Record<string, TargetCreateResult> = {};
 
     // Local first
-    let localWorktree: { branch: string } | undefined;
+    let localWorktree: { branch: string; adopted: boolean } | undefined;
     try {
       localWorktree = await createLocal();
-      results.local = { success: true, worktree: localWorktree };
+      results.local = { success: true, label: "local", worktree: localWorktree, adopted: localWorktree.adopted };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       // Local failure: return error immediately, don't attempt remotes
@@ -1167,17 +1194,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
     await Promise.allSettled(
       remoteConfigs.map(async (rc) => {
         const key = remoteConfigs.length === 1 ? "remote" : rc.serverId;
+        const label = rc.serverName;
         console.log(`[worktree] Creating remote worktree: project=${req.params.id}, branch=${trimmedBranch}, serverId=${rc.serverId}`);
         try {
           const remoteResult = await createOnRemote(rc);
           if (remoteResult.ok) {
-            const remoteData = remoteResult.data as { worktree?: { branch: string } };
-            results[key] = { success: true, worktree: remoteData.worktree };
+            const remoteData = remoteResult.data as { worktree?: { branch: string; adopted?: boolean } };
+            results[key] = { success: true, label, worktree: remoteData.worktree, adopted: remoteData.worktree?.adopted };
           } else {
             const remoteData = remoteResult.data as { error?: string };
             console.error(`[worktree] Remote failed: serverId=${rc.serverId}, requestId=${remoteResult.requestId}, errorCode=${remoteResult.errorCode}, status=${remoteResult.status}, duration=${remoteResult.durationMs}ms, error=${JSON.stringify(remoteResult.data)}`);
             results[key] = {
               success: false,
+              label,
               error: remoteData.error || "Remote creation failed",
               errorCode: remoteResult.errorCode,
               requestId: remoteResult.requestId,
@@ -1185,7 +1214,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : "Unknown error";
-          results[key] = { success: false, error: errorMessage };
+          results[key] = { success: false, label, error: errorMessage };
         }
       })
     );
