@@ -651,6 +651,32 @@ await sessionSmoke("session-history-head", ["http:GET /api/agent-sessions/:param
 await sessionSmoke("session-paste", ["http:POST /api/agent-sessions/:param/paste"], async () => {
   await api("POST", `/api/agent-sessions/${sessionId}/paste`, { content: "pasted-by-xver" });
 });
+// Non-image attachments land as a file on the agent's execution machine, so
+// the assertion is the file itself — worker and server share this host under
+// the harness, the same way the mkdir smoke checks the worker's filesystem.
+// The hub never lets a missing worker route surface as a 404 here: both the
+// handshake capability gate and a proxied 404 become 409 `worker_unsupported`,
+// so re-raise that as the 404 it stands for and let the version-gap policy
+// above judge it like any other additive capability.
+await sessionSmoke("session-attachment", ["http:POST /api/agent-sessions/:param/attachment"], async () => {
+  const apiPath = `/api/agent-sessions/${sessionId}/attachment`;
+  const bytes = Buffer.from("attached-by-xver\n");
+  const { status, json } = await request("POST", apiPath, {
+    name: "xver-attachment.txt",
+    mediaType: "text/plain",
+    contentBase64: bytes.toString("base64"),
+  });
+  if (status === 409 && json?.errorCode === "worker_unsupported") {
+    throw new HttpError("POST", apiPath, 404, "worker predates attachment upload");
+  }
+  if (status >= 300) throw new HttpError("POST", apiPath, status, JSON.stringify(json)?.slice(0, 150));
+  assert(typeof json?.path === "string" && json.path.length > 0, `no attachment path: ${JSON.stringify(json).slice(0, 120)}`);
+  assert(json.name === "xver-attachment.txt", `unexpected stored name: ${json.name}`);
+  assert(json.size === bytes.length, `unexpected stored size: ${json.size}`);
+  assert(readFileSync(json.path, "utf8") === bytes.toString(), "attachment bytes did not land on the worker");
+  // Written outside both throwaway --data-dirs (tmpdir()/vibedeckx-attachments).
+  rmSync(path.dirname(json.path), { recursive: true, force: true });
+});
 // The park-deadline controls. Both take a task id the worker never has to
 // know: /keep only records a sanction (an unknown id is a harmless no-op) and
 // /stop only writes a stop_task control frame down the CLI's stdin, which the
