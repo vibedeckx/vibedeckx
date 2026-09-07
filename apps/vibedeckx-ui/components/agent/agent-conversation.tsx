@@ -1645,8 +1645,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               >
                 <PromptInputSubmit
                   className="pointer-events-auto"
-                  disabled={(!input.trim() && !isLoading) || isTranslating || isSubmitting}
-                  status={isSubmitting || isTranslating ? "submitted" : isLoading ? "streaming" : "ready"}
+                  disabled={(!input.trim() && !isLoading) || isTranslating || isSubmitting || uploads.pending}
+                  status={isSubmitting || isTranslating || uploads.pending ? "submitted" : isLoading ? "streaming" : "ready"}
                 />
               </div>
             </div>

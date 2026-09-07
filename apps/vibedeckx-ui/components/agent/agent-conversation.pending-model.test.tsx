@@ -222,8 +222,8 @@ vi.mock("@/components/ai-elements/prompt-input", async () => {
       promptState.onPasteText = onPasteText;
       return <textarea />;
     },
-    PromptInputSubmit: ({ status }: { status: string }) => (
-      <button type="submit" data-testid="prompt-submit" data-status={status}>send</button>
+    PromptInputSubmit: ({ status, disabled }: { status: string; disabled?: boolean }) => (
+      <button type="submit" data-testid="prompt-submit" data-status={status} disabled={disabled}>send</button>
     ),
     PromptInputAttachments: () => null,
     PromptInputAttachment: () => null,
@@ -921,6 +921,28 @@ describe("AgentConversation pendingModel", () => {
         'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
         "edit", null,
       );
+    });
+
+    it("blocks sending while an attachment is still uploading", async () => {
+      // Sending mid-upload would clear the draft and then sit waiting on the
+      // upload — from the user's side the message just disappears.
+      draftState.value = "read this";
+      await renderFirstSend();
+      let finishUpload!: (value: { path: string; name: string; size: number; mediaType: string }) => void;
+      uploadAttachment.mockImplementationOnce(() => new Promise((resolve) => { finishUpload = resolve; }));
+      promptState.files = [pdf];
+      await render("pA", "featA");
+
+      const submitButton = () => q(container, "prompt-submit") as HTMLButtonElement;
+      expect(submitButton().disabled).toBe(true);
+      expect(submitButton().dataset.status).toBe("submitted");
+
+      await act(async () => {
+        finishUpload({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+      });
+
+      expect(submitButton().disabled).toBe(false);
+      expect(submitButton().dataset.status).toBe("ready");
     });
 
     it("uploads a non-image attachment and activates with a <vfile/> marker", async () => {

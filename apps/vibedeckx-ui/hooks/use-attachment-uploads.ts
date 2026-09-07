@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { vfileMarker } from "@/components/agent/vpaste-chip";
 import { base64FromDataUrl, readBlobUrlAsDataUrl } from "@/lib/attachment-io";
 import {
@@ -190,7 +190,17 @@ export function useAttachmentUploads(options: UseAttachmentUploadsOptions) {
     return { images, markers };
   }, [process]);
 
-  return { track, retry, statusOf, resolve };
+  /**
+   * True while any attachment is still being read or uploaded. The composer
+   * blocks sending on it: a send would otherwise clear the draft and then sit
+   * waiting on the upload, which reads as a message that vanished.
+   */
+  const pending = useMemo(
+    () => Array.from(statuses.values()).some((s) => s.phase === "reading" || s.phase === "uploading"),
+    [statuses]
+  );
+
+  return { track, retry, statusOf, resolve, pending };
 }
 
 export type AttachmentUploads = ReturnType<typeof useAttachmentUploads>;
