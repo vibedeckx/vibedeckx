@@ -41,6 +41,8 @@ const promptState = vi.hoisted(() => ({
   /** What the composer sees inside `PromptInput` — drives the pick-time upload. */
   files: [] as PickedFile[],
   clearAttachments: vi.fn(),
+  detached: [] as PickedFile[][],
+  restored: [] as PickedFile[][],
   onPasteText: null as null | ((event: unknown, text: string) => void),
   maxFileSize: null as number | null,
   onError: null as null | ((err: { code: string; message: string; files?: File[] }) => void),
@@ -235,7 +237,13 @@ vi.mock("@/components/ai-elements/prompt-input", async () => {
       <button type="button" data-testid="prompt-action" onClick={() => onSelect?.()}>{children}</button>
     ),
     PromptInputHeader: Pass,
-    usePromptInputAttachments: () => ({ files: promptState.files, clear: promptState.clearAttachments }),
+    usePromptInputAttachments: () => ({
+      files: promptState.files,
+      clear: promptState.clearAttachments,
+      // Real behaviour: submit takes the files out and a failure puts them back.
+      detach: () => { const taken = promptState.files; promptState.files = []; promptState.detached.push(taken); return taken; },
+      restore: (items: PickedFile[]) => { promptState.files = items; promptState.restored.push(items); },
+    }),
   };
 });
 
@@ -327,6 +335,8 @@ describe("AgentConversation pendingModel", () => {
     setModel.mockClear();
     promptState.submit = null;
     promptState.files = [];
+    promptState.detached = [];
+    promptState.restored = [];
     promptState.clearAttachments.mockReset();
     promptState.clearAttachments.mockImplementation(() => { promptState.files = []; });
     promptState.onPasteText = null;
@@ -943,6 +953,52 @@ describe("AgentConversation pendingModel", () => {
 
       expect(submitButton().disabled).toBe(false);
       expect(submitButton().dataset.status).toBe("ready");
+    });
+
+    it("clears the attachments with the text, not when the server answers", async () => {
+      // The chips used to sit there until the send round trip finished, which
+      // read as "the text went without them".
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+      promptState.files = [pdf];
+      await render("pA", "featA");
+
+      let finishActivate!: (value: typeof started) => void;
+      activateConversation.mockImplementationOnce(() => new Promise((resolve) => { finishActivate = resolve; }));
+
+      let sending!: Promise<void>;
+      await act(async () => {
+        sending = promptState.submit!({ text: "read this", files: [pdf] });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // Still waiting on the server, and the composer is already empty.
+      expect(promptState.files).toEqual([]);
+      expect(promptState.detached).toHaveLength(1);
+
+      await act(async () => {
+        finishActivate(started);
+        await sending;
+      });
+      expect(promptState.restored).toEqual([]);
+    });
+
+    it("puts the attachments back when the send fails", async () => {
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+      promptState.files = [pdf];
+      await render("pA", "featA");
+      activateConversation.mockResolvedValueOnce(null);
+
+      await act(async () => {
+        await expect(promptState.submit!({ text: "read this", files: [pdf] }))
+          .rejects.toThrow(/Failed to start session/);
+      });
+
+      // Restored with the same items, so a retry needs no re-upload.
+      expect(promptState.restored).toEqual([[pdf]]);
+      expect(promptState.files).toEqual([pdf]);
     });
 
     it("uploads a non-image attachment and activates with a <vfile/> marker", async () => {

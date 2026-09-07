@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle, createContext, useContext, type ClipboardEvent } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle, createContext, useContext, type ClipboardEvent, type RefObject } from "react";
 import { useAgentSession } from "@/hooks/use-agent-session";
 import { useSurfaceCommanderSession } from "@/hooks/use-surface-commander-session";
 import {
@@ -41,7 +41,7 @@ import {
   PromptInputHeader,
   usePromptInputAttachments,
 } from "@/components/ai-elements/prompt-input";
-import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
+import type { AttachmentItem, PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
 import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
 import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown } from "lucide-react";
@@ -85,11 +85,27 @@ import { useAttachmentUploads, type AttachmentUploads } from "@/hooks/use-attach
  * the attachment list is observable), starts each file's read/upload the
  * moment it is picked — so pressing send rarely waits on anything.
  */
-function AttachmentHeader({ uploads, workspaceKey }: { uploads: AttachmentUploads; workspaceKey: string }) {
+interface AttachmentListApi {
+  detach: () => AttachmentItem[];
+  restore: (items: AttachmentItem[]) => void;
+}
+
+function AttachmentHeader({ uploads, workspaceKey, apiRef }: {
+  uploads: AttachmentUploads;
+  workspaceKey: string;
+  apiRef: RefObject<AttachmentListApi | null>;
+}) {
   const attachments = usePromptInputAttachments();
   const files = attachments.files;
   const { track } = uploads;
-  const { clear } = attachments;
+  const { clear, detach, restore } = attachments;
+
+  // The submit handler lives outside `PromptInput`, where the attachment list
+  // is not reachable; hand it the two operations it needs.
+  useEffect(() => {
+    apiRef.current = { detach, restore };
+    return () => { apiRef.current = null; };
+  }, [apiRef, detach, restore]);
 
   // An uploaded attachment is a path on the machine that ran the workspace it
   // was picked in; carrying it to another workspace would hand the agent a
@@ -908,6 +924,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   }, [session, projectId, branch, agentType, permissionMode, pendingModel, prepareConversation, cancelPreparedConversation]);
 
   const uploads = useAttachmentUploads({ upload: uploadAttachment, getUploadTarget });
+  const attachmentListRef = useRef<AttachmentListApi | null>(null);
 
   // Pick-time refusal (size cap mirrors the server's): the file never enters
   // the attachment list, so it is never read into memory as a data URL.
@@ -970,12 +987,33 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
      * throwing is what keeps the files (and their finished uploads) in the
      * composer for a retry.
      */
+    /**
+     * Attachments are taken out of the composer as soon as their content is in
+     * hand, so they disappear with the text instead of lingering until the
+     * server answers. Whatever failure comes after has to put them back — and
+     * must reject, or `PromptInput` would clear them again on resolve.
+     */
+    let detached: AttachmentItem[] = [];
+    const restoreDetached = () => {
+      if (detached.length === 0) return;
+      attachmentListRef.current?.restore(detached);
+      detached = [];
+    };
+    /** Sent for good: the composer owns these blob URLs now, so release them. */
+    const releaseDetached = () => {
+      for (const item of detached) {
+        if (item.url?.startsWith("blob:")) URL.revokeObjectURL(item.url);
+      }
+      detached = [];
+    };
+
     const fail = async (title: string, e: unknown): Promise<never> => {
       const error = e instanceof Error ? e : new Error(title);
       await abandonPrepared();
       if (isOriginDraftDisplayed(submissionOrigin)) {
         toast.error(title, { description: error.message });
         setInput(rawText);
+        restoreDetached();
       }
       throw error;
     };
@@ -996,6 +1034,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     if (!session && isOriginDraftDisplayed(submissionOrigin) && preparedIsCurrent(preparedRef.current)) {
       owned = preparedRef.current;
       preparedRef.current = null;
+    }
+
+    // Their bytes are now either inline parts or paths on the agent's machine;
+    // the chips have nothing left to represent until something fails.
+    if (isOriginDraftDisplayed(submissionOrigin)) {
+      detached = attachmentListRef.current?.detach() ?? [];
     }
 
     // A paste (or oversize text that becomes one) needs the same upload target
@@ -1123,6 +1167,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         ? await activateConversation(prepared, content)
         : await startConversation(content, permissionMode, pendingModel);
       if (started) {
+        releaseDetached();
         console.log(`[AgentConversation] handleSubmit: started session ${started.session.id}`);
         // Arm the title-pending loader now that the session exists so the
         // dropdown trigger goes straight from "New Session" to skeleton.
@@ -1136,12 +1181,19 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           setInput(rawText);
           setPastes(capturedPastes);
           setNextPasteId(capturedNextPasteId);
+          restoreDetached();
         }
+        // Reject so PromptInput does not clear the restored attachments.
         if (hasFiles) throw new Error("Failed to start session");
       }
     } else {
       console.log(`[AgentConversation] handleSubmit: existing session ${session.id}, status=${status}`);
-      await sendMessage(content);
+      try {
+        await sendMessage(content);
+      } catch (e) {
+        return await fail("Failed to send message", e);
+      }
+      releaseDetached();
     }
     } finally {
       if (activeSubmissionRef.current === submissionToken) {
@@ -1585,7 +1637,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           className="w-full"
         >
           {/* Attachment thumbnails/chips — only rendered when files are attached */}
-          <AttachmentHeader uploads={uploads} workspaceKey={`${projectId}::${branch}`} />
+          <AttachmentHeader uploads={uploads} workspaceKey={`${projectId}::${branch}`} apiRef={attachmentListRef} />
           <div className="relative flex w-full flex-col">
             {/* Translate badge row — only when enabled */}
             {translateEnabled && (

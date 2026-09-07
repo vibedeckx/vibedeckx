@@ -1,28 +1,40 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, useEffect } from "react";
+import { act, useEffect, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { PromptInput, PromptInputAttachment, usePromptInputAttachments } from "./prompt-input";
+import { PromptInput, PromptInputAttachment, usePromptInputAttachments, type AttachmentItem } from "./prompt-input";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 let container: HTMLDivElement;
 let root: Root;
-type ProbeApi = { add: (files: File[]) => void };
+type ProbeApi = {
+  add: (files: File[]) => void;
+  detach: () => AttachmentItem[];
+  restore: (items: AttachmentItem[]) => void;
+  files: () => AttachmentItem[];
+};
 let probe: ProbeApi;
+let revoked: string[] = [];
 
 function Probe({ onReady }: { onReady: (api: ProbeApi) => void }) {
   const attachments = usePromptInputAttachments();
-  useEffect(() => { onReady({ add: attachments.add }); }, [attachments.add, onReady]);
+  const { add, detach, restore } = attachments;
+  const filesRef = useRef(attachments.files);
+  filesRef.current = attachments.files;
+  useEffect(() => {
+    onReady({ add, detach, restore, files: () => filesRef.current });
+  }, [add, detach, restore, onReady]);
   return <span data-testid="count">{attachments.files.length}</span>;
 }
 
 beforeEach(() => {
   // jsdom has neither; the component only needs opaque URLs.
   let n = 0;
+  revoked = [];
   vi.stubGlobal("URL", Object.assign(URL, {
     createObjectURL: () => `blob:http://x/${++n}`,
-    revokeObjectURL: () => {},
+    revokeObjectURL: (url: string) => { revoked.push(url); },
   }));
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -167,5 +179,38 @@ describe("PromptInputAttachment status", () => {
   it("renders nothing extra without a status", async () => {
     await chip();
     expect(container.querySelector('[data-testid="attachment-progress"]')).toBeNull();
+  });
+});
+
+describe("PromptInput detach / restore", () => {
+  const file = (name: string) => new File(["%PDF"], name, { type: "application/pdf" });
+
+  it("empties the list without revoking, so the items can come back", async () => {
+    // The composer clears attachments the moment their content is in hand;
+    // a failed send has to put the very same items back, blob URLs included.
+    await mount();
+    await act(async () => { probe.add([file("a.pdf"), file("b.pdf")]); });
+    const before = probe.files();
+
+    let taken!: AttachmentItem[];
+    await act(async () => { taken = probe.detach(); });
+
+    expect(count()).toBe("0");
+    expect(taken.map((f) => f.id)).toEqual(before.map((f) => f.id));
+    expect(revoked).toEqual([]);
+
+    await act(async () => { probe.restore(taken); });
+    expect(count()).toBe("2");
+    expect(probe.files().map((f) => f.id)).toEqual(before.map((f) => f.id));
+    expect(probe.files().map((f) => f.url)).toEqual(before.map((f) => f.url));
+  });
+
+  it("does not duplicate an item that is already back in the list", async () => {
+    await mount();
+    await act(async () => { probe.add([file("a.pdf")]); });
+    let taken!: AttachmentItem[];
+    await act(async () => { taken = probe.detach(); });
+    await act(async () => { probe.restore(taken); probe.restore(taken); });
+    expect(count()).toBe("1");
   });
 });

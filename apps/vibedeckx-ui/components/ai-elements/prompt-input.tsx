@@ -77,11 +77,22 @@ import {
 // Provider Context & Types
 // ============================================================================
 
+export type AttachmentItem = FileUIPart & { id: string };
+
 export type AttachmentsContext = {
-  files: (FileUIPart & { id: string })[];
+  files: AttachmentItem[];
   add: (files: File[] | FileList) => void;
   remove: (id: string) => void;
   clear: () => void;
+  /**
+   * Empty the list and hand the items back, WITHOUT revoking their URLs — for
+   * a caller that clears optimistically on submit and may have to `restore`
+   * them if the send fails. The caller owns the returned URLs from then on and
+   * must revoke them once the send has succeeded.
+   */
+  detach: () => AttachmentItem[];
+  /** Put detached items back, ids and URLs intact. */
+  restore: (items: AttachmentItem[]) => void;
   openFileDialog: () => void;
   fileInputRef: RefObject<HTMLInputElement | null>;
 };
@@ -199,6 +210,19 @@ export function PromptInputProvider({
     });
   }, []);
 
+  const detach = useCallback(() => {
+    const detached = attachmentsRef.current;
+    setAttachmentFiles([]);
+    return detached;
+  }, []);
+
+  const restore = useCallback((items: AttachmentItem[]) => {
+    setAttachmentFiles((prev) => {
+      const present = new Set(prev.map((f) => f.id));
+      return prev.concat(items.filter((f) => !present.has(f.id)));
+    });
+  }, []);
+
   // Keep a ref to attachments for cleanup on unmount (avoids stale closure)
   const attachmentsRef = useRef(attachmentFiles);
   attachmentsRef.current = attachmentFiles;
@@ -224,10 +248,12 @@ export function PromptInputProvider({
       add,
       remove,
       clear,
+      detach,
+      restore,
       openFileDialog,
       fileInputRef,
     }),
-    [attachmentFiles, add, remove, clear, openFileDialog]
+    [attachmentFiles, add, remove, clear, detach, restore, openFileDialog]
   );
 
   const __registerFileInput = useCallback(
@@ -652,9 +678,24 @@ export const PromptInput = ({
     []
   );
 
+  const detachLocal = useCallback(() => {
+    const detached = filesRef.current;
+    setItems([]);
+    return detached;
+  }, []);
+
+  const restoreLocal = useCallback((restored: AttachmentItem[]) => {
+    setItems((prev) => {
+      const present = new Set(prev.map((f) => f.id));
+      return prev.concat(restored.filter((f) => !present.has(f.id)));
+    });
+  }, []);
+
   const add = usingProvider ? controller.attachments.add : addLocal;
   const remove = usingProvider ? controller.attachments.remove : removeLocal;
   const clear = usingProvider ? controller.attachments.clear : clearLocal;
+  const detach = usingProvider ? controller.attachments.detach : detachLocal;
+  const restore = usingProvider ? controller.attachments.restore : restoreLocal;
   const openFileDialog = usingProvider
     ? controller.attachments.openFileDialog
     : openFileDialogLocal;
@@ -751,10 +792,12 @@ export const PromptInput = ({
       add,
       remove,
       clear,
+      detach,
+      restore,
       openFileDialog,
       fileInputRef: inputRef,
     }),
-    [files, add, remove, clear, openFileDialog]
+    [files, add, remove, clear, detach, restore, openFileDialog]
   );
 
   const handleSubmit: FormEventHandler<HTMLFormElement> = (event) => {

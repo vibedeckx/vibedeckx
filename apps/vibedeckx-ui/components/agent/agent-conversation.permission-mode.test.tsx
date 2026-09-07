@@ -142,7 +142,7 @@ vi.mock("@/components/ai-elements/prompt-input", async () => {
     PromptInputActionAddAttachments: () => null,
     PromptInputActionMenuItem: Pass,
     PromptInputHeader: Pass,
-    usePromptInputAttachments: () => ({ files: [], clear: () => {} }),
+    usePromptInputAttachments: () => ({ files: [], clear: () => {}, detach: () => [], restore: () => {} }),
   };
 });
 
