@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Button } from "@/components/ui/button";
 import { Plus, Terminal, Monitor } from "lucide-react";
 import { ExecutorItem } from "./executor-item";
@@ -264,8 +264,25 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
     commitExecutor,
   ]);
 
+  // Clicking a Start/Stop button leaves DOM focus on it, and a focused button
+  // turns Enter into its own click before the cursor's handler is even
+  // consulted — so once the mark moves to another row that stale focus would
+  // silently re-run the OLD row (and show a second, contradicting highlight).
+  // Dropping it when the two diverge hands Enter back to the cursor. Scoped to
+  // the executor list: focus parked in the sidebar or the panel header is not
+  // ours to clear.
+  useEffect(() => {
+    if (!keyboardActive) return;
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || !listRef.current?.contains(active)) return;
+    const row = active.closest("[data-locate-id]");
+    if (!row || row.getAttribute("data-locate-id") === markedExecutorId) return;
+    active.blur();
+  }, [keyboardActive, markedExecutorId]);
+
   // Clicking a row makes it current, so the mark never sits somewhere the
   // user has visibly moved on from.
+  const listRef = useRef<HTMLDivElement | null>(null);
   const handleListPointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const row = event.target instanceof Element ? event.target.closest("[data-locate-id]") : null;
     const id = row?.getAttribute("data-locate-id");
@@ -335,7 +352,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        <div className="p-4 space-y-3" onPointerDown={handleListPointerDown}>
+        <div className="p-4 space-y-3" ref={listRef} onPointerDown={handleListPointerDown}>
           {loading ? (
             <div className="text-center text-muted-foreground py-8">
               Loading executors...

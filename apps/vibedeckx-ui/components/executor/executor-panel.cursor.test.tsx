@@ -152,6 +152,36 @@ describe("executor panel keyboard cursor", () => {
     expect(commits).toEqual([]);
   });
 
+  // The reported bug: click a row's Start button, then walk away with the
+  // arrows — Enter used to re-fire the still-focused button of the OLD row.
+  it("hands Enter back to the cursor after the arrows move off a focused button", () => {
+    claimRegion();
+    const firstButton = container!.querySelector<HTMLButtonElement>(
+      '[data-locate-id="e1"] [data-locate-action]',
+    )!;
+    act(() => firstButton.focus());
+    press("ArrowDown");
+    expect(marked()).toBe("e2");
+    expect(document.activeElement).not.toBe(firstButton);
+    press("Enter", document.activeElement ?? window);
+    expect(commits).toEqual(["e2"]);
+  });
+
+  it("leaves focus alone while it sits inside the marked row", () => {
+    claimRegion();
+    const row = container!.querySelector('[data-locate-id="e3"]')!;
+    const button = row.querySelector<HTMLButtonElement>("[data-locate-action]")!;
+    act(() => {
+      row.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+      button.focus();
+    });
+    expect(marked()).toBe("e3");
+    // The clicked button keeps the keyboard: Enter there is its own click.
+    expect(document.activeElement).toBe(button);
+    press("Enter", button);
+    expect(commits).toEqual([]);
+  });
+
   it("hands the cursor over when a locate query commits", () => {
     claimRegion();
     press("t"); // matches "tests" best
