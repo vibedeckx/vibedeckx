@@ -35,8 +35,12 @@ const uploadPaste = vi.fn();
 const uploadAttachment = vi.fn();
 const setModel = vi.fn(async (): Promise<string | null> => null);
 const reviewerRunState = vi.hoisted(() => ({ value: null as WorkflowRun | null }));
+type PickedFile = { id?: string; type: "file"; filename: string; mediaType: string; url: string };
 const promptState = vi.hoisted(() => ({
-  submit: null as null | ((message: { text: string; files: { type: "file"; filename: string; mediaType: string; url: string }[] }) => Promise<void>),
+  submit: null as null | ((message: { text: string; files: PickedFile[] }) => Promise<void>),
+  /** What the composer sees inside `PromptInput` — drives the pick-time upload. */
+  files: [] as PickedFile[],
+  clearAttachments: vi.fn(),
   onPasteText: null as null | ((event: unknown, text: string) => void),
   maxFileSize: null as number | null,
   onError: null as null | ((err: { code: string; message: string; files?: File[] }) => void),
@@ -231,7 +235,7 @@ vi.mock("@/components/ai-elements/prompt-input", async () => {
       <button type="button" data-testid="prompt-action" onClick={() => onSelect?.()}>{children}</button>
     ),
     PromptInputHeader: Pass,
-    usePromptInputAttachments: () => ({ files: [] }),
+    usePromptInputAttachments: () => ({ files: promptState.files, clear: promptState.clearAttachments }),
   };
 });
 
@@ -322,6 +326,9 @@ describe("AgentConversation pendingModel", () => {
     vi.mocked(translateText).mockReset();
     setModel.mockClear();
     promptState.submit = null;
+    promptState.files = [];
+    promptState.clearAttachments.mockReset();
+    promptState.clearAttachments.mockImplementation(() => { promptState.files = []; });
     promptState.onPasteText = null;
     draftState.value = "";
     draftState.set.mockReset();
@@ -540,8 +547,18 @@ describe("AgentConversation pendingModel", () => {
       legacy: false,
     };
 
+    const started = {
+      session: { id: "s-new", projectId: "pA", branch: "featA", status: "running" as const },
+      origin: prepared.origin,
+      adopted: false,
+    };
+
     const renderFirstSend = async () => {
       prepareConversation.mockResolvedValue(prepared);
+      // Default to an accepted send: preprocessing *and* send failures now
+      // reject the submit so `PromptInput` keeps the attachments for a retry.
+      activateConversation.mockResolvedValue(started);
+      startConversation.mockResolvedValue(started);
       await render("pA", "featA");
       expect(promptState.submit).not.toBeNull();
     };
@@ -558,12 +575,16 @@ describe("AgentConversation pendingModel", () => {
         }
 
         await act(async () => {
-          await promptState.submit!({ text: "hello", files: [] });
+          await expect(promptState.submit!({ text: "hello", files: [] }))
+            .rejects.toThrow(/Disable translation/);
         });
 
         // Translation needs no identity, so nothing was prepared and nothing
         // needs discarding: the placeholder simply stays.
         expect(prepareConversation).not.toHaveBeenCalled();
+        // One failure, one toast: the returned-error path must not fall
+        // through the surrounding catch and report a second time.
+        expect(toast.error).toHaveBeenCalledTimes(1);
         expect(startConversation).not.toHaveBeenCalled();
         expect(activateConversation).not.toHaveBeenCalled();
       },
@@ -574,7 +595,8 @@ describe("AgentConversation pendingModel", () => {
       uploadPaste.mockRejectedValue(new Error("upload failed"));
 
       await act(async () => {
-        await promptState.submit!({ text: "x".repeat(2001), files: [] });
+        await expect(promptState.submit!({ text: "x".repeat(2001), files: [] }))
+          .rejects.toThrow(/upload failed/);
       });
 
       expect(uploadPaste).toHaveBeenCalledWith("x".repeat(2001), "s-new");
@@ -598,7 +620,8 @@ describe("AgentConversation pendingModel", () => {
       uploadPaste.mockRejectedValue(new Error("upload failed"));
 
       await act(async () => {
-        await promptState.submit!({ text: "[📎 paste #1 (2.0KB)]", files: [] });
+        await expect(promptState.submit!({ text: "[📎 paste #1 (2.0KB)]", files: [] }))
+          .rejects.toThrow(/upload failed/);
       });
 
       expect(uploadPaste).toHaveBeenCalledWith(pasted, "s-new");
@@ -628,7 +651,7 @@ describe("AgentConversation pendingModel", () => {
       await render("pA", "featA", "selected-session");
       await act(async () => {
         rejectTranslation(new Error("failed"));
-        await pending;
+        await expect(pending).rejects.toThrow(/Disable translation/);
       });
 
       expect(draftState.set).toHaveBeenLastCalledWith("keep this draft");
@@ -711,6 +734,7 @@ describe("AgentConversation pendingModel", () => {
     // front, like a paste) and the instruction carries a <vfile/> marker.
     // Images stay inline as content parts.
     const pdf = {
+      id: "a1",
       type: "file" as const,
       filename: "spec.pdf",
       mediaType: "application/pdf",
@@ -718,11 +742,186 @@ describe("AgentConversation pendingModel", () => {
     };
     // Full 8-byte PNG signature: inline routing is decided on the bytes.
     const png = {
+      id: "a2",
       type: "file" as const,
       filename: "shot.png",
       mediaType: "image/png",
       url: "data:image/png;base64,iVBORw0KGgo=",
     };
+
+    // Picking is what starts the upload; sending only awaits it. On a
+    // placeholder that means an identity is prepared at pick time too, since a
+    // temp file has to land next to some session.
+    it("uploads a picked file before the message is sent, then reuses it", async () => {
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+
+      promptState.files = [pdf];
+      await render("pA", "featA");
+
+      expect(uploadAttachment).toHaveBeenCalledTimes(1);
+      expect(prepareConversation).toHaveBeenCalledWith("edit", null);
+      expect(activateConversation).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await promptState.submit!({ text: "read this", files: [pdf] });
+      });
+
+      // The send did not upload again — it awaited the finished work.
+      expect(uploadAttachment).toHaveBeenCalledTimes(1);
+      expect(activateConversation).toHaveBeenCalledWith(
+        prepared,
+        'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
+      );
+    });
+
+    it("drops uploaded attachments and the prepared identity when the workspace changes", async () => {
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+      promptState.files = [pdf];
+      await render("pA", "featA");
+      expect(prepareConversation).toHaveBeenCalledTimes(1);
+
+      // Both halves are workspace-bound: the temp file sits on the machine
+      // that ran this workspace, and the identity would start the session in
+      // the wrong place. The attachment list is dropped, not carried over.
+      await act(async () => { await render("pB", "featB"); });
+      expect(promptState.clearAttachments).toHaveBeenCalled();
+      expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
+
+      await act(async () => {
+        await promptState.submit!({ text: "plain", files: [] });
+      });
+      expect(activateConversation).not.toHaveBeenCalled();
+      expect(startConversation).toHaveBeenCalledWith("plain", "edit", null);
+    });
+
+    it("does not cancel another workspace's identity when an old submission fails", async () => {
+      // A submission owns the identity it is going to activate. A second
+      // workspace preparing its own in the meantime must be untouched when
+      // the first one finally fails.
+      const preparedB: PreparedConversation = {
+        ...prepared,
+        operationId: "op-2",
+        sessionId: "s-new-b",
+        origin: { projectId: "pB", branch: "featB", agentMode: "local", explicitSessionId: null },
+      };
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValue({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+      promptState.files = [pdf];
+      await render("pA", "featA");
+      expect(prepareConversation).toHaveBeenCalledTimes(1);
+
+      // Hold the submission open inside translation, the way a slow network
+      // would.
+      await act(async () => { q(container, "prompt-action")!.click(); });
+      let rejectTranslation!: (error: Error) => void;
+      vi.mocked(translateText).mockImplementationOnce(() => new Promise((_, reject) => {
+        rejectTranslation = reject;
+      }));
+      let pending!: Promise<void>;
+      await act(async () => {
+        pending = promptState.submit!({ text: "in flight", files: [pdf] });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // Switch workspace and prepare a second identity there.
+      prepareConversation.mockResolvedValue(preparedB);
+      await act(async () => { await render("pB", "featB"); });
+      promptState.files = [pdf];
+      await render("pB", "featB");
+      expect(prepareConversation).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        rejectTranslation(new Error("failed"));
+        await expect(pending).rejects.toThrow(/Disable translation/);
+      });
+
+      expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
+      expect(cancelPreparedConversation).not.toHaveBeenCalledWith(preparedB);
+    });
+
+    it("re-prepares for a paste when the pick-time identity has obsolete settings", async () => {
+      // `prepareConversation` resumes a prepare-step submission under the
+      // settings it was started with, so a leftover identity has to be
+      // tombstoned before a paste target is created — otherwise the session
+      // would run with the model the user has since changed away from.
+      const preparedForOpus: PreparedConversation = { ...prepared, operationId: "op-2", sessionId: "s-new-2" };
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+      promptState.files = [pdf];
+      await render("pA", "featA");
+      expect(prepareConversation).toHaveBeenCalledTimes(1);
+
+      await act(async () => { q(container, "pick-opus")!.click(); });
+      prepareConversation.mockResolvedValue(preparedForOpus);
+      uploadPaste.mockResolvedValueOnce({ path: "/tmp/paste", size: 2001 });
+
+      await act(async () => {
+        await promptState.submit!({ text: "x".repeat(2001), files: [pdf] });
+      });
+
+      expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
+      expect(prepareConversation).toHaveBeenLastCalledWith("edit", "opus");
+      expect(activateConversation).toHaveBeenCalledWith(
+        preparedForOpus,
+        '<vpaste path="/tmp/paste" size="2001" />\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
+      );
+    });
+
+    it("starts fresh when the prepared identity has aged out of its TTL", async () => {
+      // The identity is now prepared while the user picks a file, so a long
+      // compose can outlive the server's pending window; activating then
+      // would be rejected.
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+      promptState.files = [pdf];
+      await render("pA", "featA");
+
+      const nowSpy = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 11 * 60_000);
+      try {
+        await act(async () => {
+          await promptState.submit!({ text: "read this", files: [pdf] });
+        });
+      } finally {
+        nowSpy.mockRestore();
+      }
+
+      expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
+      expect(activateConversation).not.toHaveBeenCalled();
+      // The uploaded path is still good — only the identity went stale.
+      expect(uploadAttachment).toHaveBeenCalledTimes(1);
+      expect(startConversation).toHaveBeenCalledWith(
+        'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
+        "edit", null,
+      );
+    });
+
+    it("does not activate a Claude identity after the user switches to Codex", async () => {
+      // The agent is frozen when the identity is prepared, so a pick-time
+      // prepare must not outlive a later switch.
+      await renderFirstSend();
+      uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
+      promptState.files = [pdf];
+      await render("pA", "featA");
+      expect(prepareConversation).toHaveBeenCalledTimes(1);
+
+      await act(async () => { q(container, "agent-codex")!.click(); });
+
+      await act(async () => {
+        await promptState.submit!({ text: "read this", files: [pdf] });
+      });
+
+      expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
+      expect(activateConversation).not.toHaveBeenCalled();
+      // The file was uploaded once and its path is still valid — same machine.
+      expect(uploadAttachment).toHaveBeenCalledTimes(1);
+      expect(startConversation).toHaveBeenCalledWith(
+        'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
+        "edit", null,
+      );
+    });
 
     it("uploads a non-image attachment and activates with a <vfile/> marker", async () => {
       await renderFirstSend();
@@ -735,6 +934,7 @@ describe("AgentConversation pendingModel", () => {
       expect(uploadAttachment).toHaveBeenCalledWith(
         { name: "spec.pdf", mediaType: "application/pdf", contentBase64: "JVBERi0=" },
         "s-new",
+        expect.any(Function),
       );
       expect(activateConversation).toHaveBeenCalledWith(
         prepared,
@@ -821,6 +1021,7 @@ describe("AgentConversation pendingModel", () => {
       expect(uploadAttachment).toHaveBeenCalledWith(
         { name: "fake.png", mediaType: "image/png", contentBase64: "aGVsbG8gd29ybGQ=" },
         "s-new",
+        expect.any(Function),
       );
       expect(activateConversation).toHaveBeenCalledWith(prepared, 'hm\n<vfile path="/tmp/att/fake.png" name="fake.png" size="11" />');
     });
@@ -837,6 +1038,7 @@ describe("AgentConversation pendingModel", () => {
       expect(uploadAttachment).toHaveBeenCalledWith(
         { name: "logo.svg", mediaType: "image/svg+xml", contentBase64: "PHN2Zz4=" },
         "s-new",
+        expect.any(Function),
       );
       // No image part: the instruction is plain text carrying the marker.
       expect(activateConversation).toHaveBeenCalledWith(
@@ -871,7 +1073,9 @@ describe("AgentConversation pendingModel", () => {
       });
 
       expect(uploadAttachment).not.toHaveBeenCalled();
-      expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
+      // Reading the bytes comes before anything else, so no identity was ever
+      // prepared and there is nothing to discard.
+      expect(prepareConversation).not.toHaveBeenCalled();
       expect(activateConversation).not.toHaveBeenCalled();
     });
   });

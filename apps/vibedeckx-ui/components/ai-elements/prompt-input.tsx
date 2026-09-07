@@ -34,9 +34,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { readBlobUrlAsDataUrl } from "@/lib/attachment-io";
 import { cn } from "@/lib/utils";
 import type { ChatStatus, FileUIPart } from "ai";
 import {
+  AlertCircleIcon,
   ArrowUpIcon,
   ImageIcon,
   Loader2Icon,
@@ -280,16 +282,32 @@ export const usePromptInputAttachments = () => {
 export type PromptInputAttachmentProps = HTMLAttributes<HTMLDivElement> & {
   data: FileUIPart & { id: string };
   className?: string;
+  /**
+   * Progress of whatever the caller started when the file was picked.
+   * Omitted (the default) renders the plain chip.
+   */
+  status?: {
+    phase: "reading" | "inline" | "uploading" | "done" | "error";
+    /** 0..1, drawn as a bar along the bottom edge while uploading. */
+    progress?: number;
+    message?: string;
+  };
+  /** Offered on a failed attachment; the chip becomes clickable. */
+  onRetry?: () => void;
 };
 
 export function PromptInputAttachment({
   data,
   className,
+  status,
+  onRetry,
   ...props
 }: PromptInputAttachmentProps) {
   const attachments = usePromptInputAttachments();
 
   const filename = data.filename || "";
+  const pending = status?.phase === "reading" || status?.phase === "uploading";
+  const failed = status?.phase === "error";
 
   const mediaType =
     data.mediaType?.startsWith("image/") && data.url ? "image" : "file";
@@ -302,10 +320,12 @@ export function PromptInputAttachment({
       <HoverCardTrigger asChild>
         <div
           className={cn(
-            "group relative flex h-8 cursor-pointer select-none items-center gap-1.5 rounded-md border border-border px-1.5 font-medium text-sm transition-all hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
+            "group relative flex h-8 cursor-pointer select-none items-center gap-1.5 overflow-hidden rounded-md border border-border px-1.5 font-medium text-sm transition-all hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50",
+            failed && "border-destructive text-destructive",
             className
           )}
           key={data.id}
+          onClick={failed ? onRetry : undefined}
           {...props}
         >
           <div className="relative size-5 shrink-0">
@@ -339,7 +359,21 @@ export function PromptInputAttachment({
             </Button>
           </div>
 
-          <span className="flex-1 truncate">{attachmentLabel}</span>
+          <span className={cn("flex-1 truncate", pending && "opacity-60")}>{attachmentLabel}</span>
+          {pending && (
+            <Loader2Icon className="size-3 shrink-0 animate-spin text-muted-foreground" />
+          )}
+          {failed && <AlertCircleIcon className="size-3 shrink-0" />}
+          {status?.phase === "uploading" && (
+            // A bar along the bottom edge rather than a badge: it reads at a
+            // glance without competing with the filename for the 8px of chip.
+            <span
+              aria-hidden
+              className="absolute inset-x-0 bottom-0 h-0.5 bg-primary transition-[width] duration-150"
+              data-testid="attachment-progress"
+              style={{ width: `${Math.round((status.progress ?? 0) * 100)}%` }}
+            />
+          )}
         </div>
       </HoverCardTrigger>
       <PromptInputHoverCardContent className="w-auto p-2">
@@ -360,10 +394,23 @@ export function PromptInputAttachment({
               <h4 className="truncate font-semibold text-sm leading-none">
                 {filename || (isImage ? "Image" : "Attachment")}
               </h4>
-              {data.mediaType && (
-                <p className="truncate font-mono text-muted-foreground text-xs">
-                  {data.mediaType}
+              {failed ? (
+                <p className="text-destructive text-xs">
+                  {status?.message ?? "Upload failed"}
+                  {onRetry ? " — click to retry" : ""}
                 </p>
+              ) : pending ? (
+                <p className="text-muted-foreground text-xs">
+                  {status?.phase === "reading"
+                    ? "Reading…"
+                    : `Uploading… ${Math.round((status?.progress ?? 0) * 100)}%`}
+                </p>
+              ) : (
+                data.mediaType && (
+                  <p className="truncate font-mono text-muted-foreground text-xs">
+                    {data.mediaType}
+                  </p>
+                )
               )}
             </div>
           </div>
@@ -430,7 +477,8 @@ export const PromptInputActionAddAttachments = ({
 
 export type PromptInputMessage = {
   text: string;
-  files: FileUIPart[];
+  /** `id` is the attachment id, stable from pick to submit. */
+  files: (FileUIPart & { id?: string })[];
 };
 
 export type PromptInputProps = Omit<
@@ -446,6 +494,13 @@ export type PromptInputProps = Omit<
   // Minimal constraints
   maxFiles?: number;
   maxFileSize?: number; // bytes
+  /**
+   * Skip the submit-time blob → data URL conversion and hand the attachments
+   * over with their blob URLs. For callers that already read the bytes when
+   * the file was picked — converting again would re-read the whole file and
+   * put the wait back where it was removed from.
+   */
+  skipAttachmentConversion?: boolean;
   onError?: (err: {
     code: "max_files" | "max_file_size" | "accept";
     message: string;
@@ -466,6 +521,7 @@ export const PromptInput = ({
   syncHiddenInput,
   maxFiles,
   maxFileSize,
+  skipAttachmentConversion,
   onError,
   onSubmit,
   children,
@@ -688,22 +744,6 @@ export const PromptInput = ({
     event.currentTarget.value = "";
   };
 
-  const convertBlobUrlToDataUrl = async (
-    url: string
-  ): Promise<string | null> => {
-    try {
-      const response = await fetch(url);
-      const blob = await response.blob();
-      return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.onerror = () => resolve(null);
-        reader.readAsDataURL(blob);
-      });
-    } catch {
-      return null;
-    }
-  };
 
   const ctx = useMemo<AttachmentsContext>(
     () => ({
@@ -736,9 +776,9 @@ export const PromptInput = ({
 
     // Convert blob URLs to data URLs asynchronously
     Promise.all(
-      files.map(async ({ id, ...item }) => {
-        if (item.url && item.url.startsWith("blob:")) {
-          const dataUrl = await convertBlobUrlToDataUrl(item.url);
+      files.map(async (item) => {
+        if (!skipAttachmentConversion && item.url && item.url.startsWith("blob:")) {
+          const dataUrl = await readBlobUrlAsDataUrl(item.url);
           // If conversion failed, keep the original blob URL
           return {
             ...item,
@@ -748,7 +788,7 @@ export const PromptInput = ({
         return item;
       })
     )
-      .then((convertedFiles: FileUIPart[]) => {
+      .then((convertedFiles: (FileUIPart & { id: string })[]) => {
         try {
           const result = onSubmit({ text, files: convertedFiles }, event);
 

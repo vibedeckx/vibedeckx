@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { PromptInput, usePromptInputAttachments } from "./prompt-input";
+import { PromptInput, PromptInputAttachment, usePromptInputAttachments } from "./prompt-input";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -112,5 +112,60 @@ describe("PromptInput maxFileSize at pick time", () => {
     await act(async () => { probe.add([big()]); });
     expect(count()).toBe("1");
     expect(onError).not.toHaveBeenCalled();
+  });
+});
+
+describe("PromptInput submit payload", () => {
+  it("carries the attachment id so callers can match work started at pick time", async () => {
+    const seen: { id?: string; url?: string }[] = [];
+    await mount({ onSubmit: async (message) => { seen.push(...message.files); } });
+    await act(async () => { probe.add([new File(["%PDF"], "spec.pdf", { type: "application/pdf" })]); });
+    await submit();
+
+    expect(seen).toHaveLength(1);
+    expect(typeof seen[0].id).toBe("string");
+  });
+
+  it("leaves blob URLs alone when the caller already read the bytes", async () => {
+    const seen: { url?: string }[] = [];
+    await mount({
+      skipAttachmentConversion: true,
+      onSubmit: async (message) => { seen.push(...message.files); },
+    });
+    await act(async () => { probe.add([new File(["%PDF"], "spec.pdf", { type: "application/pdf" })]); });
+    await submit();
+
+    expect(seen[0].url).toMatch(/^blob:/);
+  });
+});
+
+describe("PromptInputAttachment status", () => {
+  const chip = (status?: Parameters<typeof PromptInputAttachment>[0]["status"]) =>
+    act(async () => {
+      root.render(
+        <PromptInput onSubmit={async () => {}}>
+          <PromptInputAttachment
+            data={{ id: "a1", type: "file", filename: "spec.pdf", mediaType: "application/pdf", url: "blob:http://x/1" }}
+            status={status}
+          />
+        </PromptInput>,
+      );
+    });
+
+  it("draws a progress bar sized to the uploaded fraction", async () => {
+    await chip({ phase: "uploading", progress: 0.42 });
+    const bar = container.querySelector<HTMLElement>('[data-testid="attachment-progress"]');
+    expect(bar).not.toBeNull();
+    expect(bar!.style.width).toBe("42%");
+  });
+
+  it("shows no progress bar once the upload is done", async () => {
+    await chip({ phase: "done", progress: 1 });
+    expect(container.querySelector('[data-testid="attachment-progress"]')).toBeNull();
+  });
+
+  it("renders nothing extra without a status", async () => {
+    await chip();
+    expect(container.querySelector('[data-testid="attachment-progress"]')).toBeNull();
   });
 });

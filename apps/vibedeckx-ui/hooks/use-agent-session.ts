@@ -342,19 +342,40 @@ export interface AttachmentUploadInput {
  */
 async function uploadAttachmentToSession(
   sessionId: string,
-  file: AttachmentUploadInput
+  file: AttachmentUploadInput,
+  onProgress?: (fraction: number) => void
 ): Promise<UploadedAttachment> {
-  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/attachment`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(file),
-  });
+  const url = `${getApiBase()}/api/agent-sessions/${sessionId}/attachment`;
+  const body = JSON.stringify(file);
 
-  if (!response.ok) {
+  // XHR rather than fetch: this is the only upload big enough (up to 20MB
+  // before base64) for the user to wait on, and `upload.onprogress` is the
+  // only way to show how far it got. The 401 retry mirrors `authFetch`.
+  const send = (token: string | null): Promise<{ status: number; text: string }> =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      xhr.setRequestHeader("Content-Type", "application/json");
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onProgress?.(Math.min(1, event.loaded / event.total));
+        }
+      };
+      xhr.onload = () => resolve({ status: xhr.status, text: xhr.responseText });
+      xhr.onerror = () => reject(new Error(`Failed to upload ${file.name}`));
+      xhr.onabort = () => reject(new Error(`Upload of ${file.name} was cancelled`));
+      xhr.send(body);
+    });
+
+  let response = await send(await getFreshToken());
+  if (response.status === 401) response = await send(await getFreshToken({ skipCache: true }));
+
+  if (response.status < 200 || response.status >= 300) {
     let message = `Failed to upload ${file.name} [${response.status}]`;
     try {
-      const body = await response.json();
-      if (typeof body?.error === "string" && body.error) message = body.error;
+      const parsed = JSON.parse(response.text);
+      if (typeof parsed?.error === "string" && parsed.error) message = parsed.error;
     } catch {
       // ignore parse errors
     }
@@ -362,7 +383,8 @@ async function uploadAttachmentToSession(
     throw new Error(message);
   }
 
-  return response.json();
+  onProgress?.(1);
+  return JSON.parse(response.text) as UploadedAttachment;
 }
 
 async function restartSessionApi(sessionId: string, agentType?: AgentType): Promise<void> {
@@ -1754,12 +1776,16 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   );
 
   const uploadAttachment = useCallback(
-    async (file: AttachmentUploadInput, sessionId?: string): Promise<UploadedAttachment> => {
+    async (
+      file: AttachmentUploadInput,
+      sessionId?: string,
+      onProgress?: (fraction: number) => void
+    ): Promise<UploadedAttachment> => {
       const targetSessionId = sessionId || session?.id;
       if (!targetSessionId) {
         throw new Error("No session id available for attachment upload");
       }
-      return uploadAttachmentToSession(targetSessionId, file);
+      return uploadAttachmentToSession(targetSessionId, file, onProgress);
     },
     [session?.id]
   );

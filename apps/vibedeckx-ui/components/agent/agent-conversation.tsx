@@ -9,8 +9,6 @@ import {
   type AgentMessage,
   type ContentPart,
   type UploadedPaste,
-  type AttachmentUploadInput,
-  type UploadedAttachment,
   type AgentSession,
   type EnsuredAgentSession,
   type PreparedConversation,
@@ -79,14 +77,35 @@ import { SessionHistoryDropdown } from "./session-history-dropdown";
 import { ConversationAnchorHold } from "./conversation-anchor-hold";
 import { QuotePopover, appendQuote } from "./quote-popover";
 import { ReviewDialog } from "./review-dialog";
-import { vfileMarker } from "./vpaste-chip";
-import { base64ByteLength, MAX_INLINE_IMAGE_BYTES, sniffInlineImageType, type InlineImageType } from "@/lib/image-sniff";
 import { MAX_ATTACHMENT_BYTES, formatMegabytes } from "@/lib/attachment-limits";
+import { useAttachmentUploads, type AttachmentUploads } from "@/hooks/use-attachment-uploads";
 
-/** Only renders the attachment header when there are files attached */
-function AttachmentHeader() {
+/**
+ * Renders the attachment strip and, from inside `PromptInput` (the only place
+ * the attachment list is observable), starts each file's read/upload the
+ * moment it is picked — so pressing send rarely waits on anything.
+ */
+function AttachmentHeader({ uploads, workspaceKey }: { uploads: AttachmentUploads; workspaceKey: string }) {
   const attachments = usePromptInputAttachments();
-  if (attachments.files.length === 0) return null;
+  const files = attachments.files;
+  const { track } = uploads;
+  const { clear } = attachments;
+
+  // An uploaded attachment is a path on the machine that ran the workspace it
+  // was picked in; carrying it to another workspace would hand the agent a
+  // path it cannot read. Drop them on a switch, the same way the composer
+  // drops its pastes and draft.
+  const workspaceRef = useRef(workspaceKey);
+  useEffect(() => {
+    if (workspaceRef.current === workspaceKey) return;
+    workspaceRef.current = workspaceKey;
+    clear();
+  }, [workspaceKey, clear]);
+
+  useEffect(() => {
+    track(files);
+  }, [files, track]);
+  if (files.length === 0) return null;
   return (
     // pt-3/pb-0 + p-0: the block-end addon variant pads its bottom and the
     // attachments div pads all sides — stacked with the textarea's pt-3 they
@@ -94,7 +113,13 @@ function AttachmentHeader() {
     // padding alone
     <PromptInputHeader className="pt-3 pb-0">
       <PromptInputAttachments className="p-0">
-        {(attachment) => <PromptInputAttachment data={attachment} />}
+        {(attachment) => (
+          <PromptInputAttachment
+            data={attachment}
+            status={uploads.statusOf(attachment.id)}
+            onRetry={() => uploads.retry(attachment)}
+          />
+        )}
       </PromptInputAttachments>
     </PromptInputHeader>
   );
@@ -192,33 +217,22 @@ function formatPasteSize(bytes: number): string {
   return `${Math.round(kb)}KB`;
 }
 
-const DATA_URL_BASE64_RE = /^data:[^;,]*(?:;[^;,]*)*;base64,(.+)$/;
-
 /**
- * Decide per attachment whether it rides inline as an image part or goes to
- * the agent's machine as a file. The decision is made on the bytes, not on
- * `File.type` (which browsers derive from the extension alone): only JPEG /
- * PNG / GIF / WebP content is inlined, and with the media type the bytes
- * actually are, so a mislabeled image is still shown to the model rather than
- * rejected by the API. Everything else — SVG, HEIC, non-images, files whose
- * blob → data URL conversion failed, and images over the API's per-image
- * size limit — takes the file route.
+ * A prepared identity plus everything it was frozen under, so a later send can
+ * tell whether it is still the right one to activate.
  */
-function classifyAttachments(files: PromptInputMessage["files"]): {
-  images: { mediaType: InlineImageType; data: string }[];
-  others: PromptInputMessage["files"];
-} {
-  const images: { mediaType: InlineImageType; data: string }[] = [];
-  const others: PromptInputMessage["files"] = [];
-  for (const file of files) {
-    const base64 = file.url?.match(DATA_URL_BASE64_RE)?.[1];
-    const sniffed = base64 ? sniffInlineImageType(base64) : null;
-    const fitsInline = base64 !== undefined && base64ByteLength(base64) <= MAX_INLINE_IMAGE_BYTES;
-    if (base64 && sniffed && fitsInline) images.push({ mediaType: sniffed, data: base64 });
-    else others.push(file);
-  }
-  return { images, others };
+interface PreparedEntry {
+  prepared: PreparedConversation;
+  projectId: string | null;
+  branch: string | null;
+  agentType: AgentType;
+  permissionMode: "plan" | "edit";
+  model: string | null;
+  createdAt: number;
 }
+
+/** Server TTL for an `interactive_upload` preparation is 15 min; stop short. */
+const PREPARED_MAX_AGE_MS = 10 * 60_000;
 
 function pasteTokenFor(id: number, bytes: number): string {
   return `[📎 paste #${id} (${formatPasteSize(bytes)})]`;
@@ -421,6 +435,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   // otherwise spawn B's session on A's model.
   useEffect(() => {
     activeSubmissionRef.current = null;
+    void dropPrepared();
     setPastes([]);
     setNextPasteId(1);
     setPendingModel(null);
@@ -840,31 +855,59 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   }
 
   /**
-   * Upload every non-image attachment to the agent's machine and return the
-   * `<vfile/>` markers to append to the message. Throws on the first failure
-   * (including an attachment whose blob → data URL conversion failed, which
-   * would otherwise be dropped silently).
+   * A prepared-but-not-yet-activated identity, created the first time an
+   * upload needs a target on a placeholder conversation. It is reused by the
+   * eventual first send, and re-created if the user changes workspace, agent,
+   * model or permission mode in between (all frozen at prepare time). Already
+   * uploaded files stay valid across that swap: their path is on the machine,
+   * not under the session.
    */
-  async function materializeAttachments(
-    files: PromptInputMessage["files"],
-    upload: (file: AttachmentUploadInput, sessionId?: string) => Promise<UploadedAttachment>,
-    sessionId?: string
-  ): Promise<string[]> {
-    const markers: string[] = [];
-    for (const file of files) {
-      const name = file.filename || "attachment";
-      const base64Match = file.url?.match(DATA_URL_BASE64_RE);
-      if (!base64Match) {
-        throw new Error(`Could not read ${name}`);
-      }
-      const uploaded = await upload(
-        { name, mediaType: file.mediaType || undefined, contentBase64: base64Match[1] },
-        sessionId
-      );
-      markers.push(vfileMarker(uploaded));
-    }
-    return markers;
-  }
+  const preparedRef = useRef<PreparedEntry | null>(null);
+
+  /**
+   * Reusable only for the workspace and settings it was prepared under, and
+   * only inside the server's pending TTL — the identity is now created while
+   * the user picks a file, so a long compose can outlive it. Well under the
+   * 15 min the server gives an `interactive_upload` preparation, since the
+   * send still has to make its round trip.
+   */
+  const preparedIsCurrent = (entry: PreparedEntry | null): boolean =>
+    !!entry
+      && entry.projectId === projectId
+      && entry.branch === branch
+      && entry.agentType === agentType
+      && entry.permissionMode === permissionMode
+      && entry.model === pendingModel
+      && Date.now() - entry.createdAt < PREPARED_MAX_AGE_MS;
+
+  const createPrepared = async (): Promise<PreparedEntry> => {
+    const prepared = await prepareConversation(permissionMode, pendingModel);
+    // `prepareConversation` has already surfaced its own toast.
+    if (!prepared) throw new Error("Failed to prepare session");
+    return {
+      prepared, projectId, branch: branch ?? null, agentType,
+      permissionMode, model: pendingModel, createdAt: Date.now(),
+    };
+  };
+
+  /** Tombstone the identity in the pick-time slot, if any. */
+  const dropPrepared = async () => {
+    const current = preparedRef.current;
+    if (!current) return;
+    preparedRef.current = null;
+    await cancelPreparedConversation(current.prepared);
+  };
+
+  const getUploadTarget = useCallback(async (): Promise<string | undefined> => {
+    if (session) return session.id;
+    if (preparedIsCurrent(preparedRef.current)) return preparedRef.current!.prepared.sessionId;
+    await dropPrepared();
+    preparedRef.current = await createPrepared();
+    return preparedRef.current.prepared.sessionId;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the two helpers read refs and current props
+  }, [session, projectId, branch, agentType, permissionMode, pendingModel, prepareConversation, cancelPreparedConversation]);
+
+  const uploads = useAttachmentUploads({ upload: uploadAttachment, getUploadTarget });
 
   // Pick-time refusal (size cap mirrors the server's): the file never enters
   // the attachment list, so it is never read into memory as a data URL.
@@ -883,13 +926,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     const submissionOrigin = displayedWorkspaceRef.current;
     if (!submissionOrigin) return;
     const rawText = message.text;
-    // Model-visible images ride inline as content parts (both agent protocols
-    // have an image type). Every other file is uploaded to the agent's machine
-    // and referenced by a `<vfile/>` marker, like a long paste.
-    const { images: imageFiles, others: otherFiles } = classifyAttachments(message.files);
     const hasFiles = message.files.length > 0;
-    const hasImages = imageFiles.length > 0;
-    const hasAttachments = otherFiles.length > 0;
     const hasPastes = pastes.length > 0;
     const trimmedRaw = rawText.trim();
     if (!trimmedRaw && !hasFiles) return;
@@ -906,43 +943,87 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // so the workspace dot turns blue the moment the user hits send.
     onStatusChange?.();
 
-    // Resolve which session id to use for paste uploads. With an existing
-    // session that is its id. On the placeholder, a paste (or oversize text
-    // that will become one) needs an upload target BEFORE the first
-    // instruction exists, so it goes two-phase: `prepare` an invisible
-    // identity now, `activate` it with the materialized content at the end.
-    // Plain text needs no identity up front and goes through one `start`.
-    let targetSessionId: string | undefined = session?.id;
-    let prepared: PreparedConversation | null = null;
-    const needsUploadTarget = !session && (hasPastes || hasAttachments || trimmedRaw.length > PASTE_TO_FILE_THRESHOLD);
-    if (needsUploadTarget) {
-      prepared = await prepareConversation(permissionMode, pendingModel);
-      if (!prepared) {
-        // Restore input on failure so the user doesn't lose their pastes.
-        if (isOriginDraftDisplayed(submissionOrigin)) setInput(rawText);
+    /**
+     * The identity this submission will activate. It is taken out of the
+     * pick-time slot once the submission commits to it, so a workspace switch
+     * — or another workspace's submission finishing late — can neither cancel
+     * it nor be cancelled by this one.
+     */
+    let owned: PreparedEntry | null = null;
+
+    // Preprocessing failed after an identity was prepared: it goes back
+    // (tombstone), nothing was ever visible or spawned. An unclaimed slot is
+    // only touched while this submission is still the one on screen.
+    const abandonPrepared = async () => {
+      if (owned) {
+        const entry = owned;
+        owned = null;
+        await cancelPreparedConversation(entry.prepared);
         return;
       }
-      targetSessionId = prepared.sessionId;
+      if (isOriginDraftDisplayed(submissionOrigin)) await dropPrepared();
+    };
+
+    /**
+     * Every preprocessing failure rejects rather than returns: `PromptInput`
+     * clears its attachments only when the submit promise resolves, so
+     * throwing is what keeps the files (and their finished uploads) in the
+     * composer for a retry.
+     */
+    const fail = async (title: string, e: unknown): Promise<never> => {
+      const error = e instanceof Error ? e : new Error(title);
+      await abandonPrepared();
+      if (isOriginDraftDisplayed(submissionOrigin)) {
+        toast.error(title, { description: error.message });
+        setInput(rawText);
+      }
+      throw error;
+    };
+
+    // Attachments were read, classified and uploaded when they were picked;
+    // this usually only awaits work that is already done.
+    let imageParts: { mediaType: string; data: string }[];
+    let markers: string[];
+    try {
+      ({ images: imageParts, markers } = await uploads.resolve(message.files));
+    } catch (e) {
+      return await fail("Attachment upload failed", e);
     }
-    // Preprocessing failed after prepare: the identity goes back (tombstone),
-    // nothing was ever visible or spawned.
-    const abandonPrepared = async () => {
-      if (prepared) await cancelPreparedConversation(prepared);
+    const hasImages = imageParts.length > 0;
+
+    // Claim the identity those uploads landed next to (they may have created
+    // it just now). From here it belongs to this submission alone.
+    if (!session && isOriginDraftDisplayed(submissionOrigin) && preparedIsCurrent(preparedRef.current)) {
+      owned = preparedRef.current;
+      preparedRef.current = null;
+    }
+
+    // A paste (or oversize text that becomes one) needs the same upload target
+    // as an attachment: the session's id, or — on the placeholder, where no
+    // instruction exists yet — an invisible prepared identity that the send
+    // then `activate`s. Plain text needs none and goes through one `start`.
+    const ensureTarget = async (): Promise<string | undefined> => {
+      if (session) return session.id;
+      if (!owned) {
+        // An unclaimed identity in the pick-time slot is not merely unusable,
+        // it is in the way: its pending submission is still on record, and
+        // `prepareConversation` resumes a prepare-step submission under the
+        // settings it was started with. Tombstoning it first (which clears
+        // that record) is what makes the new identity really carry the
+        // permission mode and model the composer shows now.
+        if (isOriginDraftDisplayed(submissionOrigin)) await dropPrepared();
+        owned = await createPrepared();
+      }
+      return owned.prepared.sessionId;
     };
 
     // Upload pastes (if any) and replace tokens with <vpaste/> markers.
     let processedText = trimmedRaw;
     if (hasPastes) {
       try {
-        processedText = (await materializePastes(rawText, pastes, uploadPaste, targetSessionId)).trim();
+        processedText = (await materializePastes(rawText, pastes, uploadPaste, await ensureTarget())).trim();
       } catch (e) {
-        const msg = e instanceof Error ? e.message : "Failed to upload paste";
-        await abandonPrepared();
-        if (isOriginDraftDisplayed(submissionOrigin)) {
-          toast.error("Paste upload failed", { description: msg });
-          setInput(rawText);
-        }
-        return;
+        return await fail("Paste upload failed", e);
       }
     }
 
@@ -951,37 +1032,17 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // single paste file so the conversation/UI doesn't carry the bulk inline.
     if (processedText.length > PASTE_TO_FILE_THRESHOLD) {
       try {
-        const uploaded = await uploadPaste(processedText, targetSessionId);
+        const uploaded = await uploadPaste(processedText, await ensureTarget());
         processedText = `<vpaste path="${uploaded.path}" size="${uploaded.size}" />`;
       } catch (e) {
-        const msg = e instanceof Error ? e.message : "Failed to upload paste";
-        await abandonPrepared();
-        if (isOriginDraftDisplayed(submissionOrigin)) {
-          toast.error("Paste upload failed", { description: msg });
-          setInput(rawText);
-        }
-        return;
+        return await fail("Paste upload failed", e);
       }
     }
 
-    // Upload non-image attachments and append their markers after the paste
-    // handling, so the markers themselves never get wrapped into a paste file.
-    if (hasAttachments) {
-      try {
-        const markers = await materializeAttachments(otherFiles, uploadAttachment, targetSessionId);
-        processedText = [processedText, ...markers].filter(Boolean).join("\n");
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : "Failed to upload attachment";
-        await abandonPrepared();
-        if (isOriginDraftDisplayed(submissionOrigin)) {
-          toast.error("Attachment upload failed", { description: msg });
-          setInput(rawText);
-        }
-        // Rethrow: PromptInput clears its attachments only when onSubmit
-        // resolves, so a rejected submit keeps the files in the composer for
-        // a retry (too large / old worker / transient network).
-        throw e;
-      }
+    // Append the attachment markers after the paste handling, so the markers
+    // themselves never get wrapped into a paste file.
+    if (markers.length > 0) {
+      processedText = [processedText, ...markers].filter(Boolean).join("\n");
     }
 
     // Clear pastes state now that they've been materialized into the outgoing message.
@@ -1001,7 +1062,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       if (processedText) {
         parts.push({ type: "text", text: processedText });
       }
-      for (const image of imageFiles) {
+      for (const image of imageParts) {
         parts.push({ type: "image", mediaType: image.mediaType, data: image.data });
       }
       content = parts;
@@ -1017,41 +1078,45 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           && isOriginDraftDisplayed(submissionOrigin)) {
           setIsTranslating(true);
         }
+        // A returned error and a thrown one fail the same way, and the
+        // failure is raised outside the try so `fail`'s own rejection is not
+        // caught here and reported twice.
+        let translated: string | null = null;
         try {
           const result = await translateText(textToTranslate);
-          if (result.error) {
-            await abandonPrepared();
-            if (isOriginDraftDisplayed(submissionOrigin)) {
-              setInput(rawText);
-              setPastes(capturedPastes);
-              setNextPasteId(capturedNextPasteId);
-              toast.error("Translation failed", { description: "Disable translation to send the original text." });
-            }
-            return;
-          }
-          if (typeof content === "string") {
-            content = result.translatedText;
-          } else {
-            content = content.map(p =>
-              p.type === "text" ? { ...p, text: result.translatedText } : p
-            );
-          }
+          if (!result.error) translated = result.translatedText;
         } catch {
-          await abandonPrepared();
-          if (isOriginDraftDisplayed(submissionOrigin)) {
-            setInput(rawText);
-            setPastes(capturedPastes);
-            setNextPasteId(capturedNextPasteId);
-            toast.error("Translation failed", { description: "Disable translation to send the original text." });
-          }
-          return;
+          translated = null;
         } finally {
           if (activeSubmissionRef.current === submissionToken) setIsTranslating(false);
         }
+        if (translated === null) {
+          if (isOriginDraftDisplayed(submissionOrigin)) {
+            setPastes(capturedPastes);
+            setNextPasteId(capturedNextPasteId);
+          }
+          return await fail("Translation failed", new Error("Disable translation to send the original text."));
+        }
+        content = typeof content === "string"
+          ? translated
+          : content.map(p => (p.type === "text" ? { ...p, text: translated } : p));
       }
     }
 
     if (!session) {
+      // An identity prepared for an upload is activated with the instruction;
+      // one left over from settings the user has since changed is dropped so
+      // the session starts with what the composer currently shows.
+      // Settings the user changed after the identity was prepared (or a
+      // preparation that has since aged out) make it unusable: drop it and
+      // start fresh — the instruction already carries the uploaded paths.
+      // Whichever identity is around — this submission's or one still sitting
+      // in the pick-time slot — an unusable one is tombstoned rather than
+      // left to the TTL. The instruction already carries the uploaded paths,
+      // so a fresh `start` loses nothing.
+      if (!preparedIsCurrent(owned ?? preparedRef.current)) await abandonPrepared();
+      const prepared = owned?.prepared ?? null;
+      owned = null;
       // First send: the session becomes real (cached, connected, selected)
       // only when the server has accepted the instruction.
       const started = prepared
@@ -1063,12 +1128,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         // dropdown trigger goes straight from "New Session" to skeleton.
         // Cleared by `onTitleUpdated` (or the 30s safety net).
         if (isOriginDisplayed(submissionOrigin)) setPendingTitleSessionId(started.session.id);
-      } else if (isOriginDraftDisplayed(submissionOrigin)) {
+      } else {
         // The submission stays pending under its key; sending again retries
-        // the same operation instead of creating a second session.
-        setInput(rawText);
-        setPastes(capturedPastes);
-        setNextPasteId(capturedNextPasteId);
+        // the same operation instead of creating a second session. Rejecting
+        // keeps the attachments (already uploaded) in the composer.
+        if (isOriginDraftDisplayed(submissionOrigin)) {
+          setInput(rawText);
+          setPastes(capturedPastes);
+          setNextPasteId(capturedNextPasteId);
+        }
+        if (hasFiles) throw new Error("Failed to start session");
       }
     } else {
       console.log(`[AgentConversation] handleSubmit: existing session ${session.id}, status=${status}`);
@@ -1510,10 +1579,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           onSubmit={handleSubmit}
           maxFileSize={MAX_ATTACHMENT_BYTES}
           onError={handleAttachmentError}
+          // The bytes were already read when each file was picked; re-reading
+          // them here would put the post-send wait back.
+          skipAttachmentConversion
           className="w-full"
         >
           {/* Attachment thumbnails/chips — only rendered when files are attached */}
-          <AttachmentHeader />
+          <AttachmentHeader uploads={uploads} workspaceKey={`${projectId}::${branch}`} />
           <div className="relative flex w-full flex-col">
             {/* Translate badge row — only when enabled */}
             {translateEnabled && (
