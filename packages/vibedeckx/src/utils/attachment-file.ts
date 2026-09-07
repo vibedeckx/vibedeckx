@@ -17,10 +17,15 @@ import { ATTACHMENT_DIR, sweepStaleTempFiles } from "./temp-file-sweep.js";
  */
 
 /**
- * Raw-byte cap. Sized so a base64 JSON body (4/3 overhead) still fits under
- * the reverse-connect tunnel's 11 MB frame limit on the way to a worker.
+ * Raw-byte cap (temporarily raised from 8 MB to 20 MB). The base64 JSON body
+ * (4/3 overhead) must still fit in one reverse-connect frame on the way to a
+ * worker — see TUNNEL_MAX_FRAME_BYTES in constants.ts, which is sized for it.
+ * Mirror: apps/vibedeckx-ui/lib/attachment-limits.ts.
  */
-export const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
+
+/** Fastify bodyLimit for the JSON upload route: base64 of the cap plus slack for the envelope. */
+export const ATTACHMENT_BODY_LIMIT = Math.ceil((MAX_ATTACHMENT_BYTES * 4) / 3) + 1024 * 1024;
 
 
 // Attachments can contain secrets just like pastes: owner-only dir and file,

@@ -1,3 +1,4 @@
+import { TUNNEL_MAX_FRAME_BYTES } from "./constants.js";
 import WebSocket from "ws";
 import { generateKeyPairSync, sign as cryptoSign, createPrivateKey, createPublicKey, type KeyObject } from "crypto";
 import type { ControlFrame, HttpRequestFrame, WsOpenFrame, WsCloseFrame, PingFrame, HttpResponseFrame, PongFrame, StatusFrame, WsDataFrame, MachineChallengeFrame, MachineAuthFrame } from "./reverse-connect-types.js";
@@ -148,7 +149,7 @@ export class ReverseConnectClient {
     this.closingSince = 0;
 
     const ws = new WebSocket(connectUrl, {
-      maxPayload: 11 * 1024 * 1024,
+      maxPayload: TUNNEL_MAX_FRAME_BYTES,
       handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
     });
     this.ws = ws;

@@ -21,3 +21,14 @@ export const MIN_WORKER_VERSION = "0.0.0";
  * "unknown" is simply "hasn't had a chance to upgrade yet".
  */
 export const WORKER_VERSION_REPORTING_SINCE = "2026-08-03";
+
+/**
+ * Largest single reverse-connect frame a worker accepts (ws `maxPayload`).
+ * Proxied HTTP bodies ride in one frame, un-chunked, so this bounds every
+ * hub→worker upload: an oversize frame closes the socket (1009) and tears
+ * down the whole tunnel. Sized for a MAX_ATTACHMENT_BYTES attachment as
+ * base64 JSON (4/3 inflation) with headroom. Worker-side value: raising it
+ * only takes effect on workers running a release that ships it, which is why
+ * callers that send large bodies must be capability-gated.
+ */
+export const TUNNEL_MAX_FRAME_BYTES = 32 * 1024 * 1024;

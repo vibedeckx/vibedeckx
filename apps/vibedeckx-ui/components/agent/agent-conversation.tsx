@@ -81,6 +81,7 @@ import { QuotePopover, appendQuote } from "./quote-popover";
 import { ReviewDialog } from "./review-dialog";
 import { vfileMarker } from "./vpaste-chip";
 import { base64ByteLength, MAX_INLINE_IMAGE_BYTES, sniffInlineImageType, type InlineImageType } from "@/lib/image-sniff";
+import { MAX_ATTACHMENT_BYTES, formatMegabytes } from "@/lib/attachment-limits";
 
 /** Only renders the attachment header when there are files attached */
 function AttachmentHeader() {
@@ -865,6 +866,19 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     return markers;
   }
 
+  // Pick-time refusal (size cap mirrors the server's): the file never enters
+  // the attachment list, so it is never read into memory as a data URL.
+  const handleAttachmentError = useCallback((err: { code: string; message: string; files?: File[] }) => {
+    if (err.code === "max_file_size") {
+      const names = err.files?.map((f) => f.name).join(", ");
+      toast.error(`Files must be ${formatMegabytes(MAX_ATTACHMENT_BYTES)} or smaller`, {
+        description: names ? `Not attached: ${names}` : err.message,
+      });
+      return;
+    }
+    toast.error("Could not attach files", { description: err.message });
+  }, []);
+
   const handleSubmit = async (message: PromptInputMessage) => {
     const submissionOrigin = displayedWorkspaceRef.current;
     if (!submissionOrigin) return;
@@ -1494,6 +1508,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         />
         <PromptInput
           onSubmit={handleSubmit}
+          maxFileSize={MAX_ATTACHMENT_BYTES}
+          onError={handleAttachmentError}
           className="w-full"
         >
           {/* Attachment thumbnails/chips — only rendered when files are attached */}

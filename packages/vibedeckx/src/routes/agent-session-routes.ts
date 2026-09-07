@@ -9,7 +9,7 @@ import { requireAuth as requireRawAuth } from "../server.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import { writePasteToTempFile } from "../utils/paste-file.js";
-import { writeAttachmentToTempFile, MAX_ATTACHMENT_BYTES } from "../utils/attachment-file.js";
+import { writeAttachmentToTempFile, MAX_ATTACHMENT_BYTES, ATTACHMENT_BODY_LIMIT } from "../utils/attachment-file.js";
 import { extractUserText } from "../utils/session-title.js";
 import { projectMessagesForBrief } from "../utils/review-brief.js";
 import type { RemoteSessionInfo } from "../server-types.js";
@@ -1899,7 +1899,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{
     Params: { sessionId: string };
     Body: { name?: unknown; mediaType?: unknown; contentBase64?: unknown };
-  }>("/api/agent-sessions/:sessionId/attachment", { bodyLimit: 12 * 1024 * 1024 }, async (req, reply) => {
+  }>("/api/agent-sessions/:sessionId/attachment", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (req, reply) => {
     const { name, mediaType, contentBase64 } = req.body ?? {};
     if (typeof name !== "string" || name.length === 0) {
       return reply.code(400).send({ error: "name must be a non-empty string" });

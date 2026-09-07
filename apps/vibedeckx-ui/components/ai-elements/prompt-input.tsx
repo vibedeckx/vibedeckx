@@ -449,6 +449,8 @@ export type PromptInputProps = Omit<
   onError?: (err: {
     code: "max_files" | "max_file_size" | "accept";
     message: string;
+    /** The files that were refused, when the error is about specific files. */
+    files?: File[];
   }) => void;
   onSubmit: (
     message: PromptInputMessage,
@@ -525,12 +527,19 @@ export const PromptInput = ({
       const withinSize = (f: File) =>
         maxFileSize ? f.size <= maxFileSize : true;
       const sized = accepted.filter(withinSize);
-      if (accepted.length > 0 && sized.length === 0) {
+      const oversize = accepted.filter((f) => !withinSize(f));
+      // Report every dropped file, not only the all-dropped case: a silently
+      // vanished attachment in a mixed pick is worse than a refused one.
+      if (oversize.length > 0) {
         onError?.({
           code: "max_file_size",
-          message: "All files exceed the maximum size.",
+          message:
+            sized.length === 0
+              ? "All files exceed the maximum size."
+              : `Skipped ${oversize.length} file${oversize.length === 1 ? "" : "s"} over the maximum size: ${oversize.map((f) => f.name).join(", ")}`,
+          files: oversize,
         });
-        return;
+        if (sized.length === 0) return;
       }
 
       setItems((prev) => {

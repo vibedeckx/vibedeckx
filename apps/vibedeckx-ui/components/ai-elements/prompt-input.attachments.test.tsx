@@ -35,19 +35,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function renderWith(onSubmit: () => Promise<void>) {
+const count = () => container.querySelector('[data-testid="count"]')!.textContent;
+
+async function mount(props: Partial<Parameters<typeof PromptInput>[0]> = {}) {
   await act(async () => {
     root.render(
-      <PromptInput onSubmit={onSubmit}>
+      <PromptInput onSubmit={async () => {}} {...props}>
         <Probe onReady={(api) => { probe = api; }} />
         <textarea name="message" defaultValue="hi" />
       </PromptInput>,
     );
   });
+}
+
+async function renderWith(onSubmit: () => Promise<void>) {
+  await mount({ onSubmit });
   await act(async () => {
     probe.add([new File(["%PDF"], "spec.pdf", { type: "application/pdf" })]);
   });
-  expect(container.querySelector('[data-testid="count"]')!.textContent).toBe("1");
+  expect(count()).toBe("1");
 }
 
 async function submit() {
@@ -71,5 +77,40 @@ describe("PromptInput attachments across submit", () => {
     await renderWith(async () => { throw new Error("upload failed"); });
     await submit();
     expect(container.querySelector('[data-testid="count"]')!.textContent).toBe("1");
+  });
+});
+
+describe("PromptInput maxFileSize at pick time", () => {
+  const small = () => new File(["ok"], "small.txt", { type: "text/plain" });
+  const big = () => new File([new Uint8Array(200)], "big.bin", { type: "application/octet-stream" });
+
+  it("drops only the oversize files from a mixed pick and reports them by name", async () => {
+    const onError = vi.fn();
+    await mount({ maxFileSize: 100, onError });
+    await act(async () => { probe.add([small(), big()]); });
+
+    expect(count()).toBe("1");
+    expect(onError).toHaveBeenCalledTimes(1);
+    const err = onError.mock.calls[0][0];
+    expect(err.code).toBe("max_file_size");
+    expect(err.files.map((f: File) => f.name)).toEqual(["big.bin"]);
+    expect(err.message).toContain("big.bin");
+  });
+
+  it("adds nothing and reports when every file is oversize", async () => {
+    const onError = vi.fn();
+    await mount({ maxFileSize: 100, onError });
+    await act(async () => { probe.add([big()]); });
+
+    expect(count()).toBe("0");
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ code: "max_file_size" }));
+  });
+
+  it("does not limit size when maxFileSize is unset", async () => {
+    const onError = vi.fn();
+    await mount({ onError });
+    await act(async () => { probe.add([big()]); });
+    expect(count()).toBe("1");
+    expect(onError).not.toHaveBeenCalled();
   });
 });

@@ -24,6 +24,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { translateText, type WorkflowRun } from "@/lib/api";
+import { toast } from "sonner";
 import type { EnsuredAgentSession, PreparedConversation } from "@/hooks/use-agent-session";
 
 const startConversation = vi.fn(async (): Promise<EnsuredAgentSession | null> => null);
@@ -37,6 +38,8 @@ const reviewerRunState = vi.hoisted(() => ({ value: null as WorkflowRun | null }
 const promptState = vi.hoisted(() => ({
   submit: null as null | ((message: { text: string; files: { type: "file"; filename: string; mediaType: string; url: string }[] }) => Promise<void>),
   onPasteText: null as null | ((event: unknown, text: string) => void),
+  maxFileSize: null as number | null,
+  onError: null as null | ((err: { code: string; message: string; files?: File[] }) => void),
 }));
 const draftState = vi.hoisted(() => ({ value: "", set: vi.fn() }));
 
@@ -51,6 +54,8 @@ const hookState: {
   messages: unknown[];
   workflowRunUpdate: WorkflowRun | null;
 } = { session: null, status: "idle", messages: [], workflowRunUpdate: null };
+
+vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn(), info: vi.fn() } }));
 
 vi.mock("./model-picker", () => ({
   ModelPicker: ({
@@ -199,8 +204,14 @@ vi.mock("@/components/ai-elements/prompt-input", async () => {
   type Kids = { children?: React.ReactNode };
   const Pass = ({ children }: Kids) => <>{children}</>;
   return {
-    PromptInput: ({ children, onSubmit }: Kids & { onSubmit: typeof promptState.submit }) => {
+    PromptInput: ({ children, onSubmit, maxFileSize, onError }: Kids & {
+      onSubmit: typeof promptState.submit;
+      maxFileSize?: number;
+      onError?: typeof promptState.onError;
+    }) => {
       promptState.submit = onSubmit;
+      promptState.maxFileSize = maxFileSize ?? null;
+      promptState.onError = onError ?? null;
       return <form>{children}</form>;
     },
     PromptInputTextarea: ({ onPasteText }: { onPasteText: typeof promptState.onPasteText }) => {
@@ -782,6 +793,20 @@ describe("AgentConversation pendingModel", () => {
       expect(uploadAttachment).toHaveBeenCalledTimes(1);
       expect(uploadAttachment.mock.calls[0][0].name).toBe("huge.png");
       expect(activateConversation).toHaveBeenCalledWith(prepared, `big\n<vfile path="/tmp/att/huge.png" name="huge.png" size="${rawBytes}" />`);
+    });
+
+    it("caps attachments at the server limit at pick time and names the refused files", async () => {
+      await renderFirstSend();
+      expect(promptState.maxFileSize).toBe(20 * 1024 * 1024);
+
+      await act(async () => {
+        promptState.onError!({ code: "max_file_size", message: "…", files: [new File(["x"], "huge.zip")] });
+      });
+
+      expect(toast.error).toHaveBeenCalledWith(
+        "Files must be 20MB or smaller",
+        expect.objectContaining({ description: "Not attached: huge.zip" }),
+      );
     });
 
     it("sends a file claiming to be an image but with unknown bytes as a file", async () => {
