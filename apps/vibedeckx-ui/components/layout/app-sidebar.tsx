@@ -599,6 +599,20 @@ export function AppSidebar({
                             onClick={() => onMergeBadgeClick?.(wt.branch!)}
                           />
                         )}
+                        {/* Hold the merge badge's place, so the warning to its
+                            left lands on the same x in every row that has one
+                            — a workspace missing from a machine often has no
+                            merge status either (the branch is not on the
+                            machine the comparison runs against), and a warning
+                            that sits one slot further right on exactly those
+                            rows is the one the eye has to hunt for. Only rows
+                            that show the warning pay the width, which is why
+                            it is spent here and not on every row. */}
+                        {wt.targets && !(wt.branch === null
+                          ? mergeRootDirty
+                          : mergeStatuses?.get(wt.branch)) && (
+                          <span aria-hidden className="shrink-0 h-4 min-w-4 px-0.5" />
+                        )}
                         {wt.branch === null && currentProject && (
                           <RootWorkspaceMenu
                             projectId={currentProject.id}
