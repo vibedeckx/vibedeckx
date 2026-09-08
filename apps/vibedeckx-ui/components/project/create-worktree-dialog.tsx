@@ -181,7 +181,7 @@ export function CreateWorktreeDialog({
           <DialogDescription>
             {repairing
               ? `Creates '${initialBranchName}' on the machines that do not have it. The ones that already do keep what they have, branch history and all.`
-              : "Create a new branch based on an existing branch"}
+              : "Checks out a new branch as its own git worktree on each machine."}
           </DialogDescription>
         </DialogHeader>
 
