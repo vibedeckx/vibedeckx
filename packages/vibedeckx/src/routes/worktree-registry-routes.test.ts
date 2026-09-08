@@ -324,11 +324,12 @@ describe("worktree routes persisted identity", () => {
     expect(refused.statusCode).toBe(500);
     expect(refused.json().error).toMatch(/locked/i);
     expect(existsSync(worktreePath)).toBe(true);
-    // The refusal is the delete's own answer. The checkout is untouched and
-    // still healthy, and recording it as broken would be indistinguishable
-    // from a machine that never got the workspace at all.
-    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
-      .toMatchObject({ status: "ready", error: null });
+    // Still usable — recording it as broken would lock sessions out of the very
+    // workspace the user has to go and unblock. The reason is kept anyway, so
+    // it outlives the dialog that showed it.
+    const checkout = (await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout;
+    expect(checkout?.status).toBe("ready");
+    expect(checkout?.error).toMatch(/locked/i);
 
     execFileSync("git", ["-C", projectPath, "worktree", "unlock", worktreePath]);
   });
@@ -376,7 +377,7 @@ describe("worktree routes persisted identity", () => {
       label: "Mac",
       state: "present",
       status: "ready",
-      error: null,
+      error: "not a working tree",
     });
   });
 
@@ -665,8 +666,9 @@ describe("worktree routes persisted identity", () => {
     });
 
     expect(deleted.statusCode).toBe(409);
+    // Usable, and the reason it would not go is kept for the next look.
     expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
-      .toMatchObject({ status: "ready", error: null });
+      .toMatchObject({ status: "ready", error: expect.stringMatching(/uncommitted changes/) });
   });
 
   it("removes the worktree only after the real process in it has exited", async () => {
@@ -733,7 +735,7 @@ describe("worktree routes persisted identity", () => {
     expect(existsSync(worktreePath)).toBe(true);
     // The checkout is healthy — the operation was refused, not the checkout.
     expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
-      .toMatchObject({ status: "ready", error: null });
+      .toMatchObject({ status: "ready", error: expect.stringMatching(/could not be stopped/) });
   });
 
   it("leaves sessions and processes running when dirty files refuse the delete", async () => {
@@ -873,7 +875,7 @@ describe("worktree routes persisted identity", () => {
 
     expect(response.statusCode).toBe(409);
     expect((await storage.workspaceRegistry.getByProjectBranch("remote-project", "dev", remote.id))?.checkout)
-      .toMatchObject({ status: "ready", error: null });
+      .toMatchObject({ status: "ready", error: "Worktree has uncommitted changes" });
   });
 
   it("preserves a remote checkout when deletion cannot reach the worker", async () => {
@@ -892,8 +894,10 @@ describe("worktree routes persisted identity", () => {
     });
 
     expect(response.statusCode).toBe(502);
+    // Unreachable is a delete that did not happen, not a broken checkout — but
+    // the workspace is still over there, so say why nothing was removed.
     expect((await storage.workspaceRegistry.getByProjectBranch("remote-project", "dev", remote.id))?.checkout)
-      .toMatchObject({ status: "ready", error: null });
+      .toMatchObject({ status: "ready", error: "Remote server is not connected" });
   });
 
   it("restores the exact prior checkout state when remote deletion returns 5xx", async () => {
@@ -933,7 +937,7 @@ describe("worktree routes persisted identity", () => {
 
     expect(response.statusCode).toBe(500);
     expect((await storage.workspaceRegistry.getByProjectBranch("remote-project", "dev", remote.id))?.checkout)
-      .toMatchObject({ status: "ready", error: null });
+      .toMatchObject({ status: "ready", error: "reverse-connect channel closed" });
   });
 
   it("does not overwrite a concurrent checkout status change after remote deletion fails", async () => {

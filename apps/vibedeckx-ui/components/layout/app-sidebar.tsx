@@ -564,8 +564,18 @@ export function AppSidebar({
                                     ? "Deleted on some machines only. Click to finish deleting."
                                     : "Missing on some machines. Click to create it there."}
                                 </div>
-                                {describeWorkspaceTargets(wt.targets).map((line) => (
-                                  <div key={line} className="text-muted-foreground">{line}</div>
+                                {describeWorkspaceTargets(wt.targets, { unfinishedDelete: wt.unfinishedDelete }).map((line) => (
+                                  <div key={line.label} className="text-background/70">
+                                    {line.label}:{" "}
+                                    {line.failed
+                                      // The tooltip surface is inverted (bg-foreground),
+                                      // so the reds are swapped against the theme.
+                                      ? <span className="text-red-400 dark:text-red-600">Error: {line.text}</span>
+                                      : line.text}
+                                    {line.reason && (
+                                      <span className="text-red-400 dark:text-red-600"> — Error: {line.reason}</span>
+                                    )}
+                                  </div>
                                 ))}
                               </div>
                             </TooltipContent>

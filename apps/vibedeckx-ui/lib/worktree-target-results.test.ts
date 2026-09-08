@@ -143,16 +143,62 @@ describe("targetOutcomeLines", () => {
 });
 
 describe("describeWorkspaceTargets", () => {
-  it("says, per machine, whether the workspace is gone or still there", () => {
+  it("reads as an unfinished delete when that is what it is", () => {
     expect(describeWorkspaceTargets([
       { targetId: "s1", label: "worker3", state: "deleted" },
       { targetId: "s2", label: "Mac", state: "present", status: "ready" },
-    ])).toEqual(["worker3: deleted", "Mac: still here"]);
+    ], { unfinishedDelete: true })).toEqual([
+      { label: "worker3", text: "Deleted successfully", failed: false, reason: undefined },
+      { label: "Mac", text: "Not deleted", failed: false, reason: undefined },
+    ]);
   });
 
-  it("shows the reason a machine kept instead of the generic line", () => {
+  it("reads as a create when the disagreement is a machine that never got it", () => {
+    // Same row shape, opposite meaning: here having the workspace is the good
+    // outcome, so "Not deleted" would describe the healthy machine as a holdout.
+    expect(describeWorkspaceTargets([
+      { targetId: "s1", label: "worker3", state: "present", status: "ready" },
+      { targetId: "s2", label: "Mac", state: "present", status: "error", error: "Branch 'dev' already exists" },
+    ])).toEqual([
+      { label: "worker3", text: "Created successfully", failed: false, reason: undefined },
+      { label: "Mac", text: "Branch 'dev' already exists", failed: true },
+    ]);
+  });
+
+  it("keeps a refused delete's reason on a machine that is still healthy", () => {
+    // The workspace is usable there — the delete is what failed — so the state
+    // stays "Not deleted" and the reason rides along as the error it is.
+    expect(describeWorkspaceTargets([
+      { targetId: "s1", label: "worker3", state: "deleted" },
+      {
+        targetId: "s2",
+        label: "Mac",
+        state: "present",
+        status: "ready",
+        error: "Worktree has uncommitted changes",
+      },
+    ], { unfinishedDelete: true })).toEqual([
+      { label: "worker3", text: "Deleted successfully", failed: false, reason: undefined },
+      {
+        label: "Mac",
+        text: "Not deleted",
+        failed: false,
+        reason: "Worktree has uncommitted changes",
+      },
+    ]);
+  });
+
+  it("marks a machine's own error as an error, not as one more state", () => {
+    // Unmarked, "Mac: Branch 'dev' already exists" reads as a description of
+    // Mac rather than the reason nothing was created there.
     expect(describeWorkspaceTargets([
       { targetId: "s2", label: "Mac", state: "present", status: "error", error: "Branch 'dev' already exists" },
-    ])).toEqual(["Mac: Branch 'dev' already exists"]);
+    ])).toEqual([{ label: "Mac", text: "Branch 'dev' already exists", failed: true }]);
+  });
+
+  it("still marks a failure that carried no message", () => {
+    expect(describeWorkspaceTargets([
+      { targetId: "s2", label: "Mac", state: "present", status: "error", error: null },
+    ])).toEqual([{ label: "Mac", text: "failed", failed: true }]);
   });
 });

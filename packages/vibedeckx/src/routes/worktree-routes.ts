@@ -89,8 +89,13 @@ async function ensurePathProject(fastify: FastifyInstance, projectPath: string):
  * worktree is still there and still usable, so recording it as broken says the
  * wrong thing — and says it in the same field a failed *create* uses, which is
  * the one signal that tells "this machine never got the workspace" apart from
- * "this machine would not give it up". The user already saw the real reason in
- * the delete's own answer.
+ * "this machine would not give it up".
+ *
+ * The reason still goes into `error`, which the two fields make unambiguous
+ * together: `status` says whether the checkout can be used, `error` says what
+ * went wrong last. Without it the reason would live only in the answer to the
+ * delete that failed — gone the moment that window closes, leaving a marked
+ * workspace whose mark says nothing about what to do.
  *
  * Only a row still sitting in `deleting` is restored: anything else means
  * something newer has since claimed it.
@@ -98,6 +103,7 @@ async function ensurePathProject(fastify: FastifyInstance, projectPath: string):
 async function restoreCheckoutAfterFailedDelete(
   fastify: FastifyInstance,
   registered: RegisteredWorkspaceCheckout,
+  reason: string,
 ): Promise<void> {
   const current = await fastify.storage.workspaceRegistry.getCheckoutById(registered.checkout.id);
   if (!current || current.checkout.status !== "deleting") return;
@@ -105,7 +111,10 @@ async function restoreCheckoutAfterFailedDelete(
     registered.checkout.id,
     { status: "deleting", updatedAt: current.checkout.updated_at },
     registered.checkout.status,
-    registered.checkout.error,
+    // A checkout that was already broken keeps the reason it is broken: that is
+    // what its `error` means while `status` is error, and it outranks the news
+    // that a delete of it also failed.
+    registered.checkout.status === "ready" ? reason : registered.checkout.error,
   );
 }
 
@@ -872,9 +881,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const deleteOnRemote = async (rc: RemoteConfig) => {
       const registered = await fastify.storage.workspaceRegistry
         .getByProjectBranch(project.id, branch, rc.serverId);
-      const restorePreviousStatus = async () => {
+      const restorePreviousStatus = async (reason: string) => {
         if (!registered) return;
-        await restoreCheckoutAfterFailedDelete(fastify, registered);
+        await restoreCheckoutAfterFailedDelete(fastify, registered, reason);
       };
       if (registered) {
         await fastify.storage.workspaceRegistry.setCheckoutStatus(registered.checkout.id, "deleting");
@@ -894,13 +903,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
             // A failed delete describes the operation, not checkout health.
             // This includes explicit refusal, worker 5xx, and transport
             // failures where the remote outcome is unknown.
-            await restorePreviousStatus();
+            const detail = result.data as { error?: string };
+            await restorePreviousStatus(detail?.error || result.errorCode || "Remote deletion failed");
           }
         }
         return result;
       } catch (error) {
         if (registered) {
-          await restorePreviousStatus()
+          await restorePreviousStatus(error instanceof Error ? error.message : "Remote deletion failed")
             .catch((registryError) => console.error("[worktree] Failed to restore remote checkout status:", registryError));
         }
         throw error;
@@ -1001,9 +1011,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return branchRetained;
       } catch (error) {
         if (registered && !worktreeRemoved) {
-          // Same as the remote half: leave the checkout as it was, whatever
-          // the reason was — refusal (uncommitted changes, busy) or breakage.
-          await restoreCheckoutAfterFailedDelete(fastify, registered)
+          // Same as the remote half: leave the checkout usable, and keep why.
+          await restoreCheckoutAfterFailedDelete(
+            fastify,
+            registered,
+            error instanceof Error ? error.message : "Local deletion failed",
+          )
             .catch((registryError) => console.error("[worktree] Failed to restore local checkout status:", registryError));
         }
         throw error;

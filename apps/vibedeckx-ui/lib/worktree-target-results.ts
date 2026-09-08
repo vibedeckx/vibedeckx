@@ -157,14 +157,49 @@ export interface WorkspaceTargetState {
   error?: string | null;
 }
 
+export interface WorkspaceTargetLine {
+  label: string;
+  /** That machine's state, in one phrase. */
+  text: string;
+  /** `text` is the reason the machine gave for refusing, not a state. */
+  failed: boolean;
+  /** Why the last operation on that machine failed, when its state alone does not say. */
+  reason?: string;
+}
+
 /**
  * One line per machine for a workspace whose machines disagree — the sidebar
- * marker's tooltip. Reads as "worker3: deleted" / "Mac: still here".
+ * marker's tooltip.
+ *
+ * A machine that simply has the workspace means opposite things in the two
+ * ways machines can disagree, so `unfinishedDelete` picks the wording: while a
+ * delete is half-done it is the machine that did NOT comply, and otherwise it
+ * is the one that did get the workspace, against a machine that did not.
+ *
+ * `failed` is kept apart from the text so the caller can show a machine's own
+ * error as an error. Unmarked, a raw Git message sits in the list looking like
+ * one more state ("Mac: Branch 'dev' already exists" reads as a description of
+ * Mac), and the one line that says why something is broken is the one that
+ * blends in.
  */
-export function describeWorkspaceTargets(targets: WorkspaceTargetState[]): string[] {
+export function describeWorkspaceTargets(
+  targets: WorkspaceTargetState[],
+  opts?: { unfinishedDelete?: boolean },
+): WorkspaceTargetLine[] {
   return targets.map((target) => {
-    if (target.state === "deleted") return `${target.label}: deleted`;
-    if (target.status === "error") return `${target.label}: ${target.error || "failed"}`;
-    return `${target.label}: still here`;
+    if (target.state === "deleted") {
+      return { label: target.label, text: "Deleted successfully", failed: false };
+    }
+    if (target.status === "error") {
+      return { label: target.label, text: target.error || "failed", failed: true };
+    }
+    return {
+      label: target.label,
+      text: opts?.unfinishedDelete ? "Not deleted" : "Created successfully",
+      failed: false,
+      // A usable checkout that still carries a reason is one a delete could not
+      // take: the state is fine, the last attempt was not.
+      reason: target.error ?? undefined,
+    };
   });
 }
