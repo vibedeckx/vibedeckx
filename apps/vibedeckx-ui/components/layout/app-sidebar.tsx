@@ -541,7 +541,12 @@ export function AppSidebar({
                             machine that never got the workspace needs it
                             created there. The sidebar lists one machine, so
                             without this marker neither case would be visible
-                            at all. */}
+                            at all.
+
+                            It sits outside the merge badge, not inside it: the
+                            badge is on most rows most of the time, while this
+                            is rare, so the rare one takes the outer slot and
+                            the common one keeps its place. */}
                         {wt.targets && (
                           <Tooltip>
                             <TooltipTrigger asChild>

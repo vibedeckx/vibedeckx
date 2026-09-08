@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Project, Worktree } from "@/lib/api";
+import type { BranchMergeInfo } from "@/hooks/use-merge-status";
 
 import { AppSidebar } from "./app-sidebar";
 
@@ -33,7 +34,7 @@ describe("AppSidebar workspace that its machines disagree about", () => {
   const onDeleteWorktree = vi.fn();
   const onRecreateWorktree = vi.fn();
 
-  const render = (worktrees: Worktree[]) =>
+  const render = (worktrees: Worktree[], mergeStatuses?: Map<string, BranchMergeInfo>) =>
     act(() => {
       root.render(
         <AppSidebar
@@ -44,6 +45,7 @@ describe("AppSidebar workspace that its machines disagree about", () => {
           currentProject={project}
           onDeleteWorktree={onDeleteWorktree}
           onRecreateWorktree={onRecreateWorktree}
+          mergeStatuses={mergeStatuses}
         />,
       );
     });
@@ -96,5 +98,36 @@ describe("AppSidebar workspace that its machines disagree about", () => {
     act(() => marker!.click());
     expect(onRecreateWorktree).toHaveBeenCalledWith(missingOnMac);
     expect(onDeleteWorktree).not.toHaveBeenCalled();
+  });
+
+  it("takes the outer slot, so the merge badge does not move when it appears", () => {
+    // The badge is on most rows most of the time and this warning is rare, so
+    // the rare one is the one that shifts position, never the common one.
+    const mergeStatuses = new Map<string, BranchMergeInfo>([[
+      "dev2",
+      { branch: "dev2", status: "unmerged", unmergedCount: 2, dirty: false, target: "main" },
+    ]]);
+    const slotFromRight = (element: Element) => {
+      const row = element.parentElement!;
+      const trailing = Array.from(row.children).filter((child) => child !== row.firstElementChild);
+      return trailing.length - trailing.indexOf(element);
+    };
+    // The badge names the relationship it reports; that is its stable handle.
+    const badge = () => {
+      const found = container.querySelector('button[aria-label*="not in main"]');
+      expect(found, "no merge badge").toBeTruthy();
+      return found!;
+    };
+
+    render([{ branch: "dev2" }], mergeStatuses);
+    const badgeAlone = slotFromRight(badge());
+
+    render([halfDeleted], mergeStatuses);
+    const marker = container.querySelector<HTMLButtonElement>('button[aria-label^="Finish deleting"]')!;
+    expect(marker).toBeTruthy();
+
+    // The badge keeps its slot; the warning appears one further out.
+    expect(slotFromRight(badge())).toBe(badgeAlone);
+    expect(slotFromRight(marker)).toBe(badgeAlone + 1);
   });
 });
