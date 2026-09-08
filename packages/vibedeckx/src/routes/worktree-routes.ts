@@ -1,7 +1,8 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { resolveWorktreePath, conventionalWorktreePath, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, setRootWorkspaceAnchor, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache, planWorktreeAdd, applyWorktreeAdd, canonicalPath, deleteBranchAfterRemoval, liveWorktreeRecord, worktreeRecordExists, type RetainedBranch, type SetAnchorResult } from "../utils/worktree-paths.js";
+import { resolveWorktreePath, conventionalWorktreePath, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, setRootWorkspaceAnchor, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache, planWorktreeAdd, applyWorktreeAdd, canonicalPath, deleteBranchAfterRemoval, liveWorktreeRecord, worktreeRecordExists, type RetainedBranch, type SetAnchorResult, type WorktreeBranch } from "../utils/worktree-paths.js";
+import { findUnhealthyWorkspaces, type WorkspaceTargetState } from "../utils/workspace-health.js";
 import { ensurePathProjectId } from "../utils/path-project.js";
 import { registerReportedWorktrees, type ReportedWorktree } from "../workspace-binding-backfill.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
@@ -33,6 +34,8 @@ async function getAllRemoteConfigs(fastify: FastifyInstance, project: Project): 
 interface TargetCreateResult {
   success: boolean;
   label: string;
+  /** The machine itself: "local" or a remote server id. */
+  targetId: string;
   worktree?: { branch: string };
   /** This target reused a branch that already existed there. */
   adopted?: boolean;
@@ -44,6 +47,8 @@ interface TargetCreateResult {
 interface TargetDeleteResult {
   success: boolean;
   label: string;
+  /** The machine itself: "local" or a remote server id, so a caller can act on it. */
+  targetId: string;
   /** Set when Git kept the branch (unmerged work), so the name stays taken. */
   branchRetained?: RetainedBranch | null;
   error?: string;
@@ -75,6 +80,57 @@ async function ensurePathProject(fastify: FastifyInstance, projectPath: string):
   const project = await fastify.storage.projects.getById(projectId);
   if (!project) throw new Error(`Path project '${projectId}' was not persisted`);
   return project;
+}
+
+/** The worktree array out of a worker's list response, tolerating an old or odd shape. */
+function listedWorktrees(data: unknown): WorktreeBranch[] {
+  const worktrees = (data as { worktrees?: unknown })?.worktrees;
+  return Array.isArray(worktrees) ? worktrees as WorktreeBranch[] : [];
+}
+
+/**
+ * Merge the registry's cross-machine view into a worktree list.
+ *
+ * The list itself is one machine's Git (see `findUnhealthyWorkspaces`). Every
+ * workspace whose machines disagree is annotated with a per-machine breakdown,
+ * and one that the listing machine no longer has — a delete that failed
+ * somewhere else — is appended, so it stays reachable in the UI instead of
+ * disappearing while it is still on disk over there.
+ */
+async function withWorkspaceHealth(
+  fastify: FastifyInstance,
+  project: Project,
+  worktrees: WorktreeBranch[],
+): Promise<Array<WorktreeBranch & { targets?: WorkspaceTargetState[]; unfinishedDelete?: boolean }>> {
+  const remotes = await getAllRemoteConfigs(fastify, project);
+  const names = new Map(remotes.map((remote) => [remote.serverId, remote.serverName]));
+  const labelOf = (targetId: string) => targetId === "local" ? "local" : names.get(targetId) ?? targetId;
+
+  // Only machines the project still has. Unlinking a remote leaves its
+  // checkout rows behind, and one of those reads as "still there" on a machine
+  // nothing can act on any more: the workspace would be listed as half-deleted
+  // for good, since a delete only visits the machines currently linked.
+  const linked = new Set<string>(remotes.map((remote) => remote.serverId));
+  if (project.path) linked.add("local");
+  const rows = (await fastify.storage.workspaceRegistry.listByProject(project.id, undefined, { includeDeleted: true }))
+    .filter((row) => linked.has(row.checkout.target_id));
+  const unhealthy = findUnhealthyWorkspaces(rows, labelOf);
+  if (unhealthy.length === 0) return worktrees;
+
+  const byBranch = new Map(unhealthy.map((health) => [health.branch, health]));
+  const merged = worktrees.map((worktree) => {
+    const health = byBranch.get(worktree.branch);
+    if (!health) return worktree;
+    byBranch.delete(worktree.branch);
+    return { ...worktree, targets: health.targets, unfinishedDelete: health.unfinishedDelete };
+  });
+  for (const health of byBranch.values()) {
+    // The main workspace is never absent from its own machine's list, and a
+    // workspace with nothing left anywhere is simply gone.
+    if (health.branch === null || !health.targets.some((target) => target.state === "present")) continue;
+    merged.push({ branch: health.branch, targets: health.targets, unfinishedDelete: health.unfinishedDelete });
+  }
+  return merged;
 }
 
 /**
@@ -519,6 +575,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
           serverId: targetRemote.remote_server_id,
           remotePath: targetRemote.remote_path,
         }, result.data);
+        return reply.code(200).send({
+          worktrees: await withWorkspaceHealth(fastify, project, listedWorktrees(result.data)),
+        });
       }
       return reply.code(proxyStatus(result)).send(result.data);
     }
@@ -533,7 +592,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         undefined,
         { reverseConnectManager: fastify.reverseConnectManager }
       );
-      if (result.ok) await syncRemoteWorktreeList(fastify, project.id, remoteConfig, result.data);
+      if (result.ok) {
+        await syncRemoteWorktreeList(fastify, project.id, remoteConfig, result.data);
+        return reply.code(200).send({
+          worktrees: await withWorkspaceHealth(fastify, project, listedWorktrees(result.data)),
+        });
+      }
       return reply.code(proxyStatus(result)).send(result.data);
     }
 
@@ -543,8 +607,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     try {
       pruneWorktrees(project.path);
-      const worktrees = await getRegisteredWorktreeBranches(fastify.storage, project.id, project.path);
-      return reply.code(200).send({ worktrees });
+      const listed = await getRegisteredWorktreeBranches(fastify.storage, project.id, project.path);
+      return reply.code(200).send({ worktrees: await withWorkspaceHealth(fastify, project, listed) });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       return reply.code(500).send({ error: `Failed to list worktrees: ${errorMessage}` });
@@ -842,14 +906,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
             const result = await deleteOnRemote(rc);
             if (result.ok) {
               const data = result.data as { branchRetained?: RetainedBranch | null };
-              results[key] = { success: true, label, branchRetained: data?.branchRetained };
+              results[key] = { success: true, label, targetId: rc.serverId, branchRetained: data?.branchRetained };
             } else {
               const data = result.data as { error?: string };
-              results[key] = { success: false, label, error: data.error || "Remote deletion failed" };
+              results[key] = { success: false, label, targetId: rc.serverId, error: data.error || "Remote deletion failed" };
             }
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "Unknown error";
-            results[key] = { success: false, label, error: errorMessage };
+            results[key] = { success: false, label, targetId: rc.serverId, error: errorMessage };
           }
         })
       );
@@ -951,7 +1015,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Delete local first
     try {
-      results.local = { success: true, label: "local", branchRetained: await deleteLocal() };
+      results.local = { success: true, label: "local", targetId: "local", branchRetained: await deleteLocal() };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       // Local failure: return error immediately, don't attempt remotes
@@ -967,14 +1031,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
           const remoteResult = await deleteOnRemote(rc);
           if (remoteResult.ok) {
             const remoteData = remoteResult.data as { branchRetained?: RetainedBranch | null };
-            results[key] = { success: true, label, branchRetained: remoteData?.branchRetained };
+            results[key] = { success: true, label, targetId: rc.serverId, branchRetained: remoteData?.branchRetained };
           } else {
             const remoteData = remoteResult.data as { error?: string };
-            results[key] = { success: false, label, error: remoteData.error || "Remote deletion failed" };
+            results[key] = { success: false, label, targetId: rc.serverId, error: remoteData.error || "Remote deletion failed" };
           }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : "Unknown error";
-          results[key] = { success: false, label, error: errorMessage };
+          results[key] = { success: false, label, targetId: rc.serverId, error: errorMessage };
         }
       })
     );
@@ -1126,15 +1190,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
             const result = await createOnRemote(rc);
             if (result.ok) {
               const data = result.data as { worktree?: { branch: string; adopted?: boolean } };
-              results[key] = { success: true, label, worktree: data.worktree, adopted: data.worktree?.adopted };
+              results[key] = { success: true, label, targetId: rc.serverId, worktree: data.worktree, adopted: data.worktree?.adopted };
             } else {
               const data = result.data as { error?: string };
               console.error(`[worktree] Remote failed: serverId=${rc.serverId}, requestId=${result.requestId}, error=${JSON.stringify(result.data)}`);
-              results[key] = { success: false, label, error: data.error || "Remote creation failed", errorCode: result.errorCode, requestId: result.requestId };
+              results[key] = { success: false, label, targetId: rc.serverId, error: data.error || "Remote creation failed", errorCode: result.errorCode, requestId: result.requestId };
             }
           } catch (error) {
             const errorMessage = error instanceof Error ? error.message : "Unknown error";
-            results[key] = { success: false, label, error: errorMessage };
+            results[key] = { success: false, label, targetId: rc.serverId, error: errorMessage };
           }
         })
       );
@@ -1204,7 +1268,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     let localWorktree: { branch: string; adopted: boolean } | undefined;
     try {
       localWorktree = await createLocal();
-      results.local = { success: true, label: "local", worktree: localWorktree, adopted: localWorktree.adopted };
+      results.local = { success: true, label: "local", targetId: "local", worktree: localWorktree, adopted: localWorktree.adopted };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
       // Local failure: return error immediately, don't attempt remotes
@@ -1221,13 +1285,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
           const remoteResult = await createOnRemote(rc);
           if (remoteResult.ok) {
             const remoteData = remoteResult.data as { worktree?: { branch: string; adopted?: boolean } };
-            results[key] = { success: true, label, worktree: remoteData.worktree, adopted: remoteData.worktree?.adopted };
+            results[key] = { success: true, label, targetId: rc.serverId, worktree: remoteData.worktree, adopted: remoteData.worktree?.adopted };
           } else {
             const remoteData = remoteResult.data as { error?: string };
             console.error(`[worktree] Remote failed: serverId=${rc.serverId}, requestId=${remoteResult.requestId}, errorCode=${remoteResult.errorCode}, status=${remoteResult.status}, duration=${remoteResult.durationMs}ms, error=${JSON.stringify(remoteResult.data)}`);
             results[key] = {
               success: false,
               label,
+              targetId: rc.serverId,
               error: remoteData.error || "Remote creation failed",
               errorCode: remoteResult.errorCode,
               requestId: remoteResult.requestId,
@@ -1235,7 +1300,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           }
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : "Unknown error";
-          results[key] = { success: false, label, error: errorMessage };
+          results[key] = { success: false, label, targetId: rc.serverId, error: errorMessage };
         }
       })
     );

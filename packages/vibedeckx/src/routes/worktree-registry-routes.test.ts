@@ -330,6 +330,136 @@ describe("worktree routes persisted identity", () => {
     execFileSync("git", ["-C", projectPath, "worktree", "unlock", worktreePath]);
   });
 
+  it("keeps a workspace the other machine still has, and names both machines", async () => {
+    // A delete that failed on a non-primary machine used to make the workspace
+    // vanish from the UI while it was still on disk over there.
+    const remote = await storage.remoteServers.create({ name: "Mac" });
+    await storage.projectRemotes.add({
+      project_id: "p1",
+      remote_server_id: remote.id,
+      remote_path: "/remote/repo",
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1",
+      branch: "dev",
+      targetId: remote.id,
+      worktreePath: conventionalWorktreePath("/remote/repo", "dev"),
+      expectedBranch: "dev",
+    });
+
+    proxyToRemoteAuto.mockResolvedValue({ ok: false, status: 500, data: { error: "not a working tree" } });
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+    expect(deleted.statusCode).toBe(207);
+
+    invalidateWorktreeListCache(projectPath);
+    const listed = await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });
+    const dev = listed.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
+
+    expect(dev).toBeTruthy();
+    expect(dev.unfinishedDelete).toBe(true);
+    expect(dev.targets).toHaveLength(2);
+    expect(dev.targets).toContainEqual({ targetId: "local", label: "local", state: "deleted" });
+    expect(dev.targets).toContainEqual({
+      targetId: remote.id,
+      label: "Mac",
+      state: "present",
+      status: "ready",
+      error: null,
+    });
+  });
+
+  it("forgets a machine the project no longer has, instead of listing a workspace nobody can delete", async () => {
+    // Unlinking a remote leaves its checkout rows behind. Counting them would
+    // mark the workspace half-deleted forever: a delete only visits the
+    // machines currently linked, so no retry could ever clear it.
+    const remote = await storage.remoteServers.create({ name: "Mac" });
+    const link = await storage.projectRemotes.add({
+      project_id: "p1",
+      remote_server_id: remote.id,
+      remote_path: "/remote/repo",
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1",
+      branch: "dev",
+      targetId: remote.id,
+      worktreePath: conventionalWorktreePath("/remote/repo", "dev"),
+      expectedBranch: "dev",
+    });
+
+    await storage.projectRemotes.remove(link.id, "p1");
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: "/api/projects/p1/worktrees",
+      payload: { branch: "dev" },
+    });
+    expect(deleted.statusCode).toBe(200);
+
+    invalidateWorktreeListCache(projectPath);
+    const listed = await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });
+    expect(listed.json().worktrees.some((worktree: { branch: string | null }) => worktree.branch === "dev")).toBe(false);
+  });
+
+  it("leaves a workspace that every machine agrees on unannotated", async () => {
+    await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    invalidateWorktreeListCache(projectPath);
+
+    const listed = await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });
+    const dev = listed.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
+
+    expect(dev).toBeTruthy();
+    expect(dev.targets).toBeUndefined();
+    expect(dev.unfinishedDelete).toBeUndefined();
+  });
+
+  it("drops the workspace once the retry finishes the delete everywhere", async () => {
+    const remote = await storage.remoteServers.create({ name: "Mac" });
+    await storage.projectRemotes.add({
+      project_id: "p1",
+      remote_server_id: remote.id,
+      remote_path: "/remote/repo",
+    });
+    await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1",
+      branch: "dev",
+      targetId: remote.id,
+      worktreePath: conventionalWorktreePath("/remote/repo", "dev"),
+      expectedBranch: "dev",
+    });
+    proxyToRemoteAuto.mockResolvedValueOnce({ ok: false, status: 500, data: { error: "not a working tree" } });
+    await app.inject({ method: "DELETE", url: "/api/projects/p1/worktrees", payload: { branch: "dev" } });
+
+    proxyToRemoteAuto.mockResolvedValueOnce({ ok: true, status: 200, data: { success: true, branchRetained: null } });
+    const retried = await app.inject({ method: "DELETE", url: "/api/projects/p1/worktrees", payload: { branch: "dev" } });
+    expect(retried.statusCode).toBe(200);
+
+    invalidateWorktreeListCache(projectPath);
+    const listed = await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });
+    expect(listed.json().worktrees.some((worktree: { branch: string | null }) => worktree.branch === "dev")).toBe(false);
+  });
+
   it("clears root drift once the user adopts the branch they switched to", async () => {
     // The first listing is what captures the anchor, here "main".
     await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { Anchor, Columns3, ListTodo, FolderOpen, Plus, Globe, Settings } from "lucide-react";
+import { Anchor, AlertTriangle, Columns3, ListTodo, FolderOpen, Plus, Globe, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProjectGlyph } from "@/components/project/project-glyph";
@@ -16,6 +16,7 @@ import type { Worktree, Project, Schedule } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 import type { ResidentSidebarSession } from "@/hooks/use-resident-sessions";
 import { effectiveTarget, type BranchMergeInfo } from "@/hooks/use-merge-status";
+import { describeWorkspaceTargets } from "@/lib/worktree-target-results";
 
 export type ActiveView = "workspace" | "tasks" | "schedules" | "remote-servers" | "settings" | "project-info" | "project-chat";
 
@@ -527,6 +528,40 @@ export function AppSidebar({
                             </TooltipTrigger>
                             <TooltipContent side="right">
                               {`Anchor this workspace to ${wt.currentBranch}`}
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
+                        {/* The machines disagree about this workspace: a
+                            delete that finished on some of them, or one that
+                            kept an error. Deleting again retries only what is
+                            left, which is what this button does — the sidebar
+                            lists one machine, so without the marker a
+                            workspace that survives on any other one would just
+                            be missing. */}
+                        {wt.targets && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                onClick={() => onDeleteWorktree?.(wt)}
+                                aria-label={wt.unfinishedDelete
+                                  ? `Finish deleting ${branchLabel}`
+                                  : `${branchLabel} differs between machines`}
+                                className="shrink-0 p-0.5 rounded text-amber-600 dark:text-amber-400 hover:bg-muted transition-colors"
+                              >
+                                <AlertTriangle className="h-3 w-3" />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="right">
+                              <div className="space-y-0.5">
+                                <div>
+                                  {wt.unfinishedDelete
+                                    ? "Deleted on some machines only. Click to finish deleting."
+                                    : "This workspace is not the same on every machine."}
+                                </div>
+                                {describeWorkspaceTargets(wt.targets).map((line) => (
+                                  <div key={line} className="text-muted-foreground">{line}</div>
+                                ))}
+                              </div>
                             </TooltipContent>
                           </Tooltip>
                         )}

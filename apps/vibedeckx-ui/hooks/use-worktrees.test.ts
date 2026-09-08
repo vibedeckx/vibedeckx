@@ -31,6 +31,54 @@ describe("isWorktreesLoading", () => {
 });
 
 describe("worktreesEqual", () => {
+  it("sees a workspace whose machines started to disagree", () => {
+    // Nothing about the branch changes when a delete half-lands, so without
+    // the health in this comparison the sidebar marker would never appear.
+    expect(worktreesEqual(
+      [{ branch: "dev" }],
+      [{
+        branch: "dev",
+        unfinishedDelete: true,
+        targets: [
+          { targetId: "local", label: "local", state: "deleted" },
+          { targetId: "s2", label: "Mac", state: "present", status: "ready" },
+        ],
+      }],
+    )).toBe(false);
+  });
+
+  it("sees the disagreement being resolved", () => {
+    const marked = [{
+      branch: "dev",
+      unfinishedDelete: false,
+      targets: [
+        { targetId: "local", label: "local", state: "present" as const, status: "ready" as const },
+        { targetId: "s2", label: "Mac", state: "present" as const, status: "error" as const, error: "boom" },
+      ],
+    }];
+    const healed = [{
+      branch: "dev",
+      targets: [
+        { targetId: "local", label: "local", state: "present" as const, status: "ready" as const },
+        { targetId: "s2", label: "Mac", state: "present" as const, status: "ready" as const },
+      ],
+    }];
+    expect(worktreesEqual(marked, healed)).toBe(false);
+    expect(worktreesEqual(marked, marked)).toBe(true);
+  });
+
+  it("sees a machine being renamed, so the tooltip does not keep the old name", () => {
+    const named = (label: string) => [{
+      branch: "dev",
+      unfinishedDelete: true,
+      targets: [
+        { targetId: "local", label: "local", state: "deleted" as const },
+        { targetId: "s2", label, state: "present" as const, status: "ready" as const },
+      ],
+    }];
+    expect(worktreesEqual(named("Mac"), named("Jesse's Mac"))).toBe(false);
+  });
+
   it("treats separately allocated but structurally identical lists as equal", () => {
     expect(worktreesEqual(
       [{ branch: null }, { branch: "dev", currentBranch: "agent/work" }],

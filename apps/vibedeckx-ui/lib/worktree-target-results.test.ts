@@ -4,6 +4,7 @@ import {
   appendTargetFailures,
   describeRetainedBranches,
   describeTargetResults,
+  describeWorkspaceTargets,
   targetLabel,
   targetOutcomeLines,
 } from "@/lib/worktree-target-results";
@@ -126,16 +127,32 @@ describe("targetOutcomeLines", () => {
   it("gives one labelled line per target, with a reason only where it failed", () => {
     expect(
       targetOutcomeLines({
-        "5a967959": { success: true, label: "worker3" },
-        "8629d781": { success: false, label: "Mac", error: "not a working tree" },
+        "5a967959": { success: true, label: "worker3", targetId: "5a967959" },
+        "8629d781": { success: false, label: "Mac", targetId: "8629d781", error: "not a working tree" },
       }),
     ).toEqual([
-      { key: "5a967959", label: "worker3", ok: true, detail: undefined },
-      { key: "8629d781", label: "Mac", ok: false, detail: "not a working tree" },
+      { key: "5a967959", label: "worker3", targetId: "5a967959", ok: true, detail: undefined },
+      // The machine id travels with the line so the UI can offer a shell there.
+      { key: "8629d781", label: "Mac", targetId: "8629d781", ok: false, detail: "not a working tree" },
     ]);
   });
 
   it("is empty without a per-target map", () => {
     expect(targetOutcomeLines(undefined)).toEqual([]);
+  });
+});
+
+describe("describeWorkspaceTargets", () => {
+  it("says, per machine, whether the workspace is gone or still there", () => {
+    expect(describeWorkspaceTargets([
+      { targetId: "s1", label: "worker3", state: "deleted" },
+      { targetId: "s2", label: "Mac", state: "present", status: "ready" },
+    ])).toEqual(["worker3: deleted", "Mac: still here"]);
+  });
+
+  it("shows the reason a machine kept instead of the generic line", () => {
+    expect(describeWorkspaceTargets([
+      { targetId: "s2", label: "Mac", state: "present", status: "error", error: "Branch 'dev' already exists" },
+    ])).toEqual(["Mac: Branch 'dev' already exists"]);
   });
 });

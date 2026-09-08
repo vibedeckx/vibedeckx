@@ -45,11 +45,22 @@ export function isWorktreesLoading(
   return fetching || validatedScope !== scope;
 }
 
+/** Per-machine health, flattened so a change to it counts as a list change. */
+function healthKey(worktree: Worktree): string {
+  if (!worktree.targets) return "";
+  return worktree.targets
+    .map((target) => `${target.targetId}:${target.label}:${target.state}:${target.status ?? ""}:${target.error ?? ""}`)
+    .join("|");
+}
+
 export function worktreesEqual(left: Worktree[], right: Worktree[]): boolean {
   return left.length === right.length && left.every((worktree, index) =>
     worktree.branch === right[index].branch
     && worktree.currentBranch === right[index].currentBranch
     && worktree.expectedBranch === right[index].expectedBranch
+    // Health is why a row is marked; without it here a refresh that only
+    // resolves (or discovers) a partial delete never reaches the sidebar.
+    && healthKey(worktree) === healthKey(right[index])
   );
 }
 

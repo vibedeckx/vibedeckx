@@ -1,4 +1,4 @@
-import { appendTargetFailures, type RetainedBranch, type WorktreeTargetOutcome } from "@/lib/worktree-target-results";
+import { appendTargetFailures, type RetainedBranch, type WorkspaceTargetState, type WorktreeTargetOutcome } from "@/lib/worktree-target-results";
 
 // ============ Auth Token Management ============
 // `_authToken` is a warm cache of the last-known Clerk session JWT. It exists so
@@ -322,6 +322,13 @@ export interface DirectoryEntry {
 export interface Worktree {
   /** Stable workspace/session identity. */
   branch: string | null;
+  /**
+   * Per-machine state, sent only when the machines disagree — a delete that
+   * finished on some of them, or a machine holding an error.
+   */
+  targets?: WorkspaceTargetState[];
+  /** Deleted on some machines, still there on others. */
+  unfinishedDelete?: boolean;
   /** Live checkout when it differs from `branch`; null means detached HEAD. */
   currentBranch?: string | null;
   /** Display name for the root workspace, whose `branch` identity is null. */

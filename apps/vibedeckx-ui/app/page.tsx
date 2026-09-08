@@ -100,6 +100,9 @@ export default function Home() {
     setSelection((prev) => (prev.sessionId === sessionId ? prev : { ...prev, sessionId }));
   }, []);
   const [residentSessionSeed, setResidentSessionSeed] = useState<ResidentSidebarSession | null>(null);
+  // A shell asked for on a named machine (from a delete that machine refused).
+  // Carried as a nonce so asking twice opens a second terminal.
+  const [terminalRequest, setTerminalRequest] = useState<{ targetId: string; nonce: number } | null>(null);
   // The stand-in view for a review whose reviewer is still preparing, opened
   // from its sidebar row or the source conversation's banner. Identity only:
   // everything shown derives from the preparing-review store, and any other
@@ -1121,6 +1124,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                     selectedBranch={selectedBranch}
                     activateAgentTabNonce={activateAgentTabNonce}
                     diffCompareNonce={diffCompareNonce}
+                    terminalRequest={terminalRequest}
                     forceAgentTab={sessionNavPending}
                     mergeTarget={
                       selectedBranch
@@ -1312,6 +1316,14 @@ Please proceed step by step and let me know if there are any issues or conflicts
             open={deleteWorktreeDialogOpen}
             onOpenChange={setDeleteWorktreeDialogOpen}
             onWorktreeDeleted={refetchWorktrees}
+            onOpenTerminal={(branch, targetId) => {
+              // Select the workspace first: the terminal panel opens the shell
+              // in whichever workspace is current, and both land in the same
+              // render, so the request never sees the previous one.
+              selectWorkspace(branch);
+              setActiveView('workspace');
+              setTerminalRequest((previous) => ({ targetId, nonce: (previous?.nonce ?? 0) + 1 }));
+            }}
           />
         )}
         <QuickSwitcher

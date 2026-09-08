@@ -18,6 +18,8 @@ export interface WorktreeTargetOutcome {
   success: boolean;
   /** Display name for this target. Absent on servers older than this field. */
   label?: string;
+  /** The machine itself ("local" or a remote server id), for acting on it. */
+  targetId?: string;
   /** The target reused a branch that already existed there, ignoring the base branch. */
   adopted?: boolean;
   /** Set when a delete left the branch behind, so the name stays taken there. */
@@ -126,6 +128,8 @@ export function describeRetainedBranches(
 export interface TargetOutcomeLine {
   key: string;
   label: string;
+  /** The machine, when the server named it: "local" or a remote server id. */
+  targetId?: string;
   ok: boolean;
   /** Why it failed. Absent for a target that succeeded. */
   detail?: string;
@@ -138,7 +142,29 @@ export function targetOutcomeLines(results: WorktreeTargetResults | undefined): 
     .map(([key, outcome]) => ({
       key,
       label: targetLabel(key, outcome),
+      targetId: outcome.targetId,
       ok: outcome.success,
       detail: outcome.success ? undefined : targetFailureReason(outcome),
     }));
+}
+
+/** What one machine holds for a workspace, as the worktree list reports it. */
+export interface WorkspaceTargetState {
+  targetId: string;
+  label: string;
+  state: "present" | "deleted";
+  status?: "creating" | "ready" | "deleting" | "error";
+  error?: string | null;
+}
+
+/**
+ * One line per machine for a workspace whose machines disagree — the sidebar
+ * marker's tooltip. Reads as "worker3: deleted" / "Mac: still here".
+ */
+export function describeWorkspaceTargets(targets: WorkspaceTargetState[]): string[] {
+  return targets.map((target) => {
+    if (target.state === "deleted") return `${target.label}: deleted`;
+    if (target.status === "error") return `${target.label}: ${target.error || "failed"}`;
+    return `${target.label}: still here`;
+  });
 }

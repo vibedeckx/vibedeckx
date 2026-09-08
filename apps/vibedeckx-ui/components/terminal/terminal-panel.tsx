@@ -18,6 +18,8 @@ interface TerminalPanelProps {
   // (hidden via CSS) behind other tabs, so this is what tells it when to hand
   // keyboard focus to the active shell.
   active?: boolean;
+  /** Open a shell on this machine ("local" or a remote server id); bump `nonce` to ask again. */
+  createRequest?: { targetId: string; nonce: number } | null;
 }
 
 function TerminalInstance({
@@ -51,7 +53,7 @@ function TerminalInstance({
   );
 }
 
-export function TerminalPanel({ projectId, selectedBranch, project, active = true }: TerminalPanelProps) {
+export function TerminalPanel({ projectId, selectedBranch, project, active = true, createRequest }: TerminalPanelProps) {
   const {
     terminals,
     activeTerminalId,
@@ -97,6 +99,17 @@ export function TerminalPanel({ projectId, selectedBranch, project, active = tru
     },
     [createTerminal]
   );
+
+  // Someone elsewhere asked for a shell on a named machine — a workspace that
+  // could not be deleted there, say. The nonce is what makes a repeat of the
+  // same request a second terminal rather than a no-op.
+  const servedRequestRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!createRequest || servedRequestRef.current === createRequest.nonce) return;
+    servedRequestRef.current = createRequest.nonce;
+    if (createRequest.targetId === "local") createTerminal("local");
+    else createTerminal("remote", createRequest.targetId);
+  }, [createRequest, createTerminal]);
 
   // Click-outside to close the dropdown menu
   useEffect(() => {

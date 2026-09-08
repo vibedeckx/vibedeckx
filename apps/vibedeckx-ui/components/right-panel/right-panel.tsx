@@ -24,6 +24,8 @@ interface RightPanelProps {
   agentSlot?: ReactNode;
   activateAgentTabNonce?: number;
   diffCompareNonce?: number;
+  /** Open the Terminal tab with a shell on this machine; bump `nonce` to ask again. */
+  terminalRequest?: { targetId: string; nonce: number } | null;
   mergeTarget?: string | null;
   // True while a session-targeted navigation is still resolving (notably a
   // cross-project jump, where the project switches and worktrees reload before
@@ -90,6 +92,7 @@ export function RightPanel({
   agentSlot,
   activateAgentTabNonce,
   diffCompareNonce,
+  terminalRequest,
   mergeTarget,
   forceAgentTab = false,
   active = true,
@@ -115,6 +118,16 @@ export function RightPanel({
     prevDiffCompareNonceRef.current = diffCompareNonce;
     setActiveTab('diff');
   }, [diffCompareNonce, setActiveTab]);
+
+  // Same shape for a shell asked for from elsewhere: show the tab, and let the
+  // panel itself open the terminal on the machine that was named.
+  const prevTerminalRequestRef = useRef(terminalRequest?.nonce);
+  useIsomorphicLayoutEffect(() => {
+    if (terminalRequest === undefined || terminalRequest === null) return;
+    if (prevTerminalRequestRef.current === terminalRequest.nonce) return;
+    prevTerminalRequestRef.current = terminalRequest.nonce;
+    setActiveTab('terminal');
+  }, [terminalRequest, setActiveTab]);
 
   // Asking for the Agent tab is an event, not a state: `displayTab === 'agent'`
   // is already true when you press the shortcut from the sidebar or after
@@ -298,6 +311,7 @@ export function RightPanel({
             selectedBranch={selectedBranch}
             project={project}
             active={active && displayTab === 'terminal'}
+            createRequest={terminalRequest}
           />
         </div>
         <div className={cn("absolute inset-0 overflow-hidden", displayTab !== 'preview' && 'hidden')}>
