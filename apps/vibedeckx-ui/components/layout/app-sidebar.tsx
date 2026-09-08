@@ -432,7 +432,7 @@ export function AppSidebar({
               <button
                 onClick={onCreateWorktreeOpen}
                 className="p-0.5 rounded hover:bg-muted hover:text-foreground transition-colors text-muted-foreground"
-                title="Create new worktree"
+                title="Create new workspace"
               >
                 <Plus className="h-3 w-3" />
               </button>

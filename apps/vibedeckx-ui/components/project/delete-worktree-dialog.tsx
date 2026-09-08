@@ -86,7 +86,7 @@ export function DeleteWorktreeDialog({
         setOutcome({ branch, lines: targetOutcomeLines(result.results) });
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to delete worktree");
+      setError(err instanceof Error ? err.message : "Failed to delete workspace");
     } finally {
       setLoading(false);
     }
@@ -108,7 +108,7 @@ export function DeleteWorktreeDialog({
         toast.success(`Deleted '${outcome.branch}' everywhere`);
       }
     } catch (err) {
-      setOutcomeError(err instanceof Error ? err.message : "Failed to delete worktree");
+      setOutcomeError(err instanceof Error ? err.message : "Failed to delete workspace");
     } finally {
       setRetrying(false);
     }
@@ -131,9 +131,9 @@ export function DeleteWorktreeDialog({
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Delete Worktree</DialogTitle>
+            <DialogTitle>Delete Workspace</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete this worktree?
+              Are you sure you want to delete this workspace?
             </DialogDescription>
           </DialogHeader>
 

@@ -132,7 +132,7 @@ export function CreateWorktreeDialog({
         setBranchName("");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create worktree");
+      setError(err instanceof Error ? err.message : "Failed to create workspace");
     } finally {
       setLoading(false);
     }
@@ -177,7 +177,7 @@ export function CreateWorktreeDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>{repairing ? "Create where it is missing" : "Create New Worktree"}</DialogTitle>
+          <DialogTitle>{repairing ? "Create where it is missing" : "Create New Workspace"}</DialogTitle>
           <DialogDescription>
             {repairing
               ? `Creates '${initialBranchName}' on the machines that do not have it. The ones that already do keep what they have, branch history and all.`

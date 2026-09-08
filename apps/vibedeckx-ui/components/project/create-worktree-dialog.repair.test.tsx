@@ -79,7 +79,7 @@ describe("CreateWorktreeDialog opened to repair a workspace", () => {
     });
 
     // It is an ordinary new workspace now; promising to repair 'dev' would lie.
-    expect(document.body.textContent).toContain("Create New Worktree");
+    expect(document.body.textContent).toContain("Create New Workspace");
     expect(document.body.textContent).not.toContain("machines that do not have it");
   });
 
@@ -87,6 +87,6 @@ describe("CreateWorktreeDialog opened to repair a workspace", () => {
     await render(undefined);
 
     expect(branchInput()?.value).toBe("");
-    expect(document.body.textContent).toContain("Create New Worktree");
+    expect(document.body.textContent).toContain("Create New Workspace");
   });
 });
