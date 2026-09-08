@@ -36,6 +36,8 @@ interface AppSidebarProps {
   currentProject?: Project | null;
   onCreateWorktreeOpen?: () => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
+  /** Repair a workspace some machine never got: create it again, prefilled. */
+  onRecreateWorktree?: (worktree: Worktree) => void;
   onAnchorRootWorkspace?: (branch: string) => void;
   /** Anchor the main workspace to a branch picked from the list, checked out or not. */
   onSetRootWorkspaceBranch?: (branch: string) => void;
@@ -221,6 +223,7 @@ export function AppSidebar({
   currentProject,
   onCreateWorktreeOpen,
   onDeleteWorktree,
+  onRecreateWorktree,
   onAnchorRootWorkspace,
   onSetRootWorkspaceBranch,
   mergeStatuses,
@@ -531,21 +534,24 @@ export function AppSidebar({
                             </TooltipContent>
                           </Tooltip>
                         )}
-                        {/* The machines disagree about this workspace: a
-                            delete that finished on some of them, or one that
-                            kept an error. Deleting again retries only what is
-                            left, which is what this button does — the sidebar
-                            lists one machine, so without the marker a
-                            workspace that survives on any other one would just
-                            be missing. */}
+                        {/* The machines disagree about this workspace, and the
+                            two ways they can disagree want opposite actions:
+                            a half-finished delete needs deleting again (only
+                            the machines still holding it are visited), while a
+                            machine that never got the workspace needs it
+                            created there. The sidebar lists one machine, so
+                            without this marker neither case would be visible
+                            at all. */}
                         {wt.targets && (
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <button
-                                onClick={() => onDeleteWorktree?.(wt)}
+                                onClick={() => wt.unfinishedDelete
+                                  ? onDeleteWorktree?.(wt)
+                                  : onRecreateWorktree?.(wt)}
                                 aria-label={wt.unfinishedDelete
                                   ? `Finish deleting ${branchLabel}`
-                                  : `${branchLabel} differs between machines`}
+                                  : `Create ${branchLabel} where it is missing`}
                                 className="shrink-0 p-0.5 rounded text-amber-600 dark:text-amber-400 hover:bg-muted transition-colors"
                               >
                                 <AlertTriangle className="h-3 w-3" />
@@ -556,7 +562,7 @@ export function AppSidebar({
                                 <div>
                                   {wt.unfinishedDelete
                                     ? "Deleted on some machines only. Click to finish deleting."
-                                    : "This workspace is not the same on every machine."}
+                                    : "Missing on some machines. Click to create it there."}
                                 </div>
                                 {describeWorkspaceTargets(wt.targets).map((line) => (
                                   <div key={line} className="text-muted-foreground">{line}</div>

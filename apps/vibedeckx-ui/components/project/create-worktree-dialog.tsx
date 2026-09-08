@@ -28,6 +28,12 @@ interface CreateWorktreeDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onWorktreeCreated: (branch: string) => void;
+  /**
+   * Branch to start from, for a workspace that exists on some machines but not
+   * others. Creating it again is the repair: the machines that have it adopt
+   * what is already there, and the one that missed out gets it.
+   */
+  initialBranchName?: string;
 }
 
 export function CreateWorktreeDialog({
@@ -36,6 +42,7 @@ export function CreateWorktreeDialog({
   open,
   onOpenChange,
   onWorktreeCreated,
+  initialBranchName,
 }: CreateWorktreeDialogProps) {
   const [branchName, setBranchName] = useState("");
   const [loading, setLoading] = useState(false);
@@ -51,10 +58,14 @@ export function CreateWorktreeDialog({
   const [branchesLoading, setBranchesLoading] = useState(false);
 
   const isHybrid = !!(project.path && project.remote_path);
+  // The repair framing holds only while the name is still the one that was
+  // missing somewhere; typing over it makes this an ordinary new workspace.
+  const repairing = !!initialBranchName && branchName === initialBranchName;
 
   useEffect(() => {
     if (!open) return;
 
+    setBranchName(initialBranchName ?? "");
     setBranchesLoading(true);
 
     if (isHybrid) {
@@ -75,7 +86,7 @@ export function CreateWorktreeDialog({
         setBranchesLoading(false);
       });
     }
-  }, [open, projectId, isHybrid]);
+  }, [open, projectId, isHybrid, initialBranchName]);
 
   const handleCreate = async () => {
     if (!branchName.trim()) return;
@@ -166,9 +177,11 @@ export function CreateWorktreeDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Create New Worktree</DialogTitle>
+          <DialogTitle>{repairing ? "Create where it is missing" : "Create New Worktree"}</DialogTitle>
           <DialogDescription>
-            Create a new branch based on an existing branch
+            {repairing
+              ? `Creates '${initialBranchName}' on the machines that do not have it. The ones that already do keep what they have, branch history and all.`
+              : "Create a new branch based on an existing branch"}
           </DialogDescription>
         </DialogHeader>
 

@@ -323,9 +323,12 @@ describe("worktree routes persisted identity", () => {
 
     expect(refused.statusCode).toBe(500);
     expect(refused.json().error).toMatch(/locked/i);
-    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
-      .toMatchObject({ status: "error" });
     expect(existsSync(worktreePath)).toBe(true);
+    // The refusal is the delete's own answer. The checkout is untouched and
+    // still healthy, and recording it as broken would be indistinguishable
+    // from a machine that never got the workspace at all.
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
+      .toMatchObject({ status: "ready", error: null });
 
     execFileSync("git", ["-C", projectPath, "worktree", "unlock", worktreePath]);
   });
@@ -411,6 +414,39 @@ describe("worktree routes persisted identity", () => {
     invalidateWorktreeListCache(projectPath);
     const listed = await app.inject({ method: "GET", url: "/api/projects/p1/worktrees" });
     expect(listed.json().worktrees.some((worktree: { branch: string | null }) => worktree.branch === "dev")).toBe(false);
+  });
+
+  it("creates on the linked remote too when the caller names no targets", async () => {
+    // The UI's local/remote choice keys off the legacy `projects.remote_path`,
+    // which adding a remote never sets — so a project with a local path and a
+    // linked remote sends no targets at all. Defaulting to local alone would
+    // report success while the remote never got the workspace.
+    const remote = await storage.remoteServers.create({ name: "Mac" });
+    await storage.projectRemotes.add({
+      project_id: "p1",
+      remote_server_id: remote.id,
+      remote_path: "/remote/repo",
+    });
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true,
+      status: 201,
+      data: { worktree: { branch: "dev", worktreePath: "/remote/repo/../dev" } },
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main" },
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(proxyToRemoteAuto).toHaveBeenCalledWith(
+      remote.id, "POST", "/api/path/worktrees", expect.objectContaining({ branchName: "dev" }), expect.anything(),
+    );
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", remote.id))?.checkout)
+      .toMatchObject({ status: "ready" });
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout)
+      .toMatchObject({ status: "ready" });
   });
 
   it("leaves a workspace that every machine agrees on unannotated", async () => {

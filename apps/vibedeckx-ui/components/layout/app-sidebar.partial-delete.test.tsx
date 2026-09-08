@@ -31,6 +31,7 @@ describe("AppSidebar workspace that its machines disagree about", () => {
   let container: HTMLElement;
   let root: Root;
   const onDeleteWorktree = vi.fn();
+  const onRecreateWorktree = vi.fn();
 
   const render = (worktrees: Worktree[]) =>
     act(() => {
@@ -42,6 +43,7 @@ describe("AppSidebar workspace that its machines disagree about", () => {
           selectedBranch={null}
           currentProject={project}
           onDeleteWorktree={onDeleteWorktree}
+          onRecreateWorktree={onRecreateWorktree}
         />,
       );
     });
@@ -66,24 +68,33 @@ describe("AppSidebar workspace that its machines disagree about", () => {
 
     act(() => marker!.click());
     expect(onDeleteWorktree).toHaveBeenCalledWith(halfDeleted);
+    expect(onRecreateWorktree).not.toHaveBeenCalled();
   });
 
   it("leaves a workspace every machine agrees on unmarked", () => {
     render([{ branch: null }, { branch: "dev" }]);
 
     expect(container.querySelector('button[aria-label^="Finish deleting"]')).toBeNull();
-    expect(container.querySelector('button[aria-label*="differs between machines"]')).toBeNull();
+    expect(container.querySelector('button[aria-label^="Create dev where"]')).toBeNull();
   });
 
-  it("marks a machine holding an error too, without claiming a delete is pending", () => {
-    render([{
+  it("offers to create it where it is missing, not to delete it, when a machine never got it", () => {
+    // The two ways machines disagree want opposite actions; sending this one to
+    // the delete dialog would offer to remove what the user is missing.
+    const missingOnMac: Worktree = {
       branch: "dev",
       targets: [
         { targetId: "server-1", label: "worker3", state: "present", status: "ready" },
         { targetId: "server-2", label: "Mac", state: "present", status: "error", error: "Branch 'dev' already exists" },
       ],
-    }]);
+    };
+    render([missingOnMac]);
 
-    expect(container.querySelector('button[aria-label="dev differs between machines"]')).toBeTruthy();
+    const marker = container.querySelector<HTMLButtonElement>('button[aria-label="Create dev where it is missing"]');
+    expect(marker).toBeTruthy();
+
+    act(() => marker!.click());
+    expect(onRecreateWorktree).toHaveBeenCalledWith(missingOnMac);
+    expect(onDeleteWorktree).not.toHaveBeenCalled();
   });
 });

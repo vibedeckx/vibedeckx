@@ -103,6 +103,9 @@ export default function Home() {
   // A shell asked for on a named machine (from a delete that machine refused).
   // Carried as a nonce so asking twice opens a second terminal.
   const [terminalRequest, setTerminalRequest] = useState<{ targetId: string; nonce: number } | null>(null);
+  // Branch the create dialog opens on when it is repairing a workspace some
+  // machine never got, rather than starting a new one.
+  const [recreateBranch, setRecreateBranch] = useState<string | undefined>(undefined);
   // The stand-in view for a review whose reviewer is still preparing, opened
   // from its sidebar row or the source conversation's banner. Identity only:
   // everything shown derives from the preparing-review store, and any other
@@ -982,6 +985,11 @@ Please proceed step by step and let me know if there are any issues or conflicts
               setWorktreeToDelete(wt);
               setDeleteWorktreeDialogOpen(true);
             }}
+            onRecreateWorktree={(wt) => {
+              if (!wt.branch) return;
+              setRecreateBranch(wt.branch);
+              setCreateWorktreeDialogOpen(true);
+            }}
             onAnchorRootWorkspace={async (branch) => {
               if (!currentProject) return;
               try {
@@ -1292,8 +1300,12 @@ Please proceed step by step and let me know if there are any issues or conflicts
             projectId={currentProject.id}
             project={currentProject}
             open={createWorktreeDialogOpen}
-            onOpenChange={setCreateWorktreeDialogOpen}
+            onOpenChange={(open) => {
+              setCreateWorktreeDialogOpen(open);
+              if (!open) setRecreateBranch(undefined);
+            }}
             onWorktreeCreated={handleWorktreeCreated}
+            initialBranchName={recreateBranch}
           />
         )}
         <TaskDetailDialog

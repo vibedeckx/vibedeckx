@@ -7,7 +7,7 @@ import { ensurePathProjectId } from "../utils/path-project.js";
 import { registerReportedWorktrees, type ReportedWorktree } from "../workspace-binding-backfill.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
-import type { Project } from "../storage/types.js";
+import type { Project, RegisteredWorkspaceCheckout } from "../storage/types.js";
 
 interface RemoteConfig {
   serverId: string;
@@ -80,6 +80,33 @@ async function ensurePathProject(fastify: FastifyInstance, projectPath: string):
   const project = await fastify.storage.projects.getById(projectId);
   if (!project) throw new Error(`Path project '${projectId}' was not persisted`);
   return project;
+}
+
+/**
+ * Put a checkout back the way it was before a delete that did not land.
+ *
+ * A failed delete describes the operation, not the health of the checkout: the
+ * worktree is still there and still usable, so recording it as broken says the
+ * wrong thing — and says it in the same field a failed *create* uses, which is
+ * the one signal that tells "this machine never got the workspace" apart from
+ * "this machine would not give it up". The user already saw the real reason in
+ * the delete's own answer.
+ *
+ * Only a row still sitting in `deleting` is restored: anything else means
+ * something newer has since claimed it.
+ */
+async function restoreCheckoutAfterFailedDelete(
+  fastify: FastifyInstance,
+  registered: RegisteredWorkspaceCheckout,
+): Promise<void> {
+  const current = await fastify.storage.workspaceRegistry.getCheckoutById(registered.checkout.id);
+  if (!current || current.checkout.status !== "deleting") return;
+  await fastify.storage.workspaceRegistry.setCheckoutStatusIfCurrent(
+    registered.checkout.id,
+    { status: "deleting", updatedAt: current.checkout.updated_at },
+    registered.checkout.status,
+    registered.checkout.error,
+  );
 }
 
 /** The worktree array out of a worker's list response, tolerating an old or odd shape. */
@@ -847,15 +874,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         .getByProjectBranch(project.id, branch, rc.serverId);
       const restorePreviousStatus = async () => {
         if (!registered) return;
-        const current = await fastify.storage.workspaceRegistry
-          .getByProjectBranch(project.id, branch, rc.serverId);
-        if (!current || current.checkout.status !== "deleting") return;
-        await fastify.storage.workspaceRegistry.setCheckoutStatusIfCurrent(
-          registered.checkout.id,
-          { status: "deleting", updatedAt: current.checkout.updated_at },
-          registered.checkout.status,
-          registered.checkout.error,
-        );
+        await restoreCheckoutAfterFailedDelete(fastify, registered);
       };
       if (registered) {
         await fastify.storage.workspaceRegistry.setCheckoutStatus(registered.checkout.id, "deleting");
@@ -982,15 +1001,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return branchRetained;
       } catch (error) {
         if (registered && !worktreeRemoved) {
-          const message = error instanceof Error ? error.message : "Local deletion failed";
-          // A busy worktree joins uncommitted changes as a refusal that leaves
-          // the checkout itself perfectly healthy.
-          const status = message.includes("uncommitted changes") || error instanceof WorktreeBusyError
-            ? "ready"
-            : "error";
-          await fastify.storage.workspaceRegistry
-            .setCheckoutStatus(registered.checkout.id, status, status === "error" ? message : null)
-            .catch((registryError) => console.error("[worktree] Failed to record local delete error:", registryError));
+          // Same as the remote half: leave the checkout as it was, whatever
+          // the reason was — refusal (uncommitted changes, busy) or breakage.
+          await restoreCheckoutAfterFailedDelete(fastify, registered)
+            .catch((registryError) => console.error("[worktree] Failed to restore local checkout status:", registryError));
         }
         throw error;
       }
@@ -1092,6 +1106,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     if (req.body.targets && req.body.targets.length > 0) {
       targets = req.body.targets;
+    } else if (hasLocal && hasRemote) {
+      // Every machine the project has, unless the caller narrowed it. A
+      // workspace that exists on only some of them is the broken state this
+      // route's own partial-success reporting exists to describe, so it must
+      // not be what a caller gets by saying nothing — and a caller easily says
+      // nothing: linked remotes live in `project_remotes`, while the UI's
+      // local+remote choice keys off the legacy `projects.remote_path`, which
+      // adding a remote never sets.
+      targets = ["local", "remote"];
     } else if (!hasLocal && hasRemote) {
       targets = ["remote"];
     } else {
