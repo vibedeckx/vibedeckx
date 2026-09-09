@@ -490,10 +490,18 @@ export function CreateWorktreeDialog({
               <SelectTrigger size="sm" className="w-full font-mono text-[11.5px]">
                 <SelectValue placeholder={branchesLoading ? "Loading branches…" : "Select branch"} />
               </SelectTrigger>
-              <SelectContent>
+              {/* Popper mode, pinned to the trigger's width: the default
+                  item-aligned popup is sized by its longest branch name, so a
+                  long one made the list stick out past the dialog's right edge
+                  — visible as soon as the dialog itself got narrower. */}
+              <SelectContent position="popper" className="w-(--radix-select-trigger-width)">
                 {branches.map((b) => (
-                  <SelectItem key={b} value={b} className="font-mono text-[11.5px]">
-                    {b}
+                  <SelectItem
+                    key={b}
+                    value={b}
+                    className="font-mono text-[11.5px] *:[span]:last:min-w-0 *:[span]:last:overflow-hidden"
+                  >
+                    <span className="truncate">{b}</span>
                   </SelectItem>
                 ))}
               </SelectContent>
