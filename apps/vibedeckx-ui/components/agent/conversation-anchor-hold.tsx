@@ -52,6 +52,37 @@ export function shouldHoldBottom({ settling, turnInFlight, wasAtBottom }: Anchor
   return settling || !turnInFlight;
 }
 
+export interface ViewportPinInput {
+  scrollTop: number;
+  scrollHeight: number;
+  prevClientHeight: number;
+}
+
+// Exported for unit tests: was the reader pinned to the bottom before the
+// SCROLLER's own box shrank — a banner appearing above it (the
+// preparing-review line), the composer growing below it? use-stick-to-bottom
+// observes the content element only, so it receives no event whatsoever in
+// this case: a pinned reader is silently left N px off the bottom and the
+// transcript reads as "pushed down" until the next message happens to re-pin.
+//
+// Pinned is the only case corrected; a reader who scrolled up keeps the
+// browser's behaviour of letting the transcript move with the viewport, as it
+// always has. Deliberate: holding THEIR pixels still would need to know where
+// they were before the change, which this callback cannot see — `scrollTop` is
+// read after layout, which has already pulled anyone below a grown viewport's
+// new maximum up onto it. Pinning survives that blind spot because a wrong
+// answer here does nothing (re-pinning an already-clamped reader is a no-op)
+// rather than moving the transcript by a wrong amount.
+export function wasPinnedBeforeViewportChange({
+  scrollTop,
+  scrollHeight,
+  prevClientHeight,
+}: ViewportPinInput): boolean {
+  // Content height is unchanged on this path, so the pre-change bottom is
+  // measured against the pre-change viewport height.
+  return scrollTop + prevClientHeight >= scrollHeight - 6;
+}
+
 /**
  * Keeps the conversation viewport stable through load-artifact height changes,
  * with zero painted displacement.
@@ -97,6 +128,7 @@ export function ConversationAnchorHold({
     settleDeadline: 0,
     settleHardCap: 0,
     prevScrollHeight: 0,
+    prevClientHeight: 0,
   });
   stateRef.current.turnInFlight = turnInFlight;
 
@@ -166,6 +198,7 @@ export function ConversationAnchorHold({
     if (!scroller || !content || typeof ResizeObserver === "undefined") return;
 
     stateRef.current.prevScrollHeight = scroller.scrollHeight;
+    stateRef.current.prevClientHeight = scroller.clientHeight;
 
     // Mid-list anchor, refreshed on every scroll (user scrolls → new anchor;
     // our own corrections re-derive the same anchor, which is a no-op).
@@ -209,11 +242,40 @@ export function ConversationAnchorHold({
       const s = stateRef.current;
       const prev = s.prevScrollHeight;
       const next = scroller.scrollHeight;
+      const prevClient = s.prevClientHeight;
+      const client = scroller.clientHeight;
       s.prevScrollHeight = next;
-      if (Math.abs(next - prev) <= 1) return;
+      s.prevClientHeight = client;
+
+      const contentChanged = Math.abs(next - prev) > 1;
+      // Only the height matters: a viewport that keeps its height cannot move
+      // a pinned reader off the bottom, whichever edge shifted.
+      const viewportResized = Math.abs(client - prevClient) > 1;
+
+      // The scroller's own box resized while the transcript did not.
+      // Nothing else in the stack hears this event (the library watches the
+      // content element), so the correction has to happen here — and, as with
+      // content growth, synchronously inside the callback so the displaced
+      // position is never painted.
+      if (viewportResized && !contentChanged) {
+        const pinned = wasPinnedBeforeViewportChange({
+          scrollTop: scroller.scrollTop,
+          scrollHeight: next,
+          prevClientHeight: prevClient,
+        });
+        if (pinned) scroller.scrollTop = next; // clamps to max
+        diag("viewport-resize", {
+          prevClient,
+          client,
+          scrollTop: Math.round(scroller.scrollTop),
+          pinned,
+        });
+        return;
+      }
+      if (!contentChanged) return;
       const settling = isSettling();
       if (settling) armSettle(); // still churning — extend the quiet window
-      const wasAtBottom = scroller.scrollTop + scroller.clientHeight >= prev - 6;
+      const wasAtBottom = scroller.scrollTop + prevClient >= prev - 6;
       const hold = shouldHoldBottom({ settling, turnInFlight: s.turnInFlight, wasAtBottom });
 
       if (hold) {
@@ -241,6 +303,10 @@ export function ConversationAnchorHold({
       }
     });
     ro.observe(content);
+    // Also the scroller itself: a sibling appearing above it (the
+    // preparing-review banner) or below it (the composer growing) changes only
+    // this box, and the content-only observers never fire.
+    ro.observe(scroller);
     return () => {
       ro.disconnect();
       scroller.removeEventListener("scroll", refreshAnchor);
