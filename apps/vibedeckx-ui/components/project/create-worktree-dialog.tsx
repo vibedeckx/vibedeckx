@@ -640,7 +640,13 @@ export function CreateWorktreeDialog({
           )}
         </div>
 
-        <DialogFooter className="flex-row items-center gap-2.5 border-t bg-muted/40 px-4 py-3">
+        {/* `min-w-0`: this is a grid row of the dialog, so its automatic minimum
+            size is its min-content width — and the note below never wraps, so
+            that width is the whole sentence. Without this the footer widens the
+            dialog's only column and drags the header and the fields out past
+            the edge, the moment the note grows from "Looking up…" to the names
+            of the machines. */}
+        <DialogFooter className="min-w-0 flex-row items-center gap-2.5 border-t bg-muted/40 px-4 py-3">
           <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
             {loading || fetchedMachines.status === "loading" ? (
               <Loader2 className="size-3 shrink-0 animate-spin" />
@@ -649,7 +655,7 @@ export function CreateWorktreeDialog({
             ) : (
               <Info className="size-3 shrink-0" />
             )}
-            <span className="truncate">
+            <span className="min-w-0 truncate">
               {loading ? "Checking out the worktree…" : destination()}
             </span>
           </span>
