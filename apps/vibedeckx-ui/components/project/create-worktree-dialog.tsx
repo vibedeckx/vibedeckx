@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { api, type Project, type ProjectRemote } from "@/lib/api";
+import { useOptionalProjectRemotesContext } from "@/hooks/project-remotes-context";
 import {
   adoptedTargets,
   describeTargetResults,
@@ -98,8 +99,26 @@ export function CreateWorktreeDialog({
   // `useProjectRemotes`: that hook reports "loaded" after a failed request too,
   // and a create that silently goes local-only because the remote list could
   // not be read is the one outcome this dialog must never produce.
-  const [machineLoad, setMachineLoad] = useState<MachineLoad>({ status: "loading" });
+  const [fetchedMachines, setFetchedMachines] = useState<MachineLoad>({ status: "loading" });
   const [reloadNonce, setReloadNonce] = useState(0);
+
+  // Head start: the project screen has been holding this project's remotes
+  // since it was selected, so the dialog can open already showing them —
+  // knowing the machines only after a round trip is what made it resize itself
+  // in front of the user. A non-empty shared list can only have come from a
+  // successful fetch; an empty one is ambiguous (that hook calls a failed
+  // request "loaded" too), so it is left to this dialog's own fetch below.
+  const shared = useOptionalProjectRemotesContext();
+  const sharedRemotes =
+    shared && shared.remotes.length > 0 && !shared.loading ? shared.remotes : null;
+
+  const machineLoad: MachineLoad =
+    fetchedMachines.status !== "loading"
+      ? fetchedMachines
+      : sharedRemotes
+        ? { status: "ready", remotes: sharedRemotes }
+        : fetchedMachines;
+
   const remotes = machineLoad.status === "ready" ? machineLoad.remotes : EMPTY_REMOTES;
   const remotesLoaded = machineLoad.status === "ready";
 
@@ -108,14 +127,14 @@ export function CreateWorktreeDialog({
   useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    setMachineLoad({ status: "loading" });
+    setFetchedMachines({ status: "loading" });
     api.getProjectRemotes(projectId).then(
       (list) => {
-        if (!cancelled) setMachineLoad({ status: "ready", remotes: list });
+        if (!cancelled) setFetchedMachines({ status: "ready", remotes: list });
       },
       (err) => {
         if (cancelled) return;
-        setMachineLoad({
+        setFetchedMachines({
           status: "error",
           message: err instanceof Error ? err.message : "Could not read this project's machines",
         });
@@ -181,6 +200,12 @@ export function CreateWorktreeDialog({
     setBranchName(initialBranchName ?? "");
   }, [open, initialBranchName]);
 
+  // Which machines to ask, as a value rather than an array identity: the shared
+  // list and this dialog's own fetch produce equal lists in different arrays,
+  // and re-running on that would query every machine a second time for the same
+  // answer — and reset the base branch under a user who had already picked one.
+  const machineKey = machines.map((m) => m.id).join("\n");
+
   // Every machine is asked for its own branches: with several remotes linked,
   // "the remote's branches" is the first remote's, and a start point that only
   // exists on another one would never be offered.
@@ -188,7 +213,7 @@ export function CreateWorktreeDialog({
     if (!open || machineLoad.status !== "ready") return;
 
     setBranchesLoading(true);
-    const sources = machines.length > 0 ? machines.map((m) => m.id) : [undefined];
+    const sources = machineKey ? machineKey.split("\n") : [undefined];
 
     let cancelled = false;
     Promise.all(sources.map((target) => api.getProjectBranches(projectId, target))).then((lists) => {
@@ -206,14 +231,19 @@ export function CreateWorktreeDialog({
         }
       }
       setBranches(union);
-      setBaseBranch(union.includes("main") ? "main" : union[0] || "main");
+      // A machine joining the list re-runs this. The user may have picked a
+      // base branch by then, and silently cutting from a different one is the
+      // kind of wrong that only shows up in the commit history.
+      setBaseBranch((picked) =>
+        union.includes(picked) ? picked : union.includes("main") ? "main" : union[0] || "main",
+      );
       setBranchesLoading(false);
     });
 
     return () => {
       cancelled = true;
     };
-  }, [open, projectId, machines, machineLoad.status]);
+  }, [open, projectId, machineKey, machineLoad.status]);
 
   // Machines the user has had a say over. Remotes arrive a fetch after the
   // local row, so each machine takes its default tick when it first appears
@@ -260,9 +290,12 @@ export function CreateWorktreeDialog({
   // Nothing to pick from means nothing to send: the server then creates on
   // every machine the project has, which is the only sensible whole.
   const noMachinePicked = machines.length > 0 && selectedIds.length === 0;
-  // Creating before the remote links land would quietly create local-only on a
-  // project that has machines the user never saw listed.
-  const canCreate = !!trimmedBranch && !nameError && !noMachinePicked && !loading && remotesLoaded;
+  // The shared list is a head start for what to show, never a licence to
+  // submit: it is as old as the last time the project screen fetched it, so a
+  // remote linked since then would be missed by a create that went out on it.
+  // Only this dialog's own, just-confirmed list may be created on.
+  const machinesConfirmed = fetchedMachines.status === "ready";
+  const canCreate = !!trimmedBranch && !nameError && !noMachinePicked && !loading && machinesConfirmed;
 
   const handleCreate = async () => {
     if (!canCreate) return;
@@ -296,8 +329,11 @@ export function CreateWorktreeDialog({
 
       onWorktreeCreated(result.worktree.branch!);
       if (!result.partialSuccess) {
-        onOpenChange(false);
-        setBranchName("");
+        // Through the same door as Cancel. Closing straight through the prop
+        // would skip the reset, and the base branch picked here would come back
+        // as the next workspace's default — while a cancelled dialog reopened
+        // on main. One dialog, two defaults, decided by how it last closed.
+        handleOpenChange(false);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create workspace");
@@ -315,7 +351,7 @@ export function CreateWorktreeDialog({
       setBaseBranch("main");
       setSelected(null);
       decidedRef.current = new Set();
-      setMachineLoad({ status: "loading" });
+      setFetchedMachines({ status: "loading" });
     }
     onOpenChange(newOpen);
   };
@@ -324,6 +360,9 @@ export function CreateWorktreeDialog({
   const destination = () => {
     if (machineLoad.status === "error") return "Cannot tell which machines this project has";
     if (!remotesLoaded) return "Looking up this project's machines…";
+    // Rows are on screen from the shared list; this is the moment between that
+    // and the answer being confirmed, and it is why Create is not live yet.
+    if (!machinesConfirmed) return "Confirming this project's machines…";
     if (machines.length === 0) return "Creates a worktree on every machine";
     if (selectedIds.length === 0) return "Pick at least one machine";
     const labels = machines.filter((m) => selected?.has(m.id)).map((m) => m.label);
@@ -344,7 +383,7 @@ export function CreateWorktreeDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
-        className="sm:max-w-[520px] h-[560px] max-h-[85vh] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 p-0 overflow-hidden"
+        className="sm:max-w-[520px] max-h-[85vh] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 p-0 overflow-hidden"
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleCreate();
         }}
@@ -365,7 +404,7 @@ export function CreateWorktreeDialog({
           </div>
         </DialogHeader>
 
-        <div className="flex min-h-0 flex-col gap-3.5 px-4 py-3.5">
+        <div className="flex min-h-0 flex-col gap-3.5 overflow-y-auto px-4 py-3.5">
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-2">
               <label
@@ -458,8 +497,8 @@ export function CreateWorktreeDialog({
             </p>
           </div>
 
-          {machines.length > 0 && (
-            <div className="flex min-h-0 flex-1 flex-col gap-2">
+          {(machines.length > 0 || machineLoad.status === "loading") && (
+            <div className="flex min-h-0 flex-col gap-2">
               <div className="flex items-center gap-2">
                 <span className="text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
                   Create On
@@ -469,10 +508,17 @@ export function CreateWorktreeDialog({
                   {repairing ? "Ticked where it is missing" : "Pick at least one"}
                 </span>
               </div>
-              {/* The scroll region: a project can be linked to many remotes, and
-                  the dialog keeps its height so the base branch and the footer
-                  stay in place however many there are. */}
-              <div className="-mx-1 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-1 py-0.5">
+              {/* The scroll region: a project can be linked to many remotes.
+                  Rows are ~36px with an 8px gap, in a box with 2px of padding.
+                  The floor is one row (40px): a project with a single machine
+                  shows it and nothing else, and the box does not collapse while
+                  the list is still loading. The list usually arrives already
+                  seeded from the project screen, so the height is settled
+                  before the dialog is on screen.
+                  The ceiling is three rows and a sliver of the fourth
+                  (3 × 36 + 2 × 8 + 4 + 16 = 144): the cut edge reads as "there
+                  is more" without the dialog growing to say it. */}
+              <div className="-mx-1 flex min-h-[40px] max-h-[144px] flex-col gap-2 overflow-y-auto px-1 py-0.5">
                 {machines.map((machine) => {
                   const checked = !!selected?.has(machine.id);
                   const hasBranch = machinesWithBranch.has(machine.id);
@@ -572,7 +618,7 @@ export function CreateWorktreeDialog({
 
         <DialogFooter className="flex-row items-center gap-2.5 border-t bg-muted/40 px-4 py-3">
           <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
-            {loading || machineLoad.status === "loading" ? (
+            {loading || fetchedMachines.status === "loading" ? (
               <Loader2 className="size-3 shrink-0 animate-spin" />
             ) : noMachinePicked || machineLoad.status === "error" ? (
               <Lock className="size-3 shrink-0" />

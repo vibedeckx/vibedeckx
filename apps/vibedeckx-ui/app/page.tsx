@@ -933,6 +933,11 @@ Please proceed step by step and let me know if there are any issues or conflicts
     <FocusRegionProvider>
     <LocateProvider>
     <div className="h-screen flex flex-col w-full">
+      {/* One remote list for the whole project screen. It covers the dialogs as
+          well as the panels: the create-workspace dialog needs to know the
+          project's machines the moment it opens, and by then this has had them
+          since the project was selected. */}
+      <ProjectRemotesProvider projectId={currentProject?.id ?? undefined}>
         {/* Header with Project Selector */}
         <div data-focus-region="default" className="border-b border-border bg-card px-3 h-[44px] flex items-center justify-between sticky top-0 z-10">
           <div className="flex items-center gap-[9px]">
@@ -1091,7 +1096,6 @@ Please proceed step by step and let me know if there are any issues or conflicts
 
           {/* Workspace View — kept mounted, hidden via CSS to preserve WebSocket */}
           <div className={(activeView !== 'workspace' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden flex'}>
-           <ProjectRemotesProvider projectId={currentProject?.id ?? undefined}>
             <ResizablePanelGroup direction="horizontal" autoSaveId="workspace-panels">
               {/* Left Panel: Project Card + Main Chat */}
               <ResizablePanel defaultSize={33} minSize={25}>
@@ -1191,7 +1195,6 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 </div>
               </ResizablePanel>
             </ResizablePanelGroup>
-           </ProjectRemotesProvider>
           </div>
 
           {/* Tasks View — kept mounted, hidden via CSS */}
@@ -1347,7 +1350,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
           onNavigateWorkspace={handleSwitcherWorkspace}
           onNavigateSession={handleSwitcherSession}
         />
-      </div>
+      </ProjectRemotesProvider>
+    </div>
     </LocateProvider>
     </FocusRegionProvider>
   );

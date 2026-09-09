@@ -36,6 +36,15 @@ export function ProjectRemotesProvider({
   );
 }
 
+/**
+ * The shared list when a provider is above, null when there is none. For
+ * components that can render outside the project screen and only want the list
+ * as a head start, not as their source of truth.
+ */
+export function useOptionalProjectRemotesContext(): ProjectRemotesContextValue | null {
+  return useContext(ProjectRemotesContext);
+}
+
 export function useProjectRemotesContext(): ProjectRemotesContextValue {
   const ctx = useContext(ProjectRemotesContext);
   if (!ctx) {

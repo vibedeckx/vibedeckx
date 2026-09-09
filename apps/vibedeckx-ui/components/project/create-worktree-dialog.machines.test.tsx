@@ -9,8 +9,16 @@ const getProjectBranches = vi.hoisted(() => vi.fn());
 const createWorktree = vi.hoisted(() => vi.fn());
 const getProjectRemotes = vi.hoisted(() => vi.fn());
 
+// What the project screen already holds, when the dialog renders under it.
+const sharedRemotes = vi.hoisted(() => ({
+  value: null as null | { remotes: unknown[]; loading: boolean; loaded: boolean; refresh: () => Promise<void> },
+}));
+
 vi.mock("@/lib/api", () => ({
   api: { getProjectBranches, createWorktree, getProjectRemotes },
+}));
+vi.mock("@/hooks/project-remotes-context", () => ({
+  useOptionalProjectRemotesContext: () => sharedRemotes.value,
 }));
 vi.mock("sonner", () => ({ toast: { info: vi.fn(), success: vi.fn(), error: vi.fn() } }));
 
@@ -42,13 +50,17 @@ describe("CreateWorktreeDialog machine list", () => {
   let container: HTMLElement;
   let root: Root;
 
-  const render = (props?: { initialBranchName?: string; initialTargets?: WorkspaceTargetState[] }) =>
+  const render = (props?: {
+    initialBranchName?: string;
+    initialTargets?: WorkspaceTargetState[];
+    open?: boolean;
+  }) =>
     act(async () => {
       root.render(
         <CreateWorktreeDialog
           projectId="p1"
           project={project}
-          open
+          open={props?.open ?? true}
           onOpenChange={() => {}}
           onWorktreeCreated={() => {}}
           initialBranchName={props?.initialBranchName}
@@ -87,6 +99,7 @@ describe("CreateWorktreeDialog machine list", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    sharedRemotes.value = null;
     getProjectBranches.mockResolvedValue(["main", "dev"]);
     createWorktree.mockResolvedValue({ worktree: { branch: "feature/x" } });
     getProjectRemotes.mockResolvedValue([
@@ -110,6 +123,117 @@ describe("CreateWorktreeDialog machine list", () => {
     expect(document.body.textContent).toContain("Remote · gpu-01");
     expect(document.body.textContent).toContain("Remote · gpu-02");
     expect(machineRows().every((box) => box.checked)).toBe(true);
+  });
+
+  it("opens already showing the machines the project screen knows", async () => {
+    sharedRemotes.value = {
+      remotes: [remote("srv-1", "gpu-01", "/srv/work/vibedeckx"), remote("srv-2", "gpu-02", "/srv/work/vibedeckx")],
+      loading: false,
+      loaded: true,
+      refresh: async () => {},
+    };
+    // The dialog's own request never settles, so anything on screen can only
+    // be the list the app was already holding — no round trip, no resize.
+    getProjectRemotes.mockReturnValue(new Promise(() => {}));
+
+    await render();
+
+    expect(machineRows()).toHaveLength(3);
+    expect(document.body.textContent).toContain("Remote · gpu-02");
+  });
+
+  it("does not carry one workspace's base branch into the next", async () => {
+    // No machine reports "main", so the pick lands on "dev".
+    getProjectBranches.mockResolvedValue(["dev", "release"]);
+
+    await render();
+    await typeBranch("feature/x");
+
+    const baseBranch = () =>
+      document.body.querySelector('[data-slot="select-trigger"]')?.textContent;
+    expect(baseBranch()).toBe("dev");
+
+    await clickCreate();
+    expect(createWorktree).toHaveBeenCalledTimes(1);
+    // The parent closes the dialog on a create that fully succeeded.
+    await render({ open: false });
+
+    // Opened again, on machines that do report "main": the next workspace gets
+    // the default, not whatever the last one happened to be cut from.
+    getProjectBranches.mockResolvedValue(["main", "dev", "release"]);
+    await render();
+
+    expect(baseBranch()).toBe("main");
+  });
+
+  it("will not create on a shared list it has not confirmed", async () => {
+    sharedRemotes.value = {
+      remotes: [remote("srv-1", "gpu-01", "/srv/work/vibedeckx")],
+      loading: false,
+      loaded: true,
+      refresh: async () => {},
+    };
+    getProjectRemotes.mockReturnValue(new Promise(() => {}));
+
+    await render();
+    await typeBranch("feature/x");
+
+    // The shared list is as old as the project screen's last fetch: a remote
+    // linked since then would be missed by a create that went out now.
+    expect(createButton().hasAttribute("disabled")).toBe(true);
+    expect(document.body.textContent).toContain("Confirming this project's machines");
+    expect(createWorktree).not.toHaveBeenCalled();
+  });
+
+  it("keeps the picked base branch when a late machine widens the list", async () => {
+    // The project screen knows one remote; a second was linked since, and only
+    // this dialog's own fetch turns it up.
+    sharedRemotes.value = {
+      remotes: [remote("srv-1", "gpu-01", "/srv/work/vibedeckx")],
+      loading: false,
+      loaded: true,
+      refresh: async () => {},
+    };
+    let confirm: (list: ProjectRemote[]) => void;
+    getProjectRemotes.mockReturnValue(new Promise<ProjectRemote[]>((resolve) => { confirm = resolve; }));
+    getProjectBranches.mockImplementation(async (_id: string, target?: string) => {
+      if (target === "local") return ["dev", "release"];
+      if (target === "srv-1") return ["dev"];
+      return ["main", "dev"];
+    });
+
+    await render();
+
+    const baseBranch = () =>
+      document.body.querySelector('[data-slot="select-trigger"]')?.textContent;
+    // No "main" among the first two machines, so the pick landed on "dev".
+    expect(baseBranch()).toBe("dev");
+
+    await act(async () => {
+      confirm([
+        remote("srv-1", "gpu-01", "/srv/work/vibedeckx"),
+        remote("srv-2", "gpu-02", "/srv/work/vibedeckx"),
+      ]);
+    });
+
+    // gpu-02 brings "main" into the list, which the default would prefer —
+    // but "dev" is still a valid start point and is the one that was picked.
+    expect(document.body.textContent).toContain("3 branches");
+    expect(baseBranch()).toBe("dev");
+  });
+
+  it("does not re-query branches when the confirmed list matches the shared one", async () => {
+    sharedRemotes.value = {
+      remotes: [remote("srv-1", "gpu-01", "/srv/work/vibedeckx"), remote("srv-2", "gpu-02", "/srv/work/vibedeckx")],
+      loading: false,
+      loaded: true,
+      refresh: async () => {},
+    };
+
+    await render();
+
+    // Same machines, a different array: one query per machine, not two.
+    expect(getProjectBranches).toHaveBeenCalledTimes(3);
   });
 
   it("picks the base branch once, from every machine's own branches", async () => {
