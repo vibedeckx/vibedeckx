@@ -967,6 +967,111 @@ describe("worktree routes persisted identity", () => {
       .toMatchObject({ status: "error", error: "concurrent health check" });
   });
 
+  it("creates only on the remotes the caller named", async () => {
+    const first = await storage.remoteServers.create({ name: "gpu-01" });
+    const second = await storage.remoteServers.create({ name: "gpu-02" });
+    await storage.projectRemotes.add({
+      project_id: "p1", remote_server_id: first.id, remote_path: "/srv/one",
+    });
+    await storage.projectRemotes.add({
+      project_id: "p1", remote_server_id: second.id, remote_path: "/srv/two",
+    });
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true,
+      status: 201,
+      data: { worktree: { branch: "dev", worktreePath: "/srv/two/../dev" } },
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      // A machine is named by its remote server id: with several remotes, one
+      // "remote" checkbox could not say which of them the user picked.
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local", second.id] },
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(Object.keys(created.json().results).sort()).toEqual(["local", second.id].sort());
+    expect(proxyToRemoteAuto).toHaveBeenCalledTimes(1);
+    expect(proxyToRemoteAuto.mock.calls[0][0]).toBe(second.id);
+    // The remote left out is left alone — no half-made checkout row for it.
+    expect(await storage.workspaceRegistry.getByProjectBranch("p1", "dev", first.id)).toBeUndefined();
+  });
+
+  it("lists branches from the named remote, not just the first one", async () => {
+    const first = await storage.remoteServers.create({ name: "gpu-01" });
+    const second = await storage.remoteServers.create({ name: "gpu-02" });
+    await storage.projectRemotes.add({
+      project_id: "p1", remote_server_id: first.id, remote_path: "/srv/one",
+    });
+    await storage.projectRemotes.add({
+      project_id: "p1", remote_server_id: second.id, remote_path: "/srv/two",
+    });
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: { branches: ["main", "only-on-two"] },
+    });
+
+    const listed = await app.inject({
+      method: "GET",
+      url: `/api/projects/p1/branches?target=${second.id}`,
+    });
+
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json().branches).toEqual(["main", "only-on-two"]);
+    expect(proxyToRemoteAuto.mock.calls[0][0]).toBe(second.id);
+    expect(proxyToRemoteAuto.mock.calls[0][2]).toContain(encodeURIComponent("/srv/two"));
+  });
+
+  it("refuses branches from a machine the project does not have", async () => {
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/projects/p1/branches?target=srv-gone",
+    });
+
+    expect(listed.statusCode).toBe(400);
+    expect(listed.json().error).toContain("srv-gone");
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+  });
+
+  it("refuses a target that is not one of the project's machines", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local", "srv-gone"] },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toContain("srv-gone");
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+  });
+
+  it("still takes the legacy 'remote' target as every linked remote", async () => {
+    const first = await storage.remoteServers.create({ name: "gpu-01" });
+    const second = await storage.remoteServers.create({ name: "gpu-02" });
+    await storage.projectRemotes.add({
+      project_id: "p1", remote_server_id: first.id, remote_path: "/srv/one",
+    });
+    await storage.projectRemotes.add({
+      project_id: "p1", remote_server_id: second.id, remote_path: "/srv/two",
+    });
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true,
+      status: 201,
+      data: { worktree: { branch: "dev", worktreePath: "/srv/one/../dev" } },
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local", "remote"] },
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(proxyToRemoteAuto).toHaveBeenCalledTimes(2);
+  });
+
   it("uses the canonical pseudo project for path-based registry rows", async () => {
     const pseudoProjectId = `path:${projectPath}`;
     await storage.projects.create({ id: pseudoProjectId, name: "provider repo", path: projectPath });

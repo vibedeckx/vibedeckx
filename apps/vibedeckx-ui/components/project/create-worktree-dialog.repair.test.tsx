@@ -6,8 +6,11 @@ import type { Project } from "@/lib/api";
 
 const getProjectBranches = vi.hoisted(() => vi.fn());
 const createWorktree = vi.hoisted(() => vi.fn());
+const getProjectRemotes = vi.hoisted(() => vi.fn());
 
-vi.mock("@/lib/api", () => ({ api: { getProjectBranches, createWorktree } }));
+vi.mock("@/lib/api", () => ({
+  api: { getProjectBranches, createWorktree, getProjectRemotes },
+}));
 vi.mock("sonner", () => ({ toast: { info: vi.fn(), success: vi.fn(), error: vi.fn() } }));
 
 import { CreateWorktreeDialog } from "./create-worktree-dialog";
@@ -48,6 +51,16 @@ describe("CreateWorktreeDialog opened to repair a workspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getProjectBranches.mockResolvedValue(["main", "dev"]);
+    getProjectRemotes.mockResolvedValue([
+      {
+        id: "link-1",
+        project_id: "p1",
+        remote_server_id: "srv-1",
+        remote_path: "/srv/echo-read-app",
+        sort_order: 0,
+        server_name: "mac",
+      },
+    ]);
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);

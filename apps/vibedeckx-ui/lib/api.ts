@@ -372,14 +372,18 @@ export type MergeStatusBatchResult =
   | { ok: true; repository: MergeStatusRepository; entries: ProjectMergeStatusPairEntry[] }
   | { ok: false; status: number }; // status 0 = thrown fetch/network error
 
-export type WorktreeTarget = "local" | "remote";
+/**
+ * A machine to create a workspace on: "local", a remote server id, or the
+ * legacy "remote" (every linked remote at once).
+ */
+export type WorktreeTarget = string;
 
 export interface WorktreeTargetResult extends WorktreeTargetOutcome {
   worktree?: { branch: string };
 }
 
 // Keys are "local", "remote" (single-remote projects), or a remote server id
-// (multi-remote projects) — never assume the WorktreeTarget pair.
+// (multi-remote projects) — never assume a fixed local/remote pair.
 export interface WorktreeCreateResult {
   /** `adopted`: the branch already existed on that target and was reused. */
   worktree: Worktree & { adopted?: boolean };
@@ -1758,7 +1762,8 @@ export const api = {
     return data.files;
   },
 
-  async getProjectBranches(id: string, target?: "local" | "remote"): Promise<string[]> {
+  // `target` names one machine: "local", a remote server id, or legacy "remote".
+  async getProjectBranches(id: string, target?: string): Promise<string[]> {
     try {
       const params = new URLSearchParams();
       if (target) params.set("target", target);
@@ -1856,15 +1861,15 @@ export const api = {
     projectId: string,
     branchName: string,
     targets?: WorktreeTarget[],
-    baseBranch?: string,
-    remoteBaseBranch?: string
+    // One base branch for every picked machine: the server cuts the new branch
+    // from it wherever the branch does not already exist.
+    baseBranch?: string
   ): Promise<WorktreeCreateResult> {
-    const body: { branchName: string; targets?: WorktreeTarget[]; baseBranch?: string; remoteBaseBranch?: string } = { branchName };
+    const body: { branchName: string; targets?: WorktreeTarget[]; baseBranch?: string } = { branchName };
     if (targets && targets.length > 0) {
       body.targets = targets;
     }
     if (baseBranch) body.baseBranch = baseBranch;
-    if (remoteBaseBranch) body.remoteBaseBranch = remoteBaseBranch;
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/worktrees`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

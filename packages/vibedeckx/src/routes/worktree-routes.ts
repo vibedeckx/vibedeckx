@@ -789,7 +789,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Get branches for a project
   fastify.get<{
     Params: { id: string };
-    Querystring: { target?: "local" | "remote" };
+    // `target` names one machine: "local", a remote server id, or the legacy
+    // "remote" (the project's primary remote).
+    Querystring: { target?: string };
   }>("/api/projects/:id/branches", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -801,25 +803,39 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const target = req.query.target || "local";
     const hasLocal = !!project.path;
-    const remoteConfig = await getRemoteConfig(fastify, project);
+    const remoteConfigs = await getAllRemoteConfigs(fastify, project);
+    const remoteConfig = remoteConfigs[0] ?? null;
     const hasRemote = !!remoteConfig;
 
-    const proxyBranchesToRemote = async () => {
+    const proxyBranchesTo = async (rc: RemoteConfig) => {
       const result = await proxyToRemoteAuto(
-        remoteConfig!.serverId,
+        rc.serverId,
         "GET",
-        `/api/path/branches?path=${encodeURIComponent(remoteConfig!.remotePath)}`,
+        `/api/path/branches?path=${encodeURIComponent(rc.remotePath)}`,
         undefined,
         { reverseConnectManager: fastify.reverseConnectManager }
       );
       return reply.code(proxyStatus(result)).send(result.data);
     };
 
+    const proxyBranchesToRemote = async () => proxyBranchesTo(remoteConfig!);
+
     if (target === "remote") {
       if (!hasRemote) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }
       return proxyBranchesToRemote();
+    }
+
+    if (target !== "local") {
+      // A named remote: with several linked, "the remote" is not an answer —
+      // a base branch that only lives on the third one is still a valid start
+      // point for a workspace created there.
+      const named = remoteConfigs.find((rc) => rc.serverId === target);
+      if (!named) {
+        return reply.code(400).send({ error: `Unknown target '${target}'` });
+      }
+      return proxyBranchesTo(named);
     }
 
     // target === "local"
@@ -1081,7 +1097,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // 创建新的 git worktree
   fastify.post<{
     Params: { id: string };
-    Body: { branchName: string; targets?: ("local" | "remote")[]; baseBranch?: string; remoteBaseBranch?: string };
+    // `targets` names machines: "local", a remote server id, or the legacy
+    // "remote" (every linked remote at once), which older UIs still send.
+    Body: { branchName: string; targets?: string[]; baseBranch?: string; remoteBaseBranch?: string };
   }>("/api/projects/:id/worktrees", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -1115,11 +1133,38 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const hasLocal = !!project.path;
     const remoteConfigs = await getAllRemoteConfigs(fastify, project);
     const hasRemote = remoteConfigs.length > 0;
-    let targets: ("local" | "remote")[];
+    const requested = (req.body.targets ?? []).map((t) => String(t).trim()).filter(Boolean);
 
-    if (req.body.targets && req.body.targets.length > 0) {
-      targets = req.body.targets;
-    } else if (hasLocal && hasRemote) {
+    let wantLocal: boolean;
+    let selectedRemotes: RemoteConfig[];
+
+    if (requested.length > 0) {
+      wantLocal = requested.includes("local");
+      const remoteRequests = requested.filter((t) => t !== "local");
+      if (remoteRequests.includes("remote")) {
+        // Legacy shorthand: one checkbox standing for every linked remote.
+        selectedRemotes = remoteConfigs;
+      } else {
+        const byId = new Map(remoteConfigs.map((rc) => [rc.serverId, rc]));
+        selectedRemotes = [];
+        for (const id of new Set(remoteRequests)) {
+          const rc = byId.get(id);
+          if (!rc) {
+            return reply.code(400).send({ error: `Unknown target '${id}'` });
+          }
+          selectedRemotes.push(rc);
+        }
+      }
+      if (wantLocal && !hasLocal) {
+        return reply.code(400).send({ error: "Project has no local path" });
+      }
+      if (remoteRequests.length > 0 && !hasRemote) {
+        return reply.code(400).send({ error: "Project has no remote configuration" });
+      }
+      if (!wantLocal && selectedRemotes.length === 0) {
+        return reply.code(400).send({ error: "No target machines selected" });
+      }
+    } else {
       // Every machine the project has, unless the caller narrowed it. A
       // workspace that exists on only some of them is the broken state this
       // route's own partial-success reporting exists to describe, so it must
@@ -1127,19 +1172,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // nothing: linked remotes live in `project_remotes`, while the UI's
       // local+remote choice keys off the legacy `projects.remote_path`, which
       // adding a remote never sets.
-      targets = ["local", "remote"];
-    } else if (!hasLocal && hasRemote) {
-      targets = ["remote"];
-    } else {
-      targets = ["local"];
-    }
-
-    // Validate targets against project capabilities
-    if (targets.includes("local") && !hasLocal) {
-      return reply.code(400).send({ error: "Project has no local path" });
-    }
-    if (targets.includes("remote") && !hasRemote) {
-      return reply.code(400).send({ error: "Project has no remote configuration" });
+      if (!hasLocal && !hasRemote) {
+        return reply.code(400).send({ error: "Project has no local path" });
+      }
+      wantLocal = hasLocal;
+      selectedRemotes = remoteConfigs;
     }
 
     // Helper to create worktree on a single remote
@@ -1207,18 +1244,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
     };
 
-    // Single-target: remote only
-    if (targets.length === 1 && targets[0] === "remote") {
-      if (remoteConfigs.length === 1) {
+    // Remote(s) only
+    if (!wantLocal) {
+      if (selectedRemotes.length === 1 && remoteConfigs.length === 1) {
         // Single remote: backward-compatible flat response
-        const result = await createOnRemote(remoteConfigs[0]);
+        const result = await createOnRemote(selectedRemotes[0]);
         return reply.code(proxyStatus(result, 201)).send(result.data);
       }
 
-      // Multiple remotes: create on all in parallel
+      // Multiple remotes: create on all the picked ones in parallel
       const results: Record<string, TargetCreateResult> = {};
       const settled = await Promise.allSettled(
-        remoteConfigs.map(async (rc) => {
+        selectedRemotes.map(async (rc) => {
           const key = rc.serverId;
           const label = rc.serverName;
           console.log(`[worktree] Creating remote worktree: project=${req.params.id}, branch=${trimmedBranch}, serverId=${rc.serverId}`);
@@ -1282,7 +1319,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     };
 
     // Single-target: local only (backward-compatible path)
-    if (targets.length === 1 && targets[0] === "local") {
+    if (selectedRemotes.length === 0) {
       try {
         const worktree = await createLocal();
         return reply.code(201).send({ worktree });
@@ -1311,9 +1348,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(500).send({ error: `Failed to create local worktree: ${errorMessage}` });
     }
 
-    // All remotes in parallel
+    // All picked remotes in parallel
     await Promise.allSettled(
-      remoteConfigs.map(async (rc) => {
+      selectedRemotes.map(async (rc) => {
         const key = remoteConfigs.length === 1 ? "remote" : rc.serverId;
         const label = rc.serverName;
         console.log(`[worktree] Creating remote worktree: project=${req.params.id}, branch=${trimmedBranch}, serverId=${rc.serverId}`);

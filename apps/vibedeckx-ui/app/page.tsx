@@ -103,9 +103,10 @@ export default function Home() {
   // A shell asked for on a named machine (from a delete that machine refused).
   // Carried as a nonce so asking twice opens a second terminal.
   const [terminalRequest, setTerminalRequest] = useState<{ targetId: string; nonce: number } | null>(null);
-  // Branch the create dialog opens on when it is repairing a workspace some
-  // machine never got, rather than starting a new one.
-  const [recreateBranch, setRecreateBranch] = useState<string | undefined>(undefined);
+  // Workspace the create dialog opens on when it is repairing one some machine
+  // never got, rather than starting a new one. The whole row is kept, not just
+  // the branch: its per-machine state is what tells the dialog where to create.
+  const [recreateWorkspace, setRecreateWorkspace] = useState<Worktree | undefined>(undefined);
   // The stand-in view for a review whose reviewer is still preparing, opened
   // from its sidebar row or the source conversation's banner. Identity only:
   // everything shown derives from the preparing-review store, and any other
@@ -987,7 +988,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             }}
             onRecreateWorktree={(wt) => {
               if (!wt.branch) return;
-              setRecreateBranch(wt.branch);
+              setRecreateWorkspace(wt);
               setCreateWorktreeDialogOpen(true);
             }}
             onAnchorRootWorkspace={async (branch) => {
@@ -1302,10 +1303,11 @@ Please proceed step by step and let me know if there are any issues or conflicts
             open={createWorktreeDialogOpen}
             onOpenChange={(open) => {
               setCreateWorktreeDialogOpen(open);
-              if (!open) setRecreateBranch(undefined);
+              if (!open) setRecreateWorkspace(undefined);
             }}
             onWorktreeCreated={handleWorktreeCreated}
-            initialBranchName={recreateBranch}
+            initialBranchName={recreateWorkspace?.branch ?? undefined}
+            initialTargets={recreateWorkspace?.targets}
           />
         )}
         <TaskDetailDialog
