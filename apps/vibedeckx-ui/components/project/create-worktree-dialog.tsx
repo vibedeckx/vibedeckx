@@ -383,7 +383,10 @@ export function CreateWorktreeDialog({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
-        className="sm:max-w-[520px] max-h-[85vh] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 p-0 overflow-hidden"
+        // 440 rather than the comp's 520: with one base-branch picker instead
+        // of the comp's two, and a name field that holds a branch name, the
+        // extra 80px read as an empty gutter rather than as room.
+        className="sm:max-w-[440px] max-h-[85vh] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 p-0 overflow-hidden"
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleCreate();
         }}
@@ -404,7 +407,7 @@ export function CreateWorktreeDialog({
           </div>
         </DialogHeader>
 
-        <div className="flex min-h-0 flex-col gap-3.5 overflow-y-auto px-4 py-3.5">
+        <div className="flex min-h-0 min-w-0 flex-col gap-3.5 overflow-y-auto px-4 py-3.5">
           <div className="flex flex-col gap-2">
             <div className="flex items-center gap-2">
               <label
@@ -466,32 +469,35 @@ export function CreateWorktreeDialog({
           </div>
 
           <div className="flex flex-col gap-2">
-            <span className="text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
-              Base Branch
-            </span>
+            {/* Same shape as the two fields around it: label left, the field's
+                own aside right, the control below at full width. */}
             <div className="flex items-center gap-2">
-              <Select
-                value={baseBranch}
-                onValueChange={setBaseBranch}
-                disabled={loading || branchesLoading || branches.length === 0}
-              >
-                <SelectTrigger size="sm" className="flex-1 font-mono text-[11.5px]">
-                  <SelectValue placeholder={branchesLoading ? "Loading branches…" : "Select branch"} />
-                </SelectTrigger>
-                <SelectContent>
-                  {branches.map((b) => (
-                    <SelectItem key={b} value={b} className="font-mono text-[11.5px]">
-                      {b}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.07em] text-muted-foreground">
+                Base Branch
+              </span>
+              <span className="flex-1" />
+              <span className="text-[10.5px] text-muted-foreground">
                 {branchesLoading
                   ? "Loading…"
                   : `${branches.length} ${branches.length === 1 ? "branch" : "branches"}`}
               </span>
             </div>
+            <Select
+              value={baseBranch}
+              onValueChange={setBaseBranch}
+              disabled={loading || branchesLoading || branches.length === 0}
+            >
+              <SelectTrigger size="sm" className="w-full font-mono text-[11.5px]">
+                <SelectValue placeholder={branchesLoading ? "Loading branches…" : "Select branch"} />
+              </SelectTrigger>
+              <SelectContent>
+                {branches.map((b) => (
+                  <SelectItem key={b} value={b} className="font-mono text-[11.5px]">
+                    {b}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <p className="text-[10.5px] text-muted-foreground">
               The same start point on every machine picked below.
             </p>
@@ -552,7 +558,9 @@ export function CreateWorktreeDialog({
                         {checked && <Check className="size-2.5" strokeWidth={3.5} />}
                       </span>
                       <span className="flex min-w-0 flex-1 items-center gap-2">
-                        <span className="shrink-0 text-[12.5px] font-medium">{machine.label}</span>
+                        <span className="max-w-[55%] shrink-0 truncate text-[12.5px] font-medium">
+                          {machine.label}
+                        </span>
                         {repairing && initialTargets && (
                           <span
                             // The machine's own error, when it kept one: a
@@ -572,7 +580,15 @@ export function CreateWorktreeDialog({
                             {hasBranch ? "Has it" : failure ? "Failed" : "Missing"}
                           </span>
                         )}
-                        <span className="ml-auto truncate font-mono text-[10.5px] text-muted-foreground">
+                        {/* `min-w-0` is what makes the truncation possible: a
+                            flex item's automatic minimum size is its min-content
+                            width, and a path has no spaces to break at, so
+                            without this the row is as wide as the longest path
+                            and pushes the whole dialog out with it. */}
+                        <span
+                          title={machine.path ?? undefined}
+                          className="ml-auto min-w-0 truncate font-mono text-[10.5px] text-muted-foreground"
+                        >
                           {machine.path}
                         </span>
                       </span>
