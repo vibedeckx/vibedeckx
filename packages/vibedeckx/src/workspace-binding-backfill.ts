@@ -1,4 +1,4 @@
-import type { Storage, WorkspaceBindingIssueReason } from "./storage/types.js";
+import type { RegisteredWorkspaceCheckout, Storage, WorkspaceBindingIssueReason } from "./storage/types.js";
 import { conventionalWorktreePath, getRegisteredWorktreeBranches } from "./utils/worktree-paths.js";
 
 /**
@@ -77,6 +77,136 @@ export async function registerReportedWorktrees(
   }
 }
 
+/** What one reconciliation did to the registry, for logs and tests. */
+export interface ReconcileSummary {
+  registered: number;
+  restored: number;
+  tombstoned: number;
+}
+
+/**
+ * The live registry rows of one machine, read *before* asking it for its
+ * list. A reconciliation only ever acts on what this snapshot holds, and only
+ * through conditional writes keyed on it: anything created or changed after
+ * the snapshot — a create that landed while the list was in flight — fails
+ * the condition and is left alone. Without that, an older answer would tell
+ * the hub to delete a workspace that had just been made.
+ */
+export async function snapshotLiveCheckouts(
+  storage: Storage,
+  projectId: string,
+  targetId: string,
+): Promise<RegisteredWorkspaceCheckout[]> {
+  return storage.workspaceRegistry.listByProject(projectId, targetId);
+}
+
+/**
+ * Make one machine's registry rows agree with the complete worktree list it
+ * just reported. Replaces the add-only registration for callers that hold a
+ * full list:
+ *
+ *   - reported, no row       → registered ready (as before)
+ *   - reported, row in error → back to ready: the machine has it, so whatever
+ *                              failed last time no longer describes it
+ *   - row ready, not reported → tombstoned: the worktree was removed by hand,
+ *                              and this is how the row stops resurrecting it
+ *   - row creating/deleting  → untouched: an operation is under way and the
+ *                              list may predate it
+ *
+ * Restores and tombstones are single conditional writes against the snapshot
+ * (see `snapshotLiveCheckouts`). The main workspace ("") is never tombstoned:
+ * it is the repository itself.
+ */
+export async function reconcileReportedWorktrees(
+  storage: Storage,
+  opts: {
+    projectId: string;
+    targetId: string;
+    remotePath: string;
+    worktrees: ReportedWorktree[];
+    snapshot: RegisteredWorkspaceCheckout[];
+  },
+): Promise<ReconcileSummary> {
+  const summary: ReconcileSummary = { registered: 0, restored: 0, tombstoned: 0 };
+  const snapshotByBranch = new Map(opts.snapshot.map((row) => [row.workspace.branch, row]));
+  const reported = new Set<string>();
+
+  for (const worktree of opts.worktrees) {
+    const branch = worktree.branch ?? "";
+    reported.add(branch);
+    const reportedPath = typeof worktree.worktreePath === "string" ? worktree.worktreePath : null;
+    const known = snapshotByBranch.get(branch);
+
+    if (known?.checkout.status === "creating" || known?.checkout.status === "deleting") continue;
+
+    // The worker's path is the true one; a row made from a guess (a create
+    // that timed out, say) takes it in the same write. Without a reported
+    // path the row keeps what it has.
+    const freshPath = reportedPath
+      && !(known?.checkout.path_source === "reported" && known.checkout.worktree_path === reportedPath)
+      ? { worktreePath: reportedPath, pathSource: "reported" as const }
+      : undefined;
+
+    if (known?.checkout.status === "error") {
+      const restored = await storage.workspaceRegistry.setCheckoutStatusIfCurrent(
+        known.checkout.id,
+        { status: "error", updatedAt: known.checkout.updated_at },
+        "ready",
+        null,
+        freshPath,
+      );
+      if (restored) summary.restored += 1;
+      continue;
+    }
+
+    if (known) {
+      // A ready row with a path worth refreshing. Conditional, like every
+      // other write here: a delete that began after the snapshot must not be
+      // turned back into ready by an older answer, and one that finished
+      // must not be followed by a fresh live row. The reason a delete
+      // refused it, if any, stays.
+      if (freshPath) {
+        await storage.workspaceRegistry.setCheckoutStatusIfCurrent(
+          known.checkout.id,
+          { status: "ready", updatedAt: known.checkout.updated_at },
+          "ready",
+          known.checkout.error,
+          freshPath,
+        );
+      }
+      continue;
+    }
+
+    // Not in the snapshot. A row that has appeared since is someone else's
+    // operation, whatever its state; the next listing will see its result.
+    const current = await storage.workspaceRegistry.getByProjectBranch(opts.projectId, branch, opts.targetId);
+    if (current) continue;
+    await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: opts.projectId,
+      branch,
+      targetId: opts.targetId,
+      worktreePath: reportedPath ?? (branch ? conventionalWorktreePath(opts.remotePath, branch) : opts.remotePath),
+      expectedBranch: branch,
+      pathSource: reportedPath ? "reported" : "conventional",
+    });
+    summary.registered += 1;
+  }
+
+  for (const row of opts.snapshot) {
+    if (row.workspace.branch === "" || reported.has(row.workspace.branch)) continue;
+    if (row.checkout.status !== "ready") continue;
+    // One conditional write: a claim followed by an unconditional delete
+    // would leave a window in which a create that had just reused the row
+    // gets its checkout tombstoned from under it.
+    const tombstoned = await storage.workspaceRegistry.markCheckoutDeletedIfCurrent(
+      row.checkout.id,
+      { status: "ready", updatedAt: row.checkout.updated_at },
+    );
+    if (tombstoned) summary.tombstoned += 1;
+  }
+  return summary;
+}
+
 /**
  * Lazily import the local worktrees this machine can still see, so historical
  * sessions have a checkout to bind to.
@@ -115,16 +245,21 @@ export async function syncRemoteWorkspaceRegistry(
     for (const remote of remotes) {
       if (opts.remoteServerId && remote.remote_server_id !== opts.remoteServerId) continue;
       try {
+        const snapshot = await snapshotLiveCheckouts(storage, project.id, remote.remote_server_id);
         const result = await listWorktrees(remote.remote_server_id, remote.remote_path);
         if (!result.ok) continue;
         const worktrees = (result.data as { worktrees?: ReportedWorktree[] })?.worktrees;
         if (!Array.isArray(worktrees)) continue;
-        await registerReportedWorktrees(storage, {
+        await reconcileReportedWorktrees(storage, {
           projectId: project.id,
           targetId: remote.remote_server_id,
           remotePath: remote.remote_path,
           worktrees,
+          snapshot,
         });
+        // A complete list has been registered: from here on, a workspace with
+        // no row on this remote is known to be absent there, not unconfirmed.
+        await storage.projectRemotes.markWorktreesSynced(project.id, remote.remote_server_id);
       } catch (error) {
         console.warn(
           `[WorkspaceBinding] Remote registry sync failed for ${project.id}/${remote.remote_server_id}:`,

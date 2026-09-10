@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { Anchor, AlertTriangle, Columns3, ListTodo, FolderOpen, Plus, Globe, Settings } from "lucide-react";
+import { Anchor, AlertTriangle, Columns3, ListTodo, FolderOpen, Plus, Globe, Settings, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProjectGlyph } from "@/components/project/project-glyph";
@@ -16,7 +16,7 @@ import type { Worktree, Project, Schedule } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 import type { ResidentSidebarSession } from "@/hooks/use-resident-sessions";
 import { effectiveTarget, type BranchMergeInfo } from "@/hooks/use-merge-status";
-import { describeWorkspaceTargets } from "@/lib/worktree-target-results";
+import { describeWorkspaceMachines, machineStateText, machinesFromTargets, workspaceContradiction, workspaceCoverage } from "@/lib/worktree-target-results";
 
 export type ActiveView = "workspace" | "tasks" | "schedules" | "remote-servers" | "settings" | "project-info" | "project-chat";
 
@@ -31,6 +31,10 @@ interface AppSidebarProps {
    * old project's main row would light up.
    */
   worktreesStale?: boolean;
+  /** The current remote could not be asked for the list; it is the hub's record of it. */
+  staleRemoteName?: string | null;
+  /** Sessions target a remote the project no longer has. */
+  activeRemoteInvalid?: boolean;
   selectedBranch?: string | null;
   onBranchChange?: (branch: string | null) => void;
   currentProject?: Project | null;
@@ -38,6 +42,8 @@ interface AppSidebarProps {
   onDeleteWorktree?: (worktree: Worktree) => void;
   /** Repair a workspace some machine never got: create it again, prefilled. */
   onRecreateWorktree?: (worktree: Worktree) => void;
+  /** Open a workspace's per-remote management (create where missing, retry, confirm). */
+  onManageWorkspaceRemotes?: (worktree: Worktree) => void;
   onAnchorRootWorkspace?: (branch: string) => void;
   /** Anchor the main workspace to a branch picked from the list, checked out or not. */
   onSetRootWorkspaceBranch?: (branch: string) => void;
@@ -218,12 +224,15 @@ export function AppSidebar({
   onViewChange,
   worktrees,
   worktreesStale,
+  staleRemoteName,
+  activeRemoteInvalid,
   selectedBranch,
   onBranchChange,
   currentProject,
   onCreateWorktreeOpen,
   onDeleteWorktree,
   onRecreateWorktree,
+  onManageWorkspaceRemotes,
   onAnchorRootWorkspace,
   onSetRootWorkspaceBranch,
   mergeStatuses,
@@ -443,6 +452,21 @@ export function AppSidebar({
         </SectionLabel>
 
         <div className="flex-1 min-h-0 overflow-y-auto">
+        {/* What the server said about the list: not an error, the list is
+            still the hub's record, but the user should know whose Git it
+            is not. */}
+        {currentProject && activeRemoteInvalid && (
+          <div role="status" className="mx-1 mb-1 flex items-start gap-1.5 rounded-[3px] border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10.5px] text-amber-700 dark:text-amber-400">
+            <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
+            <span>Sessions target a remote this project no longer has. Pick one in the session header.</span>
+          </div>
+        )}
+        {currentProject && staleRemoteName && (
+          <div role="status" className="mx-1 mb-1 flex items-start gap-1.5 rounded-[3px] border bg-muted/60 px-2 py-1 text-[10.5px] text-muted-foreground">
+            <WifiOff className="mt-px h-3 w-3 shrink-0" />
+            <span>{staleRemoteName} is offline; this list may not be current.</span>
+          </div>
+        )}
         {currentProject && worktrees && worktrees.length > 0 && (
           <>
             <TooltipProvider delayDuration={300}>
@@ -462,6 +486,14 @@ export function AppSidebar({
                   const locateId = wt.branch ?? "__main__";
                   const isLocateMatch = workspaceLocate?.matchSet.has(locateId) ?? false;
                   const isLocateSelected = workspaceLocate?.selectedId === locateId;
+                  // The per-machine view, from the newer field or the older
+                  // one an earlier server sends (only machines holding rows).
+                  const machines = wt.branch !== null
+                    ? wt.machines ?? (wt.targets ? machinesFromTargets(wt.targets) : undefined)
+                    : undefined;
+                  const contradiction = machines ? workspaceContradiction(machines) : null;
+                  const unfinishedDelete = wt.unfinishedDelete ?? contradiction?.unfinishedDelete ?? false;
+                  const contradicted = !!contradiction && (unfinishedDelete || contradiction.hasError);
                   return (
                     <div
                       key={wt.branch ?? "__main__"}
@@ -547,14 +579,14 @@ export function AppSidebar({
                             badge is on most rows most of the time, while this
                             is rare, so the rare one takes the outer slot and
                             the common one keeps its place. */}
-                        {wt.targets && (
+                        {contradicted && machines && (
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <button
-                                onClick={() => wt.unfinishedDelete
+                                onClick={() => unfinishedDelete
                                   ? onDeleteWorktree?.(wt)
                                   : onRecreateWorktree?.(wt)}
-                                aria-label={wt.unfinishedDelete
+                                aria-label={unfinishedDelete
                                   ? `Finish deleting ${branchLabel}`
                                   : `Create ${branchLabel} where it is missing`}
                                 className="shrink-0 p-0.5 rounded text-amber-600 dark:text-amber-400 hover:bg-muted transition-colors"
@@ -565,13 +597,13 @@ export function AppSidebar({
                             <TooltipContent side="right">
                               <div className="space-y-0.5">
                                 <div>
-                                  {wt.unfinishedDelete
+                                  {unfinishedDelete
                                     ? "Deleted on some machines only. Click to finish deleting."
-                                    : "Missing on some machines. Click to create it there."}
+                                    : "Failed on some machines. Click to create it there."}
                                 </div>
-                                {describeWorkspaceTargets(wt.targets, { unfinishedDelete: wt.unfinishedDelete }).map((line) => (
-                                  <div key={line.label} className="text-background/70">
-                                    {line.label}:{" "}
+                                {describeWorkspaceMachines(machines, { unfinishedDelete }).map((line) => (
+                                  <div key={line.name} className="text-background/70">
+                                    {line.name}:{" "}
                                     {line.failed
                                       // The tooltip surface is inverted (bg-foreground),
                                       // so the reds are swapped against the theme.
@@ -586,6 +618,48 @@ export function AppSidebar({
                             </TooltipContent>
                           </Tooltip>
                         )}
+                        {/* Coverage: the workspace is deliberately (or by a
+                            failed create) on only some of the project's
+                            machines. A normal state, so it gets a neutral
+                            count rather than the amber warning above; both
+                            can show at once (two of four have it, one
+                            failed), warning left, count right. Not rendered,
+                            and not reserved, when every machine has it. */}
+                        {wt.branch !== null && wt.machines && (() => {
+                          const coverage = workspaceCoverage(wt.machines);
+                          if (!coverage.missing) return null;
+                          const currentId = currentProject?.agent_mode ?? "local";
+                          const current = wt.machines.find((machine) => machine.serverId === currentId);
+                          const lead = current?.state === "absent"
+                            ? `Not on ${current.name}, the current remote. Exists on ${coverage.present} of ${coverage.total} remotes. Click to create it on the others.`
+                            : `Exists on ${coverage.present} of ${coverage.total} remotes. Click to create it on the others.`;
+                          return (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <button
+                                  onClick={() => onManageWorkspaceRemotes?.(wt)}
+                                  aria-label={`${branchLabel} exists on ${coverage.present} of ${coverage.total} remotes`}
+                                  className="shrink-0 rounded px-0.5 font-mono text-[9.5px] tabular-nums text-muted-foreground hover:bg-muted hover:text-foreground transition-colors"
+                                >
+                                  {coverage.present}/{coverage.total}
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent side="right">
+                                <div className="space-y-0.5">
+                                  <div>{lead}</div>
+                                  {wt.machines.map((machine) => (
+                                    <div key={machine.serverId} className="text-background/70">
+                                      {machine.name}:{" "}
+                                      {machine.state === "error"
+                                        ? <span className="text-red-400 dark:text-red-600">{machineStateText(machine)}</span>
+                                        : machineStateText(machine)}
+                                    </div>
+                                  ))}
+                                </div>
+                              </TooltipContent>
+                            </Tooltip>
+                          );
+                        })()}
                         {wt.branch === null && mergeRootDirty && (
                           <WorkspaceDirtyDot
                             repositoryLabel={mergeRepositoryLabel}
@@ -608,7 +682,7 @@ export function AppSidebar({
                             rows is the one the eye has to hunt for. Only rows
                             that show the warning pay the width, which is why
                             it is spent here and not on every row. */}
-                        {wt.targets && !(wt.branch === null
+                        {contradicted && !(wt.branch === null
                           ? mergeRootDirty
                           : mergeStatuses?.get(wt.branch)) && (
                           <span aria-hidden className="shrink-0 h-4 min-w-4 px-0.5" />
@@ -632,6 +706,14 @@ export function AppSidebar({
                             onTargetChange={(t) => onMergeTargetChange?.(wt.branch!, t)}
                             onTargetReset={() => onMergeTargetChange?.(wt.branch!, null)}
                             onDelete={() => onDeleteWorktree?.(wt)}
+                            // Always there on a multi-machine project: it is
+                            // the way to retry a failure or confirm an
+                            // unknown, not only to fill a gap.
+                            onManageRemotes={
+                              onManageWorkspaceRemotes && wt.machines && wt.machines.length > 1
+                                ? () => onManageWorkspaceRemotes(wt)
+                                : undefined
+                            }
                           />
                         )}
                       </div>

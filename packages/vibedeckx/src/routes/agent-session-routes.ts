@@ -15,6 +15,7 @@ import { projectMessagesForBrief } from "../utils/review-brief.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import { bindRemoteSessionMapping, createRemoteAgentSession, createRemoteBranchedSession, ensureRemoteAgentStream, generateAndPushRemoteSessionTitle } from "../remote-agent-sessions.js";
+import { findWorkspaceMissingOnRemote, workspaceMissingOnRemoteBody } from "../workspace-presence.js";
 import { ResidentProcessLimitError, shouldShowBranchSessionInList, type AliveAgentSession } from "../resident-agent-processes.js";
 import { isSessionPurpose, logSessionLifecycle } from "../session-lifecycle-log.js";
 import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
@@ -1185,6 +1186,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!remoteConfig) {
         return reply.code(400).send({ error: `Remote server configuration not found for agent_mode="${agentMode}"` });
       }
+      // The worker will not make a checkout for a session; say so here, with
+      // the machine named, instead of relaying its opaque failure.
+      const missing = await findWorkspaceMissingOnRemote(fastify.storage, {
+        projectId: project.id, remoteServerId: agentMode, branch: branch ?? null,
+      });
+      if (missing) return reply.code(409).send(workspaceMissingOnRemoteBody(missing));
       try {
         const created = await createRemoteAgentSession(
           {

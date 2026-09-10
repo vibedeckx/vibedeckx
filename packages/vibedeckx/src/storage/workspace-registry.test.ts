@@ -21,6 +21,31 @@ describe("workspace registry storage", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("tombstones conditionally in one write, refusing a row that has moved on", async () => {
+    const ready = await storage.workspaceRegistry.registerReadyCheckout({
+      projectId: "p1", branch: "dev", targetId: "local",
+      worktreePath: "/worktrees/dev", expectedBranch: "dev",
+    });
+    const seen = { status: ready.checkout.status, updatedAt: ready.checkout.updated_at };
+
+    // The row changed since it was read: a create reused it.
+    await storage.workspaceRegistry.setCheckoutStatus(ready.checkout.id, "creating");
+    expect(await storage.workspaceRegistry.markCheckoutDeletedIfCurrent(ready.checkout.id, seen)).toBe(false);
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))?.checkout.status).toBe("creating");
+
+    // Unchanged since it was read: the tombstone lands, and the workspace follows.
+    await storage.workspaceRegistry.setCheckoutStatus(ready.checkout.id, "ready");
+    const current = (await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local"))!.checkout;
+    expect(await storage.workspaceRegistry.markCheckoutDeletedIfCurrent(
+      ready.checkout.id, { status: "ready", updatedAt: current.updated_at },
+    )).toBe(true);
+    expect(await storage.workspaceRegistry.getByProjectBranch("p1", "dev", "local")).toBeUndefined();
+    // A second attempt on a tombstone is a no-op, not a second tombstone.
+    expect(await storage.workspaceRegistry.markCheckoutDeletedIfCurrent(
+      ready.checkout.id, { status: "ready", updatedAt: current.updated_at },
+    )).toBe(false);
+  });
+
   it("records creating intent and promotes the logical workspace when checkout succeeds", async () => {
     const creating = await storage.workspaceRegistry.beginCheckout({
       projectId: "p1", branch: "dev", targetId: "local",

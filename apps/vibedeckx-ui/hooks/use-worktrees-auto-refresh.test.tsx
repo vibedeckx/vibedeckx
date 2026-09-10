@@ -6,7 +6,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const getProjectWorktrees = vi.hoisted(() => vi.fn(async () => [{ branch: null }]));
 let capturedListener: ((event: { type?: string; [key: string]: unknown }) => void) | null = null;
 
-vi.mock("@/lib/api", () => ({ api: { getProjectWorktrees } }));
+// The hook reads the list through `getProjectWorktreeList`; the tests keep
+// scripting the bare array and counting calls on it.
+vi.mock("@/lib/api", () => ({
+  api: {
+    getProjectWorktrees,
+    getProjectWorktreeList: async (...args: unknown[]) => ({
+      worktrees: await (getProjectWorktrees as (...a: unknown[]) => Promise<unknown>)(...args),
+    }),
+  },
+}));
 vi.mock("@/hooks/global-event-stream", () => ({
   useGlobalEventStream: (listener: typeof capturedListener) => {
     capturedListener = listener;

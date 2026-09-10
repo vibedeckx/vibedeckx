@@ -79,4 +79,54 @@ describe("WorkspaceRowMenu", () => {
     act(() => resetItem!.click());
     expect(onTargetReset).toHaveBeenCalledTimes(1);
   });
+  it("offers remote management whenever asked to, ahead of the delete", () => {
+    const onManageRemotes = vi.fn();
+    act(() => {
+      root.render(
+        <WorkspaceRowMenu
+          projectId="p1"
+          branch="dev"
+          currentTarget="main"
+          onTargetChange={vi.fn()}
+          onTargetReset={vi.fn()}
+          onDelete={vi.fn()}
+          onManageRemotes={onManageRemotes}
+        />,
+      );
+    });
+
+    act(() => {
+      findButton("Workspace menu").dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+      );
+    });
+    const items = Array.from(document.querySelectorAll('[role="menuitem"]')).map((el) => el.textContent ?? "");
+    const manage = items.findIndex((text) => text.includes("Manage remotes"));
+    expect(manage).toBeGreaterThan(-1);
+    expect(manage).toBeLessThan(items.findIndex((text) => text.includes("Delete worktree")));
+
+    act(() => (document.querySelectorAll('[role="menuitem"]')[manage] as HTMLElement).click());
+    expect(onManageRemotes).toHaveBeenCalledTimes(1);
+  });
+
+  it("has no management entry on a single-machine project", () => {
+    act(() => {
+      root.render(
+        <WorkspaceRowMenu
+          projectId="p1"
+          branch="dev"
+          currentTarget="main"
+          onTargetChange={vi.fn()}
+          onTargetReset={vi.fn()}
+          onDelete={vi.fn()}
+        />,
+      );
+    });
+    act(() => {
+      findButton("Workspace menu").dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }),
+      );
+    });
+    expect(document.body.textContent).not.toContain("Manage remotes");
+  });
 });

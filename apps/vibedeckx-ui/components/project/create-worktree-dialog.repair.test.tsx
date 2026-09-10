@@ -7,9 +7,10 @@ import type { Project } from "@/lib/api";
 const getProjectBranches = vi.hoisted(() => vi.fn());
 const createWorktree = vi.hoisted(() => vi.fn());
 const getProjectRemotes = vi.hoisted(() => vi.fn());
+const getWorktreeMachines = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/api", () => ({
-  api: { getProjectBranches, createWorktree, getProjectRemotes },
+  api: { getProjectBranches, createWorktree, getProjectRemotes, getWorktreeMachines },
 }));
 vi.mock("sonner", () => ({ toast: { info: vi.fn(), success: vi.fn(), error: vi.fn() } }));
 
@@ -51,6 +52,7 @@ describe("CreateWorktreeDialog opened to repair a workspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getProjectBranches.mockResolvedValue(["main", "dev"]);
+    getWorktreeMachines.mockResolvedValue(null);
     getProjectRemotes.mockResolvedValue([
       {
         id: "link-1",
@@ -71,29 +73,31 @@ describe("CreateWorktreeDialog opened to repair a workspace", () => {
     container.remove();
   });
 
-  it("opens on the branch that is missing somewhere, ready to create", async () => {
+  it("opens on the existing workspace, as its remote management", async () => {
     await render("dev");
 
     expect(branchInput()?.value).toBe("dev");
-    // Creating again is a repair, not a new workspace — say so, since the
-    // machines that already have it will keep what they have.
-    expect(document.body.textContent).toContain("Create where it is missing");
-    expect(document.body.textContent).toContain("machines that do not have it");
+    // Managing an existing workspace machine by machine, not creating a new
+    // one: the name is the subject of the operation.
+    expect(document.body.textContent).toContain("Manage remotes for dev");
+    expect(document.body.textContent).not.toContain("Create New Workspace");
   });
 
-  it("drops the repair framing once the name is typed over", async () => {
+  it("keeps the name read-only rather than letting it slide into a new workspace", async () => {
     await render("dev");
 
     const input = branchInput()!;
+    expect(input.readOnly).toBe(true);
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
       setter.call(input, "feature/new");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-    // It is an ordinary new workspace now; promising to repair 'dev' would lie.
-    expect(document.body.textContent).toContain("Create New Workspace");
-    expect(document.body.textContent).not.toContain("machines that do not have it");
+    // The framing does not change under the user's feet: to create another
+    // workspace there is the + button.
+    expect(document.body.textContent).toContain("Manage remotes for dev");
+    expect(document.body.textContent).toContain("use the + button");
   });
 
   it("is still the ordinary empty dialog when opened from the + button", async () => {

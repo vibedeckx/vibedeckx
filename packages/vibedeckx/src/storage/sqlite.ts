@@ -731,6 +731,13 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     db.exec("UPDATE workspace_checkouts SET path_source = 'conventional' WHERE target_id <> 'local'");
   }
 
+  // Migration: project_remotes.worktrees_synced_at — evidence that the hub has
+  // seen a remote's complete worktree list (see workspace-health.ts).
+  const projectRemoteColumns = db.prepare("PRAGMA table_info(project_remotes)").all() as { name: string }[];
+  if (!projectRemoteColumns.some((column) => column.name === "worktrees_synced_at")) {
+    db.exec("ALTER TABLE project_remotes ADD COLUMN worktrees_synced_at TEXT DEFAULT NULL");
+  }
+
   const remoteCreationIntentColumns = db.prepare("PRAGMA table_info(remote_session_creation_intents)").all() as { name: string }[];
   if (!remoteCreationIntentColumns.some((column) => column.name === "operation_kind")) {
     db.exec("ALTER TABLE remote_session_creation_intents ADD COLUMN operation_kind TEXT NOT NULL DEFAULT 'new' CHECK (operation_kind IN ('new', 'branch'))");

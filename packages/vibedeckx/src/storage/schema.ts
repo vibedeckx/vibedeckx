@@ -360,6 +360,13 @@ export interface ProjectRemotesTable {
   remote_server_id: string;
   remote_path: string;
   sort_order: Generated<number>;
+  /**
+   * When the hub last registered this remote's *complete* worktree list. NULL
+   * means never: a workspace with no checkout row here is then "unknown", not
+   * "absent" — rows also arrive one at a time (a create, a session binding),
+   * and none of those says anything about the workspaces they did not touch.
+   */
+  worktrees_synced_at: string | null;
 }
 
 export interface RemoteSessionMappingsTable {

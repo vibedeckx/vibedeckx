@@ -1,4 +1,4 @@
-import { appendTargetFailures, type RetainedBranch, type WorkspaceTargetState, type WorktreeTargetOutcome } from "@/lib/worktree-target-results";
+import { appendTargetFailures, type RetainedBranch, type WorkspaceMachineCheck, type WorkspaceMachineState, type WorkspaceTargetState, type WorktreeTargetOutcome } from "@/lib/worktree-target-results";
 
 // ============ Auth Token Management ============
 // `_authToken` is a warm cache of the last-known Clerk session JWT. It exists so
@@ -323,8 +323,15 @@ export interface Worktree {
   /** Stable workspace/session identity. */
   branch: string | null;
   /**
+   * Every linked machine's state for this workspace, always sent by a server
+   * that knows how (never for the root workspace, which is on every machine).
+   * Absent only from older servers: nothing is inferred from its absence.
+   */
+  machines?: WorkspaceMachineState[];
+  /**
    * Per-machine state, sent only when the machines disagree — a delete that
-   * finished on some of them, or a machine holding an error.
+   * finished on some of them, or a machine holding an error. Older shape;
+   * `machines` is its superset.
    */
   targets?: WorkspaceTargetState[];
   /** Deleted on some machines, still there on others. */
@@ -333,6 +340,14 @@ export interface Worktree {
   currentBranch?: string | null;
   /** Display name for the root workspace, whose `branch` identity is null. */
   expectedBranch?: string;
+}
+
+export interface WorktreeList {
+  worktrees: Worktree[];
+  /** The current remote could not be asked; the list is the hub's record of it. */
+  stale?: { serverId: string; name: string };
+  /** `agent_mode` names a remote the project no longer has; the first-linked one was listed. */
+  activeRemoteInvalid?: boolean;
 }
 
 export type MergeStatusValue = "merged" | "partial" | "unmerged" | "no-unique-commits";
@@ -1280,7 +1295,9 @@ export async function createNewAgentSession(
         Array.isArray(body.runningSessions) ? body.runningSessions : [],
       );
     }
-    throw new Error(`createNewAgentSession failed: ${res.status}`);
+    // A refusal that names its reason (the workspace is not on that remote,
+    // say) is worth more than the status code.
+    throw new Error(typeof body?.error === "string" ? body.error : `createNewAgentSession failed: ${res.status}`);
   }
   return res.json();
 }
@@ -1778,6 +1795,16 @@ export const api = {
   },
 
   async getProjectWorktrees(id: string, target?: string, signal?: AbortSignal): Promise<Worktree[]> {
+    return (await api.getProjectWorktreeList(id, target, signal)).worktrees;
+  },
+
+  /**
+   * The list with what the server says about its own reliability: `stale`
+   * names the current remote when it could not be asked (the list is the
+   * hub's record, not that machine's Git), and `activeRemoteInvalid` says
+   * sessions target a remote the project no longer has.
+   */
+  async getProjectWorktreeList(id: string, target?: string, signal?: AbortSignal): Promise<WorktreeList> {
     const params = new URLSearchParams();
     if (target && target !== "local") params.set("target", target);
     const query = params.toString() ? `?${params.toString()}` : "";
@@ -1789,7 +1816,31 @@ export const api = {
       throw new Error(`Failed to fetch worktrees: ${res.status}`);
     }
     const data = await res.json();
-    return data.worktrees;
+    return {
+      worktrees: data.worktrees,
+      ...(data.stale ? { stale: data.stale } : {}),
+      ...(data.activeRemoteInvalid ? { activeRemoteInvalid: true } : {}),
+    };
+  },
+
+  /**
+   * Ask every linked machine whether it has `branch` right now. Null on a
+   * server that predates the route, so the caller can fall back to what the
+   * worktree list already said.
+   */
+  async getWorktreeMachines(
+    id: string,
+    branch: string,
+    signal?: AbortSignal,
+  ): Promise<{ branch: string; machines: WorkspaceMachineCheck[] } | null> {
+    const params = new URLSearchParams({ branch });
+    const res = await authFetch(`${getApiBase()}/api/projects/${id}/worktrees/machines?${params.toString()}`, { signal });
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({}));
+      throw new Error(error.error || `Failed to check machines: ${res.status}`);
+    }
+    return res.json();
   },
 
   /** Adopt `branch` as the main workspace's expected branch, clearing its drift warning. */

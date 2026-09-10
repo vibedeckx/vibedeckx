@@ -2,9 +2,9 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath, conventionalWorktreePath, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, setRootWorkspaceAnchor, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache, planWorktreeAdd, applyWorktreeAdd, canonicalPath, deleteBranchAfterRemoval, liveWorktreeRecord, worktreeRecordExists, type RetainedBranch, type SetAnchorResult, type WorktreeBranch } from "../utils/worktree-paths.js";
-import { findUnhealthyWorkspaces, type WorkspaceTargetState } from "../utils/workspace-health.js";
+import { computeWorkspaceMachines, type LinkedMachine, type WorkspaceMachineState } from "../utils/workspace-health.js";
 import { ensurePathProjectId } from "../utils/path-project.js";
-import { registerReportedWorktrees, type ReportedWorktree } from "../workspace-binding-backfill.js";
+import { reconcileReportedWorktrees, registerReportedWorktrees, snapshotLiveCheckouts, type ReportedWorktree } from "../workspace-binding-backfill.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import type { Project, RegisteredWorkspaceCheckout } from "../storage/types.js";
@@ -14,6 +14,8 @@ interface RemoteConfig {
   remotePath: string;
   /** Human name of the remote server, for per-target result messages. */
   serverName: string;
+  /** The hub has registered this remote's complete worktree list at least once. */
+  worktreesSynced: boolean;
 }
 
 async function getAllRemoteConfigs(fastify: FastifyInstance, project: Project): Promise<RemoteConfig[]> {
@@ -22,7 +24,37 @@ async function getAllRemoteConfigs(fastify: FastifyInstance, project: Project): 
     serverId: r.remote_server_id,
     remotePath: r.remote_path,
     serverName: r.server_name,
+    worktreesSynced: r.worktrees_synced_at !== null,
   }));
+}
+
+/**
+ * The remote the project's sessions run on — `agent_mode` — which is also the
+ * one whose Git the worktree list should come from. The primary (first-linked)
+ * remote is only the fallback for an `agent_mode` that names nothing linked.
+ */
+function currentRemote(project: Project, remotes: RemoteConfig[]): RemoteConfig | null {
+  if (remotes.length === 0) return null;
+  return remotes.find((remote) => remote.serverId === project.agent_mode) ?? remotes[0];
+}
+
+/** `agent_mode` names a remote the project no longer has (or none at all). */
+function activeRemoteInvalid(project: Project, remotes: RemoteConfig[]): boolean {
+  return !remotes.some((remote) => remote.serverId === project.agent_mode);
+}
+
+/**
+ * Every machine the project has, in the order the UI lists them. The local
+ * path counts as a machine that is always synced: its list is read straight
+ * from Git, never from a cache of some earlier report.
+ */
+function linkedMachines(project: Project, remotes: RemoteConfig[]): LinkedMachine[] {
+  const linked: LinkedMachine[] = [];
+  if (project.path) linked.push({ serverId: "local", name: "local", synced: true });
+  for (const remote of remotes) {
+    linked.push({ serverId: remote.serverId, name: remote.serverName, synced: remote.worktreesSynced });
+  }
+  return linked;
 }
 
 /**
@@ -54,10 +86,9 @@ interface TargetDeleteResult {
   error?: string;
 }
 
-/** Returns the primary (first) remote config, or null. Used by endpoints that operate on a single remote. */
+/** The current remote's config (see `currentRemote`), or null. Used by endpoints that operate on a single remote. */
 async function getRemoteConfig(fastify: FastifyInstance, project: Project): Promise<RemoteConfig | null> {
-  const all = await getAllRemoteConfigs(fastify, project);
-  return all.length > 0 ? all[0] : null;
+  return currentRemote(project, await getAllRemoteConfigs(fastify, project));
 }
 
 /** HTTP shape of an explicit anchor that Git or the workspace list refused. */
@@ -124,49 +155,114 @@ function listedWorktrees(data: unknown): WorktreeBranch[] {
   return Array.isArray(worktrees) ? worktrees as WorktreeBranch[] : [];
 }
 
+/** A machine's answer to "do you have this workspace?", or its last-known state when it could not answer. */
+interface WorkspaceMachineCheck extends WorkspaceMachineState {
+  /** The worker was actually asked. False = `state` is the registry's last-known view. */
+  checked: boolean;
+  /** Why it could not be asked: offline, timed out, or the worker's own error. */
+  checkError?: string;
+}
+
+/** Per-machine ceiling for the parallel live check; the dialog is waiting on it. */
+const MACHINE_CHECK_TIMEOUT_MS = 15_000;
+
+/** One row of the project worktree list, with the registry's cross-machine view attached. */
+type ListedWorktree = WorktreeBranch & {
+  /** Every linked machine's state; never sent for the main workspace. */
+  machines?: WorkspaceMachineState[];
+};
+
+/** The registry's cross-machine view of a project, over the machines it still has. */
+async function projectMachines(
+  fastify: FastifyInstance,
+  project: Project,
+): Promise<{ linked: LinkedMachine[]; byBranch: Map<string, WorkspaceMachineState[]> }> {
+  const remotes = await getAllRemoteConfigs(fastify, project);
+  // Only machines the project still has. Unlinking a remote leaves its
+  // checkout rows behind, and one of those reads as "still there" on a machine
+  // nothing can act on any more.
+  const linked = linkedMachines(project, remotes);
+  const linkedIds = new Set(linked.map((machine) => machine.serverId));
+  const rows = (await fastify.storage.workspaceRegistry.listByProject(project.id, undefined, { includeDeleted: true }))
+    .filter((row) => linkedIds.has(row.checkout.target_id));
+  return { linked, byBranch: computeWorkspaceMachines(rows, linked) };
+}
+
+/** A workspace with a live row somewhere is still a workspace; one with none left anywhere is gone. */
+function heldSomewhere(machines: WorkspaceMachineState[]): boolean {
+  return machines.some((machine) => machine.state !== "absent" && machine.state !== "unknown");
+}
+
+/** Only the Git facts of a worker's entry: its path and anything else it adds stay on the worker. */
+function gitFacts(worktree: WorktreeBranch): WorktreeBranch {
+  return {
+    branch: worktree.branch,
+    ...(worktree.currentBranch !== undefined ? { currentBranch: worktree.currentBranch } : {}),
+    ...(worktree.expectedBranch !== undefined ? { expectedBranch: worktree.expectedBranch } : {}),
+  };
+}
+
 /**
- * Merge the registry's cross-machine view into a worktree list.
+ * Merge the registry's cross-machine view into one machine's worktree list.
  *
- * The list itself is one machine's Git (see `findUnhealthyWorkspaces`). Every
- * workspace whose machines disagree is annotated with a per-machine breakdown,
- * and one that the listing machine no longer has — a delete that failed
- * somewhere else — is appended, so it stays reachable in the UI instead of
- * disappearing while it is still on disk over there.
+ * The list itself is one machine's Git, while a workspace may deliberately
+ * exist on only some of the project's machines. Every workspace is therefore
+ * annotated with a per-machine breakdown, and one the listing machine does
+ * not have — created elsewhere only, or a delete that failed somewhere else —
+ * is appended, so it stays reachable in the UI instead of being invisible
+ * while it is on disk over there.
  */
 async function withWorkspaceHealth(
   fastify: FastifyInstance,
   project: Project,
   worktrees: WorktreeBranch[],
-): Promise<Array<WorktreeBranch & { targets?: WorkspaceTargetState[]; unfinishedDelete?: boolean }>> {
-  const remotes = await getAllRemoteConfigs(fastify, project);
-  const names = new Map(remotes.map((remote) => [remote.serverId, remote.serverName]));
-  const labelOf = (targetId: string) => targetId === "local" ? "local" : names.get(targetId) ?? targetId;
-
-  // Only machines the project still has. Unlinking a remote leaves its
-  // checkout rows behind, and one of those reads as "still there" on a machine
-  // nothing can act on any more: the workspace would be listed as half-deleted
-  // for good, since a delete only visits the machines currently linked.
-  const linked = new Set<string>(remotes.map((remote) => remote.serverId));
-  if (project.path) linked.add("local");
-  const rows = (await fastify.storage.workspaceRegistry.listByProject(project.id, undefined, { includeDeleted: true }))
-    .filter((row) => linked.has(row.checkout.target_id));
-  const unhealthy = findUnhealthyWorkspaces(rows, labelOf);
-  if (unhealthy.length === 0) return worktrees;
-
-  const byBranch = new Map(unhealthy.map((health) => [health.branch, health]));
-  const merged = worktrees.map((worktree) => {
-    const health = byBranch.get(worktree.branch);
-    if (!health) return worktree;
-    byBranch.delete(worktree.branch);
-    return { ...worktree, targets: health.targets, unfinishedDelete: health.unfinishedDelete };
+): Promise<ListedWorktree[]> {
+  const { byBranch } = await projectMachines(fastify, project);
+  const merged: ListedWorktree[] = worktrees.map((worktree) => {
+    // The registry stores the main workspace as "", the list calls it null —
+    // and it is on every machine by definition, so it carries no `machines`.
+    const machines = worktree.branch === null ? undefined : byBranch.get(worktree.branch);
+    return { ...gitFacts(worktree), ...(machines ? { machines } : {}) };
   });
-  for (const health of byBranch.values()) {
-    // The main workspace is never absent from its own machine's list, and a
-    // workspace with nothing left anywhere is simply gone.
-    if (health.branch === null || !health.targets.some((target) => target.state === "present")) continue;
-    merged.push({ branch: health.branch, targets: health.targets, unfinishedDelete: health.unfinishedDelete });
+  const listed = new Set(worktrees.map((worktree) => worktree.branch));
+  for (const [branch, machines] of byBranch) {
+    if (branch === "" || listed.has(branch) || !heldSomewhere(machines)) continue;
+    merged.push({ branch, machines });
   }
   return merged;
+}
+
+/**
+ * The project's worktree list with the registry as the source of truth and
+ * the current remote's Git as the correction (design §5.1): every workspace
+ * the registry holds a live row for, on any linked machine, is listed — the
+ * machine that happened to be linked first no longer decides what is
+ * visible. The current remote's own entries, when it answered, carry its
+ * Git facts (drift, the main workspace's anchor) and set the order; the rest
+ * follow by name.
+ */
+async function registryWorktreeList(
+  fastify: FastifyInstance,
+  project: Project,
+  reported: WorktreeBranch[] | null,
+): Promise<ListedWorktree[]> {
+  const { byBranch } = await projectMachines(fastify, project);
+  const rootFromWorker = reported?.find((worktree) => worktree.branch === null);
+  const list: ListedWorktree[] = [rootFromWorker ? gitFacts(rootFromWorker) : { branch: null }];
+  const placed = new Set<string>();
+  for (const worktree of reported ?? []) {
+    if (worktree.branch === null) continue;
+    const machines = byBranch.get(worktree.branch);
+    // Reconciliation has just registered whatever the worker listed, so a
+    // missing entry can only mean a row nothing could write; list it bare.
+    list.push({ ...gitFacts(worktree), ...(machines ? { machines } : {}) });
+    placed.add(worktree.branch);
+  }
+  const rest = [...byBranch]
+    .filter(([branch, machines]) => branch !== "" && !placed.has(branch) && heldSomewhere(machines))
+    .sort(([a], [b]) => a.localeCompare(b));
+  for (const [branch, machines] of rest) list.push({ branch, machines });
+  return list;
 }
 
 /**
@@ -226,20 +322,29 @@ async function assertPathIsFree(
   );
 }
 
+/**
+ * Take in a worker's complete worktree list, and record that the hub has now
+ * seen it. With a snapshot of the machine's rows from before the request,
+ * the registry is reconciled to the list (see `reconcileReportedWorktrees`);
+ * without one, only additions are registered — for a caller whose answer
+ * must not move anything (the machine check). Only a real list counts: an
+ * odd shape (an old worker, an error body) registers nothing and leaves the
+ * remote unconfirmed.
+ */
 async function syncRemoteWorktreeList(
   fastify: FastifyInstance,
   projectId: string,
   remote: Pick<RemoteConfig, "serverId" | "remotePath">,
   data: unknown,
-): Promise<void> {
+  snapshot?: RegisteredWorkspaceCheckout[],
+): Promise<boolean> {
   const worktrees = (data as { worktrees?: ReportedWorktree[] })?.worktrees;
-  if (!Array.isArray(worktrees)) return;
-  await registerReportedWorktrees(fastify.storage, {
-    projectId,
-    targetId: remote.serverId,
-    remotePath: remote.remotePath,
-    worktrees,
-  });
+  if (!Array.isArray(worktrees)) return false;
+  const opts = { projectId, targetId: remote.serverId, remotePath: remote.remotePath, worktrees };
+  if (snapshot) await reconcileReportedWorktrees(fastify.storage, { ...opts, snapshot });
+  else await registerReportedWorktrees(fastify.storage, opts);
+  await fastify.storage.projectRemotes.markWorktreesSynced(projectId, remote.serverId);
+  return true;
 }
 
 /**
@@ -597,8 +702,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const requestedTarget = req.query.target ?? "local";
     if (requestedTarget !== "local") {
+      // One named machine's own list. Its rows are reconciled to it: this is
+      // that machine's complete answer.
       const targetRemote = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, requestedTarget);
       if (!targetRemote) return reply.code(400).send({ error: "Unknown remote target" });
+      const snapshot = await snapshotLiveCheckouts(fastify.storage, project.id, targetRemote.remote_server_id);
       const result = await proxyToRemoteAuto(
         targetRemote.remote_server_id,
         "GET",
@@ -610,7 +718,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         await syncRemoteWorktreeList(fastify, project.id, {
           serverId: targetRemote.remote_server_id,
           remotePath: targetRemote.remote_path,
-        }, result.data);
+        }, result.data, snapshot);
         return reply.code(200).send({
           worktrees: await withWorkspaceHealth(fastify, project, listedWorktrees(result.data)),
         });
@@ -618,9 +726,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(proxyStatus(result)).send(result.data);
     }
 
-    // Proxy to remote if this is a remote-only project
-    const remoteConfig = await getRemoteConfig(fastify, project);
+    // A remote-only project: the registry is the list, and the current
+    // remote — the machine sessions run on — is asked for its Git so its rows
+    // are reconciled and its facts (drift, the anchor) ride along. One that
+    // cannot answer makes the list `stale`, not a failure: the registry still
+    // knows what is where.
+    const remoteConfigs = await getAllRemoteConfigs(fastify, project);
+    const remoteConfig = currentRemote(project, remoteConfigs);
     if (!project.path && remoteConfig) {
+      const snapshot = await snapshotLiveCheckouts(fastify.storage, project.id, remoteConfig.serverId);
       const result = await proxyToRemoteAuto(
         remoteConfig.serverId,
         "GET",
@@ -628,13 +742,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
         undefined,
         { reverseConnectManager: fastify.reverseConnectManager }
       );
-      if (result.ok) {
-        await syncRemoteWorktreeList(fastify, project.id, remoteConfig, result.data);
-        return reply.code(200).send({
-          worktrees: await withWorkspaceHealth(fastify, project, listedWorktrees(result.data)),
-        });
+      let reported: WorktreeBranch[] | null = null;
+      if (result.ok && await syncRemoteWorktreeList(fastify, project.id, remoteConfig, result.data, snapshot)) {
+        reported = listedWorktrees(result.data);
       }
-      return reply.code(proxyStatus(result)).send(result.data);
+      return reply.code(200).send({
+        worktrees: await registryWorktreeList(fastify, project, reported),
+        ...(reported ? {} : { stale: { serverId: remoteConfig.serverId, name: remoteConfig.serverName } }),
+        ...(activeRemoteInvalid(project, remoteConfigs) ? { activeRemoteInvalid: true } : {}),
+      });
     }
 
     if (!project.path) {
@@ -650,6 +766,104 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(500).send({ error: `Failed to list worktrees: ${errorMessage}` });
     }
   });
+
+  // Where one workspace is right now, machine by machine: every linked remote
+  // is asked for its worktree list in parallel. This is the repair dialog's
+  // opening question, and it is asked here rather than through `?target=`
+  // per machine because that list is not one machine's pure answer —
+  // `withWorkspaceHealth` appends workspaces held only elsewhere, so "the
+  // branch is in the response" would not mean "this machine has it".
+  fastify.get<{ Params: { id: string }; Querystring: { branch?: string } }>(
+    "/api/projects/:id/worktrees/machines",
+    async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+
+      const project = await fastify.storage.projects.getById(req.params.id, userId);
+      if (!project) {
+        return reply.code(404).send({ error: "Project not found" });
+      }
+      // The main workspace is on every machine by definition; there is
+      // nothing to manage.
+      const branch = req.query.branch?.trim();
+      if (!branch) return reply.code(400).send({ error: "Branch is required" });
+
+      const remotes = await getAllRemoteConfigs(fastify, project);
+      const linked = linkedMachines(project, remotes);
+      // The registry's last-known view, read before anything is registered
+      // below: a machine that cannot be reached answers with this, and a
+      // machine whose row says an operation is under way (or failed) keeps
+      // that answer even when its Git already lists the branch — retrying is
+      // what clears an error, not a listing.
+      const rows = (await fastify.storage.workspaceRegistry.listByProject(project.id, undefined, { includeDeleted: true }))
+        .filter((row) => row.workspace.branch === branch);
+      const known = new Map(
+        (computeWorkspaceMachines(rows, linked).get(branch)
+          ?? linked.map((machine) => ({
+            serverId: machine.serverId,
+            name: machine.name,
+            state: machine.synced ? "absent" as const : "unknown" as const,
+          })))
+          .map((machine) => [machine.serverId, machine]),
+      );
+
+      const settle = (
+        machine: WorkspaceMachineState,
+        listed: boolean,
+      ): WorkspaceMachineCheck => {
+        if (machine.state === "creating" || machine.state === "deleting" || machine.state === "error") {
+          return { ...machine, checked: true };
+        }
+        if (listed) return { serverId: machine.serverId, name: machine.name, state: "present", checked: true };
+        return {
+          serverId: machine.serverId,
+          name: machine.name,
+          state: "absent",
+          ...(machine.deleted ? { deleted: true } : {}),
+          checked: true,
+        };
+      };
+      const unreachable = (machine: WorkspaceMachineState, checkError: string): WorkspaceMachineCheck =>
+        ({ ...machine, checked: false, checkError });
+
+      const checks = await Promise.all(linked.map(async (machine): Promise<WorkspaceMachineCheck> => {
+        const state = known.get(machine.serverId)!;
+        if (machine.serverId === "local") {
+          try {
+            pruneWorktrees(project.path!);
+            const listed = await getRegisteredWorktreeBranches(fastify.storage, project.id, project.path!);
+            return settle(state, listed.some((worktree) => worktree.branch === branch));
+          } catch (error) {
+            return unreachable(state, error instanceof Error ? error.message : "Failed to list worktrees");
+          }
+        }
+        const remote = remotes.find((rc) => rc.serverId === machine.serverId)!;
+        try {
+          const result = await proxyToRemoteAuto(
+            remote.serverId,
+            "GET",
+            `/api/path/worktrees?path=${encodeURIComponent(remote.remotePath)}`,
+            undefined,
+            { reverseConnectManager: fastify.reverseConnectManager, timeoutMs: MACHINE_CHECK_TIMEOUT_MS },
+          );
+          if (!result.ok) {
+            const detail = (result.data as { error?: string } | undefined)?.error;
+            return unreachable(state, detail || result.errorCode || `Worker answered ${result.status}`);
+          }
+          // Same side effect as listing that machine: what it reports is
+          // registered (add-only) and the machine counts as confirmed.
+          if (!await syncRemoteWorktreeList(fastify, project.id, remote, result.data)) {
+            return unreachable(state, "Worker returned no worktree list");
+          }
+          return settle(state, listedWorktrees(result.data).some((worktree) => worktree.branch === branch));
+        } catch (error) {
+          return unreachable(state, error instanceof Error ? error.message : "Failed to reach the worker");
+        }
+      }));
+
+      return reply.code(200).send({ branch, machines: checks });
+    },
+  );
 
   // Anchor the main workspace to the branch it is checked out on now
   fastify.post<{
@@ -679,6 +893,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         serverId: targetRemote.remote_server_id,
         remotePath: targetRemote.remote_path,
         serverName: targetRemote.server_name,
+        worktreesSynced: targetRemote.worktrees_synced_at !== null,
       };
     }
 
@@ -748,6 +963,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         serverId: targetRemote.remote_server_id,
         remotePath: targetRemote.remote_path,
         serverName: targetRemote.server_name,
+        worktreesSynced: targetRemote.worktrees_synced_at !== null,
       };
     }
 

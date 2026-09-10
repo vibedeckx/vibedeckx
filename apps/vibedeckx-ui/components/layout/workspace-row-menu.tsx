@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { GitMerge, MoreHorizontal, Trash2 } from "lucide-react";
+import { GitMerge, MoreHorizontal, Server, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import {
   DropdownMenu,
@@ -23,6 +23,12 @@ interface WorkspaceRowMenuProps {
   onTargetChange: (target: string) => void;
   onTargetReset: () => void;
   onDelete: () => void;
+  /**
+   * Open this workspace's per-remote management: create it where it is
+   * missing, retry where it failed, confirm where it is unknown. Offered
+   * whenever the project has more than one machine.
+   */
+  onManageRemotes?: () => void;
 }
 
 export function WorkspaceRowMenu({
@@ -32,6 +38,7 @@ export function WorkspaceRowMenu({
   onTargetChange,
   onTargetReset,
   onDelete,
+  onManageRemotes,
 }: WorkspaceRowMenuProps) {
   const [branches, setBranches] = useState<string[] | null>(null);
 
@@ -80,6 +87,12 @@ export function WorkspaceRowMenu({
             </DropdownMenuItem>
           </DropdownMenuSubContent>
         </DropdownMenuSub>
+        {onManageRemotes && (
+          <DropdownMenuItem onClick={onManageRemotes}>
+            <Server className="h-3.5 w-3.5 mr-1.5" />
+            Manage remotes…
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem
           onClick={onDelete}
           className="text-destructive focus:text-destructive"

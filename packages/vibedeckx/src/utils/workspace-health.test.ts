@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findUnhealthyWorkspaces } from "./workspace-health.js";
+import { computeWorkspaceMachines, workspaceCoverage } from "./workspace-health.js";
 import type { RegisteredWorkspaceCheckout, WorkspaceCheckoutStatus } from "../storage/types.js";
 
 let sequence = 0;
@@ -39,79 +39,62 @@ function row(opts: {
   };
 }
 
-const labelOf = (targetId: string) => targetId === "local" ? "local" : targetId === "s1" ? "worker3" : "Mac";
+describe("computeWorkspaceMachines", () => {
+  const linked = [
+    { serverId: "s1", name: "worker3", synced: true },
+    { serverId: "s2", name: "Mac", synced: true },
+    { serverId: "s3", name: "ubuntu", synced: false },
+  ];
 
-describe("findUnhealthyWorkspaces", () => {
-  it("reports a delete that finished on one machine and not the other", () => {
-    // The shape the user hit: worker3 tombstoned, Mac still holding it.
-    const health = findUnhealthyWorkspaces([
-      row({ workspaceId: "w1", branch: "dev2", targetId: "s1", status: "deleting", deleted: true }),
-      row({ workspaceId: "w1", branch: "dev2", targetId: "s2" }),
-    ], labelOf);
-
-    expect(health).toEqual([{
-      branch: "dev2",
-      unfinishedDelete: true,
-      targets: [
-        { targetId: "s1", label: "worker3", state: "deleted" },
-        { targetId: "s2", label: "Mac", state: "present", status: "ready", error: null },
-      ],
-    }]);
-  });
-
-  it("says nothing about a workspace that lives on every machine", () => {
-    expect(findUnhealthyWorkspaces([
-      row({ workspaceId: "w1", branch: "dev", targetId: "s1" }),
+  it("lists every linked machine for every workspace, in the linked order", () => {
+    const machines = computeWorkspaceMachines([
       row({ workspaceId: "w1", branch: "dev", targetId: "s2" }),
-    ], labelOf)).toEqual([]);
+      row({ workspaceId: "w1", branch: "dev", targetId: "s1", status: "error", error: "disk full" }),
+    ], linked);
+
+    expect(machines.get("dev")).toEqual([
+      { serverId: "s1", name: "worker3", state: "error", error: "disk full" },
+      { serverId: "s2", name: "Mac", state: "present" },
+      // Never listed: no row is no evidence.
+      { serverId: "s3", name: "ubuntu", state: "unknown" },
+    ]);
   });
 
-  it("says nothing once the delete has finished everywhere", () => {
-    expect(findUnhealthyWorkspaces([
+  it("keeps a refused delete's reason on a machine that still has it", () => {
+    const machines = computeWorkspaceMachines([
       row({ workspaceId: "w1", branch: "dev", targetId: "s1", deleted: true }),
-      row({ workspaceId: "w1", branch: "dev", targetId: "s2", deleted: true }),
-    ], labelOf)).toEqual([]);
-  });
+      row({ workspaceId: "w1", branch: "dev", targetId: "s2", error: "Worktree has uncommitted changes" }),
+    ], linked);
 
-  it("treats a machine that was made again as present, past its old tombstones", () => {
-    // Every create/delete cycle leaves a row, so a machine carries its history.
-    expect(findUnhealthyWorkspaces([
-      row({ workspaceId: "w1", branch: "dev", targetId: "s1", deleted: true }),
-      row({ workspaceId: "w1", branch: "dev", targetId: "s1", deleted: true }),
-      row({ workspaceId: "w1", branch: "dev", targetId: "s1" }),
-      row({ workspaceId: "w1", branch: "dev", targetId: "s2" }),
-    ], labelOf)).toEqual([]);
-  });
-
-  it("reports a machine that kept a reason it could not comply", () => {
-    const health = findUnhealthyWorkspaces([
-      row({ workspaceId: "w1", branch: "dev", targetId: "s1" }),
-      row({ workspaceId: "w1", branch: "dev", targetId: "s2", status: "error", error: "Branch 'dev' already exists" }),
-    ], labelOf);
-
-    expect(health).toHaveLength(1);
-    expect(health[0].unfinishedDelete).toBe(false);
-    expect(health[0].targets).toContainEqual({
-      targetId: "s2",
-      label: "Mac",
-      state: "present",
-      status: "error",
-      error: "Branch 'dev' already exists",
+    expect(machines.get("dev")?.[1]).toEqual({
+      serverId: "s2", name: "Mac", state: "present", error: "Worktree has uncommitted changes",
     });
   });
 
-  it("ignores a machine the workspace was never on, so a late-added remote is not a disagreement", () => {
-    expect(findUnhealthyWorkspaces([
-      row({ workspaceId: "w1", branch: "dev", targetId: "s1" }),
-    ], labelOf)).toEqual([]);
+  it("tells a machine that deleted it from one that never had it", () => {
+    const machines = computeWorkspaceMachines([
+      row({ workspaceId: "w1", branch: "dev", targetId: "s1", deleted: true }),
+      row({ workspaceId: "w1", branch: "dev", targetId: "s2" }),
+    ], linked);
+
+    expect(machines.get("dev")?.[0]).toEqual({ serverId: "s1", name: "worker3", state: "absent", deleted: true });
   });
 
-  it("spells the main workspace the way the list does", () => {
-    const health = findUnhealthyWorkspaces([
-      row({ workspaceId: "w1", branch: "", targetId: "s1", deleted: true }),
-      row({ workspaceId: "w1", branch: "", targetId: "s2" }),
-    ], labelOf);
+  it("lets a live row outrank an older tombstone on the same machine", () => {
+    const machines = computeWorkspaceMachines([
+      row({ workspaceId: "w1", branch: "dev", targetId: "s1", deleted: true }),
+      row({ workspaceId: "w1", branch: "dev", targetId: "s1", status: "creating" }),
+    ], linked);
 
-    expect(health[0].branch).toBeNull();
+    expect(machines.get("dev")?.[0]).toEqual({ serverId: "s1", name: "worker3", state: "creating" });
+  });
+
+  it("counts only ready checkouts as coverage", () => {
+    const machines = computeWorkspaceMachines([
+      row({ workspaceId: "w1", branch: "dev", targetId: "s1" }),
+      row({ workspaceId: "w1", branch: "dev", targetId: "s2", status: "creating" }),
+    ], linked);
+
+    expect(workspaceCoverage(machines.get("dev")!)).toEqual({ present: 1, total: 3 });
   });
 });

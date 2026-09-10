@@ -3,11 +3,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Project, ProjectRemote } from "@/lib/api";
-import type { WorkspaceTargetState } from "@/lib/worktree-target-results";
+import type { WorkspaceMachineCheck, WorkspaceMachineState, WorkspaceTargetState } from "@/lib/worktree-target-results";
 
 const getProjectBranches = vi.hoisted(() => vi.fn());
 const createWorktree = vi.hoisted(() => vi.fn());
 const getProjectRemotes = vi.hoisted(() => vi.fn());
+const getWorktreeMachines = vi.hoisted(() => vi.fn());
 
 // What the project screen already holds, when the dialog renders under it.
 const sharedRemotes = vi.hoisted(() => ({
@@ -15,7 +16,7 @@ const sharedRemotes = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/api", () => ({
-  api: { getProjectBranches, createWorktree, getProjectRemotes },
+  api: { getProjectBranches, createWorktree, getProjectRemotes, getWorktreeMachines },
 }));
 vi.mock("@/hooks/project-remotes-context", () => ({
   useOptionalProjectRemotesContext: () => sharedRemotes.value,
@@ -50,9 +51,12 @@ describe("CreateWorktreeDialog machine list", () => {
   let container: HTMLElement;
   let root: Root;
 
+  const onOpenChange = vi.fn();
   const render = (props?: {
     initialBranchName?: string;
     initialTargets?: WorkspaceTargetState[];
+    initialMachines?: WorkspaceMachineState[];
+    initialSelectedTargets?: string[];
     open?: boolean;
   }) =>
     act(async () => {
@@ -61,10 +65,12 @@ describe("CreateWorktreeDialog machine list", () => {
           projectId="p1"
           project={project}
           open={props?.open ?? true}
-          onOpenChange={() => {}}
+          onOpenChange={onOpenChange}
           onWorktreeCreated={() => {}}
           initialBranchName={props?.initialBranchName}
           initialTargets={props?.initialTargets}
+          initialMachines={props?.initialMachines}
+          initialSelectedTargets={props?.initialSelectedTargets}
         />,
       );
     });
@@ -102,6 +108,8 @@ describe("CreateWorktreeDialog machine list", () => {
     sharedRemotes.value = null;
     getProjectBranches.mockResolvedValue(["main", "dev"]);
     createWorktree.mockResolvedValue({ worktree: { branch: "feature/x" } });
+    // A server without the live-check route; the list's view stands.
+    getWorktreeMachines.mockResolvedValue(null);
     getProjectRemotes.mockResolvedValue([
       remote("srv-1", "gpu-01", "/srv/work/vibedeckx"),
       remote("srv-2", "gpu-02", "/srv/work/vibedeckx"),
@@ -120,8 +128,8 @@ describe("CreateWorktreeDialog machine list", () => {
     await render();
 
     expect(machineRows()).toHaveLength(3);
-    expect(document.body.textContent).toContain("Remote · gpu-01");
-    expect(document.body.textContent).toContain("Remote · gpu-02");
+    expect(document.body.textContent).toContain("gpu-01");
+    expect(document.body.textContent).toContain("gpu-02");
     expect(machineRows().every((box) => box.checked)).toBe(true);
   });
 
@@ -139,7 +147,7 @@ describe("CreateWorktreeDialog machine list", () => {
     await render();
 
     expect(machineRows()).toHaveLength(3);
-    expect(document.body.textContent).toContain("Remote · gpu-02");
+    expect(document.body.textContent).toContain("gpu-02");
   });
 
   it("does not carry one workspace's base branch into the next", async () => {
@@ -338,5 +346,296 @@ describe("CreateWorktreeDialog machine list", () => {
 
     await clickCreate();
     expect(createWorktree).toHaveBeenCalledWith("p1", "dev", ["srv-2"], "main");
+  });
+});
+
+describe("CreateWorktreeDialog managing an existing workspace", () => {
+  let container: HTMLElement;
+  let root: Root;
+  const onOpenChange = vi.fn();
+
+  const machine = (
+    serverId: string,
+    name: string,
+    state: WorkspaceMachineState["state"],
+    extra?: Partial<WorkspaceMachineState>,
+  ): WorkspaceMachineState => ({ serverId, name, state, ...extra });
+
+  const render = (props: {
+    initialMachines?: WorkspaceMachineState[];
+    initialSelectedTargets?: string[];
+  }) =>
+    act(async () => {
+      root.render(
+        <CreateWorktreeDialog
+          projectId="p1"
+          project={project}
+          open
+          onOpenChange={onOpenChange}
+          onWorktreeCreated={() => {}}
+          initialBranchName="dev"
+          initialMachines={props.initialMachines}
+          initialSelectedTargets={props.initialSelectedTargets}
+        />,
+      );
+    });
+
+  const rowFor = (label: string) =>
+    Array.from(document.body.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'))
+      .find((box) => box.closest("label")?.textContent?.includes(label))!;
+  const rowText = (label: string) => rowFor(label).closest("label")!.textContent ?? "";
+  const submitButton = () =>
+    Array.from(document.body.querySelectorAll("button")).find((b) =>
+      /^(Create|Retry) on/.test(b.textContent ?? ""),
+    )!;
+  const click = (element: Element) =>
+    act(async () => {
+      element.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  const flush = () => act(async () => {});
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sharedRemotes.value = null;
+    getProjectBranches.mockResolvedValue(["main", "dev"]);
+    getProjectRemotes.mockResolvedValue([
+      remote("srv-1", "gpu-01", "/srv/work/vibedeckx"),
+      remote("srv-2", "gpu-02", "/srv/work/vibedeckx"),
+    ]);
+    getWorktreeMachines.mockResolvedValue(null);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("ticks the machines that lack it, and will not pick one that has it", async () => {
+    await render({
+      initialMachines: [
+        machine("local", "local", "present"),
+        machine("srv-1", "gpu-01", "absent"),
+        machine("srv-2", "gpu-02", "error", { error: "disk full" }),
+      ],
+    });
+
+    expect(document.body.textContent).toContain("Manage remotes for dev");
+    expect(document.body.textContent).toContain("dev exists on 1 of 3 remotes");
+    expect(rowFor("Local").disabled).toBe(true);
+    expect(rowFor("Local").checked).toBe(false);
+    expect(rowText("Local")).toContain("Has it");
+    expect(rowFor("gpu-01").checked).toBe(true);
+    expect(rowText("gpu-01")).toContain("Missing");
+    expect(rowFor("gpu-02").checked).toBe(true);
+    expect(rowText("gpu-02")).toContain("Failed");
+
+    // Clicking a present row is a no-op: it never joins the submission.
+    await click(rowFor("Local"));
+    expect(submitButton().textContent).toContain("Create on 2 remotes");
+    await click(submitButton());
+    expect(createWorktree).toHaveBeenCalledWith("p1", "dev", ["srv-1", "srv-2"], "main");
+  });
+
+  it("keeps the name read-only: a different name is a different workspace", async () => {
+    await render({ initialMachines: [machine("local", "local", "present"), machine("srv-1", "gpu-01", "absent")] });
+
+    const input = document.body.querySelector<HTMLInputElement>("#branch-name")!;
+    expect(input.value).toBe("dev");
+    expect(input.readOnly).toBe(true);
+    expect(document.body.textContent).toContain("Work done on other remotes is not copied");
+  });
+
+  it("will not pick a machine still creating, deleting, or one the hub cannot place", async () => {
+    await render({
+      initialMachines: [
+        machine("local", "local", "creating"),
+        machine("srv-1", "gpu-01", "deleting"),
+        machine("srv-2", "gpu-02", "unknown"),
+      ],
+    });
+
+    expect(rowFor("Local").disabled).toBe(true);
+    expect(rowText("Local")).toContain("Creating…");
+    expect(rowFor("gpu-01").disabled).toBe(true);
+    expect(rowText("gpu-01")).toContain("Deleting…");
+    // The live check is unavailable, so the unknown stays unknown.
+    expect(rowFor("gpu-02").disabled).toBe(true);
+    expect(rowText("gpu-02")).toContain("Could not check");
+    expect(submitButton().hasAttribute("disabled")).toBe(true);
+  });
+
+  it("ticks only the machines the caller named", async () => {
+    await render({
+      initialMachines: [
+        machine("local", "local", "present"),
+        machine("srv-1", "gpu-01", "absent"),
+        machine("srv-2", "gpu-02", "absent"),
+      ],
+      initialSelectedTargets: ["srv-2", "local"],
+    });
+
+    expect(rowFor("gpu-01").checked).toBe(false);
+    expect(rowFor("gpu-02").checked).toBe(true);
+    // Named but not pickable: ignored.
+    expect(rowFor("Local").checked).toBe(false);
+  });
+
+  it("asks every machine once on opening, and places the ones the hub could not", async () => {
+    let answer!: (value: { branch: string; machines: WorkspaceMachineCheck[] }) => void;
+    getWorktreeMachines.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    await render({
+      initialMachines: [
+        machine("local", "local", "present"),
+        machine("srv-1", "gpu-01", "unknown"),
+        machine("srv-2", "gpu-02", "unknown"),
+      ],
+    });
+
+    expect(getWorktreeMachines).toHaveBeenCalledTimes(1);
+    expect(getWorktreeMachines).toHaveBeenCalledWith("p1", "dev");
+    expect(rowText("gpu-01")).toContain("Checking…");
+    expect(rowFor("gpu-01").disabled).toBe(true);
+
+    await act(async () => {
+      answer({
+        branch: "dev",
+        machines: [
+          { serverId: "local", name: "local", state: "present", checked: true },
+          { serverId: "srv-1", name: "gpu-01", state: "absent", checked: true },
+          { serverId: "srv-2", name: "gpu-02", state: "unknown", checked: false, checkError: "not connected" },
+        ],
+      });
+    });
+
+    // Placed as missing: ticked, like it would have opened.
+    expect(rowFor("gpu-01").disabled).toBe(false);
+    expect(rowFor("gpu-01").checked).toBe(true);
+    expect(rowText("gpu-01")).toContain("Missing");
+    // Still nowhere: cannot be picked, and says so.
+    expect(rowFor("gpu-02").disabled).toBe(true);
+    expect(rowText("gpu-02")).toContain("Could not check");
+    expect(getWorktreeMachines).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the caller's narrowing when the live check places another machine", async () => {
+    // "Create it on gpu-01": gpu-02 turning out to be missing too is not a
+    // reason to create it there as well.
+    getWorktreeMachines.mockResolvedValue({
+      branch: "dev",
+      machines: [
+        { serverId: "local", name: "local", state: "present", checked: true },
+        { serverId: "srv-1", name: "gpu-01", state: "absent", checked: true },
+        { serverId: "srv-2", name: "gpu-02", state: "absent", checked: true },
+      ],
+    });
+    await render({
+      initialMachines: [
+        machine("local", "local", "present"),
+        machine("srv-1", "gpu-01", "absent"),
+        machine("srv-2", "gpu-02", "unknown"),
+      ],
+      initialSelectedTargets: ["srv-1"],
+    });
+    await flush();
+
+    expect(rowFor("gpu-01").checked).toBe(true);
+    expect(rowFor("gpu-02").disabled).toBe(false);
+    expect(rowFor("gpu-02").checked).toBe(false);
+    await click(submitButton());
+    expect(createWorktree).toHaveBeenCalledWith("p1", "dev", ["srv-1"], "main");
+  });
+
+  it("does not create while the live check is still out", async () => {
+    let answer!: (value: { branch: string; machines: WorkspaceMachineCheck[] }) => void;
+    getWorktreeMachines.mockImplementation(() => new Promise((resolve) => { answer = resolve; }));
+    await render({ initialMachines: [machine("local", "local", "present"), machine("srv-1", "gpu-01", "absent")] });
+
+    // An answer landing after a create would describe the machines as they
+    // were before it.
+    expect(submitButton().hasAttribute("disabled")).toBe(true);
+    await click(submitButton());
+    expect(createWorktree).not.toHaveBeenCalled();
+
+    await act(async () => {
+      answer({
+        branch: "dev",
+        machines: [
+          { serverId: "local", name: "local", state: "present", checked: true },
+          { serverId: "srv-1", name: "gpu-01", state: "absent", checked: true },
+        ],
+      });
+    });
+    expect(submitButton().hasAttribute("disabled")).toBe(false);
+  });
+
+  it("asks again on request", async () => {
+    getWorktreeMachines.mockResolvedValue({
+      branch: "dev",
+      machines: [
+        { serverId: "local", name: "local", state: "present", checked: true },
+        { serverId: "srv-1", name: "gpu-01", state: "present", checked: true },
+        { serverId: "srv-2", name: "gpu-02", state: "absent", checked: true },
+      ],
+    });
+    await render({ initialMachines: [machine("local", "local", "present"), machine("srv-1", "gpu-01", "absent"), machine("srv-2", "gpu-02", "absent")] });
+    await flush();
+
+    // The live answer outranks the list: gpu-01 turned out to have it.
+    expect(rowFor("gpu-01").disabled).toBe(true);
+    expect(rowText("gpu-01")).toContain("Has it");
+    expect(rowFor("gpu-02").checked).toBe(true);
+
+    const again = Array.from(document.body.querySelectorAll("button")).find((b) => b.textContent?.includes("Check again"))!;
+    await click(again);
+    await flush();
+    expect(getWorktreeMachines).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back to the list's view when the server has no live check", async () => {
+    getWorktreeMachines.mockResolvedValue(null);
+    await render({ initialMachines: [machine("local", "local", "present"), machine("srv-1", "gpu-01", "absent"), machine("srv-2", "gpu-02", "unknown")] });
+    await flush();
+
+    expect(rowFor("gpu-01").checked).toBe(true);
+    expect(rowText("gpu-02")).toContain("Could not check");
+  });
+
+  it("after a partial success, keeps only the failures ticked and retries just those", async () => {
+    createWorktree.mockResolvedValueOnce({
+      worktree: { branch: "dev" },
+      partialSuccess: true,
+      results: {
+        "srv-1": { success: true, label: "gpu-01", targetId: "srv-1", adopted: true },
+        "srv-2": { success: false, label: "gpu-02", targetId: "srv-2", error: "disk full" },
+      },
+    });
+    await render({
+      initialMachines: [
+        machine("local", "local", "present"),
+        machine("srv-1", "gpu-01", "absent"),
+        machine("srv-2", "gpu-02", "absent"),
+      ],
+    });
+
+    await click(submitButton());
+
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
+    expect(rowFor("gpu-01").checked).toBe(false);
+    expect(rowFor("gpu-01").disabled).toBe(true);
+    expect(rowText("gpu-01")).toContain("Reused");
+    expect(rowFor("gpu-02").checked).toBe(true);
+    expect(rowText("gpu-02")).toContain("disk full");
+    expect(submitButton().textContent).toContain("Retry on 1 remote");
+
+    createWorktree.mockResolvedValueOnce({
+      worktree: { branch: "dev" },
+      results: { "srv-2": { success: true, label: "gpu-02", targetId: "srv-2" } },
+    });
+    await click(submitButton());
+    expect(createWorktree).toHaveBeenLastCalledWith("p1", "dev", ["srv-2"], "main");
+    expect(onOpenChange).toHaveBeenCalledWith(false);
   });
 });

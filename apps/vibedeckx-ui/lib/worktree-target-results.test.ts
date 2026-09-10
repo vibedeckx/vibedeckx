@@ -1,10 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
+  machineStateText,
+  machinesFromTargets,
+  workspaceCoverage,
+  type WorkspaceMachineState,
   adoptedTargets,
   appendTargetFailures,
   describeRetainedBranches,
   describeTargetResults,
-  describeWorkspaceTargets,
+  describeWorkspaceMachines,
+  workspaceContradiction,
   targetLabel,
   targetOutcomeLines,
 } from "@/lib/worktree-target-results";
@@ -142,63 +147,113 @@ describe("targetOutcomeLines", () => {
   });
 });
 
-describe("describeWorkspaceTargets", () => {
+describe("workspaceContradiction", () => {
+  const m = (serverId: string, state: WorkspaceMachineState["state"], extra?: Partial<WorkspaceMachineState>): WorkspaceMachineState =>
+    ({ serverId, name: serverId, state, ...extra });
+
+  it("reads a tombstone beside a live checkout as an unfinished delete", () => {
+    expect(workspaceContradiction([m("a", "absent", { deleted: true }), m("b", "present")]))
+      .toEqual({ unfinishedDelete: true, hasError: false });
+  });
+
+  it("does not call a deliberate gap, or a never-made machine, a contradiction", () => {
+    expect(workspaceContradiction([m("a", "present"), m("b", "absent"), m("c", "unknown")]))
+      .toEqual({ unfinishedDelete: false, hasError: false });
+  });
+
+  it("reports a machine that kept a reason", () => {
+    expect(workspaceContradiction([m("a", "present"), m("b", "error", { error: "disk full" })]))
+      .toEqual({ unfinishedDelete: false, hasError: true });
+  });
+
+  it("says nothing once the delete has finished everywhere", () => {
+    expect(workspaceContradiction([m("a", "absent", { deleted: true }), m("b", "absent", { deleted: true })]))
+      .toEqual({ unfinishedDelete: false, hasError: false });
+  });
+});
+
+describe("describeWorkspaceMachines", () => {
   it("reads as an unfinished delete when that is what it is", () => {
-    expect(describeWorkspaceTargets([
-      { targetId: "s1", label: "worker3", state: "deleted" },
-      { targetId: "s2", label: "Mac", state: "present", status: "ready" },
+    expect(describeWorkspaceMachines([
+      { serverId: "s1", name: "worker3", state: "absent", deleted: true },
+      { serverId: "s2", name: "Mac", state: "present" },
     ], { unfinishedDelete: true })).toEqual([
-      { label: "worker3", text: "Deleted successfully", failed: false, reason: undefined },
-      { label: "Mac", text: "Not deleted", failed: false, reason: undefined },
+      { name: "worker3", text: "Deleted successfully", failed: false },
+      { name: "Mac", text: "Not deleted", failed: false },
     ]);
   });
 
-  it("reads as a create when the disagreement is a machine that never got it", () => {
-    // Same row shape, opposite meaning: here having the workspace is the good
+  it("reads as a create when the disagreement is a machine that failed", () => {
+    // Same shape, opposite meaning: here having the workspace is the good
     // outcome, so "Not deleted" would describe the healthy machine as a holdout.
-    expect(describeWorkspaceTargets([
-      { targetId: "s1", label: "worker3", state: "present", status: "ready" },
-      { targetId: "s2", label: "Mac", state: "present", status: "error", error: "Branch 'dev' already exists" },
+    expect(describeWorkspaceMachines([
+      { serverId: "s1", name: "worker3", state: "present" },
+      { serverId: "s2", name: "Mac", state: "error", error: "Branch 'dev' already exists" },
+      { serverId: "s3", name: "ubuntu", state: "absent" },
     ])).toEqual([
-      { label: "worker3", text: "Created successfully", failed: false, reason: undefined },
-      { label: "Mac", text: "Branch 'dev' already exists", failed: true },
+      { name: "worker3", text: "Present", failed: false },
+      { name: "Mac", text: "Branch 'dev' already exists", failed: true },
+      { name: "ubuntu", text: "Missing", failed: false },
     ]);
   });
 
   it("keeps a refused delete's reason on a machine that is still healthy", () => {
     // The workspace is usable there — the delete is what failed — so the state
     // stays "Not deleted" and the reason rides along as the error it is.
-    expect(describeWorkspaceTargets([
-      { targetId: "s1", label: "worker3", state: "deleted" },
-      {
-        targetId: "s2",
-        label: "Mac",
-        state: "present",
-        status: "ready",
-        error: "Worktree has uncommitted changes",
-      },
+    expect(describeWorkspaceMachines([
+      { serverId: "s1", name: "worker3", state: "absent", deleted: true },
+      { serverId: "s2", name: "Mac", state: "present", error: "Worktree has uncommitted changes" },
     ], { unfinishedDelete: true })).toEqual([
-      { label: "worker3", text: "Deleted successfully", failed: false, reason: undefined },
-      {
-        label: "Mac",
-        text: "Not deleted",
-        failed: false,
-        reason: "Worktree has uncommitted changes",
-      },
+      { name: "worker3", text: "Deleted successfully", failed: false },
+      { name: "Mac", text: "Not deleted", failed: false, reason: "Worktree has uncommitted changes" },
     ]);
   });
 
-  it("marks a machine's own error as an error, not as one more state", () => {
-    // Unmarked, "Mac: Branch 'dev' already exists" reads as a description of
-    // Mac rather than the reason nothing was created there.
-    expect(describeWorkspaceTargets([
-      { targetId: "s2", label: "Mac", state: "present", status: "error", error: "Branch 'dev' already exists" },
-    ])).toEqual([{ label: "Mac", text: "Branch 'dev' already exists", failed: true }]);
+  it("still marks a failure that carried no message", () => {
+    expect(describeWorkspaceMachines([{ serverId: "s2", name: "Mac", state: "error", error: null }]))
+      .toEqual([{ name: "Mac", text: "failed", failed: true }]);
+  });
+});
+
+describe("workspaceCoverage", () => {
+  const m = (serverId: string, state: WorkspaceMachineState["state"]): WorkspaceMachineState =>
+    ({ serverId, name: serverId, state });
+
+  it("counts ready checkouts over every linked machine, and flags a known gap", () => {
+    expect(workspaceCoverage([m("a", "present"), m("b", "absent"), m("c", "creating"), m("d", "unknown")]))
+      .toEqual({ present: 1, total: 4, missing: true });
   });
 
-  it("still marks a failure that carried no message", () => {
-    expect(describeWorkspaceTargets([
-      { targetId: "s2", label: "Mac", state: "present", status: "error", error: null },
-    ])).toEqual([{ label: "Mac", text: "failed", failed: true }]);
+  it("does not call an unplaced or failed machine a gap", () => {
+    // Neither is "known not to have it": one is unconfirmed, the other is the
+    // amber warning's business.
+    expect(workspaceCoverage([m("a", "present"), m("b", "unknown"), m("c", "error")]).missing).toBe(false);
+  });
+});
+
+describe("machinesFromTargets", () => {
+  it("reads the older per-row shape as machine states", () => {
+    expect(machinesFromTargets([
+      { targetId: "s1", label: "worker3", state: "present", status: "ready" },
+      { targetId: "s2", label: "Mac", state: "present", status: "error", error: "disk full" },
+      { targetId: "s3", label: "ubuntu", state: "deleted" },
+      { targetId: "s4", label: "gpu", state: "present", status: "creating" },
+      { targetId: "s5", label: "mini", state: "present", status: "ready", error: "Worktree has uncommitted changes" },
+    ])).toEqual([
+      { serverId: "s1", name: "worker3", state: "present" },
+      { serverId: "s2", name: "Mac", state: "error", error: "disk full" },
+      { serverId: "s3", name: "ubuntu", state: "absent", deleted: true },
+      { serverId: "s4", name: "gpu", state: "creating" },
+      { serverId: "s5", name: "mini", state: "present", error: "Worktree has uncommitted changes" },
+    ]);
+  });
+});
+
+describe("machineStateText", () => {
+  it("tells a deletion from a workspace never made, and keeps the machine's own reason", () => {
+    expect(machineStateText({ serverId: "a", name: "a", state: "absent" })).toBe("Missing");
+    expect(machineStateText({ serverId: "a", name: "a", state: "absent", deleted: true })).toBe("Deleted here");
+    expect(machineStateText({ serverId: "a", name: "a", state: "error", error: "disk full" })).toBe("Failed — disk full");
+    expect(machineStateText({ serverId: "a", name: "a", state: "unknown" })).toBe("Not checked yet");
   });
 });

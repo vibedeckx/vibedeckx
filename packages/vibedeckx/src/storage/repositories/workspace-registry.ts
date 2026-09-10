@@ -186,9 +186,15 @@ export const createWorkspaceRegistryRepo = (
       expected,
       status,
       error = null,
+      path,
     ) => kdb.transaction().execute(async (trx) => {
       const result = await trx.updateTable("workspace_checkouts")
-        .set({ status, error, updated_at: h.nowMs() })
+        .set({
+          status,
+          error,
+          updated_at: h.nowMs(),
+          ...(path ? { worktree_path: path.worktreePath, path_source: path.pathSource } : {}),
+        })
         .where("id", "=", checkoutId)
         .where("deleted_at", "is", null)
         .where("status", "=", expected.status)
@@ -313,5 +319,22 @@ export const createWorkspaceRegistryRepo = (
         await recomputeWorkspace(trx, checkout.workspace_id, h);
       });
     },
+
+    markCheckoutDeletedIfCurrent: async (checkoutId, expected) => kdb.transaction().execute(async (trx) => {
+      const result = await trx.updateTable("workspace_checkouts")
+        .set({ deleted_at: h.nowMs(), updated_at: h.nowMs() })
+        .where("id", "=", checkoutId)
+        .where("deleted_at", "is", null)
+        .where("status", "=", expected.status)
+        .where("updated_at", "=", expected.updatedAt)
+        .executeTakeFirst();
+      const changed = result.numUpdatedRows > 0n;
+      if (changed) {
+        const checkout = await trx.selectFrom("workspace_checkouts")
+          .select("workspace_id").where("id", "=", checkoutId).executeTakeFirstOrThrow();
+        await recomputeWorkspace(trx, checkout.workspace_id, h);
+      }
+      return changed;
+    }),
   },
 });

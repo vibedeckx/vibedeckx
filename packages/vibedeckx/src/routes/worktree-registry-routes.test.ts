@@ -146,7 +146,11 @@ describe("worktree routes persisted identity", () => {
     expect(listed.statusCode).toBe(200);
     expect(listed.json().worktrees).toEqual([
       { branch: null, expectedBranch: "main" },
-      { branch: "dev", currentBranch: "agent/experiment" },
+      {
+        branch: "dev",
+        currentBranch: "agent/experiment",
+        machines: [{ serverId: "local", name: "local", state: "present" }],
+      },
     ]);
   });
 
@@ -369,16 +373,12 @@ describe("worktree routes persisted identity", () => {
     const dev = listed.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
 
     expect(dev).toBeTruthy();
-    expect(dev.unfinishedDelete).toBe(true);
-    expect(dev.targets).toHaveLength(2);
-    expect(dev.targets).toContainEqual({ targetId: "local", label: "local", state: "deleted" });
-    expect(dev.targets).toContainEqual({
-      targetId: remote.id,
-      label: "Mac",
-      state: "present",
-      status: "ready",
-      error: "not a working tree",
-    });
+    expect(dev.machines).toEqual([
+      { serverId: "local", name: "local", state: "absent", deleted: true },
+      // The failed delete restored the checkout to ready, and the reason it
+      // refused rides along: a warning that cannot say why is no help.
+      { serverId: remote.id, name: "Mac", state: "present", error: "not a working tree" },
+    ]);
   });
 
   it("forgets a machine the project no longer has, instead of listing a workspace nobody can delete", async () => {
@@ -462,8 +462,7 @@ describe("worktree routes persisted identity", () => {
     const dev = listed.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
 
     expect(dev).toBeTruthy();
-    expect(dev.targets).toBeUndefined();
-    expect(dev.unfinishedDelete).toBeUndefined();
+    expect(dev.machines).toEqual([{ serverId: "local", name: "local", state: "present" }]);
   });
 
   it("drops the workspace once the retry finishes the delete everywhere", async () => {
@@ -1086,5 +1085,398 @@ describe("worktree routes persisted identity", () => {
       .toHaveLength(1);
     expect(await storage.workspaceRegistry.listByProject("p1", "local"))
       .toEqual([]);
+  });
+  describe("workspace coverage across remotes", () => {
+    // A SaaS project: no local path, three linked remotes, sessions on `a`.
+    let a: string;
+    let b: string;
+    let c: string;
+    const worktreesOf = (branches: Array<string | null>) => ({
+      ok: true,
+      status: 200,
+      data: {
+        worktrees: branches.map((branch) => ({
+          branch,
+          worktreePath: branch ? conventionalWorktreePath("/srv/repo", branch) : "/srv/repo",
+        })),
+      },
+    });
+    const offline = { ok: false, status: 0, data: { error: "Remote server is not connected" }, errorCode: "network_error" };
+    const machinesOf = (worktree: { machines?: Array<{ serverId: string; state: string }> }) =>
+      Object.fromEntries((worktree.machines ?? []).map((machine) => [machine.serverId, machine.state]));
+
+    beforeEach(async () => {
+      await storage.projects.create({ id: "saas", name: "saas", path: null });
+      a = (await storage.remoteServers.create({ name: "alpha" })).id;
+      b = (await storage.remoteServers.create({ name: "bravo" })).id;
+      c = (await storage.remoteServers.create({ name: "charlie" })).id;
+      for (const id of [a, b, c]) {
+        await storage.projectRemotes.add({ project_id: "saas", remote_server_id: id, remote_path: "/srv/repo" });
+      }
+      await storage.projects.update("saas", { agent_mode: a });
+    });
+
+    const listOn = (serverId: string, branch = "dev") =>
+      storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "saas",
+        branch,
+        targetId: serverId,
+        worktreePath: conventionalWorktreePath("/srv/repo", branch),
+        expectedBranch: branch,
+      });
+    const confirmAll = async () => {
+      for (const id of [a, b, c]) await storage.projectRemotes.markWorktreesSynced("saas", id);
+    };
+
+    it("lists a workspace created on one remote only, with every machine's state", async () => {
+      // Created with only bravo ticked. The listing remote's Git has never
+      // heard of it, so before this the workspace was simply invisible.
+      await confirmAll();
+      await listOn(b);
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null]));
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+
+      expect(listed.statusCode).toBe(200);
+      const dev = listed.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
+      expect(dev).toBeTruthy();
+      expect(dev.machines).toEqual([
+        { serverId: a, name: "alpha", state: "absent" },
+        { serverId: b, name: "bravo", state: "present" },
+        { serverId: c, name: "charlie", state: "absent" },
+      ]);
+      // Not a contradiction: no machine failed, nothing is half-deleted.
+      expect(dev.targets).toBeUndefined();
+      expect(dev.unfinishedDelete).toBeUndefined();
+      // The main workspace is everywhere by definition and carries no breakdown.
+      expect(listed.json().worktrees[0].branch).toBeNull();
+      expect(listed.json().worktrees[0].machines).toBeUndefined();
+    });
+
+    it("lists the remote sessions run on, not the first one linked", async () => {
+      await storage.projects.update("saas", { agent_mode: b });
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null]));
+
+      await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+
+      expect(proxyToRemoteAuto).toHaveBeenCalledTimes(1);
+      expect(proxyToRemoteAuto.mock.calls[0][0]).toBe(b);
+    });
+
+    it("falls back to the first-linked remote when agent_mode names nothing linked", async () => {
+      await storage.projects.update("saas", { agent_mode: "gone" });
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null]));
+
+      await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+
+      expect(proxyToRemoteAuto.mock.calls[0][0]).toBe(a);
+    });
+
+    it("calls a never-listed remote unknown rather than absent, until it is listed", async () => {
+      await listOn(b);
+      await storage.projectRemotes.markWorktreesSynced("saas", a);
+      await storage.projectRemotes.markWorktreesSynced("saas", b);
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null]));
+
+      const before = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+      const devBefore = before.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
+      expect(machinesOf(devBefore)).toEqual({ [a]: "absent", [b]: "present", [c]: "unknown" });
+
+      // Listing charlie is the evidence: its full list came back without dev.
+      await app.inject({ method: "GET", url: `/api/projects/saas/worktrees?target=${c}` });
+      const after = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+      const devAfter = after.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
+      expect(machinesOf(devAfter)).toEqual({ [a]: "absent", [b]: "present", [c]: "absent" });
+    });
+
+    it("does not take a row written on its own as proof the remote was listed", async () => {
+      // A create or a session binding writes one row and says nothing about
+      // the workspaces it did not touch.
+      await storage.projectRemotes.markWorktreesSynced("saas", a);
+      await storage.projectRemotes.markWorktreesSynced("saas", b);
+      await listOn(b);
+      await listOn(c, "other");
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null]));
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+      const dev = listed.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
+      expect(machinesOf(dev)).toEqual({ [a]: "absent", [b]: "present", [c]: "unknown" });
+    });
+
+    it("keeps a failed machine's reason in the breakdown", async () => {
+      // Present on two, failed on a third, never made on the fourth.
+      const d = (await storage.remoteServers.create({ name: "delta" })).id;
+      await storage.projectRemotes.add({ project_id: "saas", remote_server_id: d, remote_path: "/srv/repo" });
+      await confirmAll();
+      await storage.projectRemotes.markWorktreesSynced("saas", d);
+      await listOn(a);
+      await listOn(b);
+      const failed = await storage.workspaceRegistry.beginCheckout({
+        projectId: "saas", branch: "dev", targetId: c,
+        worktreePath: conventionalWorktreePath("/srv/repo", "dev"), expectedBranch: "dev",
+      });
+      await storage.workspaceRegistry.setCheckoutStatus(failed.checkout.id, "error", "disk full");
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null, "dev"]));
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+      const dev = listed.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
+      expect(dev.machines).toEqual([
+        { serverId: a, name: "alpha", state: "present" },
+        { serverId: b, name: "bravo", state: "present" },
+        { serverId: c, name: "charlie", state: "error", error: "disk full" },
+        { serverId: d, name: "delta", state: "absent" },
+      ]);
+    });
+
+    it("lists from the registry, in the current remote's order, with its Git facts", async () => {
+      await confirmAll();
+      await listOn(b, "zeta");
+      await listOn(a, "beta");
+      await listOn(a, "alpha-only");
+      proxyToRemoteAuto.mockResolvedValue({
+        ok: true,
+        status: 200,
+        data: {
+          worktrees: [
+            { branch: null, expectedBranch: "main", currentBranch: "hotfix", worktreePath: "/srv/repo" },
+            { branch: "beta", currentBranch: "beta-wip", worktreePath: conventionalWorktreePath("/srv/repo", "beta") },
+            { branch: "alpha-only", worktreePath: conventionalWorktreePath("/srv/repo", "alpha-only") },
+          ],
+        },
+      });
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json().stale).toBeUndefined();
+      expect(listed.json().activeRemoteInvalid).toBeUndefined();
+      // Worker order first, with what only its Git knows; then the rest by name.
+      // The worker's own paths do not leak into the list.
+      expect(listed.json().worktrees.map((worktree: { branch: string | null; currentBranch?: string; worktreePath?: string }) =>
+        [worktree.branch, worktree.currentBranch, worktree.worktreePath],
+      )).toEqual([
+        [null, "hotfix", undefined],
+        ["beta", "beta-wip", undefined],
+        ["alpha-only", undefined, undefined],
+        ["zeta", undefined, undefined],
+      ]);
+      expect(machinesOf(listed.json().worktrees[3])).toEqual({ [a]: "absent", [b]: "present", [c]: "absent" });
+    });
+
+    it("answers from the registry when the current remote is offline, and says so", async () => {
+      // Today this is a 5xx and an empty sidebar.
+      await confirmAll();
+      await listOn(a);
+      await listOn(b, "other");
+      proxyToRemoteAuto.mockResolvedValue(offline);
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json().stale).toEqual({ serverId: a, name: "alpha" });
+      expect(listed.json().worktrees.map((worktree: { branch: string | null }) => worktree.branch)).toEqual([null, "dev", "other"]);
+      // Nothing was reconciled against an answer that never came.
+      expect((await storage.workspaceRegistry.getByProjectBranch("saas", "dev", a))?.checkout.status).toBe("ready");
+    });
+
+    it("flags an agent_mode that names nothing linked, and lists from the first remote", async () => {
+      await storage.projects.update("saas", { agent_mode: "gone" });
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null]));
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json().activeRemoteInvalid).toBe(true);
+      expect(proxyToRemoteAuto.mock.calls[0][0]).toBe(a);
+    });
+
+    it("reconciles the current remote's rows to its list: tombstones the hand-deleted, restores the failed", async () => {
+      await confirmAll();
+      await listOn(a, "gone");
+      await listOn(b, "gone");
+      const failed = await storage.workspaceRegistry.beginCheckout({
+        projectId: "saas", branch: "dev", targetId: a,
+        worktreePath: conventionalWorktreePath("/srv/repo", "dev"), expectedBranch: "dev",
+      });
+      await storage.workspaceRegistry.setCheckoutStatus(failed.checkout.id, "error", "lost a race");
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null, "dev"]));
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+
+      const byBranch = Object.fromEntries(listed.json().worktrees.map((worktree: { branch: string | null }) => [worktree.branch ?? "", worktree]));
+      // `gone` was removed by hand on alpha: alpha's row is closed, bravo's stands.
+      expect(machinesOf(byBranch.gone)).toEqual({ [a]: "absent", [b]: "present", [c]: "absent" });
+      expect(byBranch.gone.machines[0].deleted).toBe(true);
+      // alpha has `dev` after all: the failure no longer describes it.
+      expect(machinesOf(byBranch.dev)).toEqual({ [a]: "present", [b]: "absent", [c]: "absent" });
+      expect((await storage.workspaceRegistry.getByProjectBranch("saas", "dev", a))?.checkout).toMatchObject({ status: "ready", error: null });
+    });
+
+    it("reconciles a named machine too when listing it explicitly", async () => {
+      await confirmAll();
+      await listOn(c, "gone");
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null]));
+
+      await app.inject({ method: "GET", url: `/api/projects/saas/worktrees?target=${c}` });
+
+      expect(await storage.workspaceRegistry.getByProjectBranch("saas", "gone", c)).toBeUndefined();
+    });
+
+    it("does not let the machine check move a row the way a listing does", async () => {
+      // The check's answer is for the dialog; the registry is add-only there.
+      await confirmAll();
+      await listOn(a, "gone");
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null]));
+
+      await app.inject({ method: "GET", url: "/api/projects/saas/worktrees/machines?branch=gone" });
+
+      expect((await storage.workspaceRegistry.getByProjectBranch("saas", "gone", a))?.checkout.status).toBe("ready");
+    });
+
+    it("sends the full breakdown even when every machine has the workspace", async () => {
+      await confirmAll();
+      for (const id of [a, b, c]) await listOn(id);
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null, "dev"]));
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+      const dev = listed.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
+      expect(machinesOf(dev)).toEqual({ [a]: "present", [b]: "present", [c]: "present" });
+      expect(dev.targets).toBeUndefined();
+    });
+
+    it("shows a create still under way as creating, and a delete as deleted here", async () => {
+      await confirmAll();
+      await listOn(a);
+      await storage.workspaceRegistry.beginCheckout({
+        projectId: "saas", branch: "dev", targetId: b,
+        worktreePath: conventionalWorktreePath("/srv/repo", "dev"), expectedBranch: "dev",
+      });
+      const gone = await listOn(c);
+      await storage.workspaceRegistry.markCheckoutDeleted(gone.checkout.id);
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null, "dev"]));
+
+      const listed = await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+      const dev = listed.json().worktrees.find((worktree: { branch: string | null }) => worktree.branch === "dev");
+      expect(dev.machines).toEqual([
+        { serverId: a, name: "alpha", state: "present" },
+        { serverId: b, name: "bravo", state: "creating" },
+        { serverId: c, name: "charlie", state: "absent", deleted: true },
+      ]);
+    });
+
+    it("confirms the remote it listed, so its later silences count", async () => {
+      proxyToRemoteAuto.mockResolvedValue(worktreesOf([null]));
+      expect((await storage.projectRemotes.getByProjectAndServer("saas", a))?.worktrees_synced_at).toBeNull();
+
+      await app.inject({ method: "GET", url: "/api/projects/saas/worktrees" });
+
+      expect((await storage.projectRemotes.getByProjectAndServer("saas", a))?.worktrees_synced_at).not.toBeNull();
+      expect((await storage.projectRemotes.getByProjectAndServer("saas", b))?.worktrees_synced_at).toBeNull();
+    });
+
+    describe("GET /api/projects/:id/worktrees/machines", () => {
+      const check = (branch = "dev") =>
+        app.inject({ method: "GET", url: `/api/projects/saas/worktrees/machines?branch=${encodeURIComponent(branch)}` });
+      const answers = (byServer: Record<string, unknown>) =>
+        proxyToRemoteAuto.mockImplementation(async (serverId: string) => byServer[serverId] ?? offline);
+
+      it("asks every remote and falls back to the registry for the one it cannot reach", async () => {
+        await storage.projectRemotes.markWorktreesSynced("saas", a);
+        await listOn(a);
+        await listOn(b);
+        answers({ [a]: worktreesOf([null, "dev"]), [c]: worktreesOf([null]) });
+
+        const response = await check();
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json().branch).toBe("dev");
+        expect(response.json().machines).toEqual([
+          { serverId: a, name: "alpha", state: "present", checked: true },
+          // Bravo is offline: its last-known state, marked as such.
+          { serverId: b, name: "bravo", state: "present", checked: false, checkError: "Remote server is not connected" },
+          { serverId: c, name: "charlie", state: "absent", checked: true },
+        ]);
+        expect(proxyToRemoteAuto).toHaveBeenCalledTimes(3);
+        // A machine that answered is confirmed from here on; one that did not is not.
+        expect((await storage.projectRemotes.getByProjectAndServer("saas", c))?.worktrees_synced_at).not.toBeNull();
+        expect((await storage.projectRemotes.getByProjectAndServer("saas", b))?.worktrees_synced_at).toBeNull();
+      });
+
+      it("leaves an unreachable, never-listed remote unknown rather than calling it absent", async () => {
+        await listOn(a);
+        answers({ [a]: worktreesOf([null, "dev"]), [c]: worktreesOf([null]) });
+
+        const response = await check();
+
+        const bravo = response.json().machines.find((machine: { serverId: string }) => machine.serverId === b);
+        expect(bravo).toMatchObject({ state: "unknown", checked: false });
+      });
+
+      it("keeps a failed create as failed even when the worker now lists the branch", async () => {
+        // Retrying is what clears an error — it adopts, then goes ready. A
+        // listing is not a retry.
+        const failed = await storage.workspaceRegistry.beginCheckout({
+          projectId: "saas", branch: "dev", targetId: a,
+          worktreePath: conventionalWorktreePath("/srv/repo", "dev"), expectedBranch: "dev",
+        });
+        await storage.workspaceRegistry.setCheckoutStatus(failed.checkout.id, "error", "lost a race");
+        answers({ [a]: worktreesOf([null, "dev"]), [b]: worktreesOf([null]), [c]: worktreesOf([null]) });
+
+        const response = await check();
+
+        const alpha = response.json().machines.find((machine: { serverId: string }) => machine.serverId === a);
+        expect(alpha).toEqual({ serverId: a, name: "alpha", state: "error", error: "lost a race", checked: true });
+      });
+
+      it("reports a ready row the worker no longer lists as absent, without tombstoning it", async () => {
+        await listOn(a);
+        answers({ [a]: worktreesOf([null]), [b]: worktreesOf([null]), [c]: worktreesOf([null]) });
+
+        const response = await check();
+
+        const alpha = response.json().machines.find((machine: { serverId: string }) => machine.serverId === a);
+        expect(alpha).toEqual({ serverId: a, name: "alpha", state: "absent", checked: true });
+        // The live answer goes to the dialog only; the registry is add-only here.
+        expect((await storage.workspaceRegistry.getByProjectBranch("saas", "dev", a))?.checkout.status).toBe("ready");
+      });
+
+      it("registers a worktree the worker has that the hub did not know about", async () => {
+        answers({ [a]: worktreesOf([null, "dev"]), [b]: worktreesOf([null]), [c]: worktreesOf([null]) });
+
+        const response = await check();
+
+        const alpha = response.json().machines.find((machine: { serverId: string }) => machine.serverId === a);
+        expect(alpha).toMatchObject({ state: "present", checked: true });
+        expect((await storage.workspaceRegistry.getByProjectBranch("saas", "dev", a))?.checkout.status).toBe("ready");
+      });
+
+      it("does not mistake a workspace held only elsewhere for one this machine has", async () => {
+        // The `?target=` list would append dev (bravo has it); the machine
+        // check reads the worker's own list, so alpha stays absent.
+        await confirmAll();
+        await listOn(b);
+        answers({ [a]: worktreesOf([null]), [b]: worktreesOf([null, "dev"]), [c]: worktreesOf([null]) });
+
+        const response = await check();
+
+        expect(machinesOf(response.json())).toEqual({ [a]: "absent", [b]: "present", [c]: "absent" });
+      });
+
+      it("answers 200 with nothing checked when every worker is offline", async () => {
+        await storage.projectRemotes.markWorktreesSynced("saas", a);
+        await listOn(b);
+        proxyToRemoteAuto.mockResolvedValue(offline);
+
+        const response = await check();
+
+        expect(response.statusCode).toBe(200);
+        expect(response.json().machines.map((machine: { state: string; checked: boolean }) => [machine.state, machine.checked]))
+          .toEqual([["absent", false], ["present", false], ["unknown", false]]);
+      });
+
+      it("requires a branch: the main workspace is on every machine and cannot be managed", async () => {
+        expect((await check("")).statusCode).toBe(400);
+      });
+    });
   });
 });

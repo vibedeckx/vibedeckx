@@ -42,6 +42,7 @@ const mapProjectRemote = (row: Selectable<ProjectRemotesTable>): ProjectRemote =
   remote_server_id: row.remote_server_id,
   remote_path: row.remote_path,
   sort_order: row.sort_order,
+  worktrees_synced_at: row.worktrees_synced_at,
 });
 
 type ProjectRemoteJoinedRow = Selectable<ProjectRemotesTable> & {
@@ -114,7 +115,7 @@ async function mintConnectToken(
 
 export const createRemoteServerRepos = (
   kdb: Kysely<DB>,
-  _h: DialectHelpers,
+  h: DialectHelpers,
 ): Pick<Storage, "remoteServers" | "projectRemotes" | "machineIdentity"> => ({
   remoteServers: {
     create: async (server, userId) => {
@@ -243,6 +244,7 @@ export const createRemoteServerRepos = (
           "project_remotes.remote_server_id",
           "project_remotes.remote_path",
           "project_remotes.sort_order",
+          "project_remotes.worktrees_synced_at",
           "remote_servers.name as server_name",
         ])
         .where("project_remotes.project_id", "=", projectId)
@@ -270,6 +272,7 @@ export const createRemoteServerRepos = (
           "project_remotes.remote_server_id",
           "project_remotes.remote_path",
           "project_remotes.sort_order",
+          "project_remotes.worktrees_synced_at",
           "remote_servers.name as server_name",
         ])
         .where("project_remotes.project_id", "=", projectId)
@@ -352,6 +355,14 @@ export const createRemoteServerRepos = (
       await renumberProjectRemotes(trx, existing.project_id, orderedIds);
       return true;
     }),
+
+    markWorktreesSynced: async (projectId, remoteServerId) => {
+      await kdb.updateTable("project_remotes")
+        .set({ worktrees_synced_at: h.nowMs() })
+        .where("project_id", "=", projectId)
+        .where("remote_server_id", "=", remoteServerId)
+        .execute();
+    },
   },
 
   machineIdentity: {

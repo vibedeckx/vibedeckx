@@ -19,6 +19,7 @@
  * `lifecycleHttpStatus`; there is no separate lifecycle GET (§9.1).
  */
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
+import { findWorkspaceMissingOnRemote, workspaceMissingOnRemoteBody } from "../workspace-presence.js";
 import fp from "fastify-plugin";
 import type { AgentType, ContentPart, NotificationDisposition } from "../agent-types.js";
 import { requireAuth as requireRawAuth } from "../server.js";
@@ -256,6 +257,10 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
       purpose,
     };
     if (ctx.remote) {
+      const missing = await findWorkspaceMissingOnRemote(fastify.storage, {
+        projectId: ctx.project.id, remoteServerId: ctx.remote.serverId, branch: common.branch,
+      });
+      if (missing) return reply.code(409).send(workspaceMissingOnRemoteBody(missing));
       const result = await remote().prepare({
         ...common, projectId: ctx.project.id, remoteServerId: ctx.remote.serverId, remotePath: ctx.remote.path,
         userId: ctx.userId,
@@ -288,6 +293,10 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     };
     const fallback = { permissionMode: common.permissionMode, agentType: common.agentType as string, model: common.model };
     if (ctx.remote) {
+      const missing = await findWorkspaceMissingOnRemote(fastify.storage, {
+        projectId: ctx.project.id, remoteServerId: ctx.remote.serverId, branch: common.branch,
+      });
+      if (missing) return reply.code(409).send(workspaceMissingOnRemoteBody(missing));
       const result = await remote().start({
         ...common, purpose: "interactive", projectId: ctx.project.id,
         remoteServerId: ctx.remote.serverId, remotePath: ctx.remote.path,

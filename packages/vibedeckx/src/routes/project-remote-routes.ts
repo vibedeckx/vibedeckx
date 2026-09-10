@@ -1,11 +1,50 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import type { ProjectRemoteWithServer } from "../storage/types.js";
+import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
+import { registerReportedWorktrees, type ReportedWorktree } from "../workspace-binding-backfill.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 
 function sanitizeProjectRemote(pr: ProjectRemoteWithServer) {
   return pr;
+}
+
+/** Ceiling on how long linking waits for the new remote's worktree list. */
+const LINK_SYNC_TIMEOUT_MS = 10_000;
+
+/**
+ * Register a just-linked remote's worktree list, so its per-workspace state
+ * is known from the start instead of "unknown" until it is listed. Offline
+ * or old workers simply leave it unconfirmed; the link itself has already
+ * succeeded, so nothing here may fail it.
+ */
+async function syncLinkedRemoteWorktrees(
+  fastify: FastifyInstance,
+  projectId: string,
+  remote: { remote_server_id: string; remote_path: string },
+): Promise<void> {
+  try {
+    const result = await proxyToRemoteAuto(
+      remote.remote_server_id,
+      "GET",
+      `/api/path/worktrees?path=${encodeURIComponent(remote.remote_path)}`,
+      undefined,
+      { reverseConnectManager: fastify.reverseConnectManager, timeoutMs: LINK_SYNC_TIMEOUT_MS },
+    );
+    if (!result.ok) return;
+    const worktrees = (result.data as { worktrees?: ReportedWorktree[] } | undefined)?.worktrees;
+    if (!Array.isArray(worktrees)) return;
+    await registerReportedWorktrees(fastify.storage, {
+      projectId,
+      targetId: remote.remote_server_id,
+      remotePath: remote.remote_path,
+      worktrees,
+    });
+    await fastify.storage.projectRemotes.markWorktreesSynced(projectId, remote.remote_server_id);
+  } catch (error) {
+    console.warn(`[ProjectRemotes] Worktree sync after linking ${remote.remote_server_id} failed:`, error);
+  }
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -68,7 +107,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
         remote_path: remotePath,
         sort_order: sortOrder,
       });
-      return reply.code(201).send(projectRemote);
+      await syncLinkedRemoteWorktrees(fastify, id, projectRemote);
+      return reply.code(201).send(
+        // The sync may have just confirmed the remote; answer with that.
+        (await fastify.storage.projectRemotes.getByProjectAndServer(id, remoteServerId)) ?? projectRemote,
+      );
     }
   );
 

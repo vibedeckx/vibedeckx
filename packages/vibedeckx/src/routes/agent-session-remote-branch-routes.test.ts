@@ -42,7 +42,12 @@ function makeApp() {
   app.decorate("storage", {
     agentSessions: { getById: async (id: string) => ({ id, project_id: "p1", title: "t" }) },
     projects: { getById: projectsGetById },
-    projectRemotes: { getByProjectAndServer: async () => ({ remote_path: "/remote/p1" }) },
+    projectRemotes: {
+      getByProjectAndServer: async () => ({
+        remote_server_id: "srv1", server_name: "worker3", remote_path: "/remote/p1",
+        worktrees_synced_at: "2026-09-09 00:00:00.000",
+      }),
+    },
     remoteServers: { getAll: async () => [{ id: "other", cross_remote_access: "read" }] },
     settings: { getOrCreate: async () => SECRET },
     remoteSessionMappings: {
@@ -60,6 +65,7 @@ function makeApp() {
     },
     workspaceRegistry: {
       getCheckoutById,
+      listByProject: async () => [],
       getByProjectBranch: async () => ({
         workspace: { id: "w1", project_id: "p1", branch: "", status: "ready", error: null },
         checkout: { id: "c1", workspace_id: "w1", target_id: "srv1", worktree_path: "/remote/p1",
@@ -246,5 +252,17 @@ describe("center-side remote branch protocol", () => {
     expect(res.statusCode).toBe(409);
     expect([...ctx.remoteSessionMap.keys()]).toEqual([SRC_SESSION_ID]);
     expect(ctx.upsert).not.toHaveBeenCalled();
+  });
+  it("refuses a new session for a workspace the hub knows the remote lacks, before proxying", async () => {
+    ctx.projectsGetById.mockResolvedValue({ id: "p1", agent_mode: "srv1" } as never);
+    proxyMock.mockImplementation(echoOk());
+
+    const res = await app.inject({
+      method: "POST", url: "/api/projects/p1/agent-sessions/new", payload: { branch: "dev" },
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(res.json()).toMatchObject({ errorCode: "workspace-missing-on-remote", serverId: "srv1", name: "worker3", branch: "dev" });
+    expect(proxyMock).not.toHaveBeenCalled();
   });
 });

@@ -97,4 +97,48 @@ describe("AppSidebar workspace that its machines disagree about", () => {
     expect(onRecreateWorktree).toHaveBeenCalledWith(missingOnMac);
     expect(onDeleteWorktree).not.toHaveBeenCalled();
   });
+  it("reads the same two contradictions off the newer per-machine field", () => {
+    // A server past the `targets` field sends only `machines`.
+    const halfDeletedNow: Worktree = {
+      branch: "dev2",
+      machines: [
+        { serverId: "server-1", name: "worker3", state: "absent", deleted: true },
+        { serverId: "server-2", name: "Mac", state: "present" },
+      ],
+    };
+    const failedOnMac: Worktree = {
+      branch: "dev",
+      machines: [
+        { serverId: "server-1", name: "worker3", state: "present" },
+        { serverId: "server-2", name: "Mac", state: "error", error: "Branch 'dev' already exists" },
+      ],
+    };
+    render([{ branch: null }, halfDeletedNow, failedOnMac]);
+
+    const finish = container.querySelector<HTMLButtonElement>('button[aria-label="Finish deleting dev2"]');
+    const create = container.querySelector<HTMLButtonElement>('button[aria-label="Create dev where it is missing"]');
+    expect(finish).toBeTruthy();
+    expect(create).toBeTruthy();
+
+    act(() => finish!.click());
+    expect(onDeleteWorktree).toHaveBeenCalledWith(halfDeletedNow);
+    act(() => create!.click());
+    expect(onRecreateWorktree).toHaveBeenCalledWith(failedOnMac);
+  });
+
+  it("leaves a deliberate gap unmarked by the amber warning", () => {
+    render([
+      { branch: null },
+      {
+        branch: "dev",
+        machines: [
+          { serverId: "server-1", name: "worker3", state: "present" },
+          { serverId: "server-2", name: "Mac", state: "absent" },
+        ],
+      },
+    ]);
+
+    expect(container.querySelector('button[aria-label^="Finish deleting"]')).toBeNull();
+    expect(container.querySelector('button[aria-label^="Create dev where"]')).toBeNull();
+  });
 });

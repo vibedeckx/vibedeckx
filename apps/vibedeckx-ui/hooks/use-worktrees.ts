@@ -47,10 +47,13 @@ export function isWorktreesLoading(
 
 /** Per-machine health, flattened so a change to it counts as a list change. */
 function healthKey(worktree: Worktree): string {
-  if (!worktree.targets) return "";
-  return worktree.targets
+  const targets = (worktree.targets ?? [])
     .map((target) => `${target.targetId}:${target.label}:${target.state}:${target.status ?? ""}:${target.error ?? ""}`)
     .join("|");
+  const machines = (worktree.machines ?? [])
+    .map((machine) => `${machine.serverId}:${machine.name}:${machine.state}:${machine.error ?? ""}:${machine.deleted ? "d" : ""}`)
+    .join("|");
+  return `${targets}/${machines}`;
 }
 
 export function worktreesEqual(left: Worktree[], right: Worktree[]): boolean {
@@ -89,6 +92,14 @@ export function preserveSelectedWorkspace(
 // fetch — never the preserveSelectedWorkspace hybrid.
 const worktreeListCache = new Map<string, Worktree[]>();
 
+export interface ListWarning {
+  /** The current remote could not be asked; the list is the hub's record. */
+  staleRemote: { serverId: string; name: string } | null;
+  /** Sessions target a remote the project no longer has. */
+  activeRemoteInvalid: boolean;
+}
+const NO_WARNING: ListWarning = { staleRemote: null, activeRemoteInvalid: false };
+
 export function useWorktrees(
   projectId: string | null,
   selectedBranch?: string | null,
@@ -100,6 +111,9 @@ export function useWorktrees(
   // target's branches.
   const scope = projectId ? `${projectId}::${agentMode ?? "local"}` : null;
   const [worktrees, setWorktrees] = useState<Worktree[]>([]);
+  // What the server said about the list it sent (see `WorktreeList`). Not
+  // cached with the list: it describes one fetch, not the scope.
+  const [listWarning, setListWarning] = useState<ListWarning>(NO_WARNING);
   const [fetching, setFetching] = useState(true);
   // The scope the current `worktrees` list was fetched for (ownership: drives
   // `stale`, seed reuse, and the error-stub decision).
@@ -173,6 +187,7 @@ export function useWorktrees(
     if (!projectId || !scope) {
       requestController.current = null;
       setWorktrees([]);
+      setListWarning(NO_WARNING);
       markLoadedFor(null);
       setValidatedScope(null);
       setFetching(false);
@@ -182,10 +197,16 @@ export function useWorktrees(
     if (!background) setFetching(true);
     let succeeded = false;
     try {
-      const data = await api.getProjectWorktrees(projectId, undefined, controller.signal);
+      const list = await api.getProjectWorktreeList(projectId, undefined, controller.signal);
       if (generation !== requestGeneration.current) return;
+      const data = list.worktrees;
       worktreeListCache.set(scope, data);
       setValidatedScope(scope);
+      setListWarning((previous) => {
+        const next = { staleRemote: list.stale ?? null, activeRemoteInvalid: list.activeRemoteInvalid === true };
+        return previous.staleRemote?.serverId === next.staleRemote?.serverId
+          && previous.activeRemoteInvalid === next.activeRemoteInvalid ? previous : next;
+      });
       succeeded = true;
       setWorktrees((previous) => {
         const next = background
@@ -310,6 +331,8 @@ export function useWorktrees(
     // Same-scope refetches keep it false, so consumers can gate selection
     // highlights on it without blinking them on every refresh.
     stale: loadedScope !== scope,
+    /** What the server said about the list on hand: an unreachable current remote, an unlinked `agent_mode`. */
+    listWarning,
     refetch,
   };
 }

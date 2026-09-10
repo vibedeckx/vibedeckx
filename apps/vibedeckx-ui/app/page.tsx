@@ -26,6 +26,7 @@ import { CreateProjectDialog } from '@/components/project/create-project-dialog'
 import { SettingsView } from '@/components/settings/settings-view';
 import { RemoteServersSettings } from '@/components/settings/remote-servers-settings';
 import { CreateWorktreeDialog } from '@/components/project/create-worktree-dialog';
+import { WorkspaceMissingOnRemoteDialog, type WorkspaceMissingOnRemote } from '@/components/project/workspace-missing-on-remote-dialog';
 import { DeleteWorktreeDialog } from '@/components/project/delete-worktree-dialog';
 import { UserMenu } from '@/components/auth/user-menu';
 import { Logo } from '@/components/brand/logo';
@@ -107,6 +108,13 @@ export default function Home() {
   // never got, rather than starting a new one. The whole row is kept, not just
   // the branch: its per-machine state is what tells the dialog where to create.
   const [recreateWorkspace, setRecreateWorkspace] = useState<Worktree | undefined>(undefined);
+  // Machines the management dialog opens with ticked, when the entry point
+  // means specific ones ("create it on the current remote"); undefined =
+  // everything that lacks the workspace.
+  const [recreateSelection, setRecreateSelection] = useState<string[] | undefined>(undefined);
+  // A workspace row clicked while the current remote does not have it: the
+  // soft prompt's subject, or null when none is up.
+  const [missingOnRemote, setMissingOnRemote] = useState<WorkspaceMissingOnRemote | null>(null);
   // The stand-in view for a review whose reviewer is still preparing, opened
   // from its sidebar row or the source conversation's banner. Identity only:
   // everything shown derives from the preparing-review store, and any other
@@ -211,7 +219,7 @@ export default function Home() {
     setBranchResetProjectId(currentProject?.id);
   }
 
-  const { worktrees, loading: worktreesLoading, stale: worktreesStale, refetch: refetchWorktrees } = useWorktrees(
+  const { worktrees, loading: worktreesLoading, stale: worktreesStale, listWarning: worktreeListWarning, refetch: refetchWorktrees } = useWorktrees(
     currentProject?.id ?? null,
     selectedBranch,
     // Worktree lists are per-target: switching agent_mode must invalidate the
@@ -884,6 +892,37 @@ export default function Home() {
     selectWorkspace(branch);
   }, [refetchWorktrees, selectWorkspace]);
 
+  const openWorkspaceManagement = useCallback((worktree: Worktree, selection?: string[]) => {
+    if (!worktree.branch) return;
+    setRecreateWorkspace(worktree);
+    setRecreateSelection(selection);
+    setCreateWorktreeDialogOpen(true);
+  }, []);
+
+  // A sidebar row click, looked at before it becomes a selection: the hub
+  // may know that the current remote — where the session would run — does
+  // not have this workspace. That is a prompt, not a wall: the view was not
+  // a request to create anything, and the hub's record can be stale. An
+  // unplaced machine is not a reason to stop, and one still creating it
+  // only gets a word.
+  const handleSidebarBranchChange = useCallback((branch: string | null) => {
+    const worktree = branch === null ? undefined : worktrees.find((w) => w.branch === branch);
+    const currentId = currentProject?.agent_mode ?? 'local';
+    const current = worktree?.machines?.find((machine) => machine.serverId === currentId);
+    if (worktree?.branch && current?.state === 'absent') {
+      setMissingOnRemote({
+        branch: worktree.branch,
+        current,
+        presentOn: worktree.machines!.filter((machine) => machine.state === 'present'),
+      });
+      return;
+    }
+    if (current?.state === 'creating') {
+      toast.info(`'${branch}' is still being created on ${current.name}`);
+    }
+    selectWorkspace(branch);
+  }, [worktrees, currentProject?.agent_mode, selectWorkspace]);
+
   // Guard against double-click sending the same command twice: ignore a repeat
   // of the same content within a short window (a native double-click fires two
   // click events before the session status can update).
@@ -983,19 +1022,18 @@ Please proceed step by step and let me know if there are any issues or conflicts
             }}
             worktrees={worktrees}
             worktreesStale={worktreesStale}
+            staleRemoteName={worktreeListWarning.staleRemote?.name ?? null}
+            activeRemoteInvalid={worktreeListWarning.activeRemoteInvalid}
             selectedBranch={selectedBranch}
-            onBranchChange={selectWorkspace}
+            onBranchChange={handleSidebarBranchChange}
             currentProject={currentProject}
             onCreateWorktreeOpen={() => setCreateWorktreeDialogOpen(true)}
             onDeleteWorktree={(wt) => {
               setWorktreeToDelete(wt);
               setDeleteWorktreeDialogOpen(true);
             }}
-            onRecreateWorktree={(wt) => {
-              if (!wt.branch) return;
-              setRecreateWorkspace(wt);
-              setCreateWorktreeDialogOpen(true);
-            }}
+            onRecreateWorktree={(wt) => openWorkspaceManagement(wt)}
+            onManageWorkspaceRemotes={(wt) => openWorkspaceManagement(wt)}
             onAnchorRootWorkspace={async (branch) => {
               if (!currentProject) return;
               try {
@@ -1306,13 +1344,45 @@ Please proceed step by step and let me know if there are any issues or conflicts
             open={createWorktreeDialogOpen}
             onOpenChange={(open) => {
               setCreateWorktreeDialogOpen(open);
-              if (!open) setRecreateWorkspace(undefined);
+              if (!open) {
+                setRecreateWorkspace(undefined);
+                setRecreateSelection(undefined);
+              }
             }}
             onWorktreeCreated={handleWorktreeCreated}
             initialBranchName={recreateWorkspace?.branch ?? undefined}
+            initialMachines={recreateWorkspace?.machines}
             initialTargets={recreateWorkspace?.targets}
+            initialSelectedTargets={recreateSelection}
           />
         )}
+        <WorkspaceMissingOnRemoteDialog
+          missing={missingOnRemote}
+          onOpenChange={(open) => { if (!open) setMissingOnRemote(null); }}
+          onSwitch={async (serverId) => {
+            const missing = missingOnRemote;
+            setMissingOnRemote(null);
+            if (!missing || !currentProject) return;
+            try {
+              await updateProject(currentProject.id, { agentMode: serverId });
+              selectWorkspace(missing.branch);
+            } catch (error) {
+              toast.error(error instanceof Error ? error.message : 'Failed to switch remote');
+            }
+          }}
+          onCreateHere={() => {
+            const missing = missingOnRemote;
+            setMissingOnRemote(null);
+            if (!missing) return;
+            const worktree = worktrees.find((w) => w.branch === missing.branch);
+            if (worktree) openWorkspaceManagement(worktree, [missing.current.serverId]);
+          }}
+          onOpenAnyway={() => {
+            const missing = missingOnRemote;
+            setMissingOnRemote(null);
+            if (missing) selectWorkspace(missing.branch);
+          }}
+        />
         <TaskDetailDialog
           task={projectChatContextTask}
           open={projectChatContextTask !== null}

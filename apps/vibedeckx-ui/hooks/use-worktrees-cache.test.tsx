@@ -14,7 +14,16 @@ const getProjectWorktrees = vi.hoisted(() =>
   vi.fn(async (projectId: string): Promise<Worktree[]> => [{ branch: null }]),
 );
 
-vi.mock("@/lib/api", () => ({ api: { getProjectWorktrees } }));
+// The hook reads the list through `getProjectWorktreeList`; the tests keep
+// scripting the bare array and counting calls on it.
+vi.mock("@/lib/api", () => ({
+  api: {
+    getProjectWorktrees,
+    getProjectWorktreeList: async (...args: unknown[]) => ({
+      worktrees: await (getProjectWorktrees as (...a: unknown[]) => Promise<unknown>)(...args),
+    }),
+  },
+}));
 vi.mock("@/hooks/global-event-stream", () => ({ useGlobalEventStream: () => {} }));
 
 import { useWorktrees } from "./use-worktrees";

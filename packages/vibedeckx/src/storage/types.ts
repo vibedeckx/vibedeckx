@@ -46,6 +46,8 @@ export interface ProjectRemote {
   remote_server_id: string;
   remote_path: string;
   sort_order: number;
+  /** Last time the hub registered this remote's full worktree list; null = never. */
+  worktrees_synced_at: string | null;
 }
 
 export interface ProjectRemoteWithServer extends ProjectRemote {
@@ -831,6 +833,8 @@ export interface Storage {
       expected: { status: WorkspaceCheckoutStatus; updatedAt: string },
       status: WorkspaceCheckoutStatus,
       error?: string | null,
+      /** A worker-reported path to record in the same write, when the answer carried one. */
+      path?: { worktreePath: string; pathSource: WorkspaceCheckoutPathSource },
     ) => Promise<boolean>;
     listByProject: (
       projectId: string,
@@ -857,6 +861,15 @@ export interface Storage {
       branch: string,
     ) => Promise<WorkspaceRecord | undefined>;
     markCheckoutDeleted: (checkoutId: string) => Promise<void>;
+    /**
+     * Tombstone only if the row is still exactly as the caller last saw it —
+     * one conditional write, so nothing can slip in between a check and the
+     * delete. Returns whether it landed.
+     */
+    markCheckoutDeletedIfCurrent: (
+      checkoutId: string,
+      expected: { status: WorkspaceCheckoutStatus; updatedAt: string },
+    ) => Promise<boolean>;
   };
   mergeTargets: {
     getForBranches: (projectId: string, branches: string[]) => Promise<Map<string, string>>;
@@ -905,6 +918,8 @@ export interface Storage {
     }, projectId?: string): Promise<ProjectRemote | undefined>;
     setPrimary(projectId: string, remoteId: string): Promise<boolean>;
     remove(id: string, projectId?: string): Promise<boolean>;
+    /** Record that the remote's complete worktree list has just been registered. */
+    markWorktreesSynced(projectId: string, remoteServerId: string): Promise<void>;
   };
   executors: {
     create: (opts: { id: string; project_id: string; workspace_id: string; name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => Promise<Executor>;

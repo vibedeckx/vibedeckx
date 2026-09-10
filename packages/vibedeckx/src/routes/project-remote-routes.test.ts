@@ -9,6 +9,8 @@ vi.mock("@clerk/fastify", () => ({
   getAuth: () => ({ userId: auth.userId }),
   clerkClient: {},
 }));
+const proxyToRemoteAuto = vi.hoisted(() => vi.fn());
+vi.mock("../utils/remote-proxy.js", () => ({ proxyToRemoteAuto }));
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { ProjectRemote, Storage } from "../storage/types.js";
 import projectRemoteRoutes from "./project-remote-routes.js";
@@ -135,5 +137,75 @@ describe("POST /api/projects/:id/remotes/:rid/primary", () => {
     expect(update.statusCode).toBe(404);
     expect(remove.statusCode).toBe(404);
     expect((await storage.projectRemotes.getByProject("auth-p2"))[0].remote_path).toBe("/repo-d");
+  });
+});
+
+describe("POST /api/projects/:id/remotes", () => {
+  let app: FastifyInstance;
+  let storage: Storage;
+  let dir: string;
+  let serverId: string;
+
+  beforeEach(async () => {
+    proxyToRemoteAuto.mockReset();
+    dir = mkdtempSync(path.join(tmpdir(), "vdx-project-remote-link-"));
+    storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+    await storage.projects.create({ id: "p1", name: "project 1", path: null });
+    serverId = (await storage.remoteServers.create({ name: "worker3" })).id;
+
+    app = Fastify();
+    app.decorate("storage", storage);
+    app.decorate("reverseConnectManager", { isConnected: () => true } as never);
+    await app.register(projectRemoteRoutes);
+    await app.ready();
+  });
+
+  afterEach(async () => {
+    await app.close();
+    await storage.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const link = () => app.inject({
+    method: "POST",
+    url: "/api/projects/p1/remotes",
+    payload: { remoteServerId: serverId, remotePath: "/srv/repo" },
+  });
+
+  it("registers the new remote's worktrees at once, so nothing on it starts out unknown", async () => {
+    proxyToRemoteAuto.mockResolvedValue({
+      ok: true,
+      status: 200,
+      data: { worktrees: [{ branch: null, worktreePath: "/srv/repo" }, { branch: "dev", worktreePath: "/srv/repo/../dev" }] },
+    });
+
+    const response = await link();
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().worktrees_synced_at).not.toBeNull();
+    expect(proxyToRemoteAuto).toHaveBeenCalledWith(
+      serverId, "GET", `/api/path/worktrees?path=${encodeURIComponent("/srv/repo")}`, undefined, expect.anything(),
+    );
+    expect((await storage.workspaceRegistry.getByProjectBranch("p1", "dev", serverId))?.checkout.status).toBe("ready");
+    expect((await storage.projectRemotes.getByProjectAndServer("p1", serverId))?.worktrees_synced_at).not.toBeNull();
+  });
+
+  it("still links an offline remote, leaving it unconfirmed", async () => {
+    proxyToRemoteAuto.mockResolvedValue({ ok: false, status: 0, data: { error: "not connected" }, errorCode: "network_error" });
+
+    const response = await link();
+
+    expect(response.statusCode).toBe(201);
+    expect(response.json().worktrees_synced_at).toBeNull();
+    expect((await storage.projectRemotes.getByProjectAndServer("p1", serverId))?.worktrees_synced_at).toBeNull();
+  });
+
+  it("does not let a sync that throws undo the link", async () => {
+    proxyToRemoteAuto.mockRejectedValue(new Error("tunnel closed"));
+
+    const response = await link();
+
+    expect(response.statusCode).toBe(201);
+    expect(await storage.projectRemotes.getByProjectAndServer("p1", serverId)).toBeTruthy();
   });
 });

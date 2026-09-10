@@ -29,7 +29,7 @@ describe("agent session lifecycle routes", () => {
     userEntryIndex: null, expiredReason: null, expiredAt: null, pendingExpiresAt: null, ...over,
   });
 
-  function makeApp(opts: { agentMode?: string } = {}) {
+  function makeApp(opts: { agentMode?: string; remoteListed?: boolean } = {}) {
     const lifecycle = {
       prepare: vi.fn(async () => ({ kind: "prepared", view: view() })),
       start: vi.fn(async () => ({ kind: "activated", view: view({ state: "active" }) })),
@@ -56,7 +56,13 @@ describe("agent session lifecycle routes", () => {
         getByPath: async () => undefined,
         create: async () => { throw new Error("unexpected create"); },
       },
-      projectRemotes: { getByProjectAndServer: async () => ({ remote_path: "/remote/w" }) },
+      projectRemotes: {
+        getByProjectAndServer: async () => ({
+          remote_server_id: "srv", server_name: "worker3", remote_path: "/remote/w",
+          worktrees_synced_at: opts.remoteListed ? "2026-09-09 00:00:00.000" : null,
+        }),
+      },
+      workspaceRegistry: { listByProject: async () => [] },
       agentSessions: {
         getActivityById: async (id: string) => (id === "s1" ? { projectId: "p1" } : undefined),
       },
@@ -123,6 +129,39 @@ describe("agent session lifecycle routes", () => {
     expect(started.json().kind).toBe("in_progress");
     expect(lifecycle.prepare).not.toHaveBeenCalled();
     expect(lifecycle.start).not.toHaveBeenCalled();
+  });
+
+  it("refuses a remote first send for a workspace the hub knows the remote lacks", async () => {
+    // The worker would fail opaquely (it never makes a checkout for a
+    // session); the hub names the machine instead. Only a listed remote's
+    // silence counts — an unlisted one is let through.
+    const { remoteLifecycle } = makeApp({ agentMode: "srv", remoteListed: true });
+    for (const route of ["prepare", "start"]) {
+      const res = await app.inject({
+        method: "POST", url: `/api/projects/p1/agent-sessions/${route}`,
+        payload: { operationId: `op-${route}`, branch: "dev", instruction: "go" },
+      });
+      expect(res.statusCode).toBe(409);
+      expect(res.json()).toMatchObject({ errorCode: "workspace-missing-on-remote", serverId: "srv", name: "worker3", branch: "dev" });
+    }
+    expect(remoteLifecycle.prepare).not.toHaveBeenCalled();
+    expect(remoteLifecycle.start).not.toHaveBeenCalled();
+
+    const main = await app.inject({
+      method: "POST", url: "/api/projects/p1/agent-sessions/start",
+      payload: { operationId: "op-main", branch: null, instruction: "go" },
+    });
+    expect(main.statusCode).toBe(202);
+  });
+
+  it("lets a first send through to a remote the hub has never listed", async () => {
+    const { remoteLifecycle } = makeApp({ agentMode: "srv", remoteListed: false });
+    const res = await app.inject({
+      method: "POST", url: "/api/projects/p1/agent-sessions/start",
+      payload: { operationId: "op-1", branch: "dev", instruction: "go" },
+    });
+    expect(res.statusCode).toBe(202);
+    expect(remoteLifecycle.start).toHaveBeenCalledTimes(1);
   });
 
   it("by-id activate / preparation dispatch on the remote- prefix and authorize through the project", async () => {
