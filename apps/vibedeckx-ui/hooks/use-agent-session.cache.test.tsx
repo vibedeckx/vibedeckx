@@ -124,6 +124,44 @@ describe("agent session window cache", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  // Liveness must not survive in the cache. The head revalidation says nothing
+  // about the agent process (its payload has no `processAlive`), so a session
+  // cached while hot would report a long-dead process as alive for the life of
+  // the tab — which is exactly what seeded a phantom sidebar row named
+  // "New Session" under the workspace.
+  it("does not carry a cached session's liveness into a later visit", async () => {
+    fetchMock.mockImplementation(async (url) => {
+      const id = String(url).match(/agent-sessions\/(cache-session-[ab])/)?.[1] ?? "unknown";
+      return {
+        ok: true,
+        json: async () => ({
+          session: {
+            id,
+            projectId: "cache-project",
+            branch: "main",
+            status: "stopped",
+            processAlive: true,
+          },
+          messages: [{ type: "assistant", content: `history-${id}`, timestamp: 1 }],
+        }),
+      } as Response;
+    });
+
+    // A fresh fetch is allowed to assert liveness...
+    await render("cache-session-a");
+    expect(latest!.session?.processAlive).toBe(true);
+
+    await render("cache-session-b");
+    await render("cache-session-a");
+
+    // ...but the same answer re-served from the cache is only a claim about
+    // the transcript. The process may have exited while we were away.
+    expect(latest!.session?.id).toBe("cache-session-a");
+    expect(latest!.messages).toMatchObject([{ content: "history-cache-session-a" }]);
+    expect(latest!.session?.processAlive).toBeUndefined();
+    expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain("cache-session-a/history-head");
+  });
+
   it("uses the warm cache on ordinary workspace navigation after a head check", async () => {
     fetchMock.mockImplementation(async (url, init) => {
       if (String(url).endsWith("/history-head")) {

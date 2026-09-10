@@ -103,6 +103,35 @@ function sessionTitle(session: { title?: string | null }): string {
 }
 
 /**
+ * The optimistic row for a session that was just opened or created, or null
+ * when it must not get one.
+ *
+ * Seeds only on a POSITIVE liveness claim. These rows are inserted without
+ * asking `/alive`, and they carry the placeholder name because the caller has
+ * no title yet — so a row seeded for a session that does NOT hold a process is
+ * unfixable: `/alive` never returns that session, so nothing ever replaces the
+ * placeholder (the next full refresh drops the row entirely instead). An
+ * ABSENT `processAlive` is therefore "unknown", not "alive": it means a
+ * cache-sourced session (liveness is deliberately not cached — see
+ * `readSessionCache`) or a dormant branch payload.
+ */
+export function residentSeedForStartedSession(
+  started: { id: string; projectId: string; branch: string | null; status: string; processAlive?: boolean },
+  now: Date = new Date(),
+): ResidentSidebarSession | null {
+  if (started.processAlive !== true) return null;
+  return {
+    id: started.id,
+    projectId: started.projectId,
+    branch: started.branch,
+    title: "New Session",
+    status: started.status,
+    processAlive: true,
+    updated_at: now.toISOString(),
+  };
+}
+
+/**
  * The sidebar's rows for one project: the sessions holding a live process.
  *
  * Primary path — one whole-project request, deliberately independent of the

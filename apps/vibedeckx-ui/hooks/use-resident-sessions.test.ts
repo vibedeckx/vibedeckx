@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isReconnectTransition,
   mergeRefreshedSessions,
+  residentSeedForStartedSession,
   residentTitleFromEvent,
   updateResidentSessionTitle,
   upsertResidentSession,
@@ -162,5 +163,40 @@ describe("isReconnectTransition", () => {
   it("does not fire when going offline", () => {
     expect(isReconnectTransition("live", "connecting", true)).toBe(false);
     expect(isReconnectTransition("live", "stale", true)).toBe(false);
+  });
+});
+
+describe("residentSeedForStartedSession", () => {
+  const started = { id: "s1", projectId: "p1", branch: "dev3", status: "stopped" };
+
+  it("seeds a row for a session that reports a live process", () => {
+    expect(residentSeedForStartedSession(
+      { ...started, status: "running", processAlive: true },
+      new Date("2026-09-10T02:10:55.440Z"),
+    )).toEqual({
+      id: "s1",
+      projectId: "p1",
+      branch: "dev3",
+      title: "New Session",
+      status: "running",
+      processAlive: true,
+      updated_at: "2026-09-10T02:10:55.440Z",
+    });
+  });
+
+  it("seeds nothing when the process is reported dead", () => {
+    expect(residentSeedForStartedSession({ ...started, processAlive: false })).toBeNull();
+  });
+
+  // The regression: a tab that opened this session while it was hot cached
+  // `processAlive: true`; the process then exited (resident-pool eviction, a
+  // review taking its slot), and re-selecting it from the session dropdown
+  // revalidated only the history head — which carries no liveness. The cache
+  // now drops the field on read (use-agent-session `readSessionCache`), so the
+  // seed sees "unknown" and must not insert a row: `/alive` will never list
+  // that session, so the placeholder title would stick forever.
+  it("seeds nothing when liveness is unknown (cache-sourced or dormant payload)", () => {
+    expect(residentSeedForStartedSession(started)).toBeNull();
+    expect(residentSeedForStartedSession({ ...started, processAlive: undefined })).toBeNull();
   });
 });

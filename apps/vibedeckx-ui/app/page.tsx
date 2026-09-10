@@ -48,7 +48,7 @@ import { touchRecentSessionOpen, touchSessionStarted, updateCachedSessionTitle }
 import { toast } from 'sonner';
 import { useGlobalEvents } from '@/hooks/use-global-events';
 import { useCompletionNotifications } from '@/hooks/use-completion-notifications';
-import { useResidentSessions, type ResidentSidebarSession } from '@/hooks/use-resident-sessions';
+import { useResidentSessions, residentSeedForStartedSession, type ResidentSidebarSession } from '@/hooks/use-resident-sessions';
 import { CompletionNotificationsMenu } from '@/components/layout/completion-notifications-menu';
 import { KeyboardShortcutsOverlay } from '@/components/layout/keyboard-shortcuts-overlay';
 import { FocusRegionProvider } from '@/components/locate/focus-region';
@@ -468,16 +468,10 @@ export default function Home() {
       targetId: startedProject?.agent_mode ?? 'local',
       branch: startedSession.branch,
     });
-    if (startedSession.processAlive === false) return;
-    setResidentSessionSeed({
-      id: startedSession.id,
-      projectId: startedSession.projectId,
-      branch: startedSession.branch,
-      title: 'New Session',
-      status: startedSession.status,
-      processAlive: true,
-      updated_at: new Date().toISOString(),
-    });
+    // Sidebar rows mean "holds a process" — the gate and the row shape live in
+    // residentSeedForStartedSession, next to the hook that consumes them.
+    const seed = residentSeedForStartedSession(startedSession);
+    if (seed) setResidentSessionSeed(seed);
   }, [refetchBranchActivity, projects]);
 
   const handleSessionTitleUpdated = useCallback((sessionId: string, title: string) => {

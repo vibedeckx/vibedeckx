@@ -496,13 +496,42 @@ function getCacheKey(projectId: string, branch: string | null, sessionId?: strin
   return `${projectId}:${branch ?? ""}:${sessionId ?? "latest"}`;
 }
 
+/**
+ * Liveness is not cacheable. A snapshot is revalidated by `history-head`
+ * (epoch, status, turn boundary) — none of which says anything about whether
+ * the agent process is still up, and the head payload does not carry
+ * `processAlive` at all. So a session cached while it was hot would keep
+ * `processAlive: true` for the life of the tab, long after its process exited
+ * (resident-pool eviction, Stop, a review taking its slot). `handleSessionStarted`
+ * reads exactly that field to decide whether to seed a sidebar row, so
+ * re-selecting such a session grew a phantom row under the workspace, carrying
+ * the seed's placeholder name ("New Session") — a row `/alive` never lists and
+ * therefore never corrects.
+ *
+ * Stripped on the way OUT of the cache rather than at the three consumption
+ * points, because `applyWarmPreview` feeds the snapshot straight into
+ * `sessionRef`, which `persistCurrentSnapshot` writes back — a per-call-site
+ * fix would let the stale value re-enter through the preview. Absent means
+ * unknown: only a fresh fetch or the live `processAlive` frame may assert it.
+ */
+function forgetCachedLiveness(snapshot: CachedSessionSnapshot): CachedSessionSnapshot {
+  if (snapshot.session.processAlive === undefined) return snapshot;
+  const session = { ...snapshot.session };
+  delete session.processAlive;
+  return {
+    session,
+    // The explicit-`?session=` path reads `history.session`, not `session`.
+    history: snapshot.history.session ? { ...snapshot.history, session } : snapshot.history,
+  };
+}
+
 function readSessionCache(key: string): CachedSessionSnapshot | undefined {
   const cached = sessionCache.get(key);
   if (!cached) return undefined;
   // Map insertion order is our LRU order.
   sessionCache.delete(key);
   sessionCache.set(key, cached);
-  return cached;
+  return forgetCachedLiveness(cached);
 }
 
 // Most-recently-used snapshot for a workspace, whatever session id it was
@@ -1256,6 +1285,20 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         // Handle remote connection status (for remote sessions)
         if ("remoteStatus" in msg) {
           setRemoteStatus(msg.remoteStatus);
+          return;
+        }
+
+        // The only live liveness signal this hook gets. Reinforcement, not a
+        // guarantee: frames for a session we are not subscribed to (or that
+        // arrive while the socket is down) are simply lost, which is why the
+        // cache forgets liveness instead of trusting a last-known value.
+        if ("processAlive" in msg) {
+          const current = sessionRef.current;
+          if (current?.id === sessionId && current.processAlive !== msg.processAlive.alive) {
+            const next = { ...current, processAlive: msg.processAlive.alive };
+            sessionRef.current = next;
+            setSession(next);
+          }
           return;
         }
 
