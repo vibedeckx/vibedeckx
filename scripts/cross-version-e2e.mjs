@@ -369,9 +369,14 @@ await api("POST", `/api/projects/${project.id}/remotes`, {
 });
 // Worker-side project row (path == remote_path) — required by execute/upload/
 // search on the worker. In production this comes from the project-sync flow;
-// here we drive the worker's own API directly as fixture setup.
+// here we drive the worker's own API directly as fixture setup. Linking the
+// remote above lists the worker's worktrees, which itself registers a project
+// for this path, so a 409 means the row we need is already there.
 const workerRow = await request("POST", "/api/projects", { name: "xver-worker-row", path: repoDir }, `http://127.0.0.1:${WORKER_PORT}`);
-assertOrFail(workerRow.status < 300, `worker-side project row creation failed: ${workerRow.status}`);
+assertOrFail(
+  workerRow.status < 300 || workerRow.status === 409,
+  `worker-side project row creation failed: ${workerRow.status}`,
+);
 console.log("[xver] fixtures ready (git repo + project + binding)");
 
 // ---------------------------------------------------------------------------
