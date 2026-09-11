@@ -216,10 +216,10 @@ hub 侧不需要另加判定。鬼行一次点击即清，不是「永不消失�
   一种情形是再删一次、另一种是再建一次，动作相反。
 - **tooltip**：每台一行，`name: Present / Missing / Deleted here / Failed — <error> /
   Present — could not delete: <error>`，失败行标红。第一行按情形：
-  - 普通缺口：「Exists on 2 of 4 remotes. Click to create it on the others.」
+  - 普通缺口：「Exists on 2 of 4 remotes.」
   - 当前 remote 缺失：前面加「Not on worker3, the current remote.」（§6.5）。
-  - 有失败：「Exists on 1 of 3 remotes. Failed on Mac. Click to retry, or create it on the others.」
-  - 半截删除：「Deleted on worker3 but still on Mac. Delete again to finish.」整体删除
+  - 有失败：「Exists on 1 of 3 remotes. Failed on Mac.」
+  - 半截删除：「Deleted on worker3 but still on Mac.」不说往哪边收尾：再删（行菜单）和补建（点徽标）都是用户的选择。整体删除
     逐台幂等、只访问还持有的机器，从行菜单再 Delete 一次即可收尾；这里不需要按台删。
 - **点击徽标** → 管理弹窗（§6.3），任何情形都是它：补建缺失、重试失败、
   半截删除时把已删的那台再建回来。

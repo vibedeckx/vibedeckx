@@ -211,10 +211,12 @@ export function workspaceCoverage(machines: WorkspaceMachineState[]): {
 
 /**
  * The lines above the per-machine list in the coverage marker's tooltip: what
- * the gap is and what the click does, then — when the primary remote (whose
- * Git the merge badge reads) has no usable checkout — why that badge is
- * gone. Both remotes are named for what they are, since they are chosen in
- * different places and need not be the same machine.
+ * the gap is, then — when the primary remote (whose Git the merge badge
+ * reads) has no usable checkout — why that badge is gone. Facts only, no
+ * direction: filling in, retrying and deleting the rest are all the user's to
+ * choose, and the management the click opens offers each. Both remotes are
+ * named for what they are, since they are chosen in different places and
+ * need not be the same machine.
  */
 export function coverageTooltipLead(
   machines: WorkspaceMachineState[],
@@ -226,15 +228,15 @@ export function coverageTooltipLead(
   const current = machines.find((machine) => machine.serverId === opts.currentId);
   const failed = names((machine) => machine.state === "error");
   const lead = (opts.unfinishedDelete ?? coverage.unfinishedDelete)
-    // A half-finished delete: the fix is to delete again, which only visits
-    // the machines still holding it. Say so before the count, which on its
-    // own reads as a workspace to fill in.
-    ? `Deleted on ${names((machine) => machine.state === "absent" && !!machine.deleted)} but still on ${names((machine) => machine.state !== "absent" && machine.state !== "unknown")}. Delete again to finish.`
+    // A half-finished delete. Say so before the count, which on its own
+    // reads as a workspace to fill in — but do not say which way to finish:
+    // deleting again (row menu) and making it again (the click) are both
+    // the user's to choose.
+    ? `Deleted on ${names((machine) => machine.state === "absent" && !!machine.deleted)} but still on ${names((machine) => machine.state !== "absent" && machine.state !== "unknown")}.`
     : [
       current?.state === "absent" ? `Not on ${current.name}, the current remote.` : null,
       `Exists on ${coverage.present} of ${coverage.total} remotes.`,
       failed ? `Failed on ${failed}.` : null,
-      failed ? "Click to retry, or create it on the others." : "Click to create it on the others.",
     ].filter(Boolean).join(" ");
   const primary = machines.find((machine) => machine.serverId === opts.primaryId);
   const noMergeStatus = primary && (primary.state === "absent" || primary.state === "error")
