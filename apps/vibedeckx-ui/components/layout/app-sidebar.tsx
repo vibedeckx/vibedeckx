@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { ProjectGlyph } from "@/components/project/project-glyph";
 import { WorkspaceDirtyDot, WorkspaceMergeBadge } from "./workspace-merge-badge";
+import { WorkspaceMachineLine } from "./workspace-machine-line";
 import { WorkspaceRowMenu } from "./workspace-row-menu";
 import { RootWorkspaceMenu } from "./root-workspace-menu";
 import { useLocateScope, useLocateEngagement } from "@/components/locate/locate-context";
@@ -16,7 +17,7 @@ import type { Worktree, Project, Schedule } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 import type { ResidentSidebarSession } from "@/hooks/use-resident-sessions";
 import { effectiveTarget, type BranchMergeInfo } from "@/hooks/use-merge-status";
-import { machineStateText, machinesFromTargets, workspaceCoverage, type WorkspaceMachineState } from "@/lib/worktree-target-results";
+import { coverageTooltipLead, machinesFromTargets, workspaceCoverage } from "@/lib/worktree-target-results";
 
 export type ActiveView = "workspace" | "tasks" | "schedules" | "remote-servers" | "settings" | "project-info" | "project-chat";
 
@@ -51,6 +52,8 @@ interface AppSidebarProps {
   mergeRootDirty?: boolean;
   mergeDefaultTarget?: string | null;
   mergeRepositoryLabel?: string | null;
+  /** Whose Git the merge statuses describe: "local" or the primary remote's id. */
+  mergeRepositoryServerId?: string | null;
   onMergeTargetChange?: (branch: string, target: string | null) => void;
   onMergeBadgeClick?: (branch: string | null) => void;
   workspaceStatuses?: Map<string, WorkspaceStatus>;
@@ -237,6 +240,7 @@ export function AppSidebar({
   mergeRootDirty,
   mergeDefaultTarget,
   mergeRepositoryLabel,
+  mergeRepositoryServerId,
   onMergeTargetChange,
   onMergeBadgeClick,
   workspaceStatuses,
@@ -489,6 +493,13 @@ export function AppSidebar({
                   const machines = wt.branch !== null
                     ? wt.machines ?? (wt.targets ? machinesFromTargets(wt.targets) : undefined)
                     : undefined;
+                  // The merge badge reads the primary remote's Git. When that
+                  // machine has no checkout of this workspace, its branch ref
+                  // (if kept) is frozen at whatever it last held, so the
+                  // numbers would describe nothing current. The coverage
+                  // marker already says where it lives.
+                  const mergeHolder = machines?.find((machine) => machine.serverId === mergeRepositoryServerId);
+                  const mergeBadgeStale = mergeHolder?.state === "absent" || mergeHolder?.state === "error";
                   return (
                     <div
                       key={wt.branch ?? "__main__"}
@@ -573,24 +584,11 @@ export function AppSidebar({
                         {machines && (() => {
                           const coverage = workspaceCoverage(machines);
                           if (!coverage.missing) return null;
-                          const unfinishedDelete = wt.unfinishedDelete ?? coverage.unfinishedDelete;
-                          const currentId = currentProject?.agent_mode ?? "local";
-                          const current = machines.find((machine) => machine.serverId === currentId);
-                          const names = (pick: (machine: WorkspaceMachineState) => boolean) =>
-                            machines.filter(pick).map((machine) => machine.name).join(", ");
-                          const failed = names((machine) => machine.state === "error");
-                          const lead = unfinishedDelete
-                            // A half-finished delete: the fix is to delete
-                            // again, which only visits the machines still
-                            // holding it. Say so before the count, which on
-                            // its own reads as a workspace to fill in.
-                            ? `Deleted on ${names((machine) => machine.state === "absent" && !!machine.deleted)} but still on ${names((machine) => machine.state !== "absent" && machine.state !== "unknown")}. Delete again to finish.`
-                            : [
-                              current?.state === "absent" ? `Not on ${current.name}, the current remote.` : null,
-                              `Exists on ${coverage.present} of ${coverage.total} remotes.`,
-                              failed ? `Failed on ${failed}.` : null,
-                              failed ? "Click to retry, or create it on the others." : "Click to create it on the others.",
-                            ].filter(Boolean).join(" ");
+                          const lead = coverageTooltipLead(machines, {
+                            currentId: currentProject?.agent_mode ?? "local",
+                            primaryId: mergeRepositoryServerId,
+                            unfinishedDelete: wt.unfinishedDelete,
+                          });
                           return (
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -604,16 +602,16 @@ export function AppSidebar({
                               </TooltipTrigger>
                               <TooltipContent side="right">
                                 <div className="space-y-0.5">
-                                  <div>{lead}</div>
+                                  {lead.map((line) => <div key={line}>{line}</div>)}
+                                </div>
+                                <div className="mt-1.5 space-y-0.5">
                                   {machines.map((machine) => (
-                                    <div key={machine.serverId} className="text-background/70">
-                                      {machine.name}:{" "}
-                                      {machine.state === "error" || machine.error
-                                        // The tooltip surface is inverted (bg-foreground),
-                                        // so the reds are swapped against the theme.
-                                        ? <span className="text-red-400 dark:text-red-600">{machineStateText(machine)}</span>
-                                        : machineStateText(machine)}
-                                    </div>
+                                    <WorkspaceMachineLine
+                                      key={machine.serverId}
+                                      machine={machine}
+                                      primary={machine.serverId === mergeRepositoryServerId}
+                                      current={machine.serverId === (currentProject?.agent_mode ?? "local")}
+                                    />
                                   ))}
                                 </div>
                               </TooltipContent>
@@ -626,7 +624,7 @@ export function AppSidebar({
                             onClick={() => onMergeBadgeClick?.(null)}
                           />
                         )}
-                        {wt.branch !== null && mergeStatuses?.get(wt.branch) && (
+                        {wt.branch !== null && mergeStatuses?.get(wt.branch) && !mergeBadgeStale && (
                           <WorkspaceMergeBadge
                             info={mergeStatuses.get(wt.branch)!}
                             repositoryLabel={mergeRepositoryLabel}

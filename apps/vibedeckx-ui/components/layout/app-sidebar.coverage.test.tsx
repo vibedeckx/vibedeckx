@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Project, Worktree } from "@/lib/api";
+import type { BranchMergeInfo } from "@/hooks/use-merge-status";
 
 import { AppSidebar } from "./app-sidebar";
 
@@ -35,7 +36,15 @@ describe("AppSidebar workspace coverage", () => {
   const onDeleteWorktree = vi.fn();
   const onBranchChange = vi.fn();
 
-  const render = (worktrees: Worktree[], extra?: { staleRemoteName?: string | null; activeRemoteInvalid?: boolean }) =>
+  const render = (
+    worktrees: Worktree[],
+    extra?: {
+      staleRemoteName?: string | null;
+      activeRemoteInvalid?: boolean;
+      mergeStatuses?: Map<string, BranchMergeInfo>;
+      mergeRepositoryServerId?: string | null;
+    },
+  ) =>
     act(() => {
       root.render(
         <AppSidebar
@@ -49,6 +58,8 @@ describe("AppSidebar workspace coverage", () => {
           onDeleteWorktree={onDeleteWorktree}
           staleRemoteName={extra?.staleRemoteName}
           activeRemoteInvalid={extra?.activeRemoteInvalid}
+          mergeStatuses={extra?.mergeStatuses}
+          mergeRepositoryServerId={extra?.mergeRepositoryServerId}
         />,
       );
     });
@@ -173,6 +184,41 @@ describe("AppSidebar workspace coverage", () => {
     act(() => counts[0].click());
     expect(onManageWorkspaceRemotes).toHaveBeenCalledWith(halfDeletedNow);
     expect(onDeleteWorktree).not.toHaveBeenCalled();
+  });
+
+  it("hides the merge badge when the primary remote has no checkout of the workspace", () => {
+    // Merge status is the primary remote's Git. Deleted there (branch ref
+    // kept) or never made there, its numbers describe a frozen ref, not the
+    // work on the machine that has it; the count already says where it is.
+    // A machine the hub has not placed, or a badge for another machine's
+    // Git, is left alone.
+    const merge = new Map<string, BranchMergeInfo>([
+      ["dev", { branch: "dev", status: "unmerged", unmergedCount: 3, dirty: false, target: "main" }],
+      ["dev2", { branch: "dev2", status: "unmerged", unmergedCount: 3, dirty: false, target: "main" }],
+      ["dev3", { branch: "dev3", status: "unmerged", unmergedCount: 3, dirty: false, target: "main" }],
+    ]);
+    const worktrees: Worktree[] = [
+      { branch: null },
+      { branch: "dev", machines: [
+        { serverId: "server-1", name: "worker3", state: "absent", deleted: true },
+        { serverId: "server-2", name: "Mac", state: "present" },
+      ] },
+      { branch: "dev2", machines: [
+        { serverId: "server-1", name: "worker3", state: "error", error: "disk full" },
+        { serverId: "server-2", name: "Mac", state: "present" },
+      ] },
+      { branch: "dev3", machines: [
+        { serverId: "server-1", name: "worker3", state: "unknown" },
+        { serverId: "server-2", name: "Mac", state: "present" },
+      ] },
+    ];
+    const mergeBadges = () => container.querySelectorAll('button[aria-label^="3 commits not in main"]').length;
+
+    render(worktrees, { mergeStatuses: merge, mergeRepositoryServerId: "server-1" });
+    expect(mergeBadges()).toBe(1);
+
+    render(worktrees, { mergeStatuses: merge, mergeRepositoryServerId: "server-2" });
+    expect(mergeBadges()).toBe(3);
   });
 
   it("leaves a workspace every machine agrees on, or from an older server, unmarked", () => {

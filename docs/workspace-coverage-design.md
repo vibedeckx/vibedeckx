@@ -65,8 +65,12 @@
 ## 3. 术语
 
 - **已链接 remote**：`project_remotes` 里该项目的每一行。集合记作 `linked`。
-- **当前 remote**：`project.agent_mode`（一个 remote server id）。会话在这台上跑。
-  `sort_order = 0` 的「主 remote」概念退居为「`agent_mode` 无效时的回退」。
+- **当前 remote**：`project.agent_mode`（一个 remote server id）。会话在这台上跑，
+  会话列表从这台拉。在会话头部的切换器里改，改的是整个项目。
+- **主 remote（primary）**：`sort_order = 0` 的那台，在项目设置里用「Set as Primary」改。
+  侧栏的 Git 状态（合并徽标、未提交标记）、Files、Diff 都锚在这台上。它和当前 remote 是
+  两个独立的选择：切当前 remote 是「换一台跑会话」，不应带着侧栏的 Git 状态一起跳；
+  主 remote 很少改，是侧栏的稳定视角。`agent_mode` 无效时列表回退到主 remote。
 - **覆盖度**：workspace 在 `linked` 中有活的 ready checkout 的 remote 数 / `linked` 大小。
 - **活的 checkout**：注册表里 `deleted_at IS NULL` 的行。
 
@@ -328,12 +332,13 @@ interface WorkspaceMachineCheck extends WorkspaceMachineState {
 ### 6.5 打开一个在当前 remote 上缺失的 workspace
 
 前端在跳转前看 `machines`：当前 remote 是 `absent` 时，**不把查看意图直接变成补建**。
-显示一个三选项的提示：
+显示一个两选项的提示，正文点名它存在于哪几台：
 
-- `Switch to <name>`：把 `agent_mode` 切到一台 `present` 的 remote（多台时列出），
-  然后正常打开。
 - `Create on <current>`：打开管理弹窗，只预勾当前 remote。
 - `Open anyway`：照常打开。hub 的记录可能陈旧，用户有权无视它。
+
+不提供「切到 <name>」：切当前 remote 是项目级改动（所有 workspace 的会话都跟着走），
+不该从某一个 workspace 的行上顺手做掉。正文告诉用户去会话头部切。
 
 `unknown` 时不拦，照常打开：hub 没记录不等于远端没有。`creating` 时提示「正在创建」，不拦。
 这是软提示，不是拦截；第一版不做服务端硬拦。
@@ -351,6 +356,19 @@ interface WorkspaceMachineCheck extends WorkspaceMachineState {
 `deleted_at IS NULL AND status = 'ready'` 的 checkout，没有就抛错。worker **不会**自建
 worktree，所以今天的表现是一条含义模糊的 500，hub 侧的 409 只是把它说清楚并接到弹窗，
 不与任何隐式流程冲突。
+
+### 6.5b 主 remote 上缺失时的合并徽标
+
+合并状态按主 remote 的 Git 算（§3）。主 remote 上这个 workspace 是 `absent` 或 `error`
+时，不显示这一行的合并徽标：删 worktree 默认保留分支引用，那台上算出来的是删除那一刻
+冻结的数字，和别台上的新工作无关。`1/2` 徽标已经说明它在哪。分支引用也没了时接口回
+`branch-not-found`，前端本来就丢弃，效果相同。实现：`useMergeStatus` 多返回
+`repositoryServerId`，侧栏拿它在 `machines` 里查那台的状态。徽标消失不能无声：`1/2` 的
+tooltip 在这种情形多一行「No merge status: not on <primary>, the primary remote.」
+（`coverageTooltipLead`），不另加图标，一行仍只有一个标记。tooltip 里的逐台列表
+（`WorkspaceMachineLine`）每行最前面一个状态图标列（✓ present / ✕ absent / ⚠ error /
+转圈 creating、deleting / ? unknown），机器名后标角色 `· primary` `· current`（同一台则
+`· primary, current`），再是状态文字；前导句和列表之间留一点间距。
 
 ### 6.6 创建完成后
 

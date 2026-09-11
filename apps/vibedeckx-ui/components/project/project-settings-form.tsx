@@ -200,8 +200,10 @@ export function ProjectSettingsForm({
         <div className="space-y-3">
           <label className="text-sm font-medium">Remote Servers</label>
           <p className="text-xs text-muted-foreground">
-            The primary remote is used for remote-only projects and default remote
-            operations. When a local checkout exists, merge status is computed locally.
+            The primary remote is whose Git the sidebar describes: each workspace&apos;s
+            merge status and uncommitted changes, plus the Files and Diff views. Where
+            sessions run is chosen separately, in the session header. When a local
+            checkout exists, the sidebar reads it instead.
           </p>
 
           {remotes.length > 0 && (

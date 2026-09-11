@@ -3,6 +3,7 @@ import {
   machineStateText,
   machinesFromTargets,
   workspaceCoverage,
+  coverageTooltipLead,
   type WorkspaceMachineState,
   adoptedTargets,
   appendTargetFailures,
@@ -173,6 +174,44 @@ describe("workspaceCoverage", () => {
   it("says the delete is over once it has finished everywhere", () => {
     expect(workspaceCoverage([m("a", "absent", { deleted: true }), m("b", "absent", { deleted: true })]).unfinishedDelete)
       .toBe(false);
+  });
+});
+
+describe("coverageTooltipLead", () => {
+  const m = (serverId: string, state: WorkspaceMachineState["state"], extra?: Partial<WorkspaceMachineState>): WorkspaceMachineState =>
+    ({ serverId, name: serverId, state, ...extra });
+
+  it("leads with the gap and the click, and names the current remote when it is the one without", () => {
+    expect(coverageTooltipLead([m("a", "present"), m("b", "absent")], { currentId: "b" })).toEqual([
+      "Not on b, the current remote. Exists on 1 of 2 remotes. Click to create it on the others.",
+    ]);
+    expect(coverageTooltipLead([m("a", "present"), m("b", "error", { error: "disk full" })], { currentId: "a" })).toEqual([
+      "Exists on 1 of 2 remotes. Failed on b. Click to retry, or create it on the others.",
+    ]);
+    expect(coverageTooltipLead([m("a", "absent", { deleted: true }), m("b", "present")], { currentId: "a" })).toEqual([
+      "Deleted on a but still on b. Delete again to finish.",
+    ]);
+  });
+
+  it("says why the merge badge is gone when the primary remote has no usable checkout", () => {
+    // The primary remote (whose Git the merge badge reads) and the current
+    // remote (where sessions run) are chosen separately; either can be the
+    // one without. Deleted or failed there: no badge, and this says so.
+    // Unknown there: the badge stays, so nothing to explain.
+    expect(coverageTooltipLead([m("a", "absent", { deleted: true }), m("b", "present")], { currentId: "b", primaryId: "a" })).toEqual([
+      "Deleted on a but still on b. Delete again to finish.",
+      "No merge status: not on a, the primary remote.",
+    ]);
+    expect(coverageTooltipLead([m("a", "error", { error: "disk full" }), m("b", "present")], { currentId: "b", primaryId: "a" })).toEqual([
+      "Exists on 1 of 2 remotes. Failed on a. Click to retry, or create it on the others.",
+      "No merge status: not on a, the primary remote.",
+    ]);
+    expect(coverageTooltipLead([m("a", "unknown"), m("b", "present"), m("c", "absent")], { currentId: "b", primaryId: "a" })).toEqual([
+      "Exists on 1 of 3 remotes. Click to create it on the others.",
+    ]);
+    expect(coverageTooltipLead([m("a", "present"), m("b", "absent")], { currentId: "b", primaryId: "a" })).toEqual([
+      "Not on b, the current remote. Exists on 1 of 2 remotes. Click to create it on the others.",
+    ]);
   });
 });
 

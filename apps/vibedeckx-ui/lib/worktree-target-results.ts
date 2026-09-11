@@ -210,6 +210,40 @@ export function workspaceCoverage(machines: WorkspaceMachineState[]): {
 }
 
 /**
+ * The lines above the per-machine list in the coverage marker's tooltip: what
+ * the gap is and what the click does, then — when the primary remote (whose
+ * Git the merge badge reads) has no usable checkout — why that badge is
+ * gone. Both remotes are named for what they are, since they are chosen in
+ * different places and need not be the same machine.
+ */
+export function coverageTooltipLead(
+  machines: WorkspaceMachineState[],
+  opts: { currentId: string; primaryId?: string | null; unfinishedDelete?: boolean },
+): string[] {
+  const coverage = workspaceCoverage(machines);
+  const names = (pick: (machine: WorkspaceMachineState) => boolean) =>
+    machines.filter(pick).map((machine) => machine.name).join(", ");
+  const current = machines.find((machine) => machine.serverId === opts.currentId);
+  const failed = names((machine) => machine.state === "error");
+  const lead = (opts.unfinishedDelete ?? coverage.unfinishedDelete)
+    // A half-finished delete: the fix is to delete again, which only visits
+    // the machines still holding it. Say so before the count, which on its
+    // own reads as a workspace to fill in.
+    ? `Deleted on ${names((machine) => machine.state === "absent" && !!machine.deleted)} but still on ${names((machine) => machine.state !== "absent" && machine.state !== "unknown")}. Delete again to finish.`
+    : [
+      current?.state === "absent" ? `Not on ${current.name}, the current remote.` : null,
+      `Exists on ${coverage.present} of ${coverage.total} remotes.`,
+      failed ? `Failed on ${failed}.` : null,
+      failed ? "Click to retry, or create it on the others." : "Click to create it on the others.",
+    ].filter(Boolean).join(" ");
+  const primary = machines.find((machine) => machine.serverId === opts.primaryId);
+  const noMergeStatus = primary && (primary.state === "absent" || primary.state === "error")
+    ? `No merge status: not on ${primary.name}, the primary remote.`
+    : null;
+  return [lead, noMergeStatus].filter((line): line is string => line !== null);
+}
+
+/**
  * The older per-machine shape (only machines holding registry rows) read as
  * the newer one, for a server that sends `targets` but not `machines`.
  */

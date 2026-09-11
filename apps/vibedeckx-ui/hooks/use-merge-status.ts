@@ -171,6 +171,13 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
   const [rootDirty, setRootDirty] = useState(false);
   const [defaultTarget, setDefaultTarget] = useState<string | null>(null);
   const [repositoryLabel, setRepositoryLabel] = useState<string | null>(null);
+  /**
+   * Whose Git the statuses describe: "local" or the primary remote's server
+   * id. Consumers that also know a workspace's per-machine coverage can tell
+   * when this machine has no checkout of it, and the numbers describe a
+   * branch ref frozen at whatever it last held.
+   */
+  const [repositoryServerId, setRepositoryServerId] = useState<string | null>(null);
   const [nonce, setNonce] = useState(0);
   const [seenProjectId, setSeenProjectId] = useState(projectId);
 
@@ -243,6 +250,7 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
       );
       setDefaultTarget(deriveDefaultTarget(result.entries));
       setRepositoryLabel(result.repository.label);
+      setRepositoryServerId(result.repository.kind === "local" ? "local" : result.repository.remoteServerId);
     })();
 
     return () => {
@@ -260,7 +268,7 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
     [projectId, refetch],
   );
 
-  return { statuses, rootDirty, defaultTarget, repositoryLabel, setTarget, refetch };
+  return { statuses, rootDirty, defaultTarget, repositoryLabel, repositoryServerId, setTarget, refetch };
 }
 
 /** Workspace statuses that mean an agent is actively working on the branch. */

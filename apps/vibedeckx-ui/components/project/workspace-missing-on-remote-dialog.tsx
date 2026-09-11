@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowRightLeft, ExternalLink, Plus } from "lucide-react";
+import { ExternalLink, Plus } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -23,8 +23,6 @@ export interface WorkspaceMissingOnRemote {
 interface WorkspaceMissingOnRemoteDialogProps {
   missing: WorkspaceMissingOnRemote | null;
   onOpenChange: (open: boolean) => void;
-  /** Move sessions to that remote, then open the workspace there. */
-  onSwitch: (serverId: string) => void;
   /** Open the management dialog with only the current remote ticked. */
   onCreateHere: () => void;
   /** Open it regardless: the hub's record may be stale, and the user outranks it. */
@@ -34,12 +32,13 @@ interface WorkspaceMissingOnRemoteDialogProps {
 /**
  * Opening a workspace the current remote does not have. A soft prompt, not a
  * gate: the view was never a request to create anything, so the choice is the
- * user's — go where it is, make it here, or ignore the record.
+ * user's — make it here, or ignore the record. Moving sessions to a machine
+ * that has it is a project-wide change, so it is not offered from a single
+ * workspace's row; the text says where it lives and where that is done.
  */
 export function WorkspaceMissingOnRemoteDialog({
   missing,
   onOpenChange,
-  onSwitch,
   onCreateHere,
   onOpenAnyway,
 }: WorkspaceMissingOnRemoteDialogProps) {
@@ -54,23 +53,11 @@ export function WorkspaceMissingOnRemoteDialog({
               </DialogTitle>
               <DialogDescription className="mt-1 text-xs">
                 {missing.presentOn.length > 0
-                  ? `Sessions run on ${missing.current.name}, which has no checkout of this workspace. It exists on ${missing.presentOn.map((m) => m.name).join(", ")}.`
+                  ? `Sessions run on ${missing.current.name}, which has no checkout of this workspace. It exists on ${missing.presentOn.map((m) => m.name).join(", ")}; to work there, switch the project's remote in the session header.`
                   : `Sessions run on ${missing.current.name}, which has no checkout of this workspace.`}
               </DialogDescription>
             </DialogHeader>
             <div className="flex flex-col gap-1.5 px-4 py-3.5">
-              {missing.presentOn.map((machine) => (
-                <Button
-                  key={machine.serverId}
-                  variant="outline"
-                  size="sm"
-                  className="justify-start"
-                  onClick={() => onSwitch(machine.serverId)}
-                >
-                  <ArrowRightLeft className="size-3.5" />
-                  Switch to {machine.name}
-                </Button>
-              ))}
               <Button variant="outline" size="sm" className="justify-start" onClick={onCreateHere}>
                 <Plus className="size-3.5" />
                 Create on {missing.current.name}

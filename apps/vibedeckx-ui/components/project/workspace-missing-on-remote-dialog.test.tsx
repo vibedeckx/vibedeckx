@@ -10,7 +10,6 @@ import { WorkspaceMissingOnRemoteDialog } from "./workspace-missing-on-remote-di
 describe("WorkspaceMissingOnRemoteDialog", () => {
   let container: HTMLElement;
   let root: Root;
-  const onSwitch = vi.fn();
   const onCreateHere = vi.fn();
   const onOpenAnyway = vi.fn();
 
@@ -34,7 +33,6 @@ describe("WorkspaceMissingOnRemoteDialog", () => {
             ],
           }}
           onOpenChange={() => {}}
-          onSwitch={onSwitch}
           onCreateHere={onCreateHere}
           onOpenAnyway={onOpenAnyway}
         />,
@@ -47,13 +45,12 @@ describe("WorkspaceMissingOnRemoteDialog", () => {
     container.remove();
   });
 
-  it("offers a switch to each machine that has it, creating it here, or opening anyway", () => {
+  it("names where it exists and offers creating it here or opening anyway", () => {
     expect(document.body.textContent).toContain("dev is not on worker3");
-
-    act(() => buttonNamed("Switch to Mac").click());
-    expect(onSwitch).toHaveBeenCalledWith("server-2");
-    act(() => buttonNamed("Switch to ubuntu").click());
-    expect(onSwitch).toHaveBeenCalledWith("server-3");
+    expect(document.body.textContent).toContain("It exists on Mac, ubuntu");
+    expect(document.body.textContent).toContain("switch the project's remote in the session header");
+    // Moving sessions is project-wide, so no row-level shortcut for it.
+    expect(buttonNamed("Switch to")).toBeUndefined();
 
     act(() => buttonNamed("Create on worker3").click());
     expect(onCreateHere).toHaveBeenCalledTimes(1);

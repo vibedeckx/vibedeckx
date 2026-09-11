@@ -232,6 +232,7 @@ export default function Home() {
     rootDirty: mergeRootDirty,
     defaultTarget: mergeDefaultTarget,
     repositoryLabel: mergeRepositoryLabel,
+    repositoryServerId: mergeRepositoryServerId,
     setTarget: setMergeTarget,
     refetch: refetchMergeStatus,
   } = useMergeStatus(currentProject?.id ?? null, worktrees);
@@ -1057,6 +1058,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             mergeRootDirty={mergeRootDirty}
             mergeDefaultTarget={mergeDefaultTarget}
             mergeRepositoryLabel={mergeRepositoryLabel}
+            mergeRepositoryServerId={mergeRepositoryServerId}
             onMergeTargetChange={setMergeTarget}
             onMergeBadgeClick={(branch) => {
               selectWorkspace(branch);
@@ -1358,17 +1360,6 @@ Please proceed step by step and let me know if there are any issues or conflicts
         <WorkspaceMissingOnRemoteDialog
           missing={missingOnRemote}
           onOpenChange={(open) => { if (!open) setMissingOnRemote(null); }}
-          onSwitch={async (serverId) => {
-            const missing = missingOnRemote;
-            setMissingOnRemote(null);
-            if (!missing || !currentProject) return;
-            try {
-              await updateProject(currentProject.id, { agentMode: serverId });
-              selectWorkspace(missing.branch);
-            } catch (error) {
-              toast.error(error instanceof Error ? error.message : 'Failed to switch remote');
-            }
-          }}
           onCreateHere={() => {
             const missing = missingOnRemote;
             setMissingOnRemote(null);
