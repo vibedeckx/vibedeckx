@@ -65,6 +65,7 @@ export function RemoteServersSettings() {
   // Delete confirmation
   const [deleteTarget, setDeleteTarget] = useState<RemoteServer | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   // Test connection status per server
   const [testStatuses, setTestStatuses] = useState<Record<string, TestStatus>>({});
@@ -164,12 +165,14 @@ export function RemoteServersSettings() {
   const handleDelete = async () => {
     if (!deleteTarget) return;
     setDeleting(true);
+    setDeleteError('');
     try {
       await api.deleteRemoteServer(deleteTarget.id);
       setDeleteTarget(null);
       await loadServers();
     } catch (e) {
-      setFormError(e instanceof Error ? e.message : 'Failed to delete server');
+      // The refusal names the projects that still link the server.
+      setDeleteError(e instanceof Error ? e.message : 'Failed to delete server');
     } finally {
       setDeleting(false);
     }
@@ -438,7 +441,10 @@ export function RemoteServersSettings() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      onClick={() => setDeleteTarget(server)}
+                      onClick={() => {
+                        setDeleteError('');
+                        setDeleteTarget(server);
+                      }}
                       title="Delete server"
                       className="h-8 w-8 text-destructive hover:text-destructive"
                     >
@@ -630,10 +636,14 @@ export function RemoteServersSettings() {
             <DialogTitle>Delete Server</DialogTitle>
             <DialogDescription>
               Are you sure you want to delete{' '}
-              <span className="font-semibold">{deleteTarget?.name}</span>? This
-              will also remove it from any projects that reference it.
+              <span className="font-semibold">{deleteTarget?.name}</span>? A
+              server that projects still link cannot be deleted: unlink it in
+              each project&apos;s settings first.
             </DialogDescription>
           </DialogHeader>
+          {deleteError && (
+            <p className="text-sm text-red-500">{deleteError}</p>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteTarget(null)}>
               Cancel

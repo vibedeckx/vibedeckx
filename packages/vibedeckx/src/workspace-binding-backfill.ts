@@ -208,6 +208,36 @@ export async function reconcileReportedWorktrees(
 }
 
 /**
+ * Take in a worker's complete worktree list, and record that the hub has now
+ * seen it. With a snapshot of the machine's rows from before the request,
+ * the registry is reconciled to the list (see `reconcileReportedWorktrees`);
+ * without one, only additions are registered — for a caller whose answer
+ * must not move anything (the machine check). Only a real list counts: an
+ * odd shape (an old worker, an error body) registers nothing and leaves the
+ * remote unconfirmed. So does a list the worker marks `gitError`: Git could
+ * not read the repository there, and the root-only answer it fell back to
+ * would tombstone every worktree the machine still has. (A worker too old to
+ * send the flag cannot be told apart; its fallback still reconciles.)
+ */
+export async function syncRemoteWorktreeList(
+  storage: Storage,
+  projectId: string,
+  remote: { serverId: string; remotePath: string },
+  data: unknown,
+  snapshot?: RegisteredWorkspaceCheckout[],
+): Promise<boolean> {
+  const answer = data as { worktrees?: ReportedWorktree[]; gitError?: unknown } | undefined;
+  const worktrees = answer?.worktrees;
+  if (!Array.isArray(worktrees)) return false;
+  if (typeof answer?.gitError === "string") return false;
+  const opts = { projectId, targetId: remote.serverId, remotePath: remote.remotePath, worktrees };
+  if (snapshot) await reconcileReportedWorktrees(storage, { ...opts, snapshot });
+  else await registerReportedWorktrees(storage, opts);
+  await storage.projectRemotes.markWorktreesSynced(projectId, remote.serverId);
+  return true;
+}
+
+/**
  * Lazily import the local worktrees this machine can still see, so historical
  * sessions have a checkout to bind to.
  *

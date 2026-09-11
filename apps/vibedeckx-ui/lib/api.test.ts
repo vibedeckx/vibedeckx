@@ -244,6 +244,67 @@ describe("createNewAgentSession", () => {
   });
 });
 
+describe("removeProjectRemote", () => {
+  const withFetch = async (response: Partial<Response>, run: (fetchMock: ReturnType<typeof vi.fn>) => Promise<void>) => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue(response as Response);
+    global.fetch = fetchMock;
+    try {
+      await run(fetchMock);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  };
+
+  it("throws the whole in-use refusal, not just its message", async () => {
+    const body = {
+      errorCode: "remote-in-use",
+      error: "worker3 still has 1 workspace in this project.",
+      serverId: "srv-1",
+      name: "worker3",
+      usage: { workspaces: ["dev3"], sessions: 0, pendingSessions: 0, schedules: [], runningExecutors: 0 },
+    };
+    await withFetch({ ok: false, status: 409, json: async () => body }, async () => {
+      await expect(api.removeProjectRemote("p1", "link-1")).rejects.toMatchObject({
+        name: "ProjectRemoteUnlinkError",
+        message: body.error,
+        body,
+      });
+    });
+  });
+
+  it("throws the unreachable refusal and sends force only when asked", async () => {
+    const body = {
+      errorCode: "remote-unreachable",
+      error: "worker3 is offline; its workspaces cannot be confirmed.",
+      serverId: "srv-1",
+      name: "worker3",
+      reason: "offline",
+      lastConnectedAt: null,
+      lastSyncedAt: null,
+      tokenRevoked: false,
+      lastKnownUsage: null,
+    };
+    await withFetch({ ok: false, status: 409, json: async () => body }, async (fetchMock) => {
+      await expect(api.removeProjectRemote("p1", "link-1")).rejects.toMatchObject({ body });
+      expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/api\/projects\/p1\/remotes\/link-1$/);
+    });
+    await withFetch({ ok: true, status: 200, json: async () => ({ success: true }) }, async (fetchMock) => {
+      await api.removeProjectRemote("p1", "link-1", { force: true });
+      expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/api\/projects\/p1\/remotes\/link-1\?force=1$/);
+    });
+  });
+
+  it("still throws a plain error for other failures", async () => {
+    await withFetch({ ok: false, status: 404, json: async () => ({ error: "Project remote not found" }) }, async () => {
+      await expect(api.removeProjectRemote("p1", "link-1")).rejects.toMatchObject({
+        name: "Error",
+        message: "Project remote not found",
+      });
+    });
+  });
+});
+
 describe("Project Chat create", () => {
   it("sends the caller's explicit create request id", async () => {
     const originalFetch = global.fetch;

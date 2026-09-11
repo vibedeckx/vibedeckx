@@ -9,6 +9,7 @@ import type {
   CrossRemoteAccess,
   ProjectRemote,
   ProjectRemoteWithServer,
+  RemoteUsage,
 } from "../types.js";
 
 const mapRemoteServer = (row: Selectable<RemoteServersTable>): RemoteServer => ({
@@ -79,6 +80,90 @@ async function renumberProjectRemotes(
       .where("project_id", "=", projectId)
       .execute();
   }
+}
+
+/**
+ * Everything one project still has on one remote (see `RemoteUsage`). Each
+ * item is one query scoped to `(project_id, remote_server_id)`; the whole
+ * set runs inside the caller's transaction so the count and the delete that
+ * may follow it see the same rows.
+ */
+async function countRemoteUsage(
+  trx: Transaction<DB>,
+  projectId: string,
+  remoteServerId: string,
+): Promise<RemoteUsage> {
+  // The main workspace ("") is the repository itself: the reconcile loop in
+  // workspace-binding-backfill never tombstones it and workspace-presence
+  // treats it as always present. It is not a worktree the unlink leaves
+  // behind, and without this exemption no synced remote could ever unlink.
+  const checkouts = await trx.selectFrom("workspaces as workspace")
+    .innerJoin("workspace_checkouts as checkout", "checkout.workspace_id", "workspace.id")
+    .select("workspace.branch")
+    .where("workspace.project_id", "=", projectId)
+    .where("checkout.target_id", "=", remoteServerId)
+    .where("checkout.deleted_at", "is", null)
+    .where("workspace.branch", "!=", "")
+    .orderBy("workspace.branch", "asc")
+    .execute();
+
+  const sessions = await trx.selectFrom("remote_session_mappings")
+    .select(({ fn }) => fn.countAll<number>().as("n"))
+    .where("project_id", "=", projectId)
+    .where("remote_server_id", "=", remoteServerId)
+    .executeTakeFirstOrThrow();
+
+  // Every pending intent, prepared ones included. `listPending` deliberately
+  // skips intents with a prepare_operation_id, so it is not reused here.
+  const pendingSessions = await trx.selectFrom("remote_session_creation_intents")
+    .select(({ fn }) => fn.countAll<number>().as("n"))
+    .where("project_id", "=", projectId)
+    .where("remote_server_id", "=", remoteServerId)
+    .where("status", "=", "pending")
+    .executeTakeFirstOrThrow();
+  const pendingReviewers = await trx.selectFrom("remote_reviewer_creation_intents")
+    .select(({ fn }) => fn.countAll<number>().as("n"))
+    .where("project_id", "=", projectId)
+    .where("remote_server_id", "=", remoteServerId)
+    .where("status", "=", "pending")
+    .executeTakeFirstOrThrow();
+
+  const schedules = await trx.selectFrom("scheduled_tasks")
+    .select("name")
+    .where("project_id", "=", projectId)
+    .where("target", "=", remoteServerId)
+    .orderBy("name", "asc")
+    .execute();
+
+  const runningExecutors = await trx.selectFrom("remote_executor_processes")
+    .select(({ fn }) => fn.countAll<number>().as("n"))
+    .where("project_id", "=", projectId)
+    .where("remote_server_id", "=", remoteServerId)
+    .where("status", "=", "running")
+    .executeTakeFirstOrThrow();
+
+  return {
+    workspaces: checkouts.map((row) => row.branch),
+    sessions: Number(sessions.n),
+    pendingSessions: Number(pendingSessions.n) + Number(pendingReviewers.n),
+    schedules: schedules.map((row) => row.name),
+    runningExecutors: Number(runningExecutors.n),
+  };
+}
+
+function remoteUsageIsEmpty(usage: RemoteUsage): boolean {
+  return usage.workspaces.length === 0
+    && usage.sessions === 0
+    && usage.pendingSessions === 0
+    && usage.schedules.length === 0
+    && usage.runningExecutors === 0;
+}
+
+async function deleteProjectRemoteRow(trx: Transaction<DB>, id: string, projectId: string): Promise<void> {
+  await trx.deleteFrom("project_remotes")
+    .where("id", "=", id).where("project_id", "=", projectId).execute();
+  const orderedIds = await orderedProjectRemoteIds(trx, projectId);
+  await renumberProjectRemotes(trx, projectId, orderedIds);
 }
 
 /** Owner-scoped row read — undefined when the row is missing or belongs to someone else. */
@@ -349,11 +434,29 @@ export const createRemoteServerRepos = (
       const existing = await existingQuery.executeTakeFirst();
       if (!existing) return false;
 
-      await trx.deleteFrom("project_remotes")
-        .where("id", "=", id).where("project_id", "=", existing.project_id).execute();
-      const orderedIds = await orderedProjectRemoteIds(trx, existing.project_id);
-      await renumberProjectRemotes(trx, existing.project_id, orderedIds);
+      await deleteProjectRemoteRow(trx, id, existing.project_id);
       return true;
+    }),
+
+    removeGuarded: async (id, projectId, opts) => kdb.transaction().execute(async (trx) => {
+      const existing = await trx.selectFrom("project_remotes")
+        .select(["id", "project_id", "remote_server_id"])
+        .where("id", "=", id)
+        .where("project_id", "=", projectId)
+        .executeTakeFirst();
+      if (!existing) return { outcome: "not-found" as const };
+
+      if (!opts.force) {
+        const usage = await countRemoteUsage(trx, projectId, existing.remote_server_id);
+        // Unreachable: the count is the hub's last knowledge, not a fact
+        // about the machine now. Hand it back and let the caller decide.
+        if (!opts.reachable || !remoteUsageIsEmpty(usage)) {
+          return { outcome: "in-use" as const, usage };
+        }
+      }
+
+      await deleteProjectRemoteRow(trx, id, projectId);
+      return { outcome: "removed" as const };
     }),
 
     markWorktreesSynced: async (projectId, remoteServerId) => {

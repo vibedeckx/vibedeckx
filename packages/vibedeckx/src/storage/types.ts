@@ -54,6 +54,31 @@ export interface ProjectRemoteWithServer extends ProjectRemote {
   server_name: string;
 }
 
+/**
+ * What one project still has on one remote machine, i.e. the hub rows that
+ * would lose their reference if the project unlinked that machine. Scoped to
+ * a single project: the same server linked to other projects counts nothing
+ * here. The main workspace (branch "") is never listed — it is the repository
+ * itself, not a worktree the unlink would leave behind.
+ */
+export interface RemoteUsage {
+  /** Non-main workspace branches with a live checkout row on the machine. */
+  workspaces: string[];
+  /** Established remote sessions (`remote_session_mappings`). */
+  sessions: number;
+  /** Session / reviewer creations still pending, including prepared ones. */
+  pendingSessions: number;
+  /** Names of schedules whose target is the machine. */
+  schedules: string[];
+  /** Remote executor processes still marked running. */
+  runningExecutors: number;
+}
+
+export type ProjectRemoteRemoveOutcome =
+  | { outcome: "removed" }
+  | { outcome: "not-found" }
+  | { outcome: "in-use"; usage: RemoteUsage };
+
 export interface Project {
   id: string;
   name: string;
@@ -918,6 +943,18 @@ export interface Storage {
     }, projectId?: string): Promise<ProjectRemote | undefined>;
     setPrimary(projectId: string, remoteId: string): Promise<boolean>;
     remove(id: string, projectId?: string): Promise<boolean>;
+    /**
+     * Unlink guarded by usage, counted and deleted in one transaction.
+     *
+     * - `reachable && !force`: the machine's registry was just reconciled, so
+     *   the count is authoritative. Any usage → `in-use`, nothing deleted.
+     * - `!reachable && !force`: the count is only what the hub last knew.
+     *   Always answers `in-use` (even with empty usage) so the route can show
+     *   it as "last known" and ask; nothing deleted.
+     * - `force`: delete regardless. Callers only pass it when `!reachable` —
+     *   confirmed usage has no override.
+     */
+    removeGuarded(id: string, projectId: string, opts: { force: boolean; reachable: boolean }): Promise<ProjectRemoteRemoveOutcome>;
     /** Record that the remote's complete worktree list has just been registered. */
     markWorktreesSynced(projectId: string, remoteServerId: string): Promise<void>;
   };

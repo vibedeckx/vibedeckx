@@ -112,6 +112,9 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:POST /api/workflow-runs/:param/cancel": { since: "0.2.5", summary: "取消 workflow run" },
 
   // --- Git / worktrees / diff ---
+  // Response gained `gitError` (additive): a worker whose Git cannot read the
+  // repository marks its root-only fallback list; the hub refuses to reconcile
+  // against a marked list. Older workers omit it and the hub cannot tell.
   "http:GET /api/path/worktrees": { since: "0.2.0", summary: "worktree 列表/状态" },
   "http:POST /api/path/worktrees": { since: "0.2.0", summary: "建 worktree" },
   "http:DELETE /api/path/worktrees": { since: "0.2.0", summary: "删 worktree" },

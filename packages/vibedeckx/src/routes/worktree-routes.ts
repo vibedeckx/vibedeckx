@@ -1,10 +1,10 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
-import { resolveWorktreePath, conventionalWorktreePath, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, setRootWorkspaceAnchor, parseGitWorktreeList, pruneWorktrees, invalidateWorktreeListCache, planWorktreeAdd, applyWorktreeAdd, canonicalPath, deleteBranchAfterRemoval, liveWorktreeRecord, worktreeRecordExists, type RetainedBranch, type SetAnchorResult, type WorktreeBranch } from "../utils/worktree-paths.js";
+import { resolveWorktreePath, conventionalWorktreePath, getRegisteredWorktreeBranches, anchorRootWorkspaceBranch, setRootWorkspaceAnchor, parseGitWorktreeList, probeWorktreeListError, pruneWorktrees, invalidateWorktreeListCache, planWorktreeAdd, applyWorktreeAdd, canonicalPath, deleteBranchAfterRemoval, liveWorktreeRecord, worktreeRecordExists, type RetainedBranch, type SetAnchorResult, type WorktreeBranch } from "../utils/worktree-paths.js";
 import { computeWorkspaceMachines, type LinkedMachine, type WorkspaceMachineState } from "../utils/workspace-health.js";
 import { ensurePathProjectId } from "../utils/path-project.js";
-import { reconcileReportedWorktrees, registerReportedWorktrees, snapshotLiveCheckouts, type ReportedWorktree } from "../workspace-binding-backfill.js";
+import { snapshotLiveCheckouts, syncRemoteWorktreeList } from "../workspace-binding-backfill.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import type { Project, RegisteredWorkspaceCheckout } from "../storage/types.js";
@@ -323,31 +323,6 @@ async function assertPathIsFree(
 }
 
 /**
- * Take in a worker's complete worktree list, and record that the hub has now
- * seen it. With a snapshot of the machine's rows from before the request,
- * the registry is reconciled to the list (see `reconcileReportedWorktrees`);
- * without one, only additions are registered — for a caller whose answer
- * must not move anything (the machine check). Only a real list counts: an
- * odd shape (an old worker, an error body) registers nothing and leaves the
- * remote unconfirmed.
- */
-async function syncRemoteWorktreeList(
-  fastify: FastifyInstance,
-  projectId: string,
-  remote: Pick<RemoteConfig, "serverId" | "remotePath">,
-  data: unknown,
-  snapshot?: RegisteredWorkspaceCheckout[],
-): Promise<boolean> {
-  const worktrees = (data as { worktrees?: ReportedWorktree[] })?.worktrees;
-  if (!Array.isArray(worktrees)) return false;
-  const opts = { projectId, targetId: remote.serverId, remotePath: remote.remotePath, worktrees };
-  if (snapshot) await reconcileReportedWorktrees(fastify.storage, { ...opts, snapshot });
-  else await registerReportedWorktrees(fastify.storage, opts);
-  await fastify.storage.projectRemotes.markWorktreesSynced(projectId, remote.serverId);
-  return true;
-}
-
-/**
  * The worktree still holds something we could not confirm dead, so the delete
  * was refused. The checkout itself is healthy — this describes the operation,
  * not the checkout — so callers restore its previous status rather than
@@ -466,6 +441,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     try {
       pruneWorktrees(projectPath);
+      // A repository Git cannot read lists as root-only, same as a directory
+      // that is no repository. The hub reconciles its registry against this
+      // answer, so it must be able to tell the two apart: `gitError` marks the
+      // list as a fallback, not a fact. Additive field — old hubs ignore it.
+      const gitError = probeWorktreeListError(projectPath);
       const project = await ensurePathProject(fastify, projectPath);
       const worktrees = await getRegisteredWorktreeBranches(fastify.storage, project.id, projectPath);
       const registered = await fastify.storage.workspaceRegistry.listByProject(project.id, "local");
@@ -475,6 +455,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           ...worktree,
           worktreePath: pathByBranch.get(worktree.branch ?? ""),
         })),
+        ...(gitError ? { gitError } : {}),
       });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "Unknown error";
@@ -715,7 +696,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         { reverseConnectManager: fastify.reverseConnectManager }
       );
       if (result.ok) {
-        await syncRemoteWorktreeList(fastify, project.id, {
+        await syncRemoteWorktreeList(fastify.storage, project.id, {
           serverId: targetRemote.remote_server_id,
           remotePath: targetRemote.remote_path,
         }, result.data, snapshot);
@@ -743,7 +724,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         { reverseConnectManager: fastify.reverseConnectManager }
       );
       let reported: WorktreeBranch[] | null = null;
-      if (result.ok && await syncRemoteWorktreeList(fastify, project.id, remoteConfig, result.data, snapshot)) {
+      if (result.ok && await syncRemoteWorktreeList(fastify.storage, project.id, remoteConfig, result.data, snapshot)) {
         reported = listedWorktrees(result.data);
       }
       return reply.code(200).send({
@@ -852,7 +833,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           }
           // Same side effect as listing that machine: what it reports is
           // registered (add-only) and the machine counts as confirmed.
-          if (!await syncRemoteWorktreeList(fastify, project.id, remote, result.data)) {
+          if (!await syncRemoteWorktreeList(fastify.storage, project.id, remote, result.data)) {
             return unreachable(state, "Worker returned no worktree list");
           }
           return settle(state, listedWorktrees(result.data).some((worktree) => worktree.branch === branch));

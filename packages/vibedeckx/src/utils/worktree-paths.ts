@@ -1,7 +1,7 @@
 import path from "path";
 import { createHash } from "crypto";
 import { execSync, execFileSync } from "child_process";
-import { mkdirSync, realpathSync } from "fs";
+import { mkdirSync, realpathSync, statSync } from "fs";
 import type { Storage, RegisteredWorkspaceCheckout } from "../storage/types.js";
 
 const WORKTREE_BASE_DIR = "/var/tmp/vibedeckx/worktrees";
@@ -134,6 +134,40 @@ function readWorktreeListTolerant(projectPath: string): Array<{ path: string; br
     return parseGitWorktreeList(projectPath);
   } catch {
     return [{ path: projectPath, branch: null }];
+  }
+}
+
+/**
+ * Why a repository's worktree list could not be read, or undefined when it
+ * could (or when the directory is not a repository at all, whose only
+ * workspace really is its root). The tolerant listing above hides this
+ * difference on purpose for the sidebar; a caller that will *act* on the list
+ * — the hub reconciling and tombstoning against it — must be told that a
+ * root-only answer came from a failure (dubious ownership, permissions, a
+ * broken HEAD) and not from Git.
+ */
+export function probeWorktreeListError(projectPath: string): string | undefined {
+  try {
+    parseGitWorktreeList(projectPath);
+    return undefined;
+  } catch (error) {
+    const gitError = error instanceof Error ? error.message : String(error);
+    // Only a directory that can be seen and holds no `.git` is a confirmed
+    // non-repository. A path that is missing, or that cannot be traversed
+    // (permissions, a dead mount), is a read failure like any other: an
+    // `existsSync` there would answer false and pass the failure off as
+    // "no worktrees".
+    try {
+      statSync(projectPath);
+    } catch {
+      return gitError;
+    }
+    try {
+      statSync(path.join(projectPath, ".git"));
+      return gitError;
+    } catch (statError) {
+      return (statError as NodeJS.ErrnoException).code === "ENOENT" ? undefined : gitError;
+    }
   }
 }
 

@@ -121,12 +121,32 @@ const routes: FastifyPluginAsync = async (fastify) => {
   );
 
   // DELETE /api/remote-servers/:id — delete
+  //
+  // `project_remotes.remote_server_id` references this row without CASCADE
+  // (on purpose: unlinking is the guarded operation, see project-remote-
+  // routes). A bare delete would trip the foreign key and answer 500, so
+  // refuse first with the projects that still link the server.
   fastify.delete<{ Params: { id: string } }>(
     "/api/remote-servers/:id",
     async (request, reply) => {
       const userId = requireAuth(request, reply);
       if (userId === null) return;
       const { id } = request.params;
+      const server = await fastify.storage.remoteServers.getById(id, userId);
+      if (!server)
+        return reply.code(404).send({ error: "Server not found" });
+
+      const projectIds = await fastify.storage.projectRemotes.listProjectIdsByServer(id);
+      if (projectIds.length > 0) {
+        const projects = (await Promise.all(projectIds.map((projectId) => fastify.storage.projects.getById(projectId))))
+          .map((project, index) => ({ id: projectIds[index], name: project?.name ?? projectIds[index] }));
+        return reply.code(409).send({
+          error: `${server.name} is still attached to ${projects.length} project${projects.length === 1 ? "" : "s"}: ${projects.map((project) => project.name).join(", ")}. Unlink it from each project first.`,
+          errorCode: "remote-server-in-use",
+          projects,
+        });
+      }
+
       const deleted = await fastify.storage.remoteServers.delete(id, userId);
       if (!deleted)
         return reply.code(404).send({ error: "Server not found" });

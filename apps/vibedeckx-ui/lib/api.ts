@@ -303,6 +303,47 @@ export interface ProjectRemote {
   status?: RemoteServerStatus;
 }
 
+/** What a project still has on a remote machine, as counted by the hub. */
+export interface RemoteUsage {
+  workspaces: string[];
+  sessions: number;
+  pendingSessions: number;
+  schedules: string[];
+  runningExecutors: number;
+}
+
+/** 409 from unlinking: the machine answered and the project still uses it. Nothing overrides this. */
+export interface RemoteInUseBody {
+  errorCode: "remote-in-use";
+  error: string;
+  serverId: string;
+  name: string;
+  usage: RemoteUsage;
+}
+
+/** 409 from unlinking: the machine could not be asked, so usage is only what the hub last knew. */
+export interface RemoteUnreachableBody {
+  errorCode: "remote-unreachable";
+  error: string;
+  serverId: string;
+  name: string;
+  reason: "offline" | "sync-failed";
+  lastConnectedAt: string | null;
+  lastSyncedAt: string | null;
+  tokenRevoked: boolean;
+  lastKnownUsage: RemoteUsage | null;
+}
+
+export class ProjectRemoteUnlinkError extends Error {
+  readonly body: RemoteInUseBody | RemoteUnreachableBody;
+
+  constructor(body: RemoteInUseBody | RemoteUnreachableBody) {
+    super(body.error);
+    this.name = "ProjectRemoteUnlinkError";
+    this.body = body;
+  }
+}
+
 export interface RemoteBrowseItem {
   name: string;
   path: string;
@@ -3143,13 +3184,22 @@ export const api = {
     }
   },
 
-  async removeProjectRemote(projectId: string, remoteId: string): Promise<void> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/remotes/${remoteId}`, {
+  /**
+   * Unlink a remote from a project. A 409 carries the reason as a whole
+   * (`ProjectRemoteUnlinkError`): confirmed usage, which cannot be overridden,
+   * or an unreachable machine, which `force` unlinks anyway.
+   */
+  async removeProjectRemote(projectId: string, remoteId: string, opts?: { force?: boolean }): Promise<void> {
+    const query = opts?.force ? "?force=1" : "";
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/remotes/${remoteId}${query}`, {
       method: "DELETE",
     });
     if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error);
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 409 && (body?.errorCode === "remote-in-use" || body?.errorCode === "remote-unreachable")) {
+        throw new ProjectRemoteUnlinkError(body as RemoteInUseBody | RemoteUnreachableBody);
+      }
+      throw new Error(typeof body?.error === "string" ? body.error : `removeProjectRemote failed: ${res.status}`);
     }
   },
 

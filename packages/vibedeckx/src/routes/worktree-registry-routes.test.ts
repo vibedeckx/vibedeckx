@@ -1,5 +1,5 @@
 import { execFileSync } from "child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -1069,6 +1069,87 @@ describe("worktree routes persisted identity", () => {
 
     expect(created.statusCode).toBe(201);
     expect(proxyToRemoteAuto).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a Git failure instead of passing off the root-only fallback as the list", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    expect(created.statusCode).toBe(201);
+    const listUrl = `/api/path/worktrees?path=${encodeURIComponent(projectPath)}`;
+
+    const healthy = await app.inject({ method: "GET", url: listUrl });
+    expect(healthy.statusCode).toBe(200);
+    expect(healthy.json().worktrees.map((w: { branch: string | null }) => w.branch)).toEqual([null, "dev"]);
+    expect(healthy.json().gitError).toBeUndefined();
+
+    // Break the repository the way a dubious-ownership or permission error
+    // would: Git refuses to read it while `.git` plainly exists.
+    const head = path.join(projectPath, ".git", "HEAD");
+    const original = readFileSync(head, "utf-8");
+    writeFileSync(head, "garbage\n");
+    invalidateWorktreeListCache(projectPath);
+    try {
+      const broken = await app.inject({ method: "GET", url: listUrl });
+      expect(broken.statusCode).toBe(200);
+      expect(broken.json().worktrees.map((w: { branch: string | null }) => w.branch)).toEqual([null]);
+      expect(broken.json().gitError).toMatch(/not a git repository/);
+    } finally {
+      writeFileSync(head, original);
+      invalidateWorktreeListCache(projectPath);
+    }
+  });
+
+  // chmod is no barrier to root, so this one only means something unprivileged.
+  it.skipIf(process.getuid?.() === 0)("reports a Git failure when the project directory cannot be traversed", async () => {
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/projects/p1/worktrees",
+      payload: { branchName: "dev", baseBranch: "main", targets: ["local"] },
+    });
+    expect(created.statusCode).toBe(201);
+    const listUrl = `/api/path/worktrees?path=${encodeURIComponent(projectPath)}`;
+
+    // A permission failure looks, to an `existsSync(<path>/.git)`, exactly
+    // like a directory that is not a repository. It is not: the worktrees
+    // are still there, and the hub must not be told otherwise.
+    chmodSync(projectPath, 0o000);
+    invalidateWorktreeListCache(projectPath);
+    try {
+      const denied = await app.inject({ method: "GET", url: listUrl });
+      expect(denied.statusCode).toBe(200);
+      expect(denied.json().worktrees.map((w: { branch: string | null }) => w.branch)).toEqual([null]);
+      expect(typeof denied.json().gitError).toBe("string");
+    } finally {
+      chmodSync(projectPath, 0o755);
+      invalidateWorktreeListCache(projectPath);
+    }
+  });
+
+  it("reports a Git failure when the project path is gone", async () => {
+    const missing = path.join(dir, "vanished");
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/path/worktrees?path=${encodeURIComponent(missing)}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().worktrees.map((w: { branch: string | null }) => w.branch)).toEqual([null]);
+    expect(typeof response.json().gitError).toBe("string");
+  });
+
+  it("does not flag a plain directory that is no repository", async () => {
+    const plain = path.join(dir, "plain");
+    mkdirSync(plain);
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/path/worktrees?path=${encodeURIComponent(plain)}`,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().gitError).toBeUndefined();
   });
 
   it("uses the canonical pseudo project for path-based registry rows", async () => {

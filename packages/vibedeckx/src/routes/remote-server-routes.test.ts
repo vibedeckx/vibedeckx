@@ -173,6 +173,30 @@ describe("inbound server lifecycle (create → id → connect token)", () => {
     expect(del.statusCode).toBe(200);
   });
 
+  it("refuses to delete a server that projects still link, instead of tripping the foreign key", async () => {
+    const created = await app.inject({ method: "POST", url: "/api/remote-servers", payload: { name: "worker-7" } });
+    const id = created.json().id as string;
+    await storage.projects.create({ id: "p1", name: "Alpha", path: null });
+    await storage.projects.create({ id: "p2", name: "Beta", path: null });
+    await storage.projectRemotes.add({ project_id: "p1", remote_server_id: id, remote_path: "/srv/a" });
+    await storage.projectRemotes.add({ project_id: "p2", remote_server_id: id, remote_path: "/srv/b" });
+
+    const refused = await app.inject({ method: "DELETE", url: `/api/remote-servers/${id}` });
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json()).toEqual({
+      error: "worker-7 is still attached to 2 projects: Alpha, Beta. Unlink it from each project first.",
+      errorCode: "remote-server-in-use",
+      projects: expect.arrayContaining([{ id: "p1", name: "Alpha" }, { id: "p2", name: "Beta" }]),
+    });
+    expect(await storage.remoteServers.getById(id)).toBeTruthy();
+
+    await storage.projectRemotes.remove((await storage.projectRemotes.getByProjectAndServer("p1", id))!.id);
+    await storage.projectRemotes.remove((await storage.projectRemotes.getByProjectAndServer("p2", id))!.id);
+    const deleted = await app.inject({ method: "DELETE", url: `/api/remote-servers/${id}` });
+    expect(deleted.statusCode).toBe(200);
+    expect(await storage.remoteServers.getById(id)).toBeUndefined();
+  });
+
   it("reports reverse-connect status on /test", async () => {
     const created = await app.inject({ method: "POST", url: "/api/remote-servers", payload: { name: "worker-3" } });
     const id = created.json().id as string;
