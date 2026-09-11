@@ -214,7 +214,7 @@ hub 侧不需要另加判定。鬼行一次点击即清，不是「永不消失�
   细节只在那次操作时展示一次（toast 与弹窗内的 207 结果行），之后侧栏上只剩这个数字。
   两个图标各管一种成因，用户不关心成因，关心的是哪台有、哪台没有；而且 ⚠ 点下去
   一种情形是再删一次、另一种是再建一次，动作相反。
-- **tooltip**：每台一行，`name: Present / Missing / Deleted here / Failed — <error> /
+- **tooltip**：每台一行，`name: Present / Missing / Deleted / Failed — <error> /
   Present — could not delete: <error>`，失败行标红。第一行按情形：
   - 普通缺口：「Exists on 2 of 4 remotes.」
   - 当前 remote 缺失：前面加「Not on worker3, the current remote.」（§6.5）。
@@ -294,7 +294,7 @@ interface WorkspaceMachineCheck extends WorkspaceMachineState {
 | 标题 | Create where it is missing | Manage remotes for `<branch>` |
 | 副标题 | 通用 | `<branch> exists on 2 of 4 remotes.` |
 | `present` 行 | 可勾，勾了会 adopt | **置灰不可点**，标签 `Has it` |
-| `absent` 行 | 默认勾 | 默认勾，标签 `Missing`；`deleted` 时标签 `Deleted here` |
+| `absent` 行 | 默认勾 | 默认勾，标签 `Missing`；`deleted` 时标签 `Deleted` |
 | `error` 行 | 默认勾，标签 `Failed` | 同现状；tooltip 是那台的 error；重试 = 再创建一次（adopt 后回 ready） |
 | `unknown` 行 | 无 | 打开时由状态查询接口确认；`checked = false` 则 `Could not check`，不可勾 |
 | `creating` / `deleting` 行 | 无 | 置灰，标签 `Creating…` / `Deleting…` |
@@ -367,8 +367,8 @@ worktree，所以今天的表现是一条含义模糊的 500，hub 侧的 409 �
 tooltip 在这种情形多一行「No merge status: no workspace <branch> on primary remote <name>.」
 （`coverageTooltipLead`），不另加图标，一行仍只有一个标记。tooltip 里的逐台列表
 （`WorkspaceMachineLine`）每行最前面一个状态图标列（✓ present / ✕ absent / ⚠ error /
-转圈 creating、deleting / ? unknown），机器名后标角色 `· primary` `· current`（同一台则
-`· primary, current`），再是状态文字；前导句和列表之间留一点间距。
+转圈 creating、deleting / ? unknown），机器名、状态文字，主 remote 那行最右侧 `[primary]` 标签；当前 remote 不标（前导句在需要时点名）。
+前导句和列表之间留一点间距。
 
 ### 6.6 创建完成后
 

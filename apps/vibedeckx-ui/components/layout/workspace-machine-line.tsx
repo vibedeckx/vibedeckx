@@ -8,28 +8,24 @@ interface WorkspaceMachineLineProps {
   machine: WorkspaceMachineState;
   /** The remote whose Git the merge badge reads (set in project settings). */
   primary?: boolean;
-  /** The remote sessions run on (set in the session header). */
-  current?: boolean;
 }
 
 /**
  * One machine's line in the coverage tooltip: a state glyph in a fixed
- * column so the eye can run down it, the machine's name with the roles that
- * make it matter (the two are chosen separately and need not coincide), then
- * the state in words. The tooltip surface is inverted (bg-foreground), so the
- * colors are the theme's swapped.
+ * column so the eye can run down it, the machine's name, the state in words,
+ * and — pushed to the right edge — a tag on the primary remote, the one the
+ * merge badge describes. The current remote is not tagged: the lead line
+ * names it when it matters. The tooltip surface is inverted (bg-foreground),
+ * so the colors are the theme's swapped.
  */
-export function WorkspaceMachineLine({ machine, primary, current }: WorkspaceMachineLineProps) {
+export function WorkspaceMachineLine({ machine, primary }: WorkspaceMachineLineProps) {
   const failed = machine.state === "error" || !!machine.error;
-  const roles = [primary ? "primary" : null, current ? "current" : null].filter(Boolean).join(", ");
   return (
-    <div className="grid grid-cols-[auto_auto_1fr] items-center gap-x-1.5 text-background/70">
+    <div className="flex items-center gap-x-1.5 whitespace-nowrap text-background/70">
       <MachineGlyph state={machine.state} />
-      <span className="text-background">
-        {machine.name}
-        {roles && <span className="text-background/60"> · {roles}</span>}
-      </span>
+      <span className="text-background">{machine.name}</span>
       <span className={cn(failed && "text-red-400 dark:text-red-600")}>{machineStateText(machine)}</span>
+      {primary && <span className="ml-auto pl-3 text-background/60">[primary]</span>}
     </div>
   );
 }

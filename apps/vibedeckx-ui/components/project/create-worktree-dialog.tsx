@@ -529,7 +529,7 @@ export function CreateWorktreeDialog({
       case "present":
         return state.reused ? { text: "Reused", tone: "ok" } : { text: "Has it", tone: "ok" };
       case "absent":
-        return state.deleted ? { text: "Deleted here", tone: "warn" } : { text: "Missing", tone: "warn" };
+        return state.deleted ? { text: "Deleted", tone: "warn" } : { text: "Missing", tone: "warn" };
       case "error":
         return { text: "Failed", tone: "bad", title: state.error || "The last attempt failed here" };
       case "creating":

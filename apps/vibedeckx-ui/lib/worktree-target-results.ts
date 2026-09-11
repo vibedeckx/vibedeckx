@@ -273,7 +273,7 @@ export function machineStateText(machine: WorkspaceMachineState): string {
       // A usable checkout may still carry the reason the last delete refused it.
       return machine.error ? `Present — could not delete: ${machine.error}` : "Present";
     case "absent":
-      return machine.deleted ? "Deleted here" : "Missing";
+      return machine.deleted ? "Deleted" : "Missing";
     case "error":
       return `Failed — ${machine.error || "the last attempt failed here"}`;
     case "creating":

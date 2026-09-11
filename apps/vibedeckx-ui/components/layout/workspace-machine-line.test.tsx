@@ -12,7 +12,7 @@ describe("WorkspaceMachineLine", () => {
   let container: HTMLElement;
   let root: Root;
 
-  const render = (machine: WorkspaceMachineState, roles?: { primary?: boolean; current?: boolean }) =>
+  const render = (machine: WorkspaceMachineState, roles?: { primary?: boolean }) =>
     act(() => {
       root.render(<WorkspaceMachineLine machine={machine} {...roles} />);
     });
@@ -43,13 +43,13 @@ describe("WorkspaceMachineLine", () => {
     expect(glyph()).toMatch(/lucide-circle-(help|question-mark)/);
   });
 
-  it("names the machine's roles after it, and both when they coincide", () => {
+  it("tags the primary remote after the state, and nothing else", () => {
+    // The current remote gets no tag: the lead line names it when it
+    // matters, and a second tag per line was more to read than it told.
     render({ serverId: "a", name: "Mac", state: "present" }, { primary: true });
-    expect(container.textContent).toBe("Mac · primaryPresent");
-    render({ serverId: "a", name: "Mac", state: "present" }, { current: true });
-    expect(container.textContent).toBe("Mac · currentPresent");
-    render({ serverId: "a", name: "Mac", state: "present" }, { primary: true, current: true });
-    expect(container.textContent).toBe("Mac · primary, currentPresent");
+    expect(container.textContent).toBe("MacPresent[primary]");
+    render({ serverId: "a", name: "Mac", state: "absent", deleted: true }, { primary: true });
+    expect(container.textContent).toBe("MacDeleted[primary]");
     render({ serverId: "a", name: "Mac", state: "present" });
     expect(container.textContent).toBe("MacPresent");
   });

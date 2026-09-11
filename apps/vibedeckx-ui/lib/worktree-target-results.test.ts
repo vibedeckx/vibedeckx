@@ -236,7 +236,7 @@ describe("machinesFromTargets", () => {
 describe("machineStateText", () => {
   it("tells a deletion from a workspace never made, and keeps the machine's own reason", () => {
     expect(machineStateText({ serverId: "a", name: "a", state: "absent" })).toBe("Missing");
-    expect(machineStateText({ serverId: "a", name: "a", state: "absent", deleted: true })).toBe("Deleted here");
+    expect(machineStateText({ serverId: "a", name: "a", state: "absent", deleted: true })).toBe("Deleted");
     expect(machineStateText({ serverId: "a", name: "a", state: "error", error: "disk full" })).toBe("Failed — disk full");
     // A usable checkout that a delete could not take keeps the reason.
     expect(machineStateText({ serverId: "a", name: "a", state: "present", error: "uncommitted changes" }))

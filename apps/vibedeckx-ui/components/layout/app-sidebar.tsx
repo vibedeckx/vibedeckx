@@ -611,7 +611,6 @@ export function AppSidebar({
                                       key={machine.serverId}
                                       machine={machine}
                                       primary={machine.serverId === mergeRepositoryServerId}
-                                      current={machine.serverId === (currentProject?.agent_mode ?? "local")}
                                     />
                                   ))}
                                 </div>
