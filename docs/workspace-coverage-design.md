@@ -202,18 +202,28 @@ hub 侧不需要另加判定。鬼行一次点击即清，不是「永不消失�
 
 ### 6.1 侧栏行
 
-- **覆盖徽标**：`machines` 存在且有 `absent` 时，行尾显示中性的 `2/4`
-  （present 数 / linked 数），`text-muted-foreground`，等宽小字。完整时不渲染、不占位。
-- **琥珀 ⚠**：保持现状，只在 `unfinishedDelete` 或有 `error` 时出现。两者可同时出现
-  （比如 4 台里 2 台有、1 台失败）：⚠ 在左，覆盖徽标在右。
-- **tooltip**（两者共用一份 `machines`）：每台一行，`name: Present / Missing /
-  Deleted here / Failed — <error>`。第一行说明：「Exists on 2 of 4 remotes.
-  Click to create it on the others.」
-- **点击徽标** → 补建弹窗（§6.3）。
-- **行菜单**（`workspace-row-menu.tsx`）新增 `Manage remotes…`，多 remote 项目上总是出现，
-  进管理弹窗（§6.3）。它同时是补建、重试失败、确认 unknown 的入口。徽标是快捷入口。
-- 不再为「当前 remote 上缺失」单加第三种标记。覆盖徽标的 tooltip 第一行点名当前 remote
-  的状态即可；打开时的处理见 §6.5。两种标记（⚠ 与 `2/4`）够用。
+- **单一标记**：行尾只有一个覆盖徽标。`machines` 存在且有任一台 `absent` 或 `error` 时，
+  显示中性的 `2/4`（present 数 / linked 数），`text-muted-foreground`，等宽小字。
+  完整时不渲染、不占位。`unknown` 计入分母但不算缺口。
+- **不再有琥珀 ⚠**。原先它管的两种情形并进徽标：某台 `error`（present 数不含它，所以
+  `2 台 1 台失败` 显示 `1/2`）；半截删除（一台墓碑一台还在，同样 `1/2`）。操作失败的
+  细节只在那次操作时展示一次（toast 与弹窗内的 207 结果行），之后侧栏上只剩这个数字。
+  两个图标各管一种成因，用户不关心成因，关心的是哪台有、哪台没有；而且 ⚠ 点下去
+  一种情形是再删一次、另一种是再建一次，动作相反。
+- **tooltip**：每台一行，`name: Present / Missing / Deleted here / Failed — <error> /
+  Present — could not delete: <error>`，失败行标红。第一行按情形：
+  - 普通缺口：「Exists on 2 of 4 remotes. Click to create it on the others.」
+  - 当前 remote 缺失：前面加「Not on worker3, the current remote.」（§6.5）。
+  - 有失败：「Exists on 1 of 3 remotes. Failed on Mac. Click to retry, or create it on the others.」
+  - 半截删除：「Deleted on worker3 but still on Mac. Delete again to finish.」整体删除
+    逐台幂等、只访问还持有的机器，从行菜单再 Delete 一次即可收尾；这里不需要按台删。
+- **点击徽标** → 管理弹窗（§6.3），任何情形都是它：补建缺失、重试失败、
+  半截删除时把已删的那台再建回来。
+- **行菜单**（`workspace-row-menu.tsx`）的 `Manage remotes…`，多 remote 项目上总是出现，
+  进同一个弹窗。它同时是补建、重试失败、确认 unknown 的入口。徽标是快捷入口。
+- **暂不做按台删除**。删除接口只接受分支名，对所有 remote 扇出。按台删是一块新的破坏性
+  能力（要加 `targets`、删除侧保护、「不能删到 0 台」规则），等有具体需求再在弹窗上加开关，
+  上面的改动不用返工。
 
 ### 6.2 弹窗（新建模式）的 remote-only 简化
 

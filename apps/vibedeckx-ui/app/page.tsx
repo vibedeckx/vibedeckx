@@ -1032,7 +1032,6 @@ Please proceed step by step and let me know if there are any issues or conflicts
               setWorktreeToDelete(wt);
               setDeleteWorktreeDialogOpen(true);
             }}
-            onRecreateWorktree={(wt) => openWorkspaceManagement(wt)}
             onManageWorkspaceRemotes={(wt) => openWorkspaceManagement(wt)}
             onAnchorRootWorkspace={async (branch) => {
               if (!currentProject) return;

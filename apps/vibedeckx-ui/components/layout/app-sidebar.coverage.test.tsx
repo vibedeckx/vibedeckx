@@ -32,6 +32,7 @@ describe("AppSidebar workspace coverage", () => {
   let container: HTMLElement;
   let root: Root;
   const onManageWorkspaceRemotes = vi.fn();
+  const onDeleteWorktree = vi.fn();
   const onBranchChange = vi.fn();
 
   const render = (worktrees: Worktree[], extra?: { staleRemoteName?: string | null; activeRemoteInvalid?: boolean }) =>
@@ -45,6 +46,7 @@ describe("AppSidebar workspace coverage", () => {
           currentProject={project}
           onBranchChange={onBranchChange}
           onManageWorkspaceRemotes={onManageWorkspaceRemotes}
+          onDeleteWorktree={onDeleteWorktree}
           staleRemoteName={extra?.staleRemoteName}
           activeRemoteInvalid={extra?.activeRemoteInvalid}
         />,
@@ -73,8 +75,8 @@ describe("AppSidebar workspace coverage", () => {
     expect(marker).toBeTruthy();
     expect(marker!.textContent).toBe("2/4");
     expect(marker!.getAttribute("aria-label")).toBe("dev exists on 2 of 4 remotes");
-    // A deliberate gap is not a fault: no amber warning for it.
-    expect(container.querySelector('button[aria-label^="Create dev where"]')).toBeNull();
+    // The count is the row's only marker: no second icon for the gap.
+    expect(container.querySelectorAll("button svg.lucide-triangle-alert").length).toBe(0);
 
     act(() => marker!.click());
     expect(onManageWorkspaceRemotes).toHaveBeenCalledWith(partial);
@@ -113,7 +115,11 @@ describe("AppSidebar workspace coverage", () => {
     expect(badge()).toBeNull();
   });
 
-  it("keeps the amber warning beside the count when a machine also failed", () => {
+  it("counts a failed machine as a gap, with no second marker for the failure", () => {
+    // A machine that kept a reason is one the workspace is not usable on, so
+    // it shows in the count like a missing one; the reason is in the tooltip
+    // and the retry is in the management the count opens. Before this, a
+    // failure had its own amber icon beside the count, one more thing to read.
     render([
       { branch: null },
       {
@@ -121,7 +127,6 @@ describe("AppSidebar workspace coverage", () => {
         machines: [
           { serverId: "server-1", name: "worker3", state: "present" },
           { serverId: "server-2", name: "Mac", state: "error", error: "disk full" },
-          { serverId: "server-3", name: "ubuntu", state: "absent" },
         ],
         targets: [
           { targetId: "server-1", label: "worker3", state: "present", status: "ready" },
@@ -130,13 +135,53 @@ describe("AppSidebar workspace coverage", () => {
       },
     ]);
 
-    const warning = container.querySelector('button[aria-label="Create dev where it is missing"]');
     const count = badge();
-    expect(warning).toBeTruthy();
-    expect(count?.textContent).toBe("1/3");
-    // Warning left, count right.
-    expect(warning!.compareDocumentPosition(count!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(count?.textContent).toBe("1/2");
+    expect(container.querySelectorAll("button svg.lucide-triangle-alert").length).toBe(0);
+    expect(container.querySelector('button[aria-label^="Create dev where"]')).toBeNull();
+
+    act(() => count!.click());
+    expect(onManageWorkspaceRemotes).toHaveBeenCalledTimes(1);
   });
+
+  it("shows a delete that finished on some machines only as the same count", () => {
+    // Deleted on worker3, still on Mac: the count reads 1/2 like any other
+    // gap, and clicking it opens the same management rather than deleting —
+    // the tooltip is what says to delete again. From the newer field and
+    // from the older one an earlier server sends.
+    const halfDeletedNow: Worktree = {
+      branch: "dev2",
+      machines: [
+        { serverId: "server-1", name: "worker3", state: "absent", deleted: true },
+        { serverId: "server-2", name: "Mac", state: "present" },
+      ],
+    };
+    const halfDeletedThen: Worktree = {
+      branch: "dev3",
+      unfinishedDelete: true,
+      targets: [
+        { targetId: "server-1", label: "worker3", state: "deleted" },
+        { targetId: "server-2", label: "Mac", state: "present", status: "ready" },
+      ],
+    };
+    render([{ branch: null }, halfDeletedNow, halfDeletedThen]);
+
+    const counts = container.querySelectorAll<HTMLButtonElement>('button[aria-label$="remotes"]');
+    expect([...counts].map((count) => count.textContent)).toEqual(["1/2", "1/2"]);
+    expect(container.querySelector('button[aria-label^="Finish deleting"]')).toBeNull();
+
+    act(() => counts[0].click());
+    expect(onManageWorkspaceRemotes).toHaveBeenCalledWith(halfDeletedNow);
+    expect(onDeleteWorktree).not.toHaveBeenCalled();
+  });
+
+  it("leaves a workspace every machine agrees on, or from an older server, unmarked", () => {
+    render([{ branch: null }, { branch: "dev" }]);
+
+    expect(badge()).toBeNull();
+    expect(container.querySelectorAll("button svg.lucide-triangle-alert").length).toBe(0);
+  });
+
   it("says whose Git the list is not, and when sessions target an unlinked remote", () => {
     render([{ branch: null }, partial], { staleRemoteName: "worker3" });
     expect(container.querySelector('[role="status"]')?.textContent).toContain("worker3 is offline");

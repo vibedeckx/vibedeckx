@@ -185,16 +185,27 @@ export interface WorkspaceMachineCheck extends WorkspaceMachineState {
   checkError?: string;
 }
 
-/** `present` count over linked count, and whether any machine is known to lack it. */
+/**
+ * How far a workspace reaches across the linked machines, for the sidebar's
+ * one marker: `present` over `total`, whether any machine is known to be
+ * without a usable checkout (never made, deleted, or failed), and whether the
+ * gap is a delete that finished on some machines only — that one wants a
+ * different first line, because the fix is to delete again, not to create.
+ * An `unknown` machine counts toward the total but is not called a gap.
+ */
 export function workspaceCoverage(machines: WorkspaceMachineState[]): {
   present: number;
   total: number;
   missing: boolean;
+  unfinishedDelete: boolean;
 } {
+  const deletedSomewhere = machines.some((machine) => machine.state === "absent" && machine.deleted);
+  const heldSomewhere = machines.some((machine) => machine.state !== "absent" && machine.state !== "unknown");
   return {
     present: machines.filter((machine) => machine.state === "present").length,
     total: machines.length,
-    missing: machines.some((machine) => machine.state === "absent"),
+    missing: machines.some((machine) => machine.state === "absent" || machine.state === "error"),
+    unfinishedDelete: deletedSomewhere && heldSomewhere,
   };
 }
 
@@ -223,7 +234,8 @@ export function machinesFromTargets(targets: WorkspaceTargetState[]): WorkspaceM
 export function machineStateText(machine: WorkspaceMachineState): string {
   switch (machine.state) {
     case "present":
-      return "Present";
+      // A usable checkout may still carry the reason the last delete refused it.
+      return machine.error ? `Present — could not delete: ${machine.error}` : "Present";
     case "absent":
       return machine.deleted ? "Deleted here" : "Missing";
     case "error":
@@ -235,62 +247,4 @@ export function machineStateText(machine: WorkspaceMachineState): string {
     case "unknown":
       return "Not checked yet";
   }
-}
-
-/**
- * The two ways a workspace's machines can contradict each other — the amber
- * warning's business, as opposed to a deliberate gap:
- *
- *   - `unfinishedDelete`: a tombstone on one machine, a live checkout on
- *     another. Exactly the state a partial delete leaves; the fix is to
- *     delete again.
- *   - `hasError`: a machine kept a reason why it could not comply; the fix is
- *     to create again there.
- */
-export function workspaceContradiction(machines: WorkspaceMachineState[]): {
-  unfinishedDelete: boolean;
-  hasError: boolean;
-} {
-  const deletedSomewhere = machines.some((machine) => machine.state === "absent" && machine.deleted);
-  const heldSomewhere = machines.some((machine) => machine.state !== "absent" && machine.state !== "unknown");
-  return {
-    unfinishedDelete: deletedSomewhere && heldSomewhere,
-    hasError: machines.some((machine) => machine.state === "error"),
-  };
-}
-
-export interface WorkspaceMachineLine {
-  name: string;
-  /** That machine's state, in one phrase. */
-  text: string;
-  /** `text` is the reason the machine gave for refusing, not a state. */
-  failed: boolean;
-  /** Why the last operation on that machine failed, when its state alone does not say. */
-  reason?: string;
-}
-
-/**
- * One line per machine for the amber warning's tooltip. A machine that has
- * the workspace means opposite things in the two contradictions, so
- * `unfinishedDelete` picks the wording: while a delete is half-done it is the
- * machine that did NOT comply.
- */
-export function describeWorkspaceMachines(
-  machines: WorkspaceMachineState[],
-  opts?: { unfinishedDelete?: boolean },
-): WorkspaceMachineLine[] {
-  return machines.map((machine) => {
-    if (machine.state === "error") {
-      return { name: machine.name, text: machine.error || "failed", failed: true };
-    }
-    if (machine.state === "present" && opts?.unfinishedDelete) {
-      // A usable checkout that still carries a reason is one a delete could
-      // not take: the state is fine, the last attempt was not.
-      return { name: machine.name, text: "Not deleted", failed: false, ...(machine.error ? { reason: machine.error } : {}) };
-    }
-    if (machine.state === "absent" && machine.deleted && opts?.unfinishedDelete) {
-      return { name: machine.name, text: "Deleted successfully", failed: false };
-    }
-    return { name: machine.name, text: machineStateText(machine), failed: false };
-  });
 }

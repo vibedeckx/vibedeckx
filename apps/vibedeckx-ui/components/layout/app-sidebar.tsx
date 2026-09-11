@@ -16,7 +16,7 @@ import type { Worktree, Project, Schedule } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 import type { ResidentSidebarSession } from "@/hooks/use-resident-sessions";
 import { effectiveTarget, type BranchMergeInfo } from "@/hooks/use-merge-status";
-import { describeWorkspaceMachines, machineStateText, machinesFromTargets, workspaceContradiction, workspaceCoverage } from "@/lib/worktree-target-results";
+import { machineStateText, machinesFromTargets, workspaceCoverage, type WorkspaceMachineState } from "@/lib/worktree-target-results";
 
 export type ActiveView = "workspace" | "tasks" | "schedules" | "remote-servers" | "settings" | "project-info" | "project-chat";
 
@@ -41,7 +41,6 @@ interface AppSidebarProps {
   onCreateWorktreeOpen?: () => void;
   onDeleteWorktree?: (worktree: Worktree) => void;
   /** Repair a workspace some machine never got: create it again, prefilled. */
-  onRecreateWorktree?: (worktree: Worktree) => void;
   /** Open a workspace's per-remote management (create where missing, retry, confirm). */
   onManageWorkspaceRemotes?: (worktree: Worktree) => void;
   onAnchorRootWorkspace?: (branch: string) => void;
@@ -231,7 +230,6 @@ export function AppSidebar({
   currentProject,
   onCreateWorktreeOpen,
   onDeleteWorktree,
-  onRecreateWorktree,
   onManageWorkspaceRemotes,
   onAnchorRootWorkspace,
   onSetRootWorkspaceBranch,
@@ -491,9 +489,6 @@ export function AppSidebar({
                   const machines = wt.branch !== null
                     ? wt.machines ?? (wt.targets ? machinesFromTargets(wt.targets) : undefined)
                     : undefined;
-                  const contradiction = machines ? workspaceContradiction(machines) : null;
-                  const unfinishedDelete = wt.unfinishedDelete ?? contradiction?.unfinishedDelete ?? false;
-                  const contradicted = !!contradiction && (unfinishedDelete || contradiction.hasError);
                   return (
                     <div
                       key={wt.branch ?? "__main__"}
@@ -566,73 +561,36 @@ export function AppSidebar({
                             </TooltipContent>
                           </Tooltip>
                         )}
-                        {/* The machines disagree about this workspace, and the
-                            two ways they can disagree want opposite actions:
-                            a half-finished delete needs deleting again (only
-                            the machines still holding it are visited), while a
-                            machine that never got the workspace needs it
-                            created there. The sidebar lists one machine, so
-                            without this marker neither case would be visible
-                            at all.
-
-                            It sits outside the merge badge, not inside it: the
-                            badge is on most rows most of the time, while this
-                            is rare, so the rare one takes the outer slot and
-                            the common one keeps its place. */}
-                        {contradicted && machines && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <button
-                                onClick={() => unfinishedDelete
-                                  ? onDeleteWorktree?.(wt)
-                                  : onRecreateWorktree?.(wt)}
-                                aria-label={unfinishedDelete
-                                  ? `Finish deleting ${branchLabel}`
-                                  : `Create ${branchLabel} where it is missing`}
-                                className="shrink-0 p-0.5 rounded text-amber-600 dark:text-amber-400 hover:bg-muted transition-colors"
-                              >
-                                <AlertTriangle className="h-3 w-3" />
-                              </button>
-                            </TooltipTrigger>
-                            <TooltipContent side="right">
-                              <div className="space-y-0.5">
-                                <div>
-                                  {unfinishedDelete
-                                    ? "Deleted on some machines only. Click to finish deleting."
-                                    : "Failed on some machines. Click to create it there."}
-                                </div>
-                                {describeWorkspaceMachines(machines, { unfinishedDelete }).map((line) => (
-                                  <div key={line.name} className="text-background/70">
-                                    {line.name}:{" "}
-                                    {line.failed
-                                      // The tooltip surface is inverted (bg-foreground),
-                                      // so the reds are swapped against the theme.
-                                      ? <span className="text-red-400 dark:text-red-600">Error: {line.text}</span>
-                                      : line.text}
-                                    {line.reason && (
-                                      <span className="text-red-400 dark:text-red-600"> — Error: {line.reason}</span>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            </TooltipContent>
-                          </Tooltip>
-                        )}
-                        {/* Coverage: the workspace is deliberately (or by a
-                            failed create) on only some of the project's
-                            machines. A normal state, so it gets a neutral
-                            count rather than the amber warning above; both
-                            can show at once (two of four have it, one
-                            failed), warning left, count right. Not rendered,
-                            and not reserved, when every machine has it. */}
-                        {wt.branch !== null && wt.machines && (() => {
-                          const coverage = workspaceCoverage(wt.machines);
+                        {/* Coverage: the one marker for a workspace that is
+                            not on every linked machine, whatever the cause —
+                            made on some only, deleted on some only, or failed
+                            on one. The count is neutral because the common
+                            case is deliberate; the tooltip names each machine
+                            and says what the gap is, and the click opens the
+                            per-remote management where any of them is fixed.
+                            Not rendered, and not reserved, when every machine
+                            has it. */}
+                        {machines && (() => {
+                          const coverage = workspaceCoverage(machines);
                           if (!coverage.missing) return null;
+                          const unfinishedDelete = wt.unfinishedDelete ?? coverage.unfinishedDelete;
                           const currentId = currentProject?.agent_mode ?? "local";
-                          const current = wt.machines.find((machine) => machine.serverId === currentId);
-                          const lead = current?.state === "absent"
-                            ? `Not on ${current.name}, the current remote. Exists on ${coverage.present} of ${coverage.total} remotes. Click to create it on the others.`
-                            : `Exists on ${coverage.present} of ${coverage.total} remotes. Click to create it on the others.`;
+                          const current = machines.find((machine) => machine.serverId === currentId);
+                          const names = (pick: (machine: WorkspaceMachineState) => boolean) =>
+                            machines.filter(pick).map((machine) => machine.name).join(", ");
+                          const failed = names((machine) => machine.state === "error");
+                          const lead = unfinishedDelete
+                            // A half-finished delete: the fix is to delete
+                            // again, which only visits the machines still
+                            // holding it. Say so before the count, which on
+                            // its own reads as a workspace to fill in.
+                            ? `Deleted on ${names((machine) => machine.state === "absent" && !!machine.deleted)} but still on ${names((machine) => machine.state !== "absent" && machine.state !== "unknown")}. Delete again to finish.`
+                            : [
+                              current?.state === "absent" ? `Not on ${current.name}, the current remote.` : null,
+                              `Exists on ${coverage.present} of ${coverage.total} remotes.`,
+                              failed ? `Failed on ${failed}.` : null,
+                              failed ? "Click to retry, or create it on the others." : "Click to create it on the others.",
+                            ].filter(Boolean).join(" ");
                           return (
                             <Tooltip>
                               <TooltipTrigger asChild>
@@ -647,10 +605,12 @@ export function AppSidebar({
                               <TooltipContent side="right">
                                 <div className="space-y-0.5">
                                   <div>{lead}</div>
-                                  {wt.machines.map((machine) => (
+                                  {machines.map((machine) => (
                                     <div key={machine.serverId} className="text-background/70">
                                       {machine.name}:{" "}
-                                      {machine.state === "error"
+                                      {machine.state === "error" || machine.error
+                                        // The tooltip surface is inverted (bg-foreground),
+                                        // so the reds are swapped against the theme.
                                         ? <span className="text-red-400 dark:text-red-600">{machineStateText(machine)}</span>
                                         : machineStateText(machine)}
                                     </div>
@@ -672,20 +632,6 @@ export function AppSidebar({
                             repositoryLabel={mergeRepositoryLabel}
                             onClick={() => onMergeBadgeClick?.(wt.branch!)}
                           />
-                        )}
-                        {/* Hold the merge badge's place, so the warning to its
-                            left lands on the same x in every row that has one
-                            — a workspace missing from a machine often has no
-                            merge status either (the branch is not on the
-                            machine the comparison runs against), and a warning
-                            that sits one slot further right on exactly those
-                            rows is the one the eye has to hunt for. Only rows
-                            that show the warning pay the width, which is why
-                            it is spent here and not on every row. */}
-                        {contradicted && !(wt.branch === null
-                          ? mergeRootDirty
-                          : mergeStatuses?.get(wt.branch)) && (
-                          <span aria-hidden className="shrink-0 h-4 min-w-4 px-0.5" />
                         )}
                         {wt.branch === null && currentProject && (
                           <RootWorkspaceMenu
