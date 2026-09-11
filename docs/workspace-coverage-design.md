@@ -364,7 +364,7 @@ worktree，所以今天的表现是一条含义模糊的 500，hub 侧的 409 �
 冻结的数字，和别台上的新工作无关。`1/2` 徽标已经说明它在哪。分支引用也没了时接口回
 `branch-not-found`，前端本来就丢弃，效果相同。实现：`useMergeStatus` 多返回
 `repositoryServerId`，侧栏拿它在 `machines` 里查那台的状态。徽标消失不能无声：`1/2` 的
-tooltip 在这种情形多一行「No merge status: not on <primary>, the primary remote.」
+tooltip 在这种情形多一行「No merge status: no workspace <branch> on primary remote <name>.」
 （`coverageTooltipLead`），不另加图标，一行仍只有一个标记。tooltip 里的逐台列表
 （`WorkspaceMachineLine`）每行最前面一个状态图标列（✓ present / ✕ absent / ⚠ error /
 转圈 creating、deleting / ? unknown），机器名后标角色 `· primary` `· current`（同一台则

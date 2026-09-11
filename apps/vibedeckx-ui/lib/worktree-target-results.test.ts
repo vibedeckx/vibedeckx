@@ -182,13 +182,13 @@ describe("coverageTooltipLead", () => {
     ({ serverId, name: serverId, state, ...extra });
 
   it("leads with the gap and the click, and names the current remote when it is the one without", () => {
-    expect(coverageTooltipLead([m("a", "present"), m("b", "absent")], { currentId: "b" })).toEqual([
+    expect(coverageTooltipLead([m("a", "present"), m("b", "absent")], { branch: "dev", currentId: "b" })).toEqual([
       "Not on b, the current remote. Exists on 1 of 2 remotes. Click to create it on the others.",
     ]);
-    expect(coverageTooltipLead([m("a", "present"), m("b", "error", { error: "disk full" })], { currentId: "a" })).toEqual([
+    expect(coverageTooltipLead([m("a", "present"), m("b", "error", { error: "disk full" })], { branch: "dev", currentId: "a" })).toEqual([
       "Exists on 1 of 2 remotes. Failed on b. Click to retry, or create it on the others.",
     ]);
-    expect(coverageTooltipLead([m("a", "absent", { deleted: true }), m("b", "present")], { currentId: "a" })).toEqual([
+    expect(coverageTooltipLead([m("a", "absent", { deleted: true }), m("b", "present")], { branch: "dev", currentId: "a" })).toEqual([
       "Deleted on a but still on b. Delete again to finish.",
     ]);
   });
@@ -198,18 +198,18 @@ describe("coverageTooltipLead", () => {
     // remote (where sessions run) are chosen separately; either can be the
     // one without. Deleted or failed there: no badge, and this says so.
     // Unknown there: the badge stays, so nothing to explain.
-    expect(coverageTooltipLead([m("a", "absent", { deleted: true }), m("b", "present")], { currentId: "b", primaryId: "a" })).toEqual([
+    expect(coverageTooltipLead([m("a", "absent", { deleted: true }), m("b", "present")], { branch: "dev", currentId: "b", primaryId: "a" })).toEqual([
       "Deleted on a but still on b. Delete again to finish.",
-      "No merge status: not on a, the primary remote.",
+      "No merge status: no workspace dev on primary remote a.",
     ]);
-    expect(coverageTooltipLead([m("a", "error", { error: "disk full" }), m("b", "present")], { currentId: "b", primaryId: "a" })).toEqual([
+    expect(coverageTooltipLead([m("a", "error", { error: "disk full" }), m("b", "present")], { branch: "dev", currentId: "b", primaryId: "a" })).toEqual([
       "Exists on 1 of 2 remotes. Failed on a. Click to retry, or create it on the others.",
-      "No merge status: not on a, the primary remote.",
+      "No merge status: no workspace dev on primary remote a.",
     ]);
-    expect(coverageTooltipLead([m("a", "unknown"), m("b", "present"), m("c", "absent")], { currentId: "b", primaryId: "a" })).toEqual([
+    expect(coverageTooltipLead([m("a", "unknown"), m("b", "present"), m("c", "absent")], { branch: "dev", currentId: "b", primaryId: "a" })).toEqual([
       "Exists on 1 of 3 remotes. Click to create it on the others.",
     ]);
-    expect(coverageTooltipLead([m("a", "present"), m("b", "absent")], { currentId: "b", primaryId: "a" })).toEqual([
+    expect(coverageTooltipLead([m("a", "present"), m("b", "absent")], { branch: "dev", currentId: "b", primaryId: "a" })).toEqual([
       "Not on b, the current remote. Exists on 1 of 2 remotes. Click to create it on the others.",
     ]);
   });

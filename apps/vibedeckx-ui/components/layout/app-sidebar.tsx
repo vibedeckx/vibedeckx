@@ -585,6 +585,7 @@ export function AppSidebar({
                           const coverage = workspaceCoverage(machines);
                           if (!coverage.missing) return null;
                           const lead = coverageTooltipLead(machines, {
+                            branch: wt.branch!,
                             currentId: currentProject?.agent_mode ?? "local",
                             primaryId: mergeRepositoryServerId,
                             unfinishedDelete: wt.unfinishedDelete,

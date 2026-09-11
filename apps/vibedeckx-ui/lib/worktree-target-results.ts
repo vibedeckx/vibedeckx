@@ -218,7 +218,7 @@ export function workspaceCoverage(machines: WorkspaceMachineState[]): {
  */
 export function coverageTooltipLead(
   machines: WorkspaceMachineState[],
-  opts: { currentId: string; primaryId?: string | null; unfinishedDelete?: boolean },
+  opts: { branch: string; currentId: string; primaryId?: string | null; unfinishedDelete?: boolean },
 ): string[] {
   const coverage = workspaceCoverage(machines);
   const names = (pick: (machine: WorkspaceMachineState) => boolean) =>
@@ -238,7 +238,7 @@ export function coverageTooltipLead(
     ].filter(Boolean).join(" ");
   const primary = machines.find((machine) => machine.serverId === opts.primaryId);
   const noMergeStatus = primary && (primary.state === "absent" || primary.state === "error")
-    ? `No merge status: not on ${primary.name}, the primary remote.`
+    ? `No merge status: no workspace ${opts.branch} on primary remote ${primary.name}.`
     : null;
   return [lead, noMergeStatus].filter((line): line is string => line !== null);
 }
