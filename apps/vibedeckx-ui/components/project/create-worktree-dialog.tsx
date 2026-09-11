@@ -99,6 +99,31 @@ interface Machine {
 const BRANCH_NAME_START = /^[a-zA-Z0-9]/;
 const BRANCH_NAME_INVALID = /[^a-zA-Z0-9/_-]/;
 
+/** The name column's bounds, in `ch` of the row's own type. */
+const NAME_COLUMN_MIN_CH = 6;
+const NAME_COLUMN_MAX_CH = 20;
+
+/** Beyond this a last segment is not a name any more, it is the whole path. */
+const PATH_TAIL_MAX = 32;
+
+/**
+ * Splits a path into an ellipsizable head and a last segment to keep.
+ *
+ * What tells two checkouts apart is their last segment, and that is exactly
+ * what an end-ellipsis eats: `/home/me/src/app-a` and `/home/me/src/app-b`
+ * both render as `/home/me/src/a…` in the width a row can spare. Pinning the
+ * tail and truncating the head reads as `…/src/app-b` instead.
+ *
+ * A path with no head worth keeping — one segment, or a segment too long to
+ * pin without pushing the row wide — goes back in the head, i.e. plain
+ * end-truncation, since there is nothing to choose between.
+ */
+function splitPathTail(path: string): [head: string, tail: string] {
+  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (cut <= 0 || path.length - cut > PATH_TAIL_MAX) return [path, ""];
+  return [path.slice(0, cut), path.slice(cut)];
+}
+
 /** A live answer as the row keeps it: the state it found, and that it was found. */
 function checkToState(check: WorkspaceMachineCheck): DialogMachineState {
   return {
@@ -210,6 +235,15 @@ export function CreateWorktreeDialog({
     }
     return list;
   }, [project.path, project.remote_path, remotes]);
+
+  // The badges read as a column, so they have to start at the same x. Each row
+  // is its own flex box and nothing aligns them for free, so the name gets one
+  // width for the whole list: wide enough for the longest name it holds, and
+  // capped so a single outlier cannot eat the path's half of the row.
+  const nameColumnCh = useMemo(() => {
+    const longest = machines.reduce((n, m) => Math.max(n, m.label.length), 0);
+    return Math.min(Math.max(longest + 1, NAME_COLUMN_MIN_CH), NAME_COLUMN_MAX_CH);
+  }, [machines]);
 
   // Managing an existing workspace, machine by machine. The name is locked
   // for the whole opening: there is no typing it over into a new workspace.
@@ -748,6 +782,7 @@ export function CreateWorktreeDialog({
                   const pickable = !manage || canPick(state);
                   const checked = pickable && !!selected?.has(machine.id);
                   const badge = manage ? rowBadge(state) : null;
+                  const [pathHead, pathTail] = splitPathTail(machine.path ?? "");
                   return (
                     <label
                       key={machine.id}
@@ -779,7 +814,13 @@ export function CreateWorktreeDialog({
                       </span>
                       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                         <span className="flex min-w-0 items-center gap-2">
-                          <span className="max-w-[55%] shrink-0 truncate text-[12.5px] font-medium">
+                          <span
+                            // One width for every row, so the badges line up;
+                            // the name's own tooltip covers the cut.
+                            title={machine.label}
+                            style={{ width: `${nameColumnCh}ch` }}
+                            className="shrink-0 truncate text-[12.5px] font-medium"
+                          >
                             {machine.label}
                           </span>
                           {badge && (
@@ -808,13 +849,18 @@ export function CreateWorktreeDialog({
                               flex item's automatic minimum size is its min-content
                               width, and a path has no spaces to break at, so
                               without this the row is as wide as the longest path
-                              and pushes the whole dialog out with it. */}
-                          <span
-                            title={machine.path ?? undefined}
-                            className="ml-auto min-w-0 truncate font-mono text-[10.5px] text-muted-foreground"
-                          >
-                            {machine.path}
-                          </span>
+                              and pushes the whole dialog out with it. It is on
+                              the head for the same reason — the pinned tail is
+                              the one part allowed to hold its width. */}
+                          {machine.path && (
+                            <span
+                              title={machine.path}
+                              className="ml-auto flex min-w-0 font-mono text-[10.5px] text-muted-foreground"
+                            >
+                              <span className="min-w-0 truncate">{pathHead}</span>
+                              <span className="shrink-0">{pathTail}</span>
+                            </span>
+                          )}
                         </span>
                         {state.failure && (
                           <span className="truncate text-[10.5px] text-destructive" title={state.failure}>

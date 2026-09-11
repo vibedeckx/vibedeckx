@@ -347,6 +347,77 @@ describe("CreateWorktreeDialog machine list", () => {
     await clickCreate();
     expect(createWorktree).toHaveBeenCalledWith("p1", "dev", ["srv-2"], "main");
   });
+
+  const nameCell = (label: string) =>
+    rowFor(label).closest("label")!.querySelector<HTMLElement>(`[title="${label}"]`)!;
+
+  it("gives every row the same name width, so the badges start on one line", async () => {
+    getProjectRemotes.mockResolvedValue([
+      remote("srv-1", "gpu-01", "/srv/work/vibedeckx"),
+      remote("srv-2", "build-runner-eu", "/srv/work/vibedeckx"),
+    ]);
+
+    await render();
+
+    // Sized by the longest name in the list, not by each row's own.
+    const widths = ["Local", "gpu-01", "build-runner-eu"].map((l) => nameCell(l).style.width);
+    expect(new Set(widths).size).toBe(1);
+    expect(widths[0]).toBe("16ch");
+  });
+
+  it("caps the name column so one long name cannot eat the row", async () => {
+    getProjectRemotes.mockResolvedValue([
+      remote("srv-1", "gpu-01", "/srv/work/vibedeckx"),
+      remote("srv-2", "build-runner-eu-west-1-spot-fleet", "/srv/work/vibedeckx"),
+    ]);
+
+    await render();
+
+    expect(nameCell("gpu-01").style.width).toBe("20ch");
+  });
+
+  // The row can only spare so much width for a path, and an end-ellipsis eats
+  // the one part that tells two checkouts under the same parent apart.
+  const pathCell = (label: string) =>
+    rowFor(label).closest("label")!.querySelector<HTMLElement>("[title^='/']")!;
+
+  it("keeps a path's last segment while the head ellipsizes", async () => {
+    getProjectRemotes.mockResolvedValue([
+      remote("srv-1", "gpu-01", "/srv/work/checkouts/vibedeckx-a"),
+      remote("srv-2", "gpu-02", "/srv/work/checkouts/vibedeckx-b"),
+    ]);
+
+    await render();
+
+    for (const [label, tail] of [["gpu-01", "/vibedeckx-a"], ["gpu-02", "/vibedeckx-b"]]) {
+      const cell = pathCell(label);
+      const [head, pinned] = Array.from(cell.children) as HTMLElement[];
+      expect(cell.title).toBe(`/srv/work/checkouts${tail}`);
+      expect(head.textContent).toBe("/srv/work/checkouts");
+      expect(head.className).toContain("truncate");
+      expect(pinned.textContent).toBe(tail);
+      expect(pinned.className).toContain("shrink-0");
+    }
+  });
+
+  it("leaves a path with no head to spare on plain end-truncation", async () => {
+    // One segment, and one long enough that pinning it would push the row wide
+    // — neither has a tail worth holding a row open for.
+    const long = `/${"vibedeckx-checkout-with-a-very-long-name".repeat(1)}`;
+    getProjectRemotes.mockResolvedValue([
+      remote("srv-1", "gpu-01", "/vibedeckx"),
+      remote("srv-2", "gpu-02", `/srv/work${long}`),
+    ]);
+
+    await render();
+
+    for (const [label, path] of [["gpu-01", "/vibedeckx"], ["gpu-02", `/srv/work${long}`]]) {
+      const [head, pinned] = Array.from(pathCell(label).children) as HTMLElement[];
+      expect(head.textContent).toBe(path);
+      expect(head.className).toContain("truncate");
+      expect(pinned.textContent).toBe("");
+    }
+  });
 });
 
 describe("CreateWorktreeDialog managing an existing workspace", () => {
