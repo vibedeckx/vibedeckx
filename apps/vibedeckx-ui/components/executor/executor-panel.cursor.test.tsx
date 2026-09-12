@@ -145,6 +145,24 @@ describe("executor panel keyboard cursor", () => {
     expect(marked()).toBe("e2");
   });
 
+  // A keyboard commit never puts the button in :active, so the flash the
+  // mouse gets has to be staged explicitly.
+  it("flashes the pressed button on Enter and clears it", () => {
+    vi.useFakeTimers();
+    try {
+      claimRegion();
+      press("Enter");
+      const button = container!.querySelector('[data-locate-id="e1"] [data-locate-action]')!;
+      expect(button.getAttribute("data-pressed")).toBe("true");
+      act(() => {
+        vi.advanceTimersByTime(500);
+      });
+      expect(button.hasAttribute("data-pressed")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("leaves Enter alone when a button already owns it", () => {
     claimRegion();
     const button = container!.querySelector("[data-locate-action]")!;

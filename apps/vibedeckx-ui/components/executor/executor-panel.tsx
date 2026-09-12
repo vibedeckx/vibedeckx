@@ -13,6 +13,7 @@ import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
 import { useFocusRegion } from "@/components/locate/focus-region";
 import { useLocateScope, useLocateEngagement, isInOverlay } from "@/components/locate/locate-context";
 import { isEditableTarget } from "@/lib/editable-target";
+import { clickWithPressFeedback } from "@/lib/press-feedback";
 import type { Project, ExecutionMode } from "@/lib/api";
 import {
   DndContext,
@@ -143,11 +144,13 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
     document.querySelector(`[data-locate-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
   }, []);
   // Enter = press the row's Start/Stop button, exactly as a click would
-  // (ExecutorItem owns that logic, so we click the marked DOM button).
+  // (ExecutorItem owns that logic, so we click the marked DOM button) —
+  // including the pressed flash, which a bare .click() would skip.
   const commitExecutor = useCallback((id: string) => {
     const row = document.querySelector(`[data-locate-id="${CSS.escape(id)}"]`);
     row?.scrollIntoView({ block: "nearest" });
-    row?.querySelector<HTMLButtonElement>("[data-locate-action]")?.click();
+    const action = row?.querySelector<HTMLButtonElement>("[data-locate-action]");
+    if (action) clickWithPressFeedback(action);
   }, []);
   const openExecutorOutput = useCallback(
     (id: string) => {
