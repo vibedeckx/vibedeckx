@@ -895,6 +895,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // would find nothing either (that path returns [] for the same reason).
         return reply.code(200).send({ sessions: [], complete: true });
       }
+      // Claimed before the request goes out: two browsers (or a browser and
+      // the tunnel-restore reconcile) read this concurrently, and the tracker
+      // must be able to tell an older answer from a newer one.
+      const readSeq = fastify.remoteLiveness.nextReadSeq();
       const result = await proxyAuto(
         project.agent_mode,
         "GET",
@@ -960,6 +964,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
             : (mapping?.branch ?? s.branch ?? null),
         };
       }));
+      // This answer is authoritative, so it also settles who has DIED since the
+      // last one: the worker announces that only on each session's own stream,
+      // which the hub may not hold, so the tracker emits what this read drops.
+      // Promise.all preserves order, so `mapped[i]` is `rows[i]`.
+      fastify.remoteLiveness.accept(
+        project.id, project.agent_mode, remoteConfig.remote_path,
+        rows.map((s, index) => ({
+          localSessionId: mapped[index].id,
+          remoteSessionId: s.id,
+          branch: mapped[index].branch,
+        })),
+        readSeq,
+      );
       return reply.code(200).send({ sessions: mapped, complete: true });
     }
   );

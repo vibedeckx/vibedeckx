@@ -135,6 +135,129 @@ describe("useResidentSessions seed vs process death", () => {
     expect(rows()).toEqual([]);
   });
 
+  // A start seed is also the hub's cue that the worker just spawned a process
+  // — and that the resident cap may have hibernated another session to make
+  // room. That eviction is announced on the evicted session's own stream,
+  // which the hub carries only while it holds one, so it can be lost entirely
+  // and leave a row for a session with no process behind it.
+  it("re-reads /alive when a seed adds a row, dropping a session evicted meanwhile", async () => {
+    const EVICTED = "remote-srv-proj-evicted";
+    listAliveSessions.mockResolvedValue({
+      sessions: [{ id: EVICTED, branch: "dev", title: "Evicted", status: "stopped" }],
+      complete: true,
+    });
+    await render(null);
+    expect(rows().map((s) => s.id)).toEqual([EVICTED]);
+
+    listAliveSessions.mockResolvedValue({
+      sessions: [{ id: SESSION, branch: "dev", title: "New Session", status: "running" }],
+      complete: true,
+    });
+    await render(seedOf("running"));
+
+    expect(rows().map((s) => s.id)).toEqual([SESSION]);
+    expect(listAliveSessions).toHaveBeenCalledTimes(2);
+  });
+
+  // The seeded row is what renders a just-started session before any request
+  // lands, so the revalidation it triggers must not delete it when the
+  // authoritative answer raced it and does not list it yet.
+  it("keeps the seeded row when the revalidation predates the session", async () => {
+    await start();
+    expect(rows().map((s) => s.id)).toEqual([SESSION]);
+    expect(listAliveSessions).toHaveBeenCalledTimes(2);
+  });
+
+  // `/alive` answers are snapshots. One taken before a death and delivered
+  // after it must not re-insert the row: the death is the newer fact.
+  it("lets a death that lands during the seed refresh beat the answer", async () => {
+    await render(null);
+    let release: () => void = () => {};
+    listAliveSessions.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        release = () => resolve({
+          sessions: [{ id: SESSION, branch: "dev", title: "New Session", status: "running" }],
+          complete: true,
+        });
+      }),
+    );
+
+    await render(seedOf("running"));
+    expect(rows().map((s) => s.id)).toEqual([SESSION]);
+
+    // User hits Stop while that request is still in flight.
+    await fireProcess(false);
+    expect(rows()).toEqual([]);
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(rows()).toEqual([]);
+  });
+
+  // ...and the veto is scoped to that window: a later wake is re-added by the
+  // next refresh rather than being suppressed forever.
+  it("re-adds a session that woke after an earlier death", async () => {
+    await start();
+    await fireProcess(false);
+    expect(rows()).toEqual([]);
+
+    listAliveSessions.mockResolvedValue({
+      sessions: [{ id: SESSION, branch: "dev", title: "Awake", status: "running" }],
+      complete: true,
+    });
+    await fireProcess(true);
+
+    expect(rows().map((s) => s.id)).toEqual([SESSION]);
+  });
+
+  // Two sessions starting back to back: the worker evicts the first to make
+  // room for the second, and each start triggers a read. If the older answer
+  // (taken before the second session existed) lands last, a membership-
+  // authoritative merge would resurrect the evicted one and drop the live one.
+  it("ignores a read answer that a newer read has overtaken", async () => {
+    const OTHER = "remote-srv-proj-other";
+    await render(null);
+
+    let releaseOld: () => void = () => {};
+    listAliveSessions.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        releaseOld = () => resolve({
+          sessions: [{ id: SESSION, branch: "dev", title: "First", status: "running" }],
+          complete: true,
+        });
+      }),
+    );
+    await render(seedOf("running"));
+
+    // Second session starts and evicts the first; its read answers right away.
+    listAliveSessions.mockResolvedValue({
+      sessions: [{ id: OTHER, branch: "dev", title: "Second", status: "running" }],
+      complete: true,
+    });
+    await render({ ...seedOf("running"), id: OTHER });
+    expect(rows().map((s) => s.id)).toEqual([OTHER]);
+
+    await act(async () => {
+      releaseOld();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(rows().map((s) => s.id)).toEqual([OTHER]);
+  });
+
+  it("spends no request on a seed for a row it already shows", async () => {
+    await start();
+    listAliveSessions.mockClear();
+
+    await render(seedOf("running"));
+
+    expect(listAliveSessions).not.toHaveBeenCalled();
+    expect(rows().map((s) => s.id)).toEqual([SESSION]);
+  });
+
   it("accepts a seed again once the session reports a live process", async () => {
     await start();
     await fireProcess(false);

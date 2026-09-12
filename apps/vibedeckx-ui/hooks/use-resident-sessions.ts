@@ -256,11 +256,29 @@ export function useResidentSessions(
   // existing-row branch of `upsertResidentSession` cannot catch that case:
   // there is no row left to keep the status of. Entries clear when the same
   // session reports a live process again (wake / restart). Not cleared on a
-  // project switch: session ids are unique across projects, and the set only
-  // ever gates the seed path — `refresh()` reads `/alive`, which by definition
-  // only returns sessions that do hold a process, so it can always re-add a
-  // row this set would have blocked.
-  const deadSessionIdsRef = useRef<Set<string>>(new Set());
+  // project switch: session ids are unique across projects.
+  //
+  // Each death carries the tick it was observed at, because `/alive` answers
+  // are snapshots: one taken before a death and delivered after it would
+  // otherwise re-insert the row as running (`mergeRefreshedSessions` is
+  // membership-authoritative). A death NEWER than the request that produced an
+  // answer therefore vetoes that answer's row; older deaths do not, so a genuine
+  // wake still comes back through the very next refresh.
+  const deadSessionIdsRef = useRef<Map<string, number>>(new Map());
+  const deathTickRef = useRef(0);
+
+  // Monotonic read ids. Two sessions starting back to back each trigger a
+  // read, and the worker may evict the first to make room for the second; if
+  // the older answer (taken before the second session existed) lands last, a
+  // membership-authoritative merge would resurrect the evicted session and
+  // drop the live one. An answer that lost the race commits nothing.
+  const readSeqRef = useRef(0);
+  const committedReadRef = useRef(0);
+  const acceptRead = useCallback((seq: number) => {
+    if (seq < committedReadRef.current) return false;
+    committedReadRef.current = seq;
+    return true;
+  }, []);
 
   // Write-through so the next visit to this project can seed.
   useEffect(() => {
@@ -275,35 +293,59 @@ export function useResidentSessions(
   // still re-run the fan-out (a same-valued projectId alone would be a no-op).
   const [fallbackTrigger, setFallbackTrigger] = useState<{ projectId: string; gen: number } | null>(null);
 
-  const commitRows = useCallback((pid: string, rows: ResidentSidebarSession[] | null) => {
+  const commitRows = useCallback((
+    pid: string,
+    rows: ResidentSidebarSession[] | null,
+    /**
+     * A session seeded moments ago, whose row must survive an answer that does
+     * not list it yet: the seed is what renders a just-started session before
+     * any request lands, and this refresh raced it. Only that one row is
+     * exempt — everything else stays membership-authoritative.
+     */
+    keepSessionId?: string,
+    /** Death tick when the request that produced `rows` started; deaths after it win. */
+    deathTickAtRequest = Number.POSITIVE_INFINITY,
+  ) => {
     // null = the answer could not be produced (see fetchAliveSessionsByBranch);
     // hold the rows we have rather than reporting the project as idle.
     if (rows === null) return;
     if (projectIdRef.current !== pid) return;
+    const live = rows.filter((row) => {
+      const diedAt = deadSessionIdsRef.current.get(row.id);
+      return diedAt === undefined || diedAt <= deathTickAtRequest;
+    });
     // Functional update so we reconcile against the freshest state: a
     // `session:title` event that landed while this fetch was in flight must not
     // be clobbered by the pre-title snapshot this request returned.
-    setSessions((prev) => mergeRefreshedSessions(prev, rows));
+    setSessions((prev) => {
+      const merged = mergeRefreshedSessions(prev, live);
+      if (!keepSessionId || merged.some((session) => session.id === keepSessionId)) return merged;
+      const kept = prev.find((session) => session.id === keepSessionId);
+      return kept ? [kept, ...merged] : merged;
+    });
   }, []);
 
   // Primary read: one whole-project request, independent of the workspace
   // list. Re-run only for a project switch or an SSE reconnect — NOT when the
   // branch list changes, which on a cold load happens once the worktrees land
   // (empty seed → real list) and used to cost a second identical /alive.
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (opts?: { keepSessionId?: string }) => {
     if (!projectId) {
       setSessions([]);
       return;
     }
+    const deathTickAtRequest = deathTickRef.current;
+    const seq = ++readSeqRef.current;
     const primary = await fetchAliveSessions(projectId);
     if (projectIdRef.current !== projectId) return;
+    if (!acceptRead(seq)) return; // a newer read already answered
     if (primary === "incomplete") {
       setFallbackTrigger((cur) => ({ projectId, gen: (cur?.gen ?? 0) + 1 }));
       return; // the fallback effect below takes it from here
     }
     setFallbackTrigger((cur) => (cur?.projectId === projectId ? null : cur));
-    commitRows(projectId, primary);
-  }, [projectId, commitRows]);
+    commitRows(projectId, primary, opts?.keepSessionId, deathTickAtRequest);
+  }, [projectId, commitRows, acceptRead]);
 
   useEffect(() => {
     let cancelled = false;
@@ -320,15 +362,20 @@ export function useResidentSessions(
   useEffect(() => {
     if (!projectId || fallbackTrigger?.projectId !== projectId) return;
     let cancelled = false;
+    const deathTickAtRequest = deathTickRef.current;
+    const seq = ++readSeqRef.current;
     fetchAliveSessionsByBranch(projectId, branches)
-      .then((rows) => { if (!cancelled) commitRows(projectId, rows); })
+      .then((rows) => {
+        if (cancelled || !acceptRead(seq)) return;
+        commitRows(projectId, rows, undefined, deathTickAtRequest);
+      })
       .catch((error) => {
         if (!cancelled) console.warn("[ResidentSessions] fallback refresh failed:", error);
       });
     return () => {
       cancelled = true;
     };
-  }, [projectId, fallbackTrigger, branches, commitRows]);
+  }, [projectId, fallbackTrigger, branches, commitRows, acceptRead]);
 
   // Recover from a dropped SSE stream: events (e.g. session:title) emitted
   // while disconnected are gone for good (no replay), so re-fetch once the
@@ -368,8 +415,20 @@ export function useResidentSessions(
     if (!seedSession || !seedSession.processAlive) return;
     if (!projectId || seedSession.projectId !== projectId) return;
     if (deadSessionIdsRef.current.has(seedSession.id)) return;
+    // A seed that adds a row means a process was just spawned — and the worker
+    // enforces a per-workspace resident cap by hibernating another session to
+    // make room. That eviction is announced on the evicted session's own
+    // stream, which the hub carries only while it holds one, so the notice can
+    // be lost and leave a row for a session that no longer has a process.
+    // `/alive` is authoritative; re-read it. A seed for a row we already show
+    // (re-opening a live session) spawned nothing and needs no request.
+    const addsRow = !sessionsRef.current.some((session) => session.id === seedSession.id);
     setSessions((prev) => upsertResidentSession(prev, seedSession));
-  }, [projectId, seedSession]);
+    if (addsRow) {
+      refresh({ keepSessionId: seedSession.id })
+        .catch((error) => console.warn("[ResidentSessions] seed refresh failed:", error));
+    }
+  }, [projectId, seedSession, refresh]);
 
   useGlobalEventStream((event) => {
     if (!projectId || event.projectId !== projectId) return;
@@ -379,7 +438,7 @@ export function useResidentSessions(
       const branch = typeof event.branch === "string" ? event.branch : null;
       if (!sessionId || alive === null) return;
       if (!alive) {
-        deadSessionIdsRef.current.add(sessionId);
+        deadSessionIdsRef.current.set(sessionId, ++deathTickRef.current);
         setSessions((prev) => prev.filter((session) => session.id !== sessionId));
         return;
       }

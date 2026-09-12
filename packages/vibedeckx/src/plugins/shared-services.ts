@@ -26,6 +26,7 @@ import { RemoteSessionLifecycleAdapter } from "../remote-session-lifecycle.js";
 import { readRetentionDays } from "../session-retention-config.js";
 import { pushRetentionToWorker } from "../session-retention-downlink.js";
 import { RemoteSessionReconciler } from "../remote-session-reconcile-service.js";
+import { RemoteLivenessTracker } from "../remote-liveness-reconcile.js";
 import { MemoryStatsReporter } from "../memory-stats.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
@@ -384,6 +385,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("eventBus", eventBus);
   fastify.decorate("proxyManager", proxyManager);
   fastify.decorate("remotePatchCache", remotePatchCache);
+  fastify.decorate("remoteLiveness", new RemoteLivenessTracker(eventBus));
   fastify.decorate("reverseConnectManager", reverseConnectManager);
   fastify.decorate("browserManager", browserManager);
   fastify.decorate("scheduler", scheduler);

@@ -15,6 +15,7 @@ import type { NotificationService } from "./notification-service.js";
 import type { RemoteNotificationSync } from "./remote-notification-sync.js";
 import type { SessionRetentionSweeper } from "./session-retention.js";
 import type { RemoteSessionReconciler } from "./remote-session-reconcile-service.js";
+import type { RemoteLivenessTracker } from "./remote-liveness-reconcile.js";
 import type { RemoteMcpSessionManager } from "./remote-mcp-session-manager.js";
 
 export interface RemoteExecutorInfo {
@@ -46,6 +47,8 @@ declare module "fastify" {
     eventBus: EventBus;
     proxyManager: ProxyManager;
     remotePatchCache: RemotePatchCache;
+    /** Last alive answer served per remote project — the baseline the tunnel-restore liveness reconcile diffs against. */
+    remoteLiveness: RemoteLivenessTracker;
     reverseConnectManager: ReverseConnectManager;
     authEnabled: boolean;
     noLocalProjects: boolean;

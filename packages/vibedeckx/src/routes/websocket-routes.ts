@@ -10,6 +10,8 @@ import {
 import type { AgentWsInput } from "../agent-types.js";
 import { userOwnsProcess, userOwnsSession, verifyWsToken, authenticateWs, processOwnerScope } from "./ws-authz.js";
 import { connectPersistentRemoteWs } from "../remote-agent-sessions.js";
+import { reconcileRemoteLiveness } from "../remote-liveness-reconcile.js";
+import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { coverageAdmitsReplay } from "../remote-patch-cache.js";
 import { attachWsHeartbeat } from "../utils/ws-heartbeat.js";
 import { ProjectChatNotFoundError } from "../project-chat-manager.js";
@@ -50,6 +52,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
         fastify.eventBus, fastify.agentSessionManager, fastify.storage,
       );
     }
+
+    // Re-establishing the streams above recovers nothing the worker already
+    // said while they were down: a subscribe replays history and status, never
+    // a liveness snapshot, and sessions with no cache entry (nobody reopened
+    // them since this process started) get no stream at all. Ask the worker
+    // which sessions still hold a process and announce the deaths we missed.
+    void reconcileRemoteLiveness(remoteServerId, {
+      tracker: fastify.remoteLiveness,
+      proxy: (serverId, remotePath) => proxyToRemoteAuto(
+        serverId,
+        "GET",
+        `/api/path/agent-sessions/alive?path=${encodeURIComponent(remotePath)}`,
+        undefined,
+        { reverseConnectManager: fastify.reverseConnectManager },
+      ),
+    }).catch((error) => console.warn("[RemoteLiveness] reconcile failed:", error));
   });
 
   // WebSocket routes must be registered after the websocket plugin is ready

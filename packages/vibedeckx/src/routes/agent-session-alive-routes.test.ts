@@ -17,6 +17,7 @@ vi.mock("../remote-agent-sessions.js", async (importOriginal) => {
 });
 
 import agentSessionRoutes from "./agent-session-routes.js";
+import { RemoteLivenessTracker } from "../remote-liveness-reconcile.js";
 
 type AliveRow = { id: string; projectId: string; branch: string | null; status: string; lastActiveAt: number };
 
@@ -58,9 +59,11 @@ function makeApp(options: {
   app.decorate("agentSessionManager", { listAliveSessions, getSession: () => undefined, getSessionProcessAlive: () => false });
   app.decorate("remoteSessionMap", new Map());
   app.decorate("remotePatchCache", {});
+  const remoteLiveness = new RemoteLivenessTracker();
+  app.decorate("remoteLiveness", remoteLiveness);
   app.decorate("reverseConnectManager", null);
 
-  return { app, listAliveSessions, listByBranch, countEntries };
+  return { app, listAliveSessions, listByBranch, countEntries, remoteLiveness };
 }
 
 describe("alive agent-session routes", () => {
