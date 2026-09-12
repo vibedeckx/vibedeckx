@@ -40,7 +40,7 @@ resolve rid → (project_id, remote_server_id, remote_path, worktrees_synced_at)
 
 要点：
 
-- **已确认有占用时没有 force**。出路都存在：在远端删掉 worktree 后重试（重同步会 tombstone）、结束或删除会话、改定时任务 target、等执行器跑完。
+- **已确认有占用时没有 force**。出路都存在：在远端删掉 worktree 后重试（重同步会 tombstone）、改定时任务 target。
 - **unreachable 态才有 force**。hub 无法区分「周末关机」和「机器报废」，只有用户知道。force 的唯一存在理由是永远回不来的机器：没有它，这条绑定永远解不掉，全局 Remote Servers 也因项目引用删不掉。
 - `worktrees_synced_at` 不参与拦/放决定。它只影响 unreachable 弹窗里「上次已知占用」那段的措辞（§7）。
 - **重同步必须走对账路径，不能复用 link 时的 `syncLinkedRemoteWorktrees`**。后者调用的是只增不删的 `registerReportedWorktrees`，远端已手动删掉的 worktree 仍会留在登记表里导致 409，「在远端删掉 worktree 后重试」这条出路就是假的。正确做法是 `worktree-routes.ts` 里 machine-check 已有的模式：请求前 `snapshotLiveCheckouts(storage, projectId, serverId)`，拿到列表后 `syncRemoteWorktreeList(fastify, projectId, remote, data, snapshot)`，它内部走 `reconcileReportedWorktrees`（tombstone 未上报的 ready 行，主 workspace 除外）并 `markWorktreesSynced`。需要把 `syncRemoteWorktreeList` 从 `worktree-routes.ts` 导出或抽到共享模块。
@@ -53,14 +53,14 @@ resolve rid → (project_id, remote_server_id, remote_path, worktrees_synced_at)
 
 | # | 来源 | 查询条件 | 计入理由 |
 |---|------|---------|---------|
-| 1 | `workspace_checkouts` | `workspaceRegistry.listByProject(projectId, serverId)`（默认排除 `deleted_at`），再过滤 `workspace.branch !== ""` | 远端 worktree。任何未删状态都计入（ready / creating / error），creating 是在途创建，error 保守计入 |
-| 2 | `remote_session_mappings` | `project_id` + `remote_server_id` | 已建立的远端会话，hub 重启后会被跳过 |
-| 3 | `remote_session_creation_intents` | `project_id` + `remote_server_id` + `status='pending'`，**不**过滤 `prepare_operation_id`（`listPending` 会过滤掉 prepared 会话，不能复用） | 创建中 / 已 prepare 未 activate / 超时未知结果的会话 |
-| 4 | `remote_reviewer_creation_intents` | 同上 | 同上，reviewer 会话 |
-| 5 | `scheduled_tasks` | `project_id` + `target = serverId` | 解绑后每次到点失败，错误只写进 run 记录 |
-| 6 | `remote_executor_processes` | `project_id` + `remote_server_id` + `status='running'` | 正在跑的远端执行器进程 |
+| 1 | `workspace_checkouts` | join `workspaces` 取 `project_id`，`target_id = serverId`，`deleted_at IS NULL`，再排除 `branch = ''` | 远端 worktree。任何未删状态都计入（ready / creating / error），creating 是在途创建，error 保守计入 |
+| 2 | `scheduled_tasks` | `project_id` + `target = serverId` | 不挂在任何 worktree 上；解绑后每次到点失败，错误只写进 run 记录 |
 
-**主 workspace 豁免**：`branch === ""` 的 checkout 不计入。理由写进代码注释：它是仓库本身，`workspace-binding-backfill.ts` 的对账循环明确不 tombstone 它，`workspace-presence.ts` 也视为恒在；它不是解绑会遗留的、被创建出来的 worktree。没有这条豁免，任何正常同步过的 remote 永远解不了绑。
+**会话、创建中的会话、运行中的执行器不计入**（2026-09-12 定案，替换早先把它们都算占用的版本）。理由：它们都跑在某个 worktree 里，worktree 还在就已经被第 1 项拦住；删 worktree 的路径本身会先停掉或拒绝有活进程的会话和执行器，「正在运行」是删 worktree 时的拦截问题，不是解绑的。已结束的会话解绑后只是失去 hub 侧入口（§8），重新绑定即恢复。把全部历史会话算占用会让一台用了很久的机器在线时永远解不了绑（实例：653 个历史会话），而「删掉这些会话」不是现实的出路。
+
+**主 workspace 豁免**：`branch === ""` 的 checkout 不计入。理由写进代码注释：它是仓库本身，`workspace-binding-backfill.ts` 的对账循环明确不 tombstone 它，列表接口也不给它 `machines`（按定义在每台机器上都在）；它不是解绑会遗留的、被创建出来的 worktree。没有这条豁免，任何正常同步过的 remote 永远解不了绑。
+
+**有意留下的缝隙**：正跑在主分支上的会话或执行器。主 workspace 删不掉，所以没有任何一道 worktree 闸门会碰到它。解绑后 worker 上那个进程继续跑，hub 只是丢了指针，那个会话页面会断掉，重新绑定同一台机器后恢复。这是用户自己点解绑时才会发生、且可恢复的事，不为它多加一次隧道调用（曾考虑只对主分支查 worker 的 alive 接口，放弃）。
 
 ## 5. API 契约
 
@@ -72,16 +72,13 @@ resolve rid → (project_id, remote_server_id, remote_path, worktrees_synced_at)
 
 ```json
 {
-  "error": "<server_name> still has 2 workspaces, 1 session and 1 schedule in this project.",
+  "error": "<server_name> still has 2 workspaces and 1 schedule in this project.",
   "errorCode": "remote-in-use",
   "serverId": "…",
   "name": "<server_name>",
   "usage": {
     "workspaces": ["dev3", "feat-x"],
-    "sessions": 1,
-    "pendingSessions": 0,
-    "schedules": ["nightly-build"],
-    "runningExecutors": 0
+    "schedules": ["nightly-build"]
   }
 }
 ```
@@ -129,11 +126,11 @@ removeGuarded(id, projectId, opts: { force: boolean; reachable: boolean }):
   >
 ```
 
-- `reachable && !force`：统计 §4 六项，非空则 `in-use`，否则删除 + 重排 sort_order（复用现有 `remove` 的逻辑）。
+- `reachable && !force`：统计 §4 两项，非空则 `in-use`，否则删除 + 重排 sort_order（复用现有 `remove` 的逻辑）。
 - `!reachable && !force`：统计后**总是**返回 `in-use` 形态的数据作 `lastKnownUsage`，不删除（路由据此组装 `remote-unreachable`）。
 - `force`：只在 `!reachable` 时由路由传入，直接删除。
 
-六项统计各自是一条按 `(project_id, remote_server_id)` 的 count / select，其中 3、4 需要新查询（现有 `listPending` 不能用）。
+两项统计各自是一条按 `(project_id, remote_server_id)` 的 select。
 
 ### 6.2 路由顺序
 
@@ -159,12 +156,12 @@ removeGuarded(id, projectId, opts: { force: boolean; reachable: boolean }):
 点击垃圾桶 → 直接调 DELETE（无预检，一次往返）：
 
 - 200 → 刷新列表。
-- `remote-in-use` → 弹窗「无法解绑」，列出 `usage`：workspace 分支名、会话数（含「N 个创建中」）、定时任务名、运行中的执行器数。给出出路文案：在那台机器上删掉 worktree 后重试；结束或删除会话；把定时任务改到别的 target。只有「知道了」按钮。
+- `remote-in-use` → 弹窗「无法解绑」，列出 `usage`：workspace 分支名、定时任务名。给出出路文案：在那台机器上删掉 workspace 后重试；把定时任务改到别的 target。只有「知道了」按钮。
 - `remote-unreachable` → 弹窗「无法确认」，标题行按 `reason` 分开写，因为这是用户决定要不要点 Unlink anyway 的依据：
   - `reason = "offline"`：「`<name>` 离线，最后在线 `lastConnectedAt`」（null 显示「从未连接」）；`tokenRevoked` 为 true 时改为「`<name>` 的连接令牌已吊销，不会再上线」。
   - `reason = "sync-failed"`：「`<name>` 在线，但读取它的 workspace 列表失败（超时或 worker 异常）。可以稍后重试。」不显示离线字样。
   - 占用段：`lastKnownUsage` 非 null 显示「截至 `lastSyncedAt` 的上次同步，它有：…（可能已过期）」；为 null 显示「从未成功读取过这台机器的 workspace」。
-  - 后果段三句：不会删除那台机器上的任何东西；hub 会失去对它上面会话、workspace、定时任务的引用；重新绑定同一台机器可恢复大部分。
+  - 后果段三句：不会删除那台机器上的任何东西；hub 会失去对它上面 workspace、会话（含历史）、定时任务的引用；重新绑定同一台机器可恢复大部分。
   - 按钮：取消 / **Unlink anyway**（带 `force`）。
 
 ### 7.3 `remote-servers-settings.tsx`
@@ -174,8 +171,9 @@ removeGuarded(id, projectId, opts: { force: boolean; reachable: boolean }):
 ## 8. 解绑后的遗留（有意不清理）
 
 - `workspace_checkouts` 行留着，不显示（机器列表来自 `project_remotes`）；重新绑定后重新出现并对账。
-- `remote_session_mappings` 行留着；重启后被跳过，重新绑定再重启即恢复。
+- `remote_session_mappings` 行留着（在线解绑时不提示，见 §4）；重启后被跳过，重新绑定再重启即恢复。
 - pending intents 留着，对账时记错；重新绑定后可再试。
+- `remote_executor_processes` running 行留着；worker 上的进程继续跑。
 - 远端机器上的 worktree、会话、进程全部原样。
 
 不清理是为了让 force 可逆。
@@ -187,9 +185,9 @@ removeGuarded(id, projectId, opts: { force: boolean; reachable: boolean }):
 1. 在线、无占用 → 200，行已删。
 2. 在线、只有主 workspace checkout → 200。
 3. 在线、有非主 checkout → 409 in-use，`usage.workspaces` 含分支名。
-4. 在线、有 pending intent 且带 `prepare_operation_id` → 409 in-use（回归 `listPending` 过滤问题）。
+4. 在线、有会话映射 / pending intent / running 执行器进程但无非主 checkout → 200，这些行原样留下。
 5. 在线、定时任务 target 指向该 server → 409 in-use，`schedules` 含名字。
-6. 在线、running 远端执行器进程 → 409 in-use。
+6. 在线、creating / error 状态的非主 checkout → 409 in-use（对账不动它们）。
 7. 在线、其他项目有占用、本项目无 → 200。
 8. 在线、登记表有 ready checkout `feat-x`、远端列表不再上报它 → 该 checkout 被 tombstone → 200（出路可行；这条同时是「必须走 reconcile 而非 register」的回归）。
 9. 离线、`worktrees_synced_at` 非 null、有旧占用 → 409 unreachable，`reason = "offline"`，`lastKnownUsage` 非 null，`lastSyncedAt` 等于该值。

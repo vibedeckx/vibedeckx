@@ -55,23 +55,27 @@ export interface ProjectRemoteWithServer extends ProjectRemote {
 }
 
 /**
- * What one project still has on one remote machine, i.e. the hub rows that
- * would lose their reference if the project unlinked that machine. Scoped to
- * a single project: the same server linked to other projects counts nothing
- * here. The main workspace (branch "") is never listed — it is the repository
- * itself, not a worktree the unlink would leave behind.
+ * What one project still has on one remote machine, i.e. what would be left
+ * behind if the project unlinked it. Scoped to a single project: the same
+ * server linked to other projects counts nothing here.
+ *
+ * Two things count. Worktrees, because that is what the user asked to be
+ * protected; and schedules targeting the machine, because they are not tied
+ * to any worktree and would fail at every run. Sessions and executor
+ * processes are deliberately not counted: they run inside a worktree, so a
+ * live one is already protected by the worktree row, and deleting a worktree
+ * is where live sessions and processes are stopped or refused. Finished
+ * sessions lose only their hub-side pointer, which re-linking restores. The
+ * main workspace (branch "") is never listed — it is the repository itself,
+ * not a worktree the unlink would leave behind — so a session running on the
+ * main branch at unlink time is not caught anywhere; accepted on purpose,
+ * since the unlink is the user's own act and re-linking recovers it.
  */
 export interface RemoteUsage {
   /** Non-main workspace branches with a live checkout row on the machine. */
   workspaces: string[];
-  /** Established remote sessions (`remote_session_mappings`). */
-  sessions: number;
-  /** Session / reviewer creations still pending, including prepared ones. */
-  pendingSessions: number;
   /** Names of schedules whose target is the machine. */
   schedules: string[];
-  /** Remote executor processes still marked running. */
-  runningExecutors: number;
 }
 
 export type ProjectRemoteRemoveOutcome =

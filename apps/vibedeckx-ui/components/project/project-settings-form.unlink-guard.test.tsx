@@ -35,10 +35,10 @@ const remotes: ProjectRemote[] = [
 
 const inUse: RemoteInUseBody = {
   errorCode: "remote-in-use",
-  error: "worker3 still has 2 workspaces, 1 session and 1 schedule in this project.",
+  error: "worker3 still has 2 workspaces and 1 schedule in this project.",
   serverId: "srv-1",
   name: "worker3",
-  usage: { workspaces: ["dev3", "feat-x"], sessions: 1, pendingSessions: 1, schedules: ["nightly-build"], runningExecutors: 0 },
+  usage: { workspaces: ["dev3", "feat-x"], schedules: ["nightly-build"] },
 };
 
 const offline: RemoteUnreachableBody = {
@@ -50,7 +50,7 @@ const offline: RemoteUnreachableBody = {
   lastConnectedAt: "2026-09-01T12:00:00Z",
   lastSyncedAt: "2026-08-30T08:00:00Z",
   tokenRevoked: false,
-  lastKnownUsage: { workspaces: ["dev3"], sessions: 0, pendingSessions: 0, schedules: [], runningExecutors: 0 },
+  lastKnownUsage: { workspaces: ["dev3"], schedules: [] },
 };
 
 let root: Root | null = null;
@@ -100,9 +100,8 @@ describe("ProjectSettingsForm unlink guard", () => {
     const text = document.body.textContent ?? "";
     expect(text).toContain("Cannot unlink worker3");
     expect(text).toContain("2 workspaces: dev3, feat-x");
-    expect(text).toContain("2 sessions (1 still being created)");
     expect(text).toContain("1 schedule: nightly-build");
-    expect(text).toContain("remove the worktrees on that machine and try again");
+    expect(text).toContain("delete the workspaces on that machine and try again");
     expect(buttonNamed("Unlink anyway")).toBeUndefined();
     expect(refreshRemotes).not.toHaveBeenCalled();
 

@@ -108,10 +108,7 @@ function plural(n: number, noun: string): string {
 function describeUsage(usage: RemoteUsage): string {
   const parts: string[] = [];
   if (usage.workspaces.length > 0) parts.push(plural(usage.workspaces.length, "workspace"));
-  if (usage.sessions > 0) parts.push(plural(usage.sessions, "session"));
-  if (usage.pendingSessions > 0) parts.push(plural(usage.pendingSessions, "pending session"));
   if (usage.schedules.length > 0) parts.push(plural(usage.schedules.length, "schedule"));
-  if (usage.runningExecutors > 0) parts.push(plural(usage.runningExecutors, "running executor"));
   if (parts.length <= 1) return parts[0] ?? "";
   return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
@@ -239,7 +236,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Decided by connectivity at this moment (docs/project-remote-unlink-guard-
   // design.md §3): a reachable machine is re-synced and any usage is a hard
   // 409 `remote-in-use` that `force` cannot override — the ways out are to
-  // remove the worktree there, end the session, or retarget the schedule. Only
+  // remove the worktree there or retarget the schedule. Only
   // an unreachable machine (offline, or not answering) gets 409
   // `remote-unreachable` with what the hub last knew, and only there does
   // `force=1` unlink anyway: a machine that is never coming back could not be

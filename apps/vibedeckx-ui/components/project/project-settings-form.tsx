@@ -57,15 +57,8 @@ function UsageList({ usage }: { usage: RemoteUsage }) {
   if (usage.workspaces.length > 0) {
     lines.push(`${plural(usage.workspaces.length, "workspace")}: ${usage.workspaces.join(", ")}`);
   }
-  if (usage.sessions > 0 || usage.pendingSessions > 0) {
-    const pending = usage.pendingSessions > 0 ? ` (${usage.pendingSessions} still being created)` : "";
-    lines.push(`${plural(usage.sessions + usage.pendingSessions, "session")}${pending}`);
-  }
   if (usage.schedules.length > 0) {
     lines.push(`${plural(usage.schedules.length, "schedule")}: ${usage.schedules.join(", ")}`);
-  }
-  if (usage.runningExecutors > 0) {
-    lines.push(plural(usage.runningExecutors, "running executor"));
   }
   return (
     <ul className="list-disc pl-5 text-sm space-y-0.5">
@@ -451,9 +444,8 @@ export function ProjectSettingsForm({
             </DialogHeader>
             <UsageList usage={unlinkRefusal.body.usage} />
             <p className="text-sm text-muted-foreground">
-              To unlink it: remove the worktrees on that machine and try again, end or
-              delete the sessions, move the schedules to another target, and let running
-              executors finish.
+              To unlink it: delete the workspaces on that machine and try again, and
+              move the schedules to another target.
             </p>
             <DialogFooter>
               <Button onClick={() => setUnlinkRefusal(null)}>Got it</Button>
@@ -488,8 +480,8 @@ export function ProjectSettingsForm({
             )}
             <p className="text-sm text-muted-foreground">
               Unlinking deletes nothing on that machine. This hub loses its references to
-              the sessions, workspaces and schedules there. Linking the same machine again
-              restores most of them.
+              the workspaces, sessions and schedules there, including session history.
+              Linking the same machine again restores most of them.
             </p>
             <DialogFooter>
               <Button variant="outline" onClick={() => setUnlinkRefusal(null)} disabled={unlinking}>

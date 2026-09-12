@@ -308,55 +308,9 @@ describe("DELETE /api/projects/:id/remotes/:rid (unlink guard)", () => {
       serverId,
       name: "worker3",
       error: "worker3 still has 2 workspaces in this project.",
-      usage: { workspaces: ["dev3", "feat-x"], sessions: 0, pendingSessions: 0, schedules: [], runningExecutors: 0 },
+      usage: { workspaces: ["dev3", "feat-x"], schedules: [] },
     });
     expect(await stillLinked()).toBe(true);
-  });
-
-  it("counts a pending prepared-session intent, which listPending would hide", async () => {
-    await storage.remoteSessionCreationIntents.begin({
-      localSessionId: "remote-local-1",
-      remoteSessionId: "remote-1",
-      projectId: "p1",
-      remoteServerId: serverId,
-      branch: null,
-      remotePath: "/srv/repo",
-      permissionMode: "edit",
-      prepareOperationId: "op-1",
-    });
-    expect(await storage.remoteSessionCreationIntents.listPending(serverId)).toEqual([]);
-    proxyToRemoteAuto.mockResolvedValue(worktreeList(null));
-
-    const response = await unlink();
-
-    expect(response.statusCode).toBe(409);
-    expect(response.json()).toMatchObject({
-      errorCode: "remote-in-use",
-      error: "worker3 still has 1 pending session in this project.",
-      usage: { pendingSessions: 1 },
-    });
-    expect(await stillLinked()).toBe(true);
-  });
-
-  it("counts a pending reviewer intent", async () => {
-    await storage.remoteReviewerCreationIntents.begin({
-      localReviewerSessionId: "remote-reviewer-1",
-      remoteReviewerSessionId: "reviewer-1",
-      remoteRunId: "run-1",
-      projectId: "p1",
-      remoteServerId: serverId,
-      branch: "dev3",
-      remotePath: "/srv/repo",
-      sourceRemoteSessionId: "remote-1",
-      reviewSpan: "this_turn",
-      agentType: "claude-code",
-    });
-    proxyToRemoteAuto.mockResolvedValue(worktreeList(null));
-
-    const response = await unlink();
-
-    expect(response.statusCode).toBe(409);
-    expect(response.json().usage).toMatchObject({ pendingSessions: 1 });
   });
 
   it("counts checkouts still being created or in error, not only ready ones", async () => {
@@ -374,14 +328,31 @@ describe("DELETE /api/projects/:id/remotes/:rid (unlink guard)", () => {
     expect(response.json().usage.workspaces).toEqual(["broken", "wip"]);
   });
 
-  it("counts an established remote session", async () => {
+  it("does not count sessions or executor processes: they live in worktrees, which already count", async () => {
     await storage.remoteSessionMappings.upsert("remote-local-2", "p1", serverId, "remote-2", "dev3");
+    await storage.remoteSessionCreationIntents.begin({
+      localSessionId: "remote-local-1",
+      remoteSessionId: "remote-1",
+      projectId: "p1",
+      remoteServerId: serverId,
+      branch: null,
+      remotePath: "/srv/repo",
+      permissionMode: "edit",
+      prepareOperationId: "op-1",
+    });
+    await storage.remoteExecutorProcesses.insert("remote-proc-1", {
+      remoteServerId: serverId, remoteProcessId: "rp-1", executorId: "ex-1", projectId: "p1",
+    });
     proxyToRemoteAuto.mockResolvedValue(worktreeList(null));
 
     const response = await unlink();
 
-    expect(response.statusCode).toBe(409);
-    expect(response.json().usage).toMatchObject({ sessions: 1 });
+    expect(response.statusCode).toBe(200);
+    expect(await stillLinked()).toBe(false);
+    // Left in place on purpose: re-linking the same machine picks them up.
+    expect(await storage.remoteSessionMappings.getByLocal("remote-local-2")).toBeTruthy();
+    expect(await storage.remoteSessionCreationIntents.getByLocal("remote-local-1")).toBeTruthy();
+    expect((await storage.remoteExecutorProcesses.getById("remote-proc-1"))?.status).toBe("running");
   });
 
   it("counts a schedule targeting the remote, by name", async () => {
@@ -401,25 +372,6 @@ describe("DELETE /api/projects/:id/remotes/:rid (unlink guard)", () => {
     expect(response.json()).toMatchObject({
       error: "worker3 still has 1 schedule in this project.",
       usage: { schedules: ["nightly-build"] },
-    });
-  });
-
-  it("counts a running remote executor process, not a finished one", async () => {
-    await storage.remoteExecutorProcesses.insert("remote-proc-1", {
-      remoteServerId: serverId, remoteProcessId: "rp-1", executorId: "ex-1", projectId: "p1",
-    });
-    await storage.remoteExecutorProcesses.insert("remote-proc-2", {
-      remoteServerId: serverId, remoteProcessId: "rp-2", executorId: "ex-1", projectId: "p1",
-    });
-    await storage.remoteExecutorProcesses.markFinished("remote-proc-2", 0);
-    proxyToRemoteAuto.mockResolvedValue(worktreeList(null));
-
-    const response = await unlink();
-
-    expect(response.statusCode).toBe(409);
-    expect(response.json()).toMatchObject({
-      error: "worker3 still has 1 running executor in this project.",
-      usage: { runningExecutors: 1 },
     });
   });
 
@@ -453,7 +405,6 @@ describe("DELETE /api/projects/:id/remotes/:rid (unlink guard)", () => {
 
   it("lists everything at once in the refusal message", async () => {
     await registerCheckout("dev3");
-    await storage.remoteSessionMappings.upsert("remote-local-4", "p1", serverId, "remote-4", "dev3");
     await storage.scheduledTasks.create({
       id: "sched-4", project_id: "p1", name: "nightly-build", cron_expr: "0 3 * * *", timezone: "UTC",
       run_type: "command", content: "make", cwd_mode: "branch", target: serverId,
@@ -462,7 +413,7 @@ describe("DELETE /api/projects/:id/remotes/:rid (unlink guard)", () => {
 
     const response = await unlink();
 
-    expect(response.json().error).toBe("worker3 still has 1 workspace, 1 session and 1 schedule in this project.");
+    expect(response.json().error).toBe("worker3 still has 1 workspace and 1 schedule in this project.");
   });
 
   it("does not honor force while the remote is online and in use", async () => {
@@ -500,7 +451,7 @@ describe("DELETE /api/projects/:id/remotes/:rid (unlink guard)", () => {
       lastConnectedAt: expect.any(String),
       lastSyncedAt: syncedAt,
       tokenRevoked: false,
-      lastKnownUsage: { workspaces: ["dev3"], sessions: 0, pendingSessions: 0, schedules: [], runningExecutors: 0 },
+      lastKnownUsage: { workspaces: ["dev3"], schedules: [] },
     });
     expect(proxyToRemoteAuto).not.toHaveBeenCalled();
     expect(await stillLinked()).toBe(true);

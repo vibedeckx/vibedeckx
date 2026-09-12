@@ -83,10 +83,10 @@ async function renumberProjectRemotes(
 }
 
 /**
- * Everything one project still has on one remote (see `RemoteUsage`). Each
- * item is one query scoped to `(project_id, remote_server_id)`; the whole
- * set runs inside the caller's transaction so the count and the delete that
- * may follow it see the same rows.
+ * What one project still has on one remote (see `RemoteUsage` for what
+ * counts and why). Each item is one query scoped to
+ * `(project_id, remote_server_id)`; both run inside the caller's transaction
+ * so the count and the delete that may follow it see the same rows.
  */
 async function countRemoteUsage(
   trx: Transaction<DB>,
@@ -107,27 +107,6 @@ async function countRemoteUsage(
     .orderBy("workspace.branch", "asc")
     .execute();
 
-  const sessions = await trx.selectFrom("remote_session_mappings")
-    .select(({ fn }) => fn.countAll<number>().as("n"))
-    .where("project_id", "=", projectId)
-    .where("remote_server_id", "=", remoteServerId)
-    .executeTakeFirstOrThrow();
-
-  // Every pending intent, prepared ones included. `listPending` deliberately
-  // skips intents with a prepare_operation_id, so it is not reused here.
-  const pendingSessions = await trx.selectFrom("remote_session_creation_intents")
-    .select(({ fn }) => fn.countAll<number>().as("n"))
-    .where("project_id", "=", projectId)
-    .where("remote_server_id", "=", remoteServerId)
-    .where("status", "=", "pending")
-    .executeTakeFirstOrThrow();
-  const pendingReviewers = await trx.selectFrom("remote_reviewer_creation_intents")
-    .select(({ fn }) => fn.countAll<number>().as("n"))
-    .where("project_id", "=", projectId)
-    .where("remote_server_id", "=", remoteServerId)
-    .where("status", "=", "pending")
-    .executeTakeFirstOrThrow();
-
   const schedules = await trx.selectFrom("scheduled_tasks")
     .select("name")
     .where("project_id", "=", projectId)
@@ -135,28 +114,14 @@ async function countRemoteUsage(
     .orderBy("name", "asc")
     .execute();
 
-  const runningExecutors = await trx.selectFrom("remote_executor_processes")
-    .select(({ fn }) => fn.countAll<number>().as("n"))
-    .where("project_id", "=", projectId)
-    .where("remote_server_id", "=", remoteServerId)
-    .where("status", "=", "running")
-    .executeTakeFirstOrThrow();
-
   return {
     workspaces: checkouts.map((row) => row.branch),
-    sessions: Number(sessions.n),
-    pendingSessions: Number(pendingSessions.n) + Number(pendingReviewers.n),
     schedules: schedules.map((row) => row.name),
-    runningExecutors: Number(runningExecutors.n),
   };
 }
 
 function remoteUsageIsEmpty(usage: RemoteUsage): boolean {
-  return usage.workspaces.length === 0
-    && usage.sessions === 0
-    && usage.pendingSessions === 0
-    && usage.schedules.length === 0
-    && usage.runningExecutors === 0;
+  return usage.workspaces.length === 0 && usage.schedules.length === 0;
 }
 
 async function deleteProjectRemoteRow(trx: Transaction<DB>, id: string, projectId: string): Promise<void> {

@@ -262,7 +262,7 @@ describe("removeProjectRemote", () => {
       error: "worker3 still has 1 workspace in this project.",
       serverId: "srv-1",
       name: "worker3",
-      usage: { workspaces: ["dev3"], sessions: 0, pendingSessions: 0, schedules: [], runningExecutors: 0 },
+      usage: { workspaces: ["dev3"], schedules: [] },
     };
     await withFetch({ ok: false, status: 409, json: async () => body }, async () => {
       await expect(api.removeProjectRemote("p1", "link-1")).rejects.toMatchObject({

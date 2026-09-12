@@ -303,13 +303,15 @@ export interface ProjectRemote {
   status?: RemoteServerStatus;
 }
 
-/** What a project still has on a remote machine, as counted by the hub. */
+/**
+ * What a project still has on a remote machine, as counted by the hub:
+ * non-main worktrees and schedules targeting it. Sessions are not counted —
+ * they live in worktrees, and deleting a worktree is where live ones are
+ * stopped or refused.
+ */
 export interface RemoteUsage {
   workspaces: string[];
-  sessions: number;
-  pendingSessions: number;
   schedules: string[];
-  runningExecutors: number;
 }
 
 /** 409 from unlinking: the machine answered and the project still uses it. Nothing overrides this. */
