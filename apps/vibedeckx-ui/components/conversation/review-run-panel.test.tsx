@@ -23,6 +23,7 @@ vi.mock("@/components/ai-elements/message", () => ({
 }));
 
 import { ReviewRunPanel } from "./review-run-panel";
+import { NotificationInboxProvider } from "@/hooks/notification-inbox-context";
 import { api } from "@/lib/api";
 import { resetWorkflowRunsInflightForTests } from "@/lib/workflow-runs-fetch";
 
@@ -161,6 +162,80 @@ describe("ReviewRunPanel out-of-order reads", () => {
 // 休眠唤醒后 WS 是僵尸、轮询失败被静默吞掉,面板会短暂停留在睡前快照 —— 按钮
 // 照常可点(这是有意的),于是点击撞上服务端的状态守卫。这一组锁住那次失败之后
 // 的行为:提示按刷新后的真实状态写,只挂在自己的 run 上,并在状态再变时消失。
+describe("ReviewRunPanel clears the run's bell entry", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let markReviewRunRead: ReturnType<typeof vi.fn<(runId: string, opts?: { runEnded?: boolean }) => void>>;
+
+  const waiting = { ...runFixture, status: "waiting_feedback" as const, feedback_snapshot: "verdict" };
+  const clickText = async (text: string) => {
+    const btn = Array.from(container.querySelectorAll("button"))
+      .find((b) => b.textContent?.includes(text))!;
+    await act(async () => { btn.click(); });
+    await act(async () => {});
+  };
+
+  const mount = async () => {
+    await act(async () => {
+      root.render(
+        <NotificationInboxProvider value={{ markReviewRunRead }}>
+          <ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />
+        </NotificationInboxProvider>,
+      );
+    });
+  };
+
+  beforeEach(() => {
+    resetWorkflowRunsInflightForTests();
+    markReviewRunRead = vi.fn();
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [waiting] });
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  // 发反馈 = 已经读过这条 review,不该再要求用户点进 reviewer session 消红点。
+  it("marks the run read after the feedback is sent back to the source session", async () => {
+    await mount();
+    await clickText("发送反馈给原 session");
+    expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "approve", undefined);
+    // approve 之后 run → completed,所以连迟到的通知也一并交给 hook 收掉。
+    expect(markReviewRunRead).toHaveBeenCalledWith("r1", { runEnded: true });
+  });
+
+  // 结论是 ship 时用户直接关掉卡片,同样算看过了。
+  it("marks the run read after ending the run from the panel", async () => {
+    await mount();
+    await clickText("结束");
+    expect(api.cancelWorkflowRun).toHaveBeenCalledWith("r1");
+    expect(markReviewRunRead).toHaveBeenCalledWith("r1", { runEnded: true });
+  });
+
+  // finalize 让 run 继续跑,下一轮的未读必须照常亮起来。
+  it("does not mark the run ended when only finalizing the current round", async () => {
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [{ ...runFixture, status: "discussing" as const }] });
+    await mount();
+    const btn = container.querySelector<HTMLButtonElement>('button[aria-label="生成 review 终稿"]')!;
+    await act(async () => { btn.click(); });
+    await act(async () => {});
+    expect(markReviewRunRead).toHaveBeenCalledWith("r1", { runEnded: false });
+  });
+
+  // 动作没生效时 run 还等着用户,未读也就还该留着。
+  it("leaves the bell alone when the gate action fails", async () => {
+    vi.mocked(api.workflowRunGate).mockRejectedValue(new Error("run 不在等待反馈确认的状态"));
+    await mount();
+    await clickText("发送反馈给原 session");
+    expect(markReviewRunRead).not.toHaveBeenCalled();
+  });
+});
+
 describe("ReviewRunPanel stale-click errors", () => {
   let container: HTMLDivElement;
   let root: Root;

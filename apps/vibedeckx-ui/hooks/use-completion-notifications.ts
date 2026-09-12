@@ -181,6 +181,13 @@ export interface CompletionNotificationsResult {
   remove: (id: string) => void;
   /** Hide all locally and mark all read on the server. */
   clear: () => void;
+  /**
+   * Mark every milestone carrying `workflow_run_id === runId` read, and — when
+   * `runEnded` — any that arrive later. Fed to the Main Chat review panel
+   * through `NotificationInboxProvider`; see hooks/notification-inbox-context.tsx
+   * for why acting there counts as seen.
+   */
+  markReviewRunRead: (runId: string, opts?: { runEnded?: boolean }) => void;
 }
 
 /**
@@ -201,6 +208,25 @@ export function useCompletionNotifications(
   const heard = useRef<Set<string>>(new Set());
   /** Ids whose read call is in flight, so navigation churn can't re-fire it. */
   const readInFlight = useRef<Set<string>>(new Set());
+  /**
+   * Live view of the list for callbacks handed out through context. Reading the
+   * state directly would make those callbacks change identity on every incoming
+   * milestone, re-rendering every consumer for data they don't display. Synced
+   * from an effect (like `activeSessionIdRef` below) rather than during render;
+   * the consumers are event handlers, which always run after the commit.
+   */
+  const notificationsRef = useRef(notifications);
+  useEffect(() => {
+    notificationsRef.current = notifications;
+  }, [notifications]);
+  /**
+   * Runs whose attention was consumed in Main Chat AND which have since ended.
+   * The sweep below can only answer milestones already in hand; a run's inbox
+   * row travels on the drain while the panel is pushed its state change
+   * directly, so the `review_ready` can arrive after the click. Ended runs mint
+   * nothing further, so any straggler for one is answered on arrival.
+   */
+  const consumedRuns = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     warmCompletionSounds();
@@ -236,6 +262,27 @@ export function useCompletionNotifications(
       });
   }, []);
 
+  /**
+   * Answer a milestone whose run was already dealt with in Main Chat and has
+   * since ended. Must run on BOTH arrival paths, not just the SSE frame: the
+   * hydration request is issued at mount but can land after the user has acted,
+   * and server rows win over local ones in that merge — so without this, a slow
+   * initial response both misses its own row and resurrects one the SSE path had
+   * already answered.
+   *
+   * Called outside the `setNotifications` updater on purpose: the read call is a
+   * side effect, and StrictMode double-invokes updaters.
+   */
+  const answerConsumed = useCallback((n: ServerNotification): ServerNotification => {
+    if (n.read_at !== null) return n;
+    if (n.workflow_run_id === null || !consumedRuns.current.has(n.workflow_run_id)) return n;
+    void markReadApi(n.id).catch(() => {
+      // Read locally, unread on the server. The next hydration answers it again
+      // (`consumedRuns` outlives it), so nothing is lost.
+    });
+    return { ...n, read_at: Date.now() };
+  }, []);
+
   // Hydrate from the server. This — not localStorage — is what restores unread
   // state across a reload.
   useEffect(() => {
@@ -244,15 +291,16 @@ export function useCompletionNotifications(
       .then((rows) => {
         if (cancelled) return;
         for (const row of rows) heard.current.add(row.id);
+        const answered = rows.map(answerConsumed);
         setNotifications((prev) => {
           // Merge rather than replace: a frame that arrived before hydration
           // resolved must not be dropped. Everything goes through
           // upsertNotification so display order is ours, not a dependency on the
           // server's ORDER BY.
           let merged: ServerNotification[] = [];
-          for (const row of rows) merged = upsertNotification(merged, row);
+          for (const row of answered) merged = upsertNotification(merged, row);
           for (const pending of prev) {
-            if (!rows.some((r) => r.id === pending.id)) merged = upsertNotification(merged, pending);
+            if (!answered.some((r) => r.id === pending.id)) merged = upsertNotification(merged, pending);
           }
           return merged;
         });
@@ -272,7 +320,7 @@ export function useCompletionNotifications(
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [answerConsumed]);
 
   useGlobalEventStream((data) => {
     if (data.type !== 'notification:created') return;
@@ -284,17 +332,24 @@ export function useCompletionNotifications(
 
     const active = activeSessionIdRef.current;
     const onScreen = notification.session_id !== null && notification.session_id === active;
+    // A straggler for a run the user already finished with in Main Chat.
+    const consumed =
+      notification.workflow_run_id !== null &&
+      consumedRuns.current.has(notification.workflow_run_id);
 
     // Sound fires for every first-time milestone, including the session on
     // screen: `onScreen` suppresses the bell entry (the user can see the
     // result), but not the cue that tells them to look. Only `isNew` gates it,
-    // so a hydrated or replayed row stays silent.
-    if (isNew) playSound(SOUND_FOR_KIND[notification.kind]);
+    // so a hydrated or replayed row stays silent. A consumed run is the one
+    // case that earns silence as well as no entry — it is over, so there is
+    // nothing left for the cue to send the user to look at.
+    if (isNew && !consumed) playSound(SOUND_FOR_KIND[notification.kind]);
 
+    const autoRead = onScreen || consumed;
     setNotifications((prev) =>
-      upsertNotification(prev, onScreen ? { ...notification, read_at: notification.read_at ?? Date.now() } : notification),
+      upsertNotification(prev, autoRead ? { ...notification, read_at: notification.read_at ?? Date.now() } : notification),
     );
-    if (onScreen && notification.read_at === null) {
+    if (autoRead && notification.read_at === null) {
       void markReadApi(notification.id).catch(() => {
         // Leave it read locally but unread on the server; the next hydration
         // will show it unread again rather than losing it.
@@ -334,6 +389,20 @@ export function useCompletionNotifications(
 
   const markRead = useCallback((id: string) => persistRead(id), [persistRead]);
 
+  // A run can hold more than one unread `review_ready`: every discussion round
+  // mints a fresh one (`reviewReadyId(runId, boundary)`), and unlike session
+  // milestones they do NOT collapse in the bell — each round is its own entry.
+  // Consuming the run therefore has to sweep all of them, not just the newest.
+  const markReviewRunRead = useCallback(
+    (runId: string, opts?: { runEnded?: boolean }) => {
+      if (opts?.runEnded) consumedRuns.current.add(runId);
+      for (const n of notificationsRef.current) {
+        if (n.workflow_run_id === runId && n.read_at === null) persistRead(n.id);
+      }
+    },
+    [persistRead],
+  );
+
   const markAllRead = useCallback(() => {
     const readAt = Date.now();
     const previous = notifications;
@@ -365,7 +434,7 @@ export function useCompletionNotifications(
     0,
   );
 
-  return { notifications, unreadCount, markRead, markAllRead, remove, clear };
+  return { notifications, unreadCount, markRead, markAllRead, remove, clear, markReviewRunRead };
 }
 
 function playSound(src: string) {

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type WorkflowRun } from "@/lib/api";
 import { fetchActiveWorkflowRunsAt } from "@/lib/workflow-runs-fetch";
+import { useNotificationInbox } from "@/hooks/notification-inbox-context";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MessageResponse } from "@/components/ai-elements/message";
@@ -67,6 +68,7 @@ export function ReviewRunPanel({
     useState<{ runId: string; status: string | null; message: string; signature: string } | null>(null);
   /** 动作序号:新动作作废旧动作那趟还在路上的解释。 */
   const actionSeqRef = useRef(0);
+  const { markReviewRunRead } = useNotificationInbox();
 
   // 切工作区一并丢弃:面板不 remount,否则 A 分支留下的提示会在切回来时复活。
   const [seenWorkspace, setSeenWorkspace] = useState(() => ({ projectId, branch }));
@@ -177,7 +179,23 @@ export function ReviewRunPanel({
     let failure: string | null = null;
     try { await fn(); } catch (e) { failure = e instanceof Error ? e.message : String(e); }
     finally { setBusy(null); void refresh({ force: true }); }
-    if (!failure) return;
+    if (!failure) {
+      // 在这里处理掉 review = 已经看过它了。`review_ready` 指向的是 reviewer
+      // session,而这张卡片在**原 session** 的 Main Chat 里:发完反馈、或者结论
+      // 是 ship 直接结束之后,还要专程点进 reviewer session 才能消掉铃铛上的红
+      // 点,纯属跑腿。「生成终稿」同理——那一轮的结论已经被这次点击消费掉,新
+      // 一轮完成时会另发一条未读把铃铛重新点亮。
+      //
+      // 只在成功后调用:动作失败(如 409「反馈正在发送,无法取消」)时 run 仍然
+      // 等着用户,未读也就还该留着。
+      //
+      // approve/cancel 之后 run 是终态(completed / cancelled),不会再有新一轮,
+      // 所以连「点击之后才送达」的迟到通知一并收掉——run 状态是 WS 直推的,而
+      // 通知要过 outbox drain,面板先于铃铛拿到结果完全可能。finalize 不同:它
+      // 让 run 继续跑,下一轮的未读必须照常亮起来。
+      markReviewRunRead(runId, { runEnded: action !== "finalize" });
+      return;
+    }
     let active: WorkflowRun[] | null = null;
     if (projectId) {
       const read = fetchActiveWorkflowRunsAt(projectId, branch, { force: true });

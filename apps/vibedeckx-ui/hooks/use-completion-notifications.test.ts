@@ -406,6 +406,121 @@ describe('useCompletionNotifications', () => {
     expect(latest.unreadCount).toBe(1);
   });
 
+  it('markReviewRunRead clears every unread milestone of one run, across discussion rounds', async () => {
+    // Two rounds of the same run: `review_ready` does not collapse in the bell,
+    // so acting on the run has to sweep both, and nothing else.
+    api.getNotifications.mockResolvedValue([
+      row({ id: 'r1', kind: 'review_ready', session_id: 'rev', workflow_run_id: 'run-1', created_at: 1 }),
+      row({ id: 'r2', kind: 'review_ready', session_id: 'rev', workflow_run_id: 'run-1', created_at: 2 }),
+      row({ id: 'other', kind: 'review_ready', session_id: 'rev2', workflow_run_id: 'run-2', created_at: 3 }),
+    ]);
+    await render();
+    expect(latest.unreadCount).toBe(3);
+
+    await act(async () => { latest.markReviewRunRead('run-1'); });
+
+    expect(api.markNotificationRead.mock.calls.map((c) => c[0]).sort()).toEqual(['r1', 'r2']);
+    expect(latest.unreadCount).toBe(1);
+    expect(latest.notifications.find((n) => n.id === 'other')?.read_at).toBeNull();
+  });
+
+  it('answers a review_ready that only arrives AFTER the run was consumed and ended', async () => {
+    // 面板走 WS 直推、通知走 outbox drain,所以卡片可以先于铃铛拿到结果:
+    // 用户点完「发送反馈」/「结束」之后这一帧才落地。run 已是终态,不可能再有
+    // 合法的新一轮,所以它必须当场被收掉 —— 既不进铃铛,也不响。
+    await render();
+    await act(async () => { latest.markReviewRunRead('run-1', { runEnded: true }); });
+
+    await pushSse(row({ id: 'late', kind: 'review_ready', session_id: 'rev', workflow_run_id: 'run-1', created_at: 7 }));
+
+    expect(latest.unreadCount).toBe(0);
+    expect(latest.notifications[0].read_at).not.toBeNull();
+    expect(api.markNotificationRead).toHaveBeenCalledWith('late');
+    expect(played.srcs).toEqual([]);
+  });
+
+  it('answers a consumed run in a hydration response that lands after the click', async () => {
+    // 初始请求在 mount 时就发出,但可以晚于用户操作才返回 —— SSE 不是唯一入口。
+    let resolveHydration: (rows: ServerNotification[]) => void = () => {};
+    api.getNotifications.mockReturnValue(new Promise((r) => { resolveHydration = r; }));
+    await render();
+    await act(async () => { latest.markReviewRunRead('run-1', { runEnded: true }); });
+
+    await act(async () => {
+      resolveHydration([row({ id: 'late', kind: 'review_ready', session_id: 'rev', workflow_run_id: 'run-1' })]);
+    });
+
+    expect(latest.unreadCount).toBe(0);
+    expect(latest.notifications[0].read_at).not.toBeNull();
+    expect(api.markNotificationRead).toHaveBeenCalledWith('late');
+  });
+
+  it('does not let a late hydration response resurrect a row the SSE path already answered', async () => {
+    // 合并时服务器行压过本地行,所以迟到的初始响应必须自己也认得 consumed。
+    let resolveHydration: (rows: ServerNotification[]) => void = () => {};
+    api.getNotifications.mockReturnValue(new Promise((r) => { resolveHydration = r; }));
+    await render();
+    await act(async () => { latest.markReviewRunRead('run-1', { runEnded: true }); });
+    await pushSse(row({ id: 'late', kind: 'review_ready', session_id: 'rev', workflow_run_id: 'run-1' }));
+    expect(latest.unreadCount).toBe(0);
+
+    await act(async () => {
+      resolveHydration([row({ id: 'late', kind: 'review_ready', session_id: 'rev', workflow_run_id: 'run-1' })]);
+    });
+
+    expect(latest.unreadCount).toBe(0);
+    expect(latest.notifications[0].read_at).not.toBeNull();
+  });
+
+  it('leaves an unrelated unread row in a late hydration response alone', async () => {
+    let resolveHydration: (rows: ServerNotification[]) => void = () => {};
+    api.getNotifications.mockReturnValue(new Promise((r) => { resolveHydration = r; }));
+    await render();
+    await act(async () => { latest.markReviewRunRead('run-1', { runEnded: true }); });
+
+    await act(async () => {
+      resolveHydration([row({ id: 'other', kind: 'review_ready', session_id: 'rev2', workflow_run_id: 'run-2' })]);
+    });
+
+    expect(latest.unreadCount).toBe(1);
+    expect(api.markNotificationRead).not.toHaveBeenCalled();
+  });
+
+  it('still raises the bell for the next round after finalize consumed the current one', async () => {
+    // finalize 让 run 继续跑:这一轮的结论算看过了,下一轮必须照常亮。
+    api.getNotifications.mockResolvedValue([
+      row({ id: 'r1', kind: 'review_ready', session_id: 'rev', workflow_run_id: 'run-1', created_at: 1 }),
+    ]);
+    await render();
+    await act(async () => { latest.markReviewRunRead('run-1', { runEnded: false }); });
+    expect(latest.unreadCount).toBe(0);
+
+    await pushSse(row({ id: 'r2', kind: 'review_ready', session_id: 'rev', workflow_run_id: 'run-1', created_at: 2 }));
+
+    expect(latest.unreadCount).toBe(1);
+    expect(latest.notifications.find((n) => n.id === 'r2')?.read_at).toBeNull();
+    expect(played.srcs).toEqual([SOUND_FOR_KIND.review_ready]);
+  });
+
+  it('leaves an unrelated run\'s late milestone alone', async () => {
+    await render();
+    await act(async () => { latest.markReviewRunRead('run-1', { runEnded: true }); });
+
+    await pushSse(row({ id: 'other', kind: 'review_ready', session_id: 'rev2', workflow_run_id: 'run-2', created_at: 7 }));
+
+    expect(latest.unreadCount).toBe(1);
+    expect(api.markNotificationRead).not.toHaveBeenCalled();
+  });
+
+  it('markReviewRunRead does not re-send a read call for rows already read', async () => {
+    api.getNotifications.mockResolvedValue([
+      row({ id: 'r1', kind: 'review_ready', workflow_run_id: 'run-1', read_at: 99 }),
+    ]);
+    await render();
+    await act(async () => { latest.markReviewRunRead('run-1'); });
+    expect(api.markNotificationRead).not.toHaveBeenCalled();
+  });
+
   it('ignores branch:activity entirely — no bell entry, no sound', async () => {
     await render();
     await act(async () => {

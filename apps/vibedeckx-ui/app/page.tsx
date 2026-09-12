@@ -53,6 +53,7 @@ import { CompletionNotificationsMenu } from '@/components/layout/completion-noti
 import { KeyboardShortcutsOverlay } from '@/components/layout/keyboard-shortcuts-overlay';
 import { FocusRegionProvider } from '@/components/locate/focus-region';
 import { LocateProvider } from '@/components/locate/locate-context';
+import { NotificationInboxProvider } from '@/hooks/notification-inbox-context';
 import { ConnectionStatusIndicator } from '@/components/layout/connection-status-indicator';
 import { useUrlState } from '@/hooks/use-url-state';
 import { buildUrl } from '@/lib/url-state';
@@ -365,7 +366,16 @@ export default function Home() {
     markAllRead: markAllNotificationsRead,
     remove: removeNotification,
     clear: clearNotifications,
+    markReviewRunRead,
   } = useCompletionNotifications(activeNotificationSessionId);
+
+  // Handed down by context rather than through AgentConversation ->
+  // MainConversation: neither of those knows or cares about the inbox, and the
+  // review panel is the only consumer.
+  const notificationInbox = useMemo(
+    () => ({ markReviewRunRead }),
+    [markReviewRunRead],
+  );
 
   // The project dashboard's Waiting tile. Derived from the bell's own state so
   // the two can never disagree — including the case that a server-side count
@@ -966,6 +976,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
   return (
     <FocusRegionProvider>
     <LocateProvider>
+    <NotificationInboxProvider value={notificationInbox}>
     <div className="h-screen flex flex-col w-full">
       {/* One remote list for the whole project screen. It covers the dialogs as
           well as the panels: the create-workspace dialog needs to know the
@@ -1406,6 +1417,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
         />
       </ProjectRemotesProvider>
     </div>
+    </NotificationInboxProvider>
     </LocateProvider>
     </FocusRegionProvider>
   );
