@@ -343,13 +343,13 @@ describe("ExecutorOutput line filter", () => {
   it("offers an explicit Keep/Hide toggle beside the box that negates the next chip", () => {
     render(false);
     act(() => filterButton().click());
-    expect(modeToggle().textContent).toBe("Keep");
     expect(modeToggle().getAttribute("aria-pressed")).toBe("false");
+    expect(modeToggle().getAttribute("aria-label")).toContain("Keep mode");
     expect(input()!.placeholder).toContain("keep");
 
     act(() => modeToggle().click());
-    expect(modeToggle().textContent).toBe("Hide");
     expect(modeToggle().getAttribute("aria-pressed")).toBe("true");
+    expect(modeToggle().getAttribute("aria-label")).toContain("Hide mode");
     expect(input()!.placeholder).toContain("hide");
     // Toggling keeps the caret in the box.
     expect(document.activeElement).toBe(input());

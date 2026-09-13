@@ -88,7 +88,6 @@ export function TerminalFilterBar({
           )}
           title={filter.negate ? `Hide lines containing "${filter.pattern}"` : `Keep lines containing "${filter.pattern}"`}
         >
-          {filter.negate && <EyeOff className="h-3 w-3 shrink-0 opacity-80" />}
           <span className="truncate">{filter.pattern}</span>
           <button
             type="button"
@@ -118,14 +117,13 @@ export function TerminalFilterBar({
             onMouseDown={(e) => e.preventDefault()}
             onClick={() => setHideMode((v) => !v)}
             className={cn(
-              "flex h-full shrink-0 items-center gap-1 border-r px-1.5 text-[11px] font-medium",
+              "flex h-full shrink-0 items-center border-r px-1.5",
               hideMode
                 ? "border-red-500/40 bg-red-500/15 text-red-300 hover:bg-red-500/25"
                 : "border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
             )}
           >
             {hideMode ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
-            {hideMode ? "Hide" : "Keep"}
           </button>
           <input
             ref={inputRef}
