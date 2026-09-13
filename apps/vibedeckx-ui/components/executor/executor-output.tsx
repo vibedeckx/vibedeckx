@@ -183,15 +183,33 @@ export function ExecutorOutput({
       .join("");
     setIsCapturing(false);
 
-    const text = stripAnsi(captured);
+    // Semantics: record the raw output for the interval, then on stop apply
+    // whatever filters are active at that moment. This is deliberately NOT
+    // "what the user saw": rules changed mid-capture apply to the whole
+    // interval, and the raw stream differs from the rendered buffer where
+    // output overwrites itself (`\r` progress bars keep every matching
+    // frame, clear-line sequences are stripped, not applied). Good enough
+    // for log-style output; a faithful replay would have to record buffer
+    // changes instead.
+    const plain = stripAnsi(captured);
+    const text =
+      filters.length > 0 ? applyFilters(plain.split(/\r?\n/), filters).join("\n") : plain;
     if (!text) {
-      toast.info("Capture stopped — no output to copy");
+      toast.info(
+        filters.length > 0
+          ? "Capture stopped — no output matched the filters"
+          : "Capture stopped — no output to copy"
+      );
       return;
     }
 
     try {
       await navigator.clipboard.writeText(text);
-      toast.success("Copied captured output to clipboard");
+      toast.success(
+        filters.length > 0
+          ? "Copied filtered captured output to clipboard"
+          : "Copied captured output to clipboard"
+      );
     } catch {
       toast.error("Failed to copy to clipboard");
     }
@@ -861,7 +879,13 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
             <button
               type="button"
               onClick={handleCaptureToggle}
-              title={isCapturing ? "Stop capture & copy to clipboard" : "Start capturing output"}
+              title={
+                isCapturing
+                  ? filterActive
+                    ? "Stop capture & copy filtered output"
+                    : "Stop capture & copy to clipboard"
+                  : "Start capturing output"
+              }
               aria-label={isCapturing ? "Stop capture and copy" : "Start capturing output"}
               className={cn(
                 toolbarButtonClass,

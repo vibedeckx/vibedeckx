@@ -378,4 +378,48 @@ describe("ExecutorOutput line filter", () => {
     expect(chips().map((c) => c.getAttribute("data-negate"))).toEqual(["true", "true", null, "true"]);
     expect(viewLines()).toEqual([]);
   });
+
+  it("applies the active filters to a capture when it is stopped", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const out = (data: string) => ({ type: "stdout" as const, data });
+    const capture = () =>
+      q<HTMLButtonElement>(
+        'button[aria-label="Start capturing output"], button[aria-label="Stop capture and copy"]'
+      )!;
+
+    render(false, { logs: [out("before\n")] });
+    act(() => capture().click());
+    act(() => filterButton().click());
+    addFilter("error");
+    addFilter("-timeout");
+
+    // Output arrives in chunks that do not align with lines, with ANSI
+    // colour; the capture is line-split and filtered after stripping.
+    render(false, {
+      logs: [
+        out("before\n"),
+        out("INFO ok\n\x1b[31mERROR one"),
+        out(" more\nerror: timeout\nERROR two\x1b[0m\n"),
+      ],
+    });
+    expect(capture().title).toBe("Stop capture & copy filtered output");
+    await act(async () => capture().click());
+    expect(writeText).toHaveBeenCalledWith("ERROR one more\nERROR two");
+  });
+
+  it("captures everything when no filter is active", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("navigator", { ...navigator, clipboard: { writeText } });
+    const out = (data: string) => ({ type: "stdout" as const, data });
+    const capture = () =>
+      q<HTMLButtonElement>(
+        'button[aria-label="Start capturing output"], button[aria-label="Stop capture and copy"]'
+      )!;
+    render(false, { logs: [] });
+    act(() => capture().click());
+    render(false, { logs: [out("a\n"), out("b\n")] });
+    await act(async () => capture().click());
+    expect(writeText).toHaveBeenCalledWith("a\nb\n");
+  });
 });
