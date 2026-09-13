@@ -5,7 +5,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { Circle, Square, Info, Copy } from "lucide-react";
+import { Circle, Square, Info, Copy, Maximize2, Minimize2 } from "lucide-react";
 import { toast } from "sonner";
 import type { LogMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -104,6 +104,13 @@ export function ExecutorOutput({
   // flushed history has fully parsed, then show the settled screen in one
   // frame.
   const [revealed, setRevealed] = useState(false);
+  // Maximized = the same xterm instance re-positioned as a fixed, viewport-
+  // sized layer. It is deliberately NOT a Dialog/portal: moving the subtree
+  // would remount xterm and replay the whole log buffer, whereas re-styling
+  // the existing container just fires the ResizeObserver below, which re-fits
+  // and pushes the larger geometry to the PTY (and the smaller one on
+  // restore). Escape is not bound — it is a live keystroke for the shell.
+  const [maximized, setMaximized] = useState(false);
   const processIdRef = useRef(processId);
   useEffect(() => {
     processIdRef.current = processId;
@@ -467,6 +474,12 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     }
   }, [terminalSettings.fontSize, terminalSettings.fontFamily, terminalSettings.scrollback]);
 
+  // Hand the enlarged terminal keyboard focus so the user can type right away;
+  // the fit itself is driven by the ResizeObserver reacting to the new size.
+  useEffect(() => {
+    if (maximized && isPty) terminalRef.current?.focus();
+  }, [maximized, isPty]);
+
   // Only PTY windows take focus — read-only output has no stdin to type into.
   // The terminal is created in an effect, so a host calling focus() from its
   // own effect is safe: child effects run first.
@@ -522,6 +535,12 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     toast.success(`${label} copied`);
   };
 
+  const toolbarButtonClass = cn(
+    "flex h-6 w-6 items-center justify-center rounded",
+    "bg-zinc-900/70 backdrop-blur-sm border border-zinc-700/60",
+    "text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
+  );
+
   return (
     <div
       className={cn(
@@ -529,68 +548,108 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
         className
       )}
     >
-      {/* opacity (not visibility/display) keeps the container measurable for
-          fit() and xterm's renderer active while concealed pre-reveal. */}
-      <div ref={containerRef} className={cn("h-full w-full", !revealed && "opacity-0")} />
-      <div className="absolute top-2 right-3 z-10 flex items-center gap-1.5">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              title="Process info"
-              aria-label="Show process info"
-              className={cn(
-                "flex h-6 w-6 items-center justify-center rounded",
-                "bg-zinc-900/70 backdrop-blur-sm border border-zinc-700/60",
-                "text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors"
-              )}
-            >
-              <Info className="h-3 w-3" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-72">
-            <DropdownMenuLabel className="text-xs text-muted-foreground">
-              Process info
-            </DropdownMenuLabel>
-            {infoRows.map((row) => (
-              <DropdownMenuItem
-                key={row.label}
-                disabled={!row.value}
-                // Keep the menu open after copying so several values can be
-                // grabbed in one pass.
-                onSelect={(e) => {
-                  e.preventDefault();
-                  copyValue(row.label, row.value);
-                }}
-                className="flex items-center justify-between gap-3 font-mono text-xs"
-              >
-                <span className="shrink-0 text-muted-foreground">{row.label}</span>
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <span className="truncate">{row.value ?? "—"}</span>
-                  {row.value && <Copy className="h-3 w-3 shrink-0 opacity-60" />}
-                </span>
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <button
-          type="button"
-          onClick={handleCaptureToggle}
-          title={isCapturing ? "Stop capture & copy to clipboard" : "Start capturing output"}
-          aria-label={isCapturing ? "Stop capture and copy" : "Start capturing output"}
+      {/* The inline slot keeps its height while the terminal is lifted out, so
+          the list below does not jump; a hint marks where it went. */}
+      {maximized && (
+        <div className="flex h-full select-none items-center justify-center text-xs text-zinc-500">
+          Terminal is maximized
+        </div>
+      )}
+      <div
+        data-testid="executor-output-layer"
+        data-maximized={maximized || undefined}
+        // role="dialog" is what the panel-level keyboard handlers key off
+        // (isInOverlay): with focus resting on the toggle button, ←/→ would
+        // otherwise bubble to ExecutorPanel and switch the executor target,
+        // unmounting this very output. A focused xterm never lets keys reach
+        // window, so PTY input is unaffected either way.
+        role={maximized ? "dialog" : undefined}
+        aria-modal={maximized || undefined}
+        aria-label={maximized ? "Maximized terminal" : undefined}
+        className={maximized ? "fixed inset-0 z-50 flex bg-black/70 p-3 sm:p-6" : "absolute inset-0"}
+        // Clicking the dimmed margin (not the terminal itself) restores.
+        onMouseDown={
+          maximized
+            ? (e) => {
+                if (e.target === e.currentTarget) setMaximized(false);
+              }
+            : undefined
+        }
+      >
+        <div
           className={cn(
-            "flex h-6 w-6 items-center justify-center rounded",
-            "bg-zinc-900/70 backdrop-blur-sm border border-zinc-700/60",
-            "text-zinc-400 hover:text-zinc-100 hover:border-zinc-500 transition-colors",
-            isCapturing && "text-red-400 border-red-500/70 hover:text-red-300"
+            "relative h-full w-full",
+            maximized && "overflow-hidden rounded-md border border-zinc-700 bg-zinc-950 shadow-2xl"
           )}
         >
-          {isCapturing ? (
-            <Square className="h-3 w-3 fill-current" />
-          ) : (
-            <Circle className="h-3 w-3" />
-          )}
-        </button>
+          {/* opacity (not visibility/display) keeps the container measurable for
+              fit() and xterm's renderer active while concealed pre-reveal. */}
+          <div ref={containerRef} className={cn("h-full w-full", !revealed && "opacity-0")} />
+          <div className="absolute top-2 right-3 z-10 flex items-center gap-1.5">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  title="Process info"
+                  aria-label="Show process info"
+                  className={toolbarButtonClass}
+                >
+                  <Info className="h-3 w-3" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-72">
+                <DropdownMenuLabel className="text-xs text-muted-foreground">
+                  Process info
+                </DropdownMenuLabel>
+                {infoRows.map((row) => (
+                  <DropdownMenuItem
+                    key={row.label}
+                    disabled={!row.value}
+                    // Keep the menu open after copying so several values can be
+                    // grabbed in one pass.
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      copyValue(row.label, row.value);
+                    }}
+                    className="flex items-center justify-between gap-3 font-mono text-xs"
+                  >
+                    <span className="shrink-0 text-muted-foreground">{row.label}</span>
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate">{row.value ?? "—"}</span>
+                      {row.value && <Copy className="h-3 w-3 shrink-0 opacity-60" />}
+                    </span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <button
+              type="button"
+              onClick={handleCaptureToggle}
+              title={isCapturing ? "Stop capture & copy to clipboard" : "Start capturing output"}
+              aria-label={isCapturing ? "Stop capture and copy" : "Start capturing output"}
+              className={cn(
+                toolbarButtonClass,
+                isCapturing && "text-red-400 border-red-500/70 hover:text-red-300"
+              )}
+            >
+              {isCapturing ? (
+                <Square className="h-3 w-3 fill-current" />
+              ) : (
+                <Circle className="h-3 w-3" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setMaximized((v) => !v)}
+              title={maximized ? "Restore size" : "Maximize terminal"}
+              aria-label={maximized ? "Restore terminal size" : "Maximize terminal"}
+              aria-pressed={maximized}
+              className={toolbarButtonClass}
+            >
+              {maximized ? <Minimize2 className="h-3 w-3" /> : <Maximize2 className="h-3 w-3" />}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
