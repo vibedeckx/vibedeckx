@@ -51,13 +51,15 @@ export function TerminalFilterView({
         onScroll={handleScroll}
         // Room at the top for the toolbar row (chips, input, buttons) that
         // floats over the terminal.
-        className="min-h-0 flex-1 overflow-auto px-2 pb-2 pt-9"
+        className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-2 pt-9"
       >
         {lines.length === 0 ? (
           <div className="select-none py-4 text-center text-xs text-zinc-500">No lines match</div>
         ) : (
+          // Wrap at the container edge the way xterm does (break anywhere,
+          // not at word boundaries) instead of growing a horizontal scrollbar.
           <pre
-            className="m-0 whitespace-pre text-zinc-100"
+            className="m-0 whitespace-pre-wrap break-all text-zinc-100"
             style={{ fontSize, fontFamily, lineHeight: 1.2 }}
           >
             {lines.map((line, i) => (
