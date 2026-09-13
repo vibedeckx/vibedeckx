@@ -122,6 +122,8 @@ const chips = () => Array.from(document.querySelectorAll('[data-testid="terminal
 const viewLines = () =>
   Array.from(view()?.querySelectorAll("pre > div") ?? []).map((d) => d.textContent);
 const count = () => q<HTMLElement>('[data-testid="terminal-filter-count"]')?.textContent;
+const modeToggle = () =>
+  q<HTMLButtonElement>('[data-testid="terminal-filter-input-group"] button[aria-pressed]')!;
 
 function key(el: Element, key: string, init: KeyboardEventInit = {}) {
   act(() => {
@@ -336,5 +338,39 @@ describe("ExecutorOutput line filter", () => {
     key(input()!, "Escape");
     expect(input()).toBeNull();
     expect(fake.focusCalls).toBeGreaterThan(0);
+  });
+
+  it("offers an explicit Keep/Hide toggle beside the box that negates the next chip", () => {
+    render(false);
+    act(() => filterButton().click());
+    expect(modeToggle().textContent).toBe("Keep");
+    expect(modeToggle().getAttribute("aria-pressed")).toBe("false");
+    expect(input()!.placeholder).toContain("keep");
+
+    act(() => modeToggle().click());
+    expect(modeToggle().textContent).toBe("Hide");
+    expect(modeToggle().getAttribute("aria-pressed")).toBe("true");
+    expect(input()!.placeholder).toContain("hide");
+    // Toggling keeps the caret in the box.
+    expect(document.activeElement).toBe(input());
+
+    addFilter("info");
+    expect(chips().map((c) => [c.textContent, c.getAttribute("data-negate")])).toEqual([
+      ["info", "true"],
+    ]);
+    expect(viewLines()).toEqual(["ERROR db connection refused", "error: request timeout"]);
+
+    // The mode sticks for the next chip, and a - prefix in Hide mode is not
+    // a double negative.
+    addFilter("-timeout");
+    expect(chips().map((c) => c.getAttribute("data-negate"))).toEqual(["true", "true"]);
+    expect(viewLines()).toEqual(["ERROR db connection refused"]);
+
+    // Back to Keep: plain text keeps again, the prefix shortcut still hides.
+    act(() => modeToggle().click());
+    addFilter("db");
+    addFilter("-refused");
+    expect(chips().map((c) => c.getAttribute("data-negate"))).toEqual(["true", "true", null, "true"]);
+    expect(viewLines()).toEqual([]);
   });
 });

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, type KeyboardEvent } from "react";
-import { X } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Eye, EyeOff, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { parseFilterInput, type TerminalFilter } from "@/lib/terminal-filter";
 
@@ -31,6 +31,11 @@ export function TerminalFilterBar({
   counts,
 }: TerminalFilterBarProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  // Keep (default) or Hide for the chip being typed. An explicit toggle next
+  // to the box, because a `-word` prefix is invisible to anyone who hasn't
+  // read the docs. The prefix still works as a shortcut. The mode survives
+  // closing the box so a run of "hide this noise" entries needs one click.
+  const [hideMode, setHideMode] = useState(false);
 
   useEffect(() => {
     if (inputOpen) inputRef.current?.focus();
@@ -46,7 +51,9 @@ export function TerminalFilterBar({
       e.preventDefault();
       const parsed = parseFilterInput(el.value);
       if (parsed) {
-        onAdd(parsed);
+        // The explicit toggle wins over the prefix shortcut when both say
+        // "hide"; in Keep mode the prefix alone can still negate.
+        onAdd(hideMode ? { ...parsed, negate: true } : parsed);
         el.value = "";
       }
       return;
@@ -81,7 +88,7 @@ export function TerminalFilterBar({
           )}
           title={filter.negate ? `Hide lines containing "${filter.pattern}"` : `Keep lines containing "${filter.pattern}"`}
         >
-          {filter.negate && <span className="opacity-70">−</span>}
+          {filter.negate && <EyeOff className="h-3 w-3 shrink-0 opacity-80" />}
           <span className="truncate">{filter.pattern}</span>
           <button
             type="button"
@@ -94,19 +101,43 @@ export function TerminalFilterBar({
         </span>
       ))}
       {inputOpen && (
-        <input
-          ref={inputRef}
-          type="text"
-          aria-label="Add terminal filter"
-          placeholder="filter… (-word hides)"
-          spellCheck={false}
-          autoComplete="off"
-          onKeyDown={handleKeyDown}
+        <span
+          data-testid="terminal-filter-input-group"
           className={cn(
-            "h-6 w-40 rounded border border-zinc-600 bg-zinc-900/90 px-1.5 font-mono text-[11px]",
-            "text-zinc-100 placeholder:text-zinc-500 outline-none focus:border-sky-500/70"
+            "flex h-6 items-center overflow-hidden rounded border bg-zinc-900/90 backdrop-blur-sm",
+            hideMode ? "border-red-500/60" : "border-zinc-600 focus-within:border-sky-500/70"
           )}
-        />
+        >
+          <button
+            type="button"
+            aria-label={hideMode ? "Hide mode: chip hides matching lines" : "Keep mode: chip keeps matching lines"}
+            aria-pressed={hideMode}
+            title="Toggle between keeping and hiding lines that match"
+            // Keep the caret in the box: switching mode is part of typing the
+            // chip, not a separate task.
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => setHideMode((v) => !v)}
+            className={cn(
+              "flex h-full shrink-0 items-center gap-1 border-r px-1.5 text-[11px] font-medium",
+              hideMode
+                ? "border-red-500/40 bg-red-500/15 text-red-300 hover:bg-red-500/25"
+                : "border-zinc-700 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            )}
+          >
+            {hideMode ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
+            {hideMode ? "Hide" : "Keep"}
+          </button>
+          <input
+            ref={inputRef}
+            type="text"
+            aria-label="Add terminal filter"
+            placeholder={hideMode ? "hide lines containing…" : "keep lines containing…"}
+            spellCheck={false}
+            autoComplete="off"
+            onKeyDown={handleKeyDown}
+            className="h-full w-36 bg-transparent px-1.5 font-mono text-[11px] text-zinc-100 outline-none placeholder:text-zinc-500"
+          />
+        </span>
       )}
       {counts && (
         <span
