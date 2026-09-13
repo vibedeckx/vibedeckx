@@ -18,6 +18,11 @@ vi.mock("@xterm/xterm", () => ({
     write(_d: string, cb?: () => void) { cb?.(); }
     onData() {}
     onResize() {}
+    onSelectionChange() {}
+    onScroll() {}
+    getSelectionPosition() { return undefined; }
+    getSelection() { return ""; }
+    element = undefined;
     attachCustomKeyEventHandler() {}
     focus() { focusCalls.n++; }
     reset() {}

@@ -46,6 +46,11 @@ vi.mock("@xterm/xterm", () => ({
         },
       };
     }
+    onSelectionChange() {}
+    onScroll() {}
+    getSelectionPosition() { return undefined; }
+    getSelection() { return ""; }
+    element = undefined;
     attachCustomKeyEventHandler() {}
     focus() { fake.focusCalls++; }
     // reset() empties the buffer and, like the real thing, does NOT fire

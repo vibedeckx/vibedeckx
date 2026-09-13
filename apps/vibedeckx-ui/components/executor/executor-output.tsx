@@ -15,6 +15,11 @@ import { useTerminalSettings } from "@/hooks/use-terminal-settings";
 import { TerminalFilterBar } from "./terminal-filter-bar";
 import { TerminalFilterView } from "./terminal-filter-view";
 import {
+  SelectionCopyButton,
+  placeAboveSelection,
+  type SelectionAnchor,
+} from "./selection-copy-button";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
@@ -132,7 +137,14 @@ export function ExecutorOutput({
   // (the user cannot see the echo). Read via ref inside the onData handler,
   // which is bound once at terminal creation.
   const filterActiveRef = useRef(filterActive);
-  filterActiveRef.current = filterActive;
+  useEffect(() => {
+    filterActiveRef.current = filterActive;
+  }, [filterActive]);
+  // Floating copy button over a mouse selection in the xterm. Hidden while
+  // the pointer is down so it does not flicker under a drag.
+  const [xtermSelection, setXtermSelection] = useState<SelectionAnchor | null>(null);
+  const pointerDownRef = useRef(false);
+  const layerRef = useRef<HTMLDivElement>(null);
   const processIdRef = useRef(processId);
   useEffect(() => {
     processIdRef.current = processId;
@@ -313,6 +325,75 @@ export function ExecutorOutput({
     fitRetryRafRef.current = requestAnimationFrame(tick);
   }, [tryFitAndFlush]);
 
+  // Position from xterm's data, not its rendering: getSelectionPosition()
+  // (0-based column, absolute buffer row — the d.ts "1-based" comment is
+  // stale) and buffer.viewportY are both current when onSelectionChange /
+  // onScroll fire, whereas the selection layer is redrawn a frame later.
+  // The DOM renderer keeps one fixed-size element per viewport row, so the
+  // start cell's pixel box is that row's rect plus column × cell width.
+  const placeXtermSelection = useCallback(() => {
+    const terminal = terminalRef.current;
+    const host = layerRef.current;
+    if (!terminal || !host || pointerDownRef.current) {
+      setXtermSelection(null);
+      return;
+    }
+    const pos = terminal.getSelectionPosition();
+    if (!pos) {
+      setXtermSelection(null);
+      return;
+    }
+    const viewportY = terminal.buffer.active.viewportY;
+    const startRow = pos.start.y - viewportY;
+    const endRow = pos.end.y - viewportY;
+    // Anchor on the first selected row that is on screen; none → no button.
+    if (endRow < 0 || startRow >= terminal.rows) {
+      setXtermSelection(null);
+      return;
+    }
+    const row = Math.max(startRow, 0);
+    const col = row === startRow ? pos.start.x : 0;
+    const rowEl = terminal.element?.querySelectorAll<HTMLElement>(".xterm-rows > div")[row];
+    const rowRect = rowEl?.getBoundingClientRect();
+    if (!rowRect || rowRect.width === 0) {
+      setXtermSelection(null);
+      return;
+    }
+    const cellWidth = rowRect.width / terminal.cols;
+    setXtermSelection(
+      placeAboveSelection(
+        { top: rowRect.top, bottom: rowRect.bottom, left: rowRect.left + col * cellWidth },
+        host.getBoundingClientRect()
+      )
+    );
+  }, []);
+
+  const handleXtermPointerDown = useCallback(() => {
+    pointerDownRef.current = true;
+    setXtermSelection(null);
+    // The drag may end outside the terminal; window sees it regardless.
+    window.addEventListener(
+      "pointerup",
+      () => {
+        pointerDownRef.current = false;
+        placeXtermSelection();
+      },
+      { once: true }
+    );
+  }, [placeXtermSelection]);
+
+  const copyXtermSelection = async () => {
+    const text = terminalRef.current?.getSelection() ?? "";
+    setXtermSelection(null);
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Copied selection");
+    } catch {
+      toast.error("Failed to copy to clipboard");
+    }
+  };
+
   // Initialize terminal
   useEffect(() => {
     if (!containerRef.current || terminalRef.current) return;
@@ -406,6 +487,11 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
       });
     }
 
+    // Selection cleared → button goes; changed or scrolled → re-anchor
+    // (no-op while the pointer is down).
+    terminal.onSelectionChange(placeXtermSelection);
+    terminal.onScroll(placeXtermSelection);
+
     // Handle resize (only in PTY mode)
     if (isPty && onResize) {
       terminal.onResize(({ cols, rows }) => {
@@ -431,7 +517,7 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
       pendingHistRef.current = "";
       pendingLiveRef.current = "";
     };
-  }, [isPty, onInput, onResize, tryFitAndFlush, scheduleFitRetry, logResize]);
+  }, [isPty, onInput, onResize, tryFitAndFlush, scheduleFitRetry, logResize, placeXtermSelection]);
 
   // Write new logs to terminal
   useEffect(() => {
@@ -672,6 +758,7 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
         }
       >
         <div
+          ref={layerRef}
           className={cn(
             "relative h-full w-full",
             maximized &&
@@ -680,7 +767,14 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
         >
           {/* opacity (not visibility/display) keeps the container measurable for
               fit() and xterm's renderer active while concealed pre-reveal. */}
-          <div ref={containerRef} className={cn("h-full w-full", !revealed && "opacity-0")} />
+          <div
+            ref={containerRef}
+            onPointerDown={handleXtermPointerDown}
+            className={cn("h-full w-full", !revealed && "opacity-0")}
+          />
+          {xtermSelection && !filterResult && (
+            <SelectionCopyButton anchor={xtermSelection} onCopy={copyXtermSelection} />
+          )}
           {filterResult && (
             <TerminalFilterView
               lines={filterResult.lines}
