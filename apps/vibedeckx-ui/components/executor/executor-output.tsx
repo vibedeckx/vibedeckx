@@ -5,12 +5,15 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { Circle, Square, Info, Copy, Maximize2, Minimize2 } from "lucide-react";
+import { Circle, Square, Info, Copy, ListFilter, Maximize2, Minimize2 } from "lucide-react";
 import { toast } from "sonner";
 import type { LogMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { matchTabShortcut } from "@/lib/tab-shortcuts";
+import { applyFilters, collectLogicalLines, type TerminalFilter } from "@/lib/terminal-filter";
 import { useTerminalSettings } from "@/hooks/use-terminal-settings";
+import { TerminalFilterBar } from "./terminal-filter-bar";
+import { TerminalFilterView } from "./terminal-filter-view";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -111,6 +114,25 @@ export function ExecutorOutput({
   // and pushes the larger geometry to the PTY (and the smaller one on
   // restore). Escape is not bound — it is a live keystroke for the shell.
   const [maximized, setMaximized] = useState(false);
+  // Line filter = a read-only overlay over the rendered buffer (see
+  // lib/terminal-filter.ts for why it is not a transform of the byte stream).
+  // The xterm underneath keeps receiving writes and fitting as normal; the
+  // overlay is recomputed from `buffer.active` whenever a write has parsed.
+  const [filters, setFilters] = useState<TerminalFilter[]>([]);
+  const [filterInputOpen, setFilterInputOpen] = useState(false);
+  const [filterResult, setFilterResult] = useState<{ lines: string[]; total: number } | null>(null);
+  // Bumped when the init effect creates a Terminal (so the filter subscription
+  // re-attaches to the live instance, not a disposed one) and when the buffer
+  // is reset() on a log clear — reset() does not fire onWriteParsed, so
+  // without this a filtered view would keep showing the cleared output until
+  // the next write.
+  const [terminalEpoch, setTerminalEpoch] = useState(0);
+  const filterActive = filters.length > 0;
+  // While the overlay covers the terminal, keystrokes must not reach the shell
+  // (the user cannot see the echo). Read via ref inside the onData handler,
+  // which is bound once at terminal creation.
+  const filterActiveRef = useRef(filterActive);
+  filterActiveRef.current = filterActive;
   const processIdRef = useRef(processId);
   useEffect(() => {
     processIdRef.current = processId;
@@ -369,11 +391,16 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
 
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    setTerminalEpoch((n) => n + 1);
 
     // Handle user input (only in PTY mode)
     if (isPty && onInput) {
       terminal.onData((data) => {
-        if (!muteInputRef.current && historyParseMuteRef.current === 0) {
+        if (
+          !muteInputRef.current &&
+          historyParseMuteRef.current === 0 &&
+          !filterActiveRef.current
+        ) {
           onInput(data);
         }
       });
@@ -413,6 +440,7 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     // Logs were cleared (e.g., on WebSocket reconnect) — reset terminal
     if (logs.length < lastLogIndexRef.current) {
       terminalRef.current.reset();
+      setTerminalEpoch((n) => n + 1);
       lastLogIndexRef.current = 0;
       pendingHistRef.current = "";
       pendingLiveRef.current = "";
@@ -476,16 +504,77 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
 
   // Hand the enlarged terminal keyboard focus so the user can type right away;
   // the fit itself is driven by the ResizeObserver reacting to the new size.
+  // Not while filtered: the overlay hides the terminal, so focusing it would
+  // invite blind typing (input is also gated off in onData above). Nor while
+  // the filter box is open — removing the last chip with Backspace must not
+  // yank focus out of the box mid-edit; closeFilterInput hands it over on Esc.
   useEffect(() => {
-    if (maximized && isPty) terminalRef.current?.focus();
-  }, [maximized, isPty]);
+    if (maximized && isPty && !filterActive && !filterInputOpen) {
+      terminalRef.current?.focus();
+    }
+  }, [maximized, isPty, filterActive, filterInputOpen]);
+
+  // Recompute the filtered view from the rendered buffer. A full re-scan per
+  // parsed write is cheap (substring match over ≤100k rows) and avoids any
+  // incremental bookkeeping across reset()/reconnect; rAF coalesces bursts.
+  useEffect(() => {
+    if (!filterActive) {
+      setFilterResult(null);
+      return;
+    }
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    let raf: number | null = null;
+    const recompute = () => {
+      raf = null;
+      const lines = collectLogicalLines(terminal.buffer.active);
+      setFilterResult({ lines: applyFilters(lines, filters), total: lines.length });
+    };
+    recompute();
+    const sub = terminal.onWriteParsed(() => {
+      if (raf === null) raf = requestAnimationFrame(recompute);
+    });
+    return () => {
+      sub.dispose();
+      if (raf !== null) cancelAnimationFrame(raf);
+    };
+  }, [filters, filterActive, terminalEpoch]);
+
+  const addFilter = useCallback((filter: Omit<TerminalFilter, "id">) => {
+    setFilters((prev) => [...prev, { ...filter, id: `${Date.now()}-${prev.length}` }]);
+  }, []);
+
+  const removeFilter = useCallback((id: string) => {
+    setFilters((prev) => prev.filter((f) => f.id !== id));
+  }, []);
+
+  // Closing the box hands focus back to the shell — but only when no filter
+  // is left, since the overlay covers the terminal while one is active.
+  const closeFilterInput = useCallback(() => {
+    setFilterInputOpen(false);
+    if (isPty && filters.length === 0) terminalRef.current?.focus();
+  }, [isPty, filters.length]);
+
+  const copyFilteredLines = async () => {
+    const text = filterResult?.lines.join("\n") ?? "";
+    if (!text) {
+      toast.info("No filtered lines to copy");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success(`Copied ${filterResult!.lines.length} filtered lines`);
+    } catch {
+      toast.error("Failed to copy to clipboard");
+    }
+  };
 
   // Only PTY windows take focus — read-only output has no stdin to type into.
   // The terminal is created in an effect, so a host calling focus() from its
   // own effect is safe: child effects run first.
   useImperativeHandle(focusHandle, () => ({
     focus: () => {
-      if (isPty) terminalRef.current?.focus();
+      if (isPty && !filterActiveRef.current) terminalRef.current?.focus();
     },
   }), [isPty]);
 
@@ -592,7 +681,53 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
           {/* opacity (not visibility/display) keeps the container measurable for
               fit() and xterm's renderer active while concealed pre-reveal. */}
           <div ref={containerRef} className={cn("h-full w-full", !revealed && "opacity-0")} />
-          <div className="absolute top-2 right-3 z-10 flex items-center gap-1.5">
+          {filterResult && (
+            <TerminalFilterView
+              lines={filterResult.lines}
+              fontSize={terminalSettings.fontSize}
+              fontFamily={terminalSettings.fontFamily}
+              isPty={isPty}
+            />
+          )}
+          {/* Chips wrap leftwards under the buttons rather than pushing them
+              off-screen; the filtered view pads its top to stay clear. */}
+          <div className="absolute top-2 right-3 z-10 flex max-w-[calc(100%-1.5rem)] flex-wrap items-center justify-end gap-1.5">
+            <TerminalFilterBar
+              filters={filters}
+              inputOpen={filterInputOpen}
+              onAdd={addFilter}
+              onRemove={removeFilter}
+              onCloseInput={closeFilterInput}
+              counts={
+                filterResult
+                  ? { matched: filterResult.lines.length, total: filterResult.total }
+                  : null
+              }
+            />
+            {filterResult && (
+              <button
+                type="button"
+                onClick={copyFilteredLines}
+                title="Copy filtered lines"
+                aria-label="Copy filtered lines"
+                className={toolbarButtonClass}
+              >
+                <Copy className="h-3 w-3" />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => (filterInputOpen ? closeFilterInput() : setFilterInputOpen(true))}
+              title={filterInputOpen ? "Close filter input" : "Filter output lines"}
+              aria-label={filterInputOpen ? "Close filter input" : "Filter output lines"}
+              aria-pressed={filterActive}
+              className={cn(
+                toolbarButtonClass,
+                filterActive && "text-sky-300 border-sky-500/70 hover:text-sky-200"
+              )}
+            >
+              <ListFilter className="h-3 w-3" />
+            </button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <button
