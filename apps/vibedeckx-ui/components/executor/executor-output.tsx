@@ -566,7 +566,13 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
         role={maximized ? "dialog" : undefined}
         aria-modal={maximized || undefined}
         aria-label={maximized ? "Maximized terminal" : undefined}
-        className={maximized ? "fixed inset-0 z-50 flex bg-black/70 p-3 sm:p-6" : "absolute inset-0"}
+        // Centered, capped window rather than edge-to-edge: wide enough for a
+        // full QR code / wide table at 13px, without turning into a wall.
+        className={
+          maximized
+            ? "fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 sm:p-10 lg:p-16"
+            : "absolute inset-0"
+        }
         // Clicking the dimmed margin (not the terminal itself) restores.
         onMouseDown={
           maximized
@@ -579,7 +585,8 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
         <div
           className={cn(
             "relative h-full w-full",
-            maximized && "overflow-hidden rounded-md border border-zinc-700 bg-zinc-950 shadow-2xl"
+            maximized &&
+              "max-h-[85vh] max-w-6xl overflow-hidden rounded-md border border-zinc-700 bg-zinc-950 shadow-2xl"
           )}
         >
           {/* opacity (not visibility/display) keeps the container measurable for
