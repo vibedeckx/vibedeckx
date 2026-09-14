@@ -1445,6 +1445,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               sessionId={session?.id ?? null}
               currentAgentType={agentType}
               providers={providers}
+              // The keyboard binding follows the button: live only while this
+              // panel is the tab on screen, not while it sits mounted behind
+              // Diff/Terminal/Files.
+              shortcutEnabled={agentTabActive}
               onStarted={(run) => onReviewStarted?.(run, displayedSessionTitle)}
             />
           )}

@@ -828,3 +828,74 @@ describe("ReviewDialog explains a vanished reviewer only when one was promised",
     expect(document.body.textContent).toContain("The last reviewer is no longer available");
   });
 });
+
+/**
+ * ⌃⇧R / Ctrl+Alt+R opens the dialog without going through the trigger — the
+ * listener lives on the window because the agent panel stays mounted behind
+ * the other workspace tabs.
+ */
+describe("ReviewDialog open shortcut", () => {
+  async function renderClosed(sessionId: string | null, shortcutEnabled = true) {
+    getReviewerCandidate.mockResolvedValue(null);
+    createWorkflowRun.mockResolvedValue({});
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <ReviewDialog
+          projectId="p1"
+          branch="dev"
+          sessionId={sessionId}
+          shortcutEnabled={shortcutEnabled}
+        />,
+      );
+    });
+  }
+
+  async function pressR(mods: KeyboardEventInit) {
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { code: "KeyR", bubbles: true, cancelable: true, ...mods }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
+
+  const isOpen = () => document.body.querySelector('[role="dialog"]') !== null;
+
+  it("opens on Ctrl+Alt+R off macOS and ignores the mac combo", async () => {
+    setPlatform("Linux x86_64");
+    await renderClosed("s-src");
+    await pressR({ ctrlKey: true, shiftKey: true });
+    expect(isOpen()).toBe(false);
+    await pressR({ ctrlKey: true, altKey: true });
+    expect(isOpen()).toBe(true);
+  });
+
+  it("opens on Ctrl+Shift+R on macOS and ignores the non-mac combo", async () => {
+    setPlatform("MacIntel");
+    await renderClosed("s-src");
+    await pressR({ ctrlKey: true, altKey: true });
+    expect(isOpen()).toBe(false);
+    await pressR({ ctrlKey: true, shiftKey: true });
+    expect(isOpen()).toBe(true);
+  });
+
+  it("stays inert with no session to review", async () => {
+    setPlatform("Linux x86_64");
+    await renderClosed(null);
+    await pressR({ ctrlKey: true, altKey: true });
+    expect(isOpen()).toBe(false);
+  });
+
+  // The panel stays mounted (invisible) behind Diff/Terminal/Files, so the
+  // binding has to follow the tab rather than the mount — and it is off by
+  // default, so a caller that never passes the flag gets no window listener.
+  it("stays inert while the Agent tab is not the one on screen", async () => {
+    setPlatform("Linux x86_64");
+    await renderClosed("s-src", false);
+    await pressR({ ctrlKey: true, altKey: true });
+    expect(isOpen()).toBe(false);
+  });
+});

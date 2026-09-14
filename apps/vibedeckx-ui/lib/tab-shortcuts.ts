@@ -1,6 +1,9 @@
-// Workspace tab shortcuts, shared between the right panel (window keydown →
-// switch tab) and xterm hosts (attachCustomKeyEventHandler → let the combo
-// bubble instead of sending control bytes to the PTY).
+// The app's ⌃⇧/Ctrl+Alt shortcut namespace: the workspace tab shortcuts plus
+// the few non-tab bindings that share the same modifier pair (Start review).
+// Shared between the right panel (window keydown → switch tab), the dialogs
+// that bind their own letter, and xterm hosts
+// (attachCustomKeyEventHandler → let the combo bubble instead of sending
+// control bytes to the PTY).
 //
 // Each tab is reachable via its label's first letter: ⌃⇧<letter> on macOS,
 // Ctrl+Alt+<letter> elsewhere. The modifier pair differs per platform because
@@ -37,16 +40,28 @@ const CODE_TO_TAB: Record<string, TabShortcutTarget> = Object.fromEntries(
 export const isMacPlatform = () =>
   typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 
+// Non-tab bindings in the same namespace, listed here so anyone picking a new
+// letter sees every claimed key. Unlike the tab shortcuts these are scoped to
+// one panel (Start review is bound only while the Agent tab is on screen), so
+// they need no xterm passthrough — no terminal is ever mounted there.
+export const REVIEW_SHORTCUT_CODE = 'KeyR';
+
 type ComboKeys = Pick<KeyboardEvent, 'ctrlKey' | 'shiftKey' | 'altKey' | 'metaKey' | 'code'>;
+
+const comboHeld = (event: ComboKeys) =>
+  isMacPlatform()
+    ? event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey
+    : event.ctrlKey && event.altKey && !event.shiftKey && !event.metaKey;
 
 /** The tab a keyboard event addresses, or null if it isn't a tab shortcut. */
 export function matchTabShortcut(event: ComboKeys): TabShortcutTarget | null {
-  const comboHeld = isMacPlatform()
-    ? event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey
-    : event.ctrlKey && event.altKey && !event.shiftKey && !event.metaKey;
-  if (!comboHeld) return null;
+  if (!comboHeld(event)) return null;
   return CODE_TO_TAB[event.code] ?? null;
 }
 
-export const tabShortcutHint = (isMac: boolean, code: string) =>
+/** Whether the event is the platform combo plus `code` — for non-tab bindings. */
+export const matchComboShortcut = (event: ComboKeys, code: string) =>
+  comboHeld(event) && event.code === code;
+
+export const comboShortcutHint = (isMac: boolean, code: string) =>
   `${isMac ? '⌃⇧' : 'Ctrl+Alt+'}${code.slice(3)}`;

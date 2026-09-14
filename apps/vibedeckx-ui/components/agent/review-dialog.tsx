@@ -19,7 +19,9 @@ import {
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { hasPriorReview, subscribeReviewedSessions } from "@/lib/workflow-runs-fetch";
-import { isMacPlatform } from "@/lib/tab-shortcuts";
+import {
+  REVIEW_SHORTCUT_CODE, comboShortcutHint, isMacPlatform, matchComboShortcut,
+} from "@/lib/tab-shortcuts";
 import { Clock, Info, Loader2, Lock, SearchCheck, Send, TriangleAlert, X } from "lucide-react";
 
 const noopSubscribe = () => () => {};
@@ -141,6 +143,7 @@ export function ReviewDialog({
   sessionId,
   currentAgentType,
   providers,
+  shortcutEnabled = false,
   onStarted,
 }: {
   projectId: string;
@@ -148,6 +151,15 @@ export function ReviewDialog({
   sessionId: string | null;
   currentAgentType?: AgentType | null;
   providers?: AgentProviderInfo[];
+  /**
+   * Whether the ⌃⇧R / Ctrl+Alt+R binding is live. The agent panel stays
+   * mounted (invisible) behind the other workspace tabs, so a window listener
+   * would otherwise fire from Diff/Terminal/Files too — the caller passes the
+   * Agent tab's on-screen flag. Defaults to off: a second mount that forgets
+   * to pass it loses the shortcut, which is far better than two dialogs
+   * opening on one keypress.
+   */
+  shortcutEnabled?: boolean;
   /**
    * The created run, in the same frame the dialog closes. The reviewer of a
    * fresh review is a pending identity for the whole distillation window
@@ -365,6 +377,24 @@ export function ReviewDialog({
     });
   }, [open, projectId, sessionId]);
 
+  // ⌃⇧R / Ctrl+Alt+R opens the dialog — the same modifier namespace as the
+  // workspace tabs (see lib/tab-shortcuts.ts). Bound only while the Agent tab
+  // is the one on screen, matching the button it stands in for: the panel is
+  // still mounted behind the other tabs, so an ungated listener would fire
+  // from Diff/Terminal/Files as well. Opening only: a repeat press is a no-op
+  // rather than a toggle, so a stray second press can't discard a typed
+  // review focus.
+  useEffect(() => {
+    if (!sessionId || !shortcutEnabled) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!matchComboShortcut(event, REVIEW_SHORTCUT_CODE)) return;
+      event.preventDefault();
+      setOpen(true);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [sessionId, shortcutEnabled]);
+
   if (!sessionId) return null;
 
   // The one way the dialog closes — the programmatic close after a successful
@@ -512,7 +542,11 @@ export function ReviewDialog({
   return (
     <Dialog open={open} onOpenChange={setDialogOpen}>
       <DialogTrigger asChild>
-        <Button variant="ghost" size="sm" title="让另一个 agent review 这个 session 的最新成果">
+        <Button
+          variant="ghost"
+          size="sm"
+          title={`让另一个 agent review 这个 session 的最新成果 (${comboShortcutHint(isMac, REVIEW_SHORTCUT_CODE)})`}
+        >
           <SearchCheck className="h-4 w-4" />
         </Button>
       </DialogTrigger>

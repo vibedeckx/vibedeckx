@@ -4,7 +4,7 @@
 // entries derive from lib/tab-shortcuts.ts (the same data the bindings and
 // tooltips use), so the overlay can't drift from the actual keys.
 
-import { TAB_SHORTCUTS, tabShortcutHint } from './tab-shortcuts';
+import { REVIEW_SHORTCUT_CODE, TAB_SHORTCUTS, comboShortcutHint } from './tab-shortcuts';
 
 export interface ShortcutEntry {
   /** Rendered as <kbd> chips, one per alternative binding. */
@@ -29,6 +29,12 @@ export function shortcutGroups(isMac: boolean): ShortcutGroup[] {
         { hints: [meta(isMac, 'J')], description: 'Notifications' },
         { hints: [meta(isMac, 'B')], description: 'Toggle sidebar' },
         { hints: [metaShift(isMac, 'O')], description: 'New agent conversation' },
+        {
+          // Shares the tab shortcuts' modifier pair, not ⌘/Ctrl — see
+          // lib/tab-shortcuts.ts for why that namespace exists.
+          hints: [comboShortcutHint(isMac, REVIEW_SHORTCUT_CODE)],
+          description: 'Start review of this session',
+        },
         { hints: ['a…z'], description: 'Locate workspace (type, ↑↓ cycle, ↵ jump)' },
         { hints: ['Esc'], description: 'Clear locate query / unfocus right panel' },
         { hints: ['?', meta(isMac, '/')], description: 'This dialog' },
@@ -38,7 +44,7 @@ export function shortcutGroups(isMac: boolean): ShortcutGroup[] {
       title: 'Workspace tabs',
       entries: [
         ...TAB_SHORTCUTS.map((t) => ({
-          hints: [tabShortcutHint(isMac, t.code)],
+          hints: [comboShortcutHint(isMac, t.code)],
           description: `Open ${t.label}`,
         })),
         { hints: ['←', '→'], description: 'Switch executor target (Executors focused)' },

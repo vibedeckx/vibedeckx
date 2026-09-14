@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { matchTabShortcut, tabShortcutHint } from "./tab-shortcuts";
+import { comboShortcutHint, matchComboShortcut, matchTabShortcut } from "./tab-shortcuts";
 
 const realPlatform = Object.getOwnPropertyDescriptor(Navigator.prototype, "platform");
 
@@ -44,9 +44,22 @@ describe("matchTabShortcut", () => {
   });
 });
 
-describe("tabShortcutHint", () => {
+describe("comboShortcutHint", () => {
   it("renders per-platform hints", () => {
-    expect(tabShortcutHint(true, "KeyD")).toBe("⌃⇧D");
-    expect(tabShortcutHint(false, "KeyD")).toBe("Ctrl+Alt+D");
+    expect(comboShortcutHint(true, "KeyD")).toBe("⌃⇧D");
+    expect(comboShortcutHint(false, "KeyD")).toBe("Ctrl+Alt+D");
+  });
+});
+
+describe("matchComboShortcut", () => {
+  it("matches the platform combo plus the given key, and nothing else", () => {
+    setPlatform("Linux x86_64");
+    expect(matchComboShortcut(key("KeyR", { ctrlKey: true, altKey: true }), "KeyR")).toBe(true);
+    expect(matchComboShortcut(key("KeyT", { ctrlKey: true, altKey: true }), "KeyR")).toBe(false);
+    expect(matchComboShortcut(key("KeyR", { ctrlKey: true, shiftKey: true }), "KeyR")).toBe(false);
+    expect(matchComboShortcut(key("KeyR", { ctrlKey: true }), "KeyR")).toBe(false);
+    setPlatform("MacIntel");
+    expect(matchComboShortcut(key("KeyR", { ctrlKey: true, shiftKey: true }), "KeyR")).toBe(true);
+    expect(matchComboShortcut(key("KeyR", { ctrlKey: true, altKey: true }), "KeyR")).toBe(false);
   });
 });

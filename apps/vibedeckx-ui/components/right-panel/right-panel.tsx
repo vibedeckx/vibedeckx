@@ -10,7 +10,7 @@ import { PreviewPanel } from '@/components/preview';
 import { FilesView } from '@/components/files';
 import type { Project, ExecutionMode } from '@/lib/api';
 import { FileNavigationProvider } from '@/components/agent/file-navigation-context';
-import { matchTabShortcut, isMacPlatform, tabShortcutHint, TAB_SHORTCUTS, type TabShortcutTarget } from '@/lib/tab-shortcuts';
+import { matchTabShortcut, isMacPlatform, comboShortcutHint, TAB_SHORTCUTS, type TabShortcutTarget } from '@/lib/tab-shortcuts';
 import { useFileRefIndex } from '@/hooks/use-file-ref-index';
 import { AgentTabFocusProvider } from '@/hooks/agent-tab-focus-context';
 import { useFocusRegion } from '@/components/locate/focus-region';
@@ -239,7 +239,7 @@ export function RightPanel({
                 if (id === 'agent') requestAgentFocus();
                 if (id === 'executors') requestExecutorFocus();
               }}
-              title={`${label} (${tabShortcutHint(isMac, code)})`}
+              title={`${label} (${comboShortcutHint(isMac, code)})`}
               className={cn(
                 'flex items-center gap-0.5 py-2.5 text-xs font-medium border-b-2 transition-colors',
                 // Two-level selection: which tab is open (always visible) vs
