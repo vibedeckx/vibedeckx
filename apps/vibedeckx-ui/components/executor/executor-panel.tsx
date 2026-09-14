@@ -44,6 +44,9 @@ interface ExecutorPanelProps {
 // Custom collision detection that only considers the header region (52px) of each item
 const HEADER_HEIGHT = 52;
 
+// Breathing room left above/below a row when scrolling it into full view.
+const REVEAL_MARGIN = 12;
+
 const headerOnlyCollision: CollisionDetection = (args) => {
   const { droppableContainers, pointerCoordinates } = args;
 
@@ -143,6 +146,53 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
   const revealExecutor = useCallback((id: string) => {
     document.querySelector(`[data-locate-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "nearest" });
   }, []);
+  // Expanding a row near the fold pushes its output (a fixed-height terminal)
+  // past the bottom of the list, so an open scrolls the whole row back into
+  // view. scrollIntoView({block:"nearest"}) can't do this job: for a row too
+  // tall to fit it aligns the bottom edge and shoves the header — with the
+  // Start/Stop button — off the top, so measure and scroll by hand.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const revealExpandedExecutor = useCallback((id: string) => {
+    const scroller = scrollRef.current;
+    const row = scroller?.querySelector(`[data-locate-id="${CSS.escape(id)}"]`);
+    if (!scroller || !row) return;
+    const rowRect = row.getBoundingClientRect();
+    const viewRect = scroller.getBoundingClientRect();
+    let delta = 0;
+    if (rowRect.height > viewRect.height) {
+      // Taller than the panel: show it from the top, header first.
+      delta = rowRect.top - viewRect.top;
+    } else if (rowRect.bottom > viewRect.bottom) {
+      // Never scroll so far down that the header leaves the top edge.
+      delta = Math.max(0, Math.min(rowRect.bottom + REVEAL_MARGIN - viewRect.bottom, rowRect.top - viewRect.top));
+    } else if (rowRect.top < viewRect.top) {
+      delta = rowRect.top - REVEAL_MARGIN - viewRect.top;
+    }
+    if (Math.abs(delta) < 1) return;
+    const top = scroller.scrollTop + delta;
+    if (typeof scroller.scrollTo === "function") scroller.scrollTo({ top, behavior: "smooth" });
+    else scroller.scrollTop = top;
+  }, []);
+  // One funnel for every way a row opens or closes — Space, Enter/Start, a
+  // click on the header, or the auto-open when Main Chat starts the process —
+  // since they all land in this set. An effect rather than a scroll next to
+  // each call site: React runs it after the DOM commit, so the height we
+  // measure is the one the row just took, with no guessing about when the
+  // re-render lands.
+  const prevOpenRef = useRef(openExecutors);
+  useEffect(() => {
+    const prev = prevOpenRef.current;
+    prevOpenRef.current = openExecutors;
+    const opened = [...openExecutors].filter((id) => !prev.has(id));
+    if (opened.length > 0) {
+      revealExpandedExecutor(opened[opened.length - 1]);
+      return;
+    }
+    // Collapsing shrinks the row, which can drag it out of view when the list
+    // above it reflows; keep it where the user can see what they just closed.
+    const closed = [...prev].filter((id) => !openExecutors.has(id));
+    if (closed.length > 0) revealExecutor(closed[closed.length - 1]);
+  }, [openExecutors, revealExpandedExecutor, revealExecutor]);
   // Enter = press the row's Start/Stop button, exactly as a click would
   // (ExecutorItem owns that logic, so we click the marked DOM button) —
   // including the pressed flash, which a bare .click() would skip.
@@ -152,27 +202,27 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
     const action = row?.querySelector<HTMLButtonElement>("[data-locate-action]");
     if (action) clickWithPressFeedback(action);
   }, []);
+  // Opening is revealed by the effect above. A row that was already open
+  // renders nothing new, so no state change reaches the effect — its geometry
+  // is final right here, and the scroll can just happen.
   const openExecutorOutput = useCallback(
     (id: string) => {
+      const alreadyOpen = openExecutors.has(id);
       setOpenExecutors((prev) => new Set(prev).add(id));
-      requestAnimationFrame(() => revealExecutor(id));
+      if (alreadyOpen) revealExpandedExecutor(id);
     },
-    [revealExecutor],
+    [openExecutors, revealExpandedExecutor],
   );
   // Space on the idle cursor toggles, so the key that opened a row also puts
   // it away. The locate path stays open-only: you typed a query to see that
   // row, and collapsing an already-open one there would read as a no-op.
-  const toggleExecutorOutput = useCallback(
-    (id: string) => {
-      setOpenExecutors((prev) => {
-        const next = new Set(prev);
-        if (!next.delete(id)) next.add(id);
-        return next;
-      });
-      requestAnimationFrame(() => revealExecutor(id));
-    },
-    [revealExecutor],
-  );
+  const toggleExecutorOutput = useCallback((id: string) => {
+    setOpenExecutors((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  }, []);
 
   // The current executor: a cursor that exists even with no query typed, so
   // entering the tab always has something marked to act on. Stored loosely and
@@ -377,7 +427,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
         </Button>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto" ref={scrollRef}>
         <div className="p-4 space-y-3" ref={listRef} onPointerDown={handleListPointerDown}>
           {loading ? (
             <div className="text-center text-muted-foreground py-8">
