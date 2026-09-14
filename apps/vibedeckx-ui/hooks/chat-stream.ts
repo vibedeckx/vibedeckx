@@ -46,7 +46,12 @@ export interface ChatStreamState {
   messages: AgentMessage[];
   status: AgentSessionStatus;
   isConnected: boolean;
-  /** True once the server's replay has been applied (`Ready`). */
+  /**
+   * True once the transcript on screen is trustworthy enough to act on: the
+   * create-or-get response (authoritative at that instant), a warm snapshot
+   * (what was on screen when the user left), or the socket's `Ready`. Gates
+   * the empty state and the composer.
+   */
   isInitialized: boolean;
   /** True while the create-or-get session request is in flight. */
   isLoading: boolean;
@@ -300,8 +305,12 @@ export class ChatStream {
     // The session row is known from the first paint too (header controls and
     // the listening flag need it), whether or not a transcript was snapshotted.
     const session = warm?.session ?? sessionCache.get(this.key) ?? null;
+    // A snapshot is shown as initialized straight away — an empty one renders
+    // the empty state on the first frame rather than a blank pane until Ready.
+    // Anything that changed while the user was away (an executor event pushed
+    // in, a reset elsewhere) arrives with the replay and replaces it.
     this.state = warm
-      ? { ...EMPTY_CHAT_STREAM_STATE, session, messages: warm.messages, status: warm.status, draft }
+      ? { ...EMPTY_CHAT_STREAM_STATE, session, messages: warm.messages, status: warm.status, isInitialized: true, draft }
       : { ...EMPTY_CHAT_STREAM_STATE, session, draft };
   }
 
@@ -362,7 +371,7 @@ export class ChatStream {
     if (!this.active) return;
     const epoch = this.epoch;
     this.lastStartFailed = false;
-    this.set({ error: null, isInitialized: false });
+    this.set({ error: null });
 
     const cached = sessionCache.get(this.key);
     if (cached) {
@@ -383,11 +392,10 @@ export class ChatStream {
       const { session, messages } = await createOrGetChatSession(this.projectId, this.branch);
       if (epoch !== this.epoch) return;
       sessionCache.set(this.key, session);
-      this.set({
-        session,
-        status: session.status,
-        ...(messages && messages.length > 0 ? { messages } : {}),
-      });
+      // The response carries the full transcript as of now — the same list the
+      // socket will replay. Show it (or the empty state) immediately; the
+      // socket is the live channel, not a prerequisite for the first paint.
+      this.set({ session, status: session.status, messages: messages ?? [], isInitialized: true });
       this.connect();
     } catch (e) {
       if (epoch !== this.epoch) return;
@@ -401,14 +409,21 @@ export class ChatStream {
   private async refreshSessionMetadata(epoch: number): Promise<void> {
     const writes = this.metadataWrites;
     try {
-      const { session } = await createOrGetChatSession(this.projectId, this.branch);
+      const { session, messages } = await createOrGetChatSession(this.projectId, this.branch);
       if (epoch !== this.epoch) return;
       // The user changed metadata while this read was in flight: the read is
       // older than what the server now holds. Drop it.
       if (writes !== this.metadataWrites) return;
       // Same session: adopt its current metadata. A different id means the
       // hub restarted; the short-lived-connection path already handles that.
-      if (session.id === this.state.session?.id) this.adoptSession(session);
+      if (session.id !== this.state.session?.id) return;
+      this.adoptSession(session);
+      // Cached id but no snapshot (evicted): nothing was initialized from a
+      // warm state, so this response is the first authoritative transcript.
+      // Ready may still be pending; when it lands it replaces this anyway.
+      if (!this.state.isInitialized) {
+        this.set({ messages: messages ?? [], isInitialized: true });
+      }
     } catch {
       // Metadata refresh is best-effort; the cached row stays in effect.
     }

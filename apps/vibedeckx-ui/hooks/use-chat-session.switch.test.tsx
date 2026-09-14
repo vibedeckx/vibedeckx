@@ -150,7 +150,48 @@ describe("Main Chat workspace switch", () => {
     await render("dev");
     // Every render since the switch belongs to `dev`: empty until its replay.
     for (const r of renders) expect(r.messages).toEqual([]);
+    // …and `dev` is already initialized from its create-or-get response (an
+    // empty transcript), so the empty state shows before any socket frame.
+    expect(FakeWebSocket.instances[1].readyState).toBe(FakeWebSocket.CONNECTING);
+    expect(latest().isInitialized).toBe(true);
+  });
+
+  it("shows the empty state for a first visit as soon as create-or-get returns", async () => {
+    // Before the response: loading, not initialized.
+    let resolveCreate: (r: Response) => void = () => {};
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveCreate = resolve; }));
+    await render("main");
+    expect(latest().isLoading).toBe(true);
     expect(latest().isInitialized).toBe(false);
+
+    await act(async () => {
+      resolveCreate({
+        ok: true,
+        json: async () => ({ session: { id: "chat-main", projectId: "p1", branch: "main", status: "stopped" }, messages: [] }),
+      } as unknown as Response);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // Initialized with an empty transcript while the socket is still connecting.
+    expect(latest().isLoading).toBe(false);
+    expect(latest().isInitialized).toBe(true);
+    expect(latest().messages).toEqual([]);
+    expect(FakeWebSocket.instances[0].readyState).toBe(FakeWebSocket.CONNECTING);
+  });
+
+  it("shows a revisited empty workspace's empty state on the first render", async () => {
+    await render("main");
+    await act(async () => { FakeWebSocket.instances[0].open(); FakeWebSocket.instances[0].replay([]); });
+    await render("dev");
+
+    renders = [];
+    await render("main");
+    expect(renders[0].messages).toEqual([]);
+    expect(renders[0].isInitialized).toBe(true);
+
+    // A message that arrived while away shows up with the replay.
+    const sock = FakeWebSocket.instances[2];
+    await act(async () => { sock.open(); sock.replay(["[Executor Event: build finished]"]); });
+    expect(latest().messages.map((m) => "content" in m && m.content)).toEqual(["[Executor Event: build finished]"]);
   });
 
   it("paints a revisited workspace's last transcript on the first render", async () => {
@@ -163,8 +204,8 @@ describe("Main Chat workspace switch", () => {
     // First paint already carries the cached transcript, before any frame.
     expect(renders[0].messages.map((m) => "content" in m && m.content)).toEqual(["from main"]);
     expect(renders[0].session?.id).toBe("chat-main");
-    // …but the input stays gated until the live replay confirms.
-    expect(renders[0].isInitialized).toBe(false);
+    // …and is initialized from it: the composer opens on the first frame.
+    expect(renders[0].isInitialized).toBe(true);
 
     const sock = FakeWebSocket.instances[2];
     expect(sock.url).toBe("ws://test/api/chat-sessions/chat-main/stream");
