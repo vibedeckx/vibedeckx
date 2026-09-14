@@ -49,7 +49,11 @@ interface PendingApproval {
 }
 
 interface ChatStore {
-  patches: Patch[];
+  // Terminal state only, indexed by entry index. There is deliberately no
+  // patch log: replaying one keeps every streaming delta (each carrying the
+  // full accumulated text so far), so a 200-chunk answer replays as 200 frames
+  // and ~100x its final byte size. subscribe() derives add-patches from
+  // `entries` instead, one per message, at its current content.
   entries: AgentMessage[];
   nextIndex: number;
 }
@@ -1178,7 +1182,7 @@ export class ChatSessionManager {
       projectId,
       branch,
       userId,
-      store: { patches: [], entries: [], nextIndex: 0 },
+      store: { entries: [], nextIndex: 0 },
       subscribers: new Set(),
       status: "stopped",
       abortController: null,
@@ -1266,9 +1270,21 @@ export class ChatSessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
 
-    // Replay all historical patches
-    for (const patch of session.store.patches) {
-      const msg: AgentWsMessage = { JsonPatch: patch };
+    // Replay the conversation as ONE frame of add-patches built from the
+    // terminal entries — each message once, at its current content. The client
+    // applies a whole frame in a single Immer pass and only flushes on Ready,
+    // so this is the cheapest shape for it too. `entries` is index-addressed;
+    // skip holes defensively (none are produced today: every nextIndex++ is
+    // followed by an immediate assignment).
+    const { entries } = session.store;
+    const replay: Patch = [];
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (!entry) continue;
+      replay.push(...ConversationPatch.addEntry(i, entry));
+    }
+    if (replay.length > 0) {
+      const msg: AgentWsMessage = { JsonPatch: replay };
       try {
         ws.send(JSON.stringify(msg));
       } catch {
@@ -2672,7 +2688,6 @@ export class ChatSessionManager {
         const resolved: AgentMessage = { ...entry, resolved: approved ? "approved" : "denied" };
         session.store.entries[entryIndex] = resolved;
         const patch = ConversationPatch.replaceEntry(entryIndex, resolved);
-        session.store.patches.push(patch);
         this.broadcastPatch(session, patch);
       }
     }
@@ -2781,7 +2796,6 @@ export class ChatSessionManager {
               session.store.nextIndex++;
 
               const patch = ConversationPatch.addEntry(assistantIndex, assistantMsg);
-              session.store.patches.push(patch);
               session.store.entries[assistantIndex] = assistantMsg;
               this.broadcastPatch(session, patch);
             } else {
@@ -2793,7 +2807,6 @@ export class ChatSessionManager {
                 timestamp: Date.now(),
               };
               const patch = ConversationPatch.replaceEntry(assistantIndex, assistantMsg);
-              session.store.patches.push(patch);
               session.store.entries[assistantIndex] = assistantMsg;
               this.broadcastPatch(session, patch);
             }
@@ -2810,7 +2823,6 @@ export class ChatSessionManager {
                 timestamp: Date.now(),
               };
               const patch = ConversationPatch.replaceEntry(assistantIndex, finalMsg);
-              session.store.patches.push(patch);
               session.store.entries[assistantIndex] = finalMsg;
               this.broadcastPatch(session, patch);
             }
@@ -2869,7 +2881,6 @@ export class ChatSessionManager {
           timestamp: Date.now(),
         };
         const patch = ConversationPatch.replaceEntry(assistantIndex, finalMsg);
-        session.store.patches.push(patch);
         session.store.entries[assistantIndex] = finalMsg;
         this.broadcastPatch(session, patch);
       }
@@ -2971,7 +2982,6 @@ export class ChatSessionManager {
             timestamp: Date.now(),
           };
           const patch = ConversationPatch.replaceEntry(assistantIndex, finalMsg);
-          session.store.patches.push(patch);
           session.store.entries[assistantIndex] = finalMsg;
           this.broadcastPatch(session, patch);
         }
@@ -3057,7 +3067,6 @@ export class ChatSessionManager {
     session.pendingApproval = null;
 
     // Clear the message store
-    session.store.patches = [];
     session.store.entries = [];
     session.store.nextIndex = 0;
     session.status = "stopped";
@@ -3085,14 +3094,13 @@ export class ChatSessionManager {
     session.store.nextIndex++;
 
     const patch = ConversationPatch.addEntry(index, entry);
-    session.store.patches.push(patch);
     session.store.entries[index] = entry;
     this.broadcastPatch(session, patch);
   }
 
   private broadcastPatch(session: ChatSession, patch: Patch): void {
     // A new message with nobody listening isn't lost (subscribe() replays the
-    // patch log on reconnect), but it's the first thing to check when a client
+    // terminal entries on reconnect), but it's the first thing to check when a client
     // reports a missing message.
     if (session.subscribers.size === 0 && patch.some(p => p.value?.type === "ENTRY")) {
       console.debug(`[ChatSession] broadcastPatch: ENTRY patch but 0 subscribers for session ${session.id}`);

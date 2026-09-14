@@ -1165,7 +1165,16 @@ Please proceed step by step and let me know if there are any issues or conflicts
                     </div>
                   )}
                   <div className="flex-1 overflow-hidden">
-                    <MainConversation ref={mainChatRef} projectId={currentProject?.id ?? null} branch={selectedBranch} />
+                    {/* Keyed on the workspace: a different workspace is a different
+                        conversation, so its UI state (draft, scroll, run panel) resets by
+                        remount instead of by Effects (react.dev "Resetting all state when
+                        a prop changes"). */}
+                    <MainConversation
+                      key={`${currentProject?.id ?? ""}:${selectedBranch ?? ""}`}
+                      ref={mainChatRef}
+                      projectId={currentProject?.id ?? null}
+                      branch={selectedBranch}
+                    />
                   </div>
                 </div>
               </ResizablePanel>

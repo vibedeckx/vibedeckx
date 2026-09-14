@@ -97,6 +97,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
     restartSession,
     workflowRunUpdate,
     streamEpoch,
+    draft,
+    setDraft,
+    setEventListening,
   } = useChatSession(projectId, branch);
 
   const { settings: convSettings } = useConversationSettings();
@@ -110,15 +113,10 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
     },
   }), [sendMessage]);
 
-  const [inputValue, setInputValue] = useState("");
-  const [eventListeningEnabled, setEventListeningEnabled] = useState(false);
-
-  // Sync button state when backend auto-enables event listening (e.g. via runExecutor tool)
-  useEffect(() => {
-    if (session?.eventListeningEnabled != null) {
-      setEventListeningEnabled(session.eventListeningEnabled);
-    }
-  }, [session?.eventListeningEnabled]);
+  // Draft and the listening flag live in the chat store, not here: this
+  // component is keyed on the workspace and remounts on switch, and neither
+  // may be lost (draft) or reset to a guess (flag) when that happens.
+  const eventListeningEnabled = session?.eventListeningEnabled ?? false;
 
   const isGenerating = status === "running";
 
@@ -126,10 +124,10 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
     async (message: { text: string }) => {
       const text = message.text.trim();
       if (!text) return;
-      setInputValue("");
+      setDraft("");
       await sendMessage(text);
     },
-    [sendMessage]
+    [sendMessage, setDraft]
   );
 
   if (!projectId) {
@@ -165,10 +163,8 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
               variant="ghost"
               size="icon"
               onClick={async () => {
-                const newVal = !eventListeningEnabled;
                 try {
-                  await api.setChatEventListening(session.id, newVal);
-                  setEventListeningEnabled(newVal);
+                  await setEventListening(!eventListeningEnabled);
                 } catch {
                   toast.error("Failed to toggle event listening");
                 }
@@ -414,8 +410,8 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             }
             className="pr-12"
             style={{ fontSize: "var(--conv-font-size, 14px)" }}
-            value={inputValue}
-            onChange={(e) => setInputValue(e.currentTarget.value)}
+            value={draft}
+            onChange={(e) => setDraft(e.currentTarget.value)}
           />
           {/* Wrapper height = one textarea line (1lh must match the
               textarea's font classes; 1.5rem = its py-3): centered on a
@@ -429,7 +425,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
           >
             <PromptInputSubmit
               className="pointer-events-auto"
-              disabled={!isInitialized || isGenerating || !inputValue.trim()}
+              disabled={!isInitialized || isGenerating || !draft.trim()}
             />
           </div>
         </PromptInput>
