@@ -52,11 +52,17 @@ vi.mock("./executor-item", () => ({
   ExecutorItem: ({
     executor,
     keyboardSelected,
+    isOpen,
   }: {
     executor: { id: string; name: string };
     keyboardSelected?: boolean;
+    isOpen?: boolean;
   }) => (
-    <div data-locate-id={executor.id} data-marked={keyboardSelected ? "yes" : "no"}>
+    <div
+      data-locate-id={executor.id}
+      data-marked={keyboardSelected ? "yes" : "no"}
+      data-open={isOpen ? "yes" : "no"}
+    >
       {executor.name}
       <button data-locate-action onClick={() => commits.push(executor.id)}>
         run
@@ -95,6 +101,9 @@ afterEach(() => {
 });
 
 const marked = () => container!.querySelector('[data-marked="yes"]')?.getAttribute("data-locate-id") ?? null;
+
+const isOpen = (id: string) =>
+  container!.querySelector(`[data-locate-id="${id}"]`)?.getAttribute("data-open") === "yes";
 
 // A tab click claims the keyboard region; a tab restored from storage on page
 // load does not, which is why every keyboard test opts in explicitly.
@@ -161,6 +170,52 @@ describe("executor panel keyboard cursor", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Space is the output area's toggle, not a one-way reveal: pressing it
+  // twice on the same row opens and then closes it.
+  it("toggles the current executor's output on Space", () => {
+    claimRegion();
+    press("ArrowDown");
+    expect(isOpen("e2")).toBe(false);
+    press(" ");
+    expect(isOpen("e2")).toBe(true);
+    expect(marked()).toBe("e2");
+    press(" ");
+    expect(isOpen("e2")).toBe(false);
+  });
+
+  // The other way into the idle state: click a row instead of walking to it.
+  // The row header is a Collapsible trigger on a plain div, so the click
+  // leaves no button holding the keyboard and Space reaches the cursor.
+  it("toggles the output of a row selected by click", () => {
+    claimRegion();
+    act(() => {
+      container!
+        .querySelector('[data-locate-id="e3"]')!
+        .dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+    expect(marked()).toBe("e3");
+    press(" ");
+    expect(isOpen("e3")).toBe(true);
+    expect(isOpen("e1")).toBe(false);
+    press(" ");
+    expect(isOpen("e3")).toBe(false);
+  });
+
+  it("ignores Space until the panel owns the keyboard", () => {
+    press(" ");
+    expect(isOpen("e1")).toBe(false);
+    claimRegion();
+    press(" ");
+    expect(isOpen("e1")).toBe(true);
+  });
+
+  it("leaves Space alone when a button already owns it", () => {
+    claimRegion();
+    const button = container!.querySelector("[data-locate-action]")!;
+    press(" ", button);
+    expect(isOpen("e1")).toBe(false);
   });
 
   it("leaves Enter alone when a button already owns it", () => {

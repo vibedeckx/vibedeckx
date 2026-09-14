@@ -159,6 +159,20 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
     },
     [revealExecutor],
   );
+  // Space on the idle cursor toggles, so the key that opened a row also puts
+  // it away. The locate path stays open-only: you typed a query to see that
+  // row, and collapsing an already-open one there would read as a no-op.
+  const toggleExecutorOutput = useCallback(
+    (id: string) => {
+      setOpenExecutors((prev) => {
+        const next = new Set(prev);
+        if (!next.delete(id)) next.add(id);
+        return next;
+      });
+      requestAnimationFrame(() => revealExecutor(id));
+    },
+    [revealExecutor],
+  );
 
   // The current executor: a cursor that exists even with no query typed, so
   // entering the tab always has something marked to act on. Stored loosely and
@@ -221,8 +235,8 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
 
   // Idle keyboard commands — same layering guards as type-to-locate, and off
   // while a query is engaged so the locate controller keeps its own ↑↓/Enter.
-  // ↑↓ move the cursor, Enter fires the current executor's Start/Stop, ←/→
-  // cycle the executor target (Local / remotes).
+  // ↑↓ move the cursor, Enter fires the current executor's Start/Stop, Space
+  // toggles its output area, ←/→ cycle the executor target (Local / remotes).
   useEffect(() => {
     if (!keyboardActive || locateEngaged) return;
     const handler = (event: KeyboardEvent) => {
@@ -245,10 +259,18 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
         revealExecutor(next.id);
         return;
       }
-      // A focused button already turns Enter into its own click; only the
-      // idle panel (or a plain row) delegates it to the cursor.
+      // A focused button already turns Enter/Space into its own click; only
+      // the idle panel (or a plain row) delegates them to the cursor.
+      const onControl =
+        event.target instanceof Element && event.target.closest("button,a,[role='button']") !== null;
+      if (event.key === " " && currentExecutorId) {
+        if (onControl) return;
+        event.preventDefault();
+        toggleExecutorOutput(currentExecutorId);
+        return;
+      }
       if (event.key === "Enter" && currentExecutorId) {
-        if (event.target instanceof Element && event.target.closest("button,a,[role='button']")) return;
+        if (onControl) return;
         event.preventDefault();
         commitExecutor(currentExecutorId);
       }
@@ -265,6 +287,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
     currentExecutorId,
     revealExecutor,
     commitExecutor,
+    toggleExecutorOutput,
   ]);
 
   // Clicking a Start/Stop button leaves DOM focus on it, and a focused button
