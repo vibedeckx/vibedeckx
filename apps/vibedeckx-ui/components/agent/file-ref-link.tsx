@@ -20,8 +20,8 @@ const REF_CLASS =
   "text-primary underline decoration-dotted underline-offset-2 cursor-pointer hover:decoration-solid";
 const LINK_CLASS =
   "wrap-anywhere font-medium text-primary underline decoration-primary/60 underline-offset-2 transition-colors hover:text-primary/80 hover:decoration-primary";
-// A file the repo index doesn't know — a temp artifact, a gitignored build
-// output. Same affordance, muted so it reads as "outside the tree".
+// A file the repo index doesn't know — a temp artifact outside the checkout.
+// Same affordance, muted so it reads as "outside the tree".
 const EXTERNAL_CLASS =
   "text-primary/80 underline decoration-dotted underline-offset-2 cursor-pointer hover:decoration-solid";
 
@@ -36,21 +36,26 @@ function extensionOf(rawPath: string): string {
 }
 
 // What to make of a path-shaped reference the repo index could NOT resolve.
-// The index only lists tracked/untracked-not-ignored files at session open, so
-// anything the agent produced during the session — `/tmp/screenshot.png`, an
-// ignored `out/report.png` — is unresolvable by construction. Those are the
-// refs worth linking: click opens them in the Files tab (the backend reads
-// absolute paths verbatim on the agent's machine), and images get a hover
-// preview. To keep noise down, a relative path needs an image extension and an
-// absolute one needs some extension; everything else stays plain text — an
-// API route like `/api/projects` is not a file, and nothing verifies existence
-// until the user hovers or clicks, so streaming never fans out requests.
+// Only an absolute (or `~/`) path with an extension is linked: click opens it
+// in the Files tab (the backend reads absolute paths verbatim on the agent's
+// machine), images get a hover preview. Nothing verifies existence until the
+// user hovers or clicks, so streaming never fans out requests.
+//
+// Relative paths the index does not know stay plain text. The index lists
+// tracked and untracked-not-ignored files and is refreshed when an agent on
+// the branch finishes a turn (useFileRefIndex), so a file the agent just
+// created resolves normally once the turn ends. What that leaves out is a
+// gitignored relative artifact (`out/shot.png`) — linking it would mean
+// guessing that "relative" means "relative to the checkout", and the guess
+// fails silently on hover. The system prompt asks the agent to give such
+// artifacts as absolute paths instead. An extension-less `/api/projects` is
+// not a file and stays text as well.
 export function classifyExternalRef(rawPath: string): "image" | "file" | null {
+  const absolute = rawPath.startsWith("/") || rawPath.startsWith("~/");
+  if (!absolute) return null;
   const ext = extensionOf(rawPath);
   if (!ext) return null;
-  if (IMAGE_EXTENSIONS.has(ext)) return "image";
-  const absolute = rawPath.startsWith("/") || rawPath.startsWith("~/");
-  return absolute ? "file" : null;
+  return IMAGE_EXTENSIONS.has(ext) ? "image" : "file";
 }
 
 // Resolution happens HERE, at render time, against the index from context —

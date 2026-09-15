@@ -37,11 +37,14 @@ async function render(raw: string, value: Partial<FileNavigationValue>) {
 }
 
 describe("classifyExternalRef", () => {
-  it("links images anywhere and other files only when absolute", () => {
+  it("links absolute paths with an extension and nothing relative", () => {
     expect(classifyExternalRef("/tmp/splash-vs-icon.png")).toBe("image");
-    expect(classifyExternalRef("out/screenshot.png")).toBe("image");
     expect(classifyExternalRef("~/shots/a.webp")).toBe("image");
     expect(classifyExternalRef("/tmp/report.md")).toBe("file");
+    // Relative paths are the index's job (refreshed at turn end); an
+    // unresolved one is not guessed at.
+    expect(classifyExternalRef("out/screenshot.png")).toBeNull();
+    expect(classifyExternalRef("screenshot.png")).toBeNull();
     expect(classifyExternalRef("notes/report.md")).toBeNull();
     expect(classifyExternalRef("/api/projects")).toBeNull();
     expect(classifyExternalRef("and/or")).toBeNull();

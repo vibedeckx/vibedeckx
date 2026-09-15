@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
+import { useGlobalEventStream } from "@/hooks/global-event-stream";
 import { buildFileRefIndex, type FileRefIndex } from "@/lib/file-ref/file-ref-index";
 
 interface Args {
@@ -54,6 +55,10 @@ export async function loadFilesWithRetry(
   }
 }
 
+// Several sessions on one branch can end within the same second (a commander
+// and its spawned reviewers); one list-files per burst is plenty.
+const REFRESH_DEBOUNCE_MS = 250;
+
 // Loads the project's flat file list (with retry for not-yet-ready remotes) once
 // per project/branch/target and builds a resolution index. Returns null only
 // while loading (refs stay plain text and upgrade to links when the index
@@ -61,6 +66,15 @@ export async function loadFilesWithRetry(
 // ref will resolve either way, but a non-null index is what lets FileRefLink
 // keep linking paths outside the repo (`/tmp/shot.png`), which are read by
 // path and never needed the list in the first place.
+//
+// The list is a snapshot, so it is re-pulled when the working tree is known to
+// have changed: an agent on this branch finished a turn (the files it just
+// created become linkable in the reply that mentions them), or the Files tab
+// wrote to this checkout. A refresh keeps the current index in place until the
+// new one lands — nulling it would flash every link back to plain text — and a
+// failed refresh simply leaves the old index standing. Resolution happens at
+// render time from context, so swapping the index restyles anchors in place
+// without remounting the markdown tree.
 export function useFileRefIndex({
   projectId,
   branch,
@@ -69,6 +83,8 @@ export function useFileRefIndex({
 }: Args): FileRefIndex | null {
   const [index, setIndex] = useState<FileRefIndex | null>(null);
   const keyRef = useRef(0);
+  const refreshSeqRef = useRef(0);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     setIndex(null);
@@ -83,7 +99,43 @@ export function useFileRefIndex({
       if (key !== keyRef.current) return;
       setIndex(res ? buildFileRefIndex(res.files, res.root) : buildFileRefIndex([]));
     });
+    return () => {
+      // A scope change abandons any refresh queued for the old scope.
+      if (refreshTimerRef.current !== null) {
+        clearTimeout(refreshTimerRef.current);
+        refreshTimerRef.current = null;
+      }
+    };
   }, [projectId, branch, target, enabled]);
+
+  useGlobalEventStream((evt) => {
+    if (!enabled || !projectId) return;
+    const turnEnded = evt.type === "session:taskCompleted" || evt.type === "session:finished";
+    const treeWritten = evt.type === "files:changed";
+    if (!turnEnded && !treeWritten) return;
+    if (evt.projectId !== projectId) return;
+    // Both event kinds carry the workspace branch (null = root checkout); a
+    // turn on another branch touched another working tree.
+    if ((evt.branch ?? null) !== (branch ?? null)) return;
+
+    if (refreshTimerRef.current !== null) clearTimeout(refreshTimerRef.current);
+    const key = keyRef.current;
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      const seq = ++refreshSeqRef.current;
+      // Single attempt: the retry ladder exists for a remote whose worktree is
+      // not checked out yet; a tree that just changed is by definition there.
+      api
+        .listProjectFiles(projectId, branch, target)
+        .then((res) => {
+          if (key !== keyRef.current || seq !== refreshSeqRef.current) return;
+          setIndex(buildFileRefIndex(res.files, res.root));
+        })
+        .catch(() => {
+          /* keep the current index */
+        });
+    }, REFRESH_DEBOUNCE_MS);
+  });
 
   return index;
 }
