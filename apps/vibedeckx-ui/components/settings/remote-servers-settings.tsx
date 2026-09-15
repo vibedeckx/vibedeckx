@@ -28,6 +28,7 @@ import {
 } from '@/components/ui/select';
 import { api, type RemoteServer, type CrossRemoteAccess } from '@/lib/api';
 import { useGlobalEventStream } from '@/hooks/global-event-stream';
+import { publishRemoteServerNames } from '@/hooks/use-remote-server-names';
 import {
   Globe,
   Plus,
@@ -88,6 +89,9 @@ export function RemoteServersSettings() {
     try {
       const data = await api.getRemoteServers();
       setServers(data);
+      // A rename here has to reach the cross-remote cards of any conversation
+      // still mounted behind this screen.
+      publishRemoteServerNames(data);
       setError('');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load servers');

@@ -49,7 +49,7 @@ describe("CodexProvider", () => {
     ]);
   });
 
-  it("leaves other MCP servers' tool names untouched", () => {
+  it("leaves an unattributed tool name untouched", () => {
     const events = new CodexProvider().parseStdoutLine(JSON.stringify({
       jsonrpc: "2.0",
       method: "item/completed",
@@ -60,6 +60,29 @@ describe("CodexProvider", () => {
     }), "s1");
 
     expect((events[0] as { tool: string }).tool).toBe("remote_bash");
+  });
+
+  it("qualifies another server's tool with the server that reported it", () => {
+    const events = new CodexProvider().parseStdoutLine(JSON.stringify({
+      jsonrpc: "2.0",
+      method: "item/completed",
+      params: {
+        turnId: "turn-1",
+        item: {
+          type: "mcpToolCall",
+          id: "mcp-3",
+          server: "cross-remote",
+          tool: "remote_bash",
+          arguments: { remoteId: "srv-1", command: "ls" },
+          result: {},
+        },
+      },
+    }), "s1");
+
+    expect(events.map((e) => (e as { tool: string }).tool)).toEqual([
+      "mcp__cross-remote__remote_bash",
+      "mcp__cross-remote__remote_bash",
+    ]);
   });
 
   function commandExecutionCompleted(id = "cmd-1") {

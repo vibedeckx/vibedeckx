@@ -2,6 +2,7 @@ import type { AgentType, ContentPart } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
 import type { CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import { canonicalizeSessionToolName, type SessionToolsMcpConfig } from "../session-tools-mcp.js";
+import { qualifiedMcpToolName } from "../protocol/mcp/tool-names.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import {
   buildApprovalResponse,
@@ -361,10 +362,15 @@ export class CodexProvider implements AgentProvider {
 
       case "mcpToolCall": {
         const id = item.id ?? this.generateId();
-        // Normalize vibedeckx's own tools onto the canonical `mcp__server__tool`
-        // name Claude reports, so the frontend matches one name per tool rather
-        // than tracking whatever shape each CLI version happens to emit.
-        const toolName = item.tool ? canonicalizeSessionToolName(item.tool, item.server) : "MCP";
+        // Normalize onto the canonical `mcp__server__tool` name Claude reports,
+        // so the frontend matches one name per tool rather than tracking whatever
+        // shape each CLI version happens to emit. Our own tools have their own
+        // alias table; everyone else's are qualified with the reporting server,
+        // which is what lets the cross-remote cards recognize a Codex-reported
+        // `remote_bash`.
+        const toolName = item.tool
+          ? qualifiedMcpToolName(canonicalizeSessionToolName(item.tool, item.server), item.server)
+          : "MCP";
         const output = item.error?.message ?? (item.result ? JSON.stringify(item.result) : "");
         return [
           { type: "tool_use", tool: toolName, input: item.arguments, toolUseId: id },

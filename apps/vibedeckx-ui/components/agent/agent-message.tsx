@@ -35,6 +35,7 @@ import { SkillToolUseUI, SkillToolResultUI } from "./skill-tools";
 import { TaskOutputToolUseUI, TaskOutputToolResultUI } from "./task-output-tools";
 import { FileChangeToolUseUI, FileChangeToolResultUI } from "./file-change-tools";
 import { PROPOSE_SCHEDULE_TOOL, ScheduleProposalUI } from "./schedule-proposal";
+import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./cross-remote-tools";
 import { VPasteChip, splitVPasteMarkers } from "./vpaste-chip";
 import { Fragment, useState } from "react";
 
@@ -550,6 +551,12 @@ function ToolUseMessage({ tool, input, messageIndex, toolUseId }: { tool: string
     );
   }
 
+  // Every remaining MCP tool renders as raw JSON below; the cross-remote ones
+  // get a card first, because their one identifying argument is a bare uuid.
+  if (isCrossRemoteTool(tool)) {
+    return <CrossRemoteToolUse tool={tool} input={input} />;
+  }
+
   const inputStr = typeof input === "string" ? input : JSON.stringify(input, null, 2);
 
   return (
@@ -734,6 +741,16 @@ function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
       <div className="flex gap-3 py-3 pl-11">
         <div className="flex-1 min-w-0 overflow-hidden">
           <FileChangeToolResultUI output={output} />
+        </div>
+      </div>
+    );
+  }
+
+  if (isCrossRemoteTool(tool)) {
+    return (
+      <div className="flex gap-3 py-3 pl-11">
+        <div className="flex-1 min-w-0 overflow-hidden">
+          <CrossRemoteToolResult output={output} />
         </div>
       </div>
     );
