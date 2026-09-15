@@ -10,6 +10,7 @@ interface ImagePreviewProps {
   filePath: string;
   branch?: string | null;
   target?: "local" | "remote";
+  sessionId?: string | null;
   onDownload: () => void;
 }
 
@@ -22,6 +23,7 @@ export function ImagePreview({
   filePath,
   branch,
   target,
+  sessionId,
   onDownload,
 }: ImagePreviewProps) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
@@ -34,8 +36,8 @@ export function ImagePreview({
     let cancelled = false;
 
     api
-      .getFileBlob(projectId, filePath, branch, target)
-      .then((blob) => {
+      .getFileBlob(projectId, filePath, branch, target, sessionId)
+      .then(({ blob }) => {
         if (cancelled) return;
         url = URL.createObjectURL(blob);
         setObjectUrl(url);
@@ -48,7 +50,7 @@ export function ImagePreview({
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [projectId, filePath, branch, target]);
+  }, [projectId, filePath, branch, target, sessionId]);
 
   if (error) {
     return (

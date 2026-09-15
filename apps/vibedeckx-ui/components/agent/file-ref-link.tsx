@@ -13,6 +13,8 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useFileNavigation, type FileReadScope } from "./file-navigation-context";
+import { useRemoteServerName } from "@/hooks/use-remote-server-names";
+import { remoteServerIdOf } from "@/lib/remote-session-id";
 
 type AnchorProps = ComponentProps<"a"> & { node?: { properties?: Record<string, unknown> } };
 
@@ -188,18 +190,25 @@ function FileRefChoice({
 function ExternalImagePreview({ scope, filePath }: { scope: FileReadScope; filePath: string }) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Which machine served it, when that is not the one the agent runs on — a
+  // cross-remote screenshot lives on the machine the tool call targeted, and
+  // saying so is the difference between "an image" and "an image from zk200".
+  const [sourceServerId, setSourceServerId] = useState<string | null>(null);
+  const foreign = sourceServerId !== null && sourceServerId !== remoteServerIdOf(scope.sessionId);
+  const { label } = useRemoteServerName(foreign ? sourceServerId : null);
 
   useEffect(() => {
     let url: string | null = null;
     let cancelled = false;
     api
-      .getFileBlob(scope.projectId, filePath, scope.branch, scope.target)
-      .then((blob) => {
+      .getFileBlob(scope.projectId, filePath, scope.branch, scope.target, scope.sessionId)
+      .then(({ blob, serverId }) => {
         if (cancelled) return;
         if (blob.size > HOVER_PREVIEW_MAX_BYTES) {
           setError("Too large to preview — click to open");
           return;
         }
+        setSourceServerId(serverId);
         url = URL.createObjectURL(blob);
         setObjectUrl(url);
       })
@@ -212,7 +221,7 @@ function ExternalImagePreview({ scope, filePath }: { scope: FileReadScope; fileP
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [scope.projectId, scope.branch, scope.target, filePath]);
+  }, [scope.projectId, scope.branch, scope.target, scope.sessionId, filePath]);
 
   if (error) {
     return (
@@ -231,11 +240,18 @@ function ExternalImagePreview({ scope, filePath }: { scope: FileReadScope; fileP
     );
   }
   return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img
-      src={objectUrl}
-      alt={filePath}
-      className="block max-h-64 max-w-[22rem] rounded object-contain"
-    />
+    <div className="flex flex-col gap-1">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src={objectUrl}
+        alt={filePath}
+        className="block max-h-64 max-w-[22rem] rounded object-contain"
+      />
+      {label && (
+        <p className="px-0.5 text-xs text-muted-foreground">
+          on <span className="text-foreground">{label}</span>
+        </p>
+      )}
+    </div>
   );
 }

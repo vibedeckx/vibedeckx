@@ -46,7 +46,7 @@ export interface AccessDeps {
 const tierSatisfies = (granted: CrossRemoteAccess, required: CrossRemoteTier): boolean =>
   granted === "exec" || (granted === "read" && required === "read");
 
-const isOnline = (deps: AccessDeps, server: RemoteServer): boolean =>
+const isOnline = (deps: ReachDeps, server: RemoteServer): boolean =>
   deps.reverseConnectManager.isConnected(server.id);
 
 /**
@@ -66,6 +66,33 @@ export type ResolveResult =
   | { ok: true; server: RemoteServer }
   | { ok: false; reason: "not_accessible" | "offline" };
 
+/** What the tier check itself needs — no session, no token. */
+export type ReachDeps = Pick<AccessDeps, "storage" | "reverseConnectManager">;
+
+/**
+ * Whether this user may reach that machine at this tier right now.
+ *
+ * Split out of `resolveTarget` because the gateway is not the only caller: a
+ * cross-remote artifact the conversation links (`artifact-read-targets.ts`)
+ * is read from a machine the agent touched, and must be gated by exactly the
+ * grant that let it touch it — one policy, not two.
+ */
+export async function canReachRemote(
+  deps: ReachDeps,
+  userId: string | undefined,
+  targetRemoteId: string,
+  requiredTier: CrossRemoteTier,
+): Promise<ResolveResult> {
+  const server = await deps.storage.remoteServers.getById(targetRemoteId, userId);
+  if (!server) return { ok: false, reason: "not_accessible" };
+  if (!tierSatisfies(server.cross_remote_access, requiredTier)) {
+    return { ok: false, reason: "not_accessible" };
+  }
+  if (!isOnline(deps, server)) return { ok: false, reason: "offline" };
+
+  return { ok: true, server };
+}
+
 export async function resolveTarget(
   deps: AccessDeps,
   payload: CrossRemoteTokenPayload,
@@ -76,14 +103,7 @@ export async function resolveTarget(
     return { ok: false, reason: "not_accessible" };
   }
 
-  const server = await deps.storage.remoteServers.getById(targetRemoteId, payload.userId);
-  if (!server) return { ok: false, reason: "not_accessible" };
-  if (!tierSatisfies(server.cross_remote_access, requiredTier)) {
-    return { ok: false, reason: "not_accessible" };
-  }
-  if (!isOnline(deps, server)) return { ok: false, reason: "offline" };
-
-  return { ok: true, server };
+  return canReachRemote(deps, payload.userId, targetRemoteId, requiredTier);
 }
 
 export async function listAccessibleRemotes(

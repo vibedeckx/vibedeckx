@@ -10,6 +10,14 @@ export interface FileReadScope {
   projectId: string;
   branch: string | null;
   target?: "local" | "remote";
+  /**
+   * The conversation asking. A repo file needs only the triple above, but an
+   * artifact the agent names by absolute path (`/tmp/shot.png`) belongs to
+   * whichever machine ran the command that wrote it — the session's own remote,
+   * or one it drove through the cross-remote gateway. The backend ranks those
+   * candidates; without the session it can only guess the project's primary.
+   */
+  sessionId?: string | null;
 }
 
 export interface FileNavigationValue {

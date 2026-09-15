@@ -37,6 +37,9 @@ interface RightPanelProps {
   // Whether the workspace view is currently shown. The panel stays mounted
   // (hidden via CSS) on other views, so this gates the file-ref index load.
   active?: boolean;
+  // The conversation currently rendered in the Agent tab. Only file reads use
+  // it, and only for paths outside the checkout — see FileReadScope.
+  agentSessionId?: string | null;
 }
 
 type TabType = TabShortcutTarget;
@@ -96,6 +99,7 @@ export function RightPanel({
   mergeTarget,
   forceAgentTab = false,
   active = true,
+  agentSessionId = null,
 }: RightPanelProps) {
   const [activeTab, setActiveTab] = usePersistedTab(projectId, selectedBranch);
   // What the UI actually renders. While a session navigation is still resolving
@@ -211,8 +215,11 @@ export function RightPanel({
   );
 
   const scope = useMemo(
-    () => (projectId ? { projectId, branch: selectedBranch ?? null, target } : null),
-    [projectId, selectedBranch, target],
+    () =>
+      projectId
+        ? { projectId, branch: selectedBranch ?? null, target, sessionId: agentSessionId }
+        : null,
+    [projectId, selectedBranch, target, agentSessionId],
   );
   const navValue = useMemo(() => ({ openFile, index, scope }), [openFile, index, scope]);
 
@@ -331,6 +338,7 @@ export function RightPanel({
             project={project}
             selectedBranch={selectedBranch}
             navRequest={navRequest}
+            sessionId={agentSessionId}
           />
         </div>
       </div>

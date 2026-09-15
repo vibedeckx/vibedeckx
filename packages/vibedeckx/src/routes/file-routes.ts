@@ -6,12 +6,20 @@ import fs from "fs/promises";
 import { createReadStream, constants as fsConstants } from "fs";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
+import { proxyStatus, proxyToRemoteAuto, type ProxyResult } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import { requireAuth as requireRawAuth } from "../server.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
+import {
+  isOutsideArtifactPath,
+  resolveArtifactReadTargets,
+  type ArtifactReadTarget,
+} from "../artifact-read-targets.js";
+
+/** Names the machine a read was ultimately served from (see firstRemoteHit). */
+const SOURCE_SERVER_HEADER = "X-Vibedeckx-Source-Server";
 
 async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
   const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
@@ -20,6 +28,81 @@ async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
   return {
     serverId: primary.remote_server_id,
     remotePath: primary.remote_path,
+  };
+}
+
+/**
+ * The machines a project-scoped read may look on, in order.
+ *
+ * A repo-relative path belongs to the checkout being browsed, so it keeps the
+ * single-target behaviour it always had. An absolute path is an artifact the
+ * agent named, and the conversation that named it says nothing about which
+ * machine's /tmp it means — `artifact-read-targets.ts` ranks the candidates.
+ */
+async function readTargetsFor(
+  fastify: FastifyInstance,
+  opts: {
+    project: Project;
+    filePath: string;
+    branch?: string;
+    sessionId?: string;
+    userId?: string;
+  },
+): Promise<ArtifactReadTarget[]> {
+  const remoteConfig = await getRemoteConfig(fastify, opts.project);
+  const primary: ArtifactReadTarget | null = remoteConfig
+    ? { ...remoteConfig, branch: opts.branch ?? null }
+    : null;
+
+  if (!isOutsideArtifactPath(opts.filePath)) return primary ? [primary] : [];
+
+  return resolveArtifactReadTargets(fastify, {
+    projectId: opts.project.id,
+    userId: opts.userId,
+    sessionId: opts.sessionId,
+    branch: opts.branch,
+    primary,
+  });
+}
+
+/** Query string for one worker-side read, `path`/`branch` per target. */
+function readParams(target: ArtifactReadTarget, filePath: string): string {
+  const params = [
+    `path=${encodeURIComponent(target.remotePath)}`,
+    `filePath=${encodeURIComponent(filePath)}`,
+  ];
+  if (target.branch) params.push(`branch=${encodeURIComponent(target.branch)}`);
+  return params.join("&");
+}
+
+/**
+ * Ask each candidate machine in turn and keep the first that serves the file.
+ *
+ * A 404 means "not this machine" and moves on, and so do the two other answers
+ * that say nothing about the machines further down the list: an unreachable
+ * worker (status 0), and the 403 a worker older than the outside-path support
+ * gives any absolute path. The most specific machine's miss is what an all-miss
+ * search reports, unless some machine raised a real error worth showing.
+ */
+async function firstRemoteHit(
+  targets: ArtifactReadTarget[],
+  send: (target: ArtifactReadTarget) => Promise<ProxyResult>,
+): Promise<{ result: ProxyResult; serverId: string }> {
+  let firstMiss: { result: ProxyResult; serverId: string } | null = null;
+  let firstError: { result: ProxyResult; serverId: string } | null = null;
+
+  for (const target of targets) {
+    const result = await send(target);
+    const attempt = { result, serverId: target.serverId };
+    const status = proxyStatus(result);
+    if (status === 200) return attempt;
+    if (status === 404 || status === 403 || result.status === 0) firstMiss ??= attempt;
+    else firstError ??= attempt;
+  }
+
+  return firstError ?? firstMiss ?? {
+    result: { ok: false, status: 404, data: { error: "File not found" } },
+    serverId: "",
   };
 }
 
@@ -759,7 +842,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Get file content (project-scoped)
   fastify.get<{
     Params: { id: string };
-    Querystring: { path: string; branch?: string; target?: "local" | "remote" };
+    Querystring: { path: string; branch?: string; target?: "local" | "remote"; sessionId?: string };
   }>("/api/projects/:id/file-content", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -781,23 +864,33 @@ const routes: FastifyPluginAsync = async (fastify) => {
       || (!target && !project.path);
 
     if (useRemote) {
-      const remoteConfig = await getRemoteConfig(fastify, project);
-      if (!remoteConfig) {
+      const targets = await readTargetsFor(fastify, {
+        project,
+        filePath,
+        branch,
+        sessionId: req.query.sessionId,
+        userId,
+      });
+      if (targets.length === 0) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }
-      const params = [
-        `path=${encodeURIComponent(remoteConfig.remotePath)}`,
-        `filePath=${encodeURIComponent(filePath)}`,
-      ];
-      if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
-      const result = await proxyToRemoteAuto(
-        remoteConfig.serverId,
-        "GET",
-        `/api/path/file-content?${params.join("&")}`,
-        undefined,
-        { reverseConnectManager: fastify.reverseConnectManager }
+      const { result, serverId } = await firstRemoteHit(targets, (target) =>
+        proxyToRemoteAuto(
+          target.serverId,
+          "GET",
+          `/api/path/file-content?${readParams(target, filePath)}`,
+          undefined,
+          { reverseConnectManager: fastify.reverseConnectManager }
+        )
       );
-      return reply.code(proxyStatus(result)).send(result.data);
+      const status = proxyStatus(result);
+      if (status === 200 && serverId) reply.header(SOURCE_SERVER_HEADER, serverId);
+      // `serverId` in the body too: the Files tab reads content as JSON and
+      // cannot see a response header once the fetch result is cached.
+      const body = status === 200 && result.data && typeof result.data === "object"
+        ? { ...(result.data as Record<string, unknown>), serverId }
+        : result.data;
+      return reply.code(status).send(body);
     }
 
     if (!project.path) {
@@ -895,7 +988,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Download file (project-scoped)
   fastify.get<{
     Params: { id: string };
-    Querystring: { path: string; branch?: string; target?: "local" | "remote" };
+    Querystring: { path: string; branch?: string; target?: "local" | "remote"; sessionId?: string };
   }>("/api/projects/:id/file-download", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -917,22 +1010,26 @@ const routes: FastifyPluginAsync = async (fastify) => {
       || (!target && !project.path);
 
     if (useRemote) {
-      const remoteConfig = await getRemoteConfig(fastify, project);
-      if (!remoteConfig) {
+      const targets = await readTargetsFor(fastify, {
+        project,
+        filePath,
+        branch,
+        sessionId: req.query.sessionId,
+        userId,
+      });
+      if (targets.length === 0) {
         return reply.code(400).send({ error: "Project has no remote configuration" });
       }
-      const params = [
-        `path=${encodeURIComponent(remoteConfig.remotePath)}`,
-        `filePath=${encodeURIComponent(filePath)}`,
-      ];
-      if (branch) params.push(`branch=${encodeURIComponent(branch)}`);
-      const result = await proxyToRemoteAuto(
-        remoteConfig.serverId,
-        "GET",
-        `/api/path/file-download?${params.join("&")}`,
-        undefined,
-        { reverseConnectManager: fastify.reverseConnectManager }
+      const { result, serverId } = await firstRemoteHit(targets, (target) =>
+        proxyToRemoteAuto(
+          target.serverId,
+          "GET",
+          `/api/path/file-download?${readParams(target, filePath)}`,
+          undefined,
+          { reverseConnectManager: fastify.reverseConnectManager }
+        )
       );
+      if (proxyStatus(result) === 200 && serverId) reply.header(SOURCE_SERVER_HEADER, serverId);
       // Binary responses (e.g. images) arrive as a Buffer over the tunnel —
       // stream the raw bytes instead of JSON-serializing them.
       if (Buffer.isBuffer(result.data)) {

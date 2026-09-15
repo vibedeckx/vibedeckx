@@ -1186,6 +1186,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 <div className="h-full flex flex-col overflow-hidden">
                   <RightPanel
                     active={activeView === 'workspace'}
+                    agentSessionId={renderedSessionId}
                     projectId={currentProject?.id ?? null}
                     selectedBranch={selectedBranch}
                     activateAgentTabNonce={activateAgentTabNonce}

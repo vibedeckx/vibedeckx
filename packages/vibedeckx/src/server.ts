@@ -254,8 +254,9 @@ export const createServer = async (opts: {
     // origin (:3000 → :5173) needs it allowed or every request preflight-fails.
     reply.header("access-control-allow-headers", "Content-Type, Upgrade, Connection, X-Vibedeckx-Api-Key, X-Request-Id, Authorization, traceparent");
     // Response headers are unreadable from JS unless exposed — without this
-    // the UI cannot show the user the trace ID it just received.
-    reply.header("access-control-expose-headers", "traceparent");
+    // the UI cannot show the user the trace ID it just received, nor which
+    // machine a downloaded artifact turned out to live on.
+    reply.header("access-control-expose-headers", "traceparent, X-Vibedeckx-Source-Server");
     done();
   });
 

@@ -57,6 +57,7 @@ exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes
   ],
   "getById": [
     "agent-session-manager.ts",
+    "artifact-read-targets.ts",
     "notification-service.ts",
     "plugins/shared-services.ts",
     "project-chat-manager.ts",

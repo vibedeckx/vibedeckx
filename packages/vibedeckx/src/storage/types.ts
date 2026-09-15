@@ -929,6 +929,17 @@ export interface Storage {
   crossRemoteAudit: {
     insert(entry: CrossRemoteAuditEntry): Promise<void>;
     listByTarget(targetRemoteId: string, limit?: number): Promise<CrossRemoteAuditRow[]>;
+    /**
+     * Distinct machines this session reached through the gateway, most recently
+     * used first. This is the only record of where a cross-remote artifact
+     * (`/tmp/shot.png` written by `remote_bash` on another box) actually lives —
+     * the conversation carries the path but not the machine.
+     *
+     * Reached, not merely targeted: calls the gateway refused (`denied`) or
+     * could not deliver (`offline`) are excluded, so a machine appears here only
+     * if a call of this session actually ran on it.
+     */
+    listSessionTargets(sessionId: string, userId?: string, limit?: number): Promise<string[]>;
   };
   projectRemotes: {
     getByProject(projectId: string): Promise<ProjectRemoteWithServer[]>;

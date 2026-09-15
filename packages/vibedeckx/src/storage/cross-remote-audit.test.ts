@@ -55,6 +55,31 @@ describe("crossRemoteAudit storage", () => {
     expect(rows[0].source_remote_id).toBeNull();
   });
 
+  // What this feeds: the machine an artifact path in a conversation might live
+  // on (artifact-read-targets.ts). A refused call never ran anywhere, so the
+  // machine it aimed at is not a place this session could have written a file.
+  it("lists a session's machines newest-first, and only ones a call reached", async () => {
+    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "srv-b" }));
+    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "srv-c", status: "timeout" }));
+    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "srv-b", status: "error" }));
+    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "refused", status: "denied" }));
+    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "unreachable", status: "offline" }));
+    await storage.crossRemoteAudit.insert(entry({ session_id: "sess-2", target_remote_id: "other-session" }));
+
+    // srv-b is last-used, so it leads; denied/offline targets never appear.
+    expect(await storage.crossRemoteAudit.listSessionTargets("sess-1")).toEqual(["srv-b", "srv-c"]);
+  });
+
+  it("scopes a session's machines to the user, and honours the limit", async () => {
+    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "srv-b" }));
+    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "srv-c" }));
+    await storage.crossRemoteAudit.insert(entry({ user_id: "user-2", target_remote_id: "theirs" }));
+
+    expect(await storage.crossRemoteAudit.listSessionTargets("sess-1", "user-1")).toEqual(["srv-c", "srv-b"]);
+    expect(await storage.crossRemoteAudit.listSessionTargets("sess-1", "user-2")).toEqual(["theirs"]);
+    expect(await storage.crossRemoteAudit.listSessionTargets("sess-1", "user-1", 1)).toEqual(["srv-c"]);
+  });
+
   it("filters by target and returns newest first, honouring the limit", async () => {
     await storage.crossRemoteAudit.insert(entry({ args_summary: "first" }));
     await storage.crossRemoteAudit.insert(entry({ args_summary: "second" }));

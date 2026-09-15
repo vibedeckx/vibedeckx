@@ -29,6 +29,8 @@ import { MessageResponse } from "@/components/ai-elements/message";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import { api, type FileContentResponse } from "@/lib/api";
+import { useRemoteServerName } from "@/hooks/use-remote-server-names";
+import { remoteServerIdOf } from "@/lib/remote-session-id";
 import type { SupportedLanguage } from "@/lib/shiki";
 import { SymbolNavPopover } from "./symbol-nav-popover";
 import { ImagePreview } from "./image-preview";
@@ -286,6 +288,7 @@ interface FilePreviewProps {
   projectId: string;
   branch?: string | null;
   target?: "local" | "remote";
+  sessionId?: string | null;
   scrollToLine?: number | null;
   scrollKey?: number;
   onJump: (file: string, line: number) => void;
@@ -304,6 +307,7 @@ export function FilePreview({
   projectId,
   branch,
   target,
+  sessionId,
   scrollToLine,
   scrollKey,
   onJump,
@@ -311,6 +315,13 @@ export function FilePreview({
   restoreScrollKey,
   onScroll,
 }: FilePreviewProps) {
+  // An artifact outside the checkout can come from a machine other than the one
+  // the session's agent runs on (a cross-remote screenshot). Name it when so —
+  // the path alone gives no hint which machine's /tmp this is.
+  const fileServerId = fileContent?.serverId ?? null;
+  const { label: sourceLabel } = useRemoteServerName(
+    fileServerId && fileServerId !== remoteServerIdOf(sessionId) ? fileServerId : null,
+  );
   const [viewMode, setViewMode] = useState<"rendered" | "source">("rendered");
   const [prevFilePath, setPrevFilePath] = useState(filePath);
   const [symbolNav, setSymbolNav] = useState<{
@@ -661,7 +672,7 @@ export function FilePreview({
 
   const handleDownload = () => {
     if (!filePath) return;
-    void api.downloadFile(projectId, filePath, branch, target).catch((err) => {
+    void api.downloadFile(projectId, filePath, branch, target, sessionId).catch((err) => {
       console.error("Failed to download file", err);
     });
   };
@@ -687,6 +698,11 @@ export function FilePreview({
           <span className="text-xs text-muted-foreground shrink-0">
             {formatSize(fileContent.size)}
           </span>
+          {sourceLabel && (
+            <span className="text-xs text-muted-foreground shrink-0">
+              on <span className="text-foreground">{sourceLabel}</span>
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
           {canToggleMarkdown && (
@@ -753,6 +769,7 @@ export function FilePreview({
             filePath={filePath}
             branch={branch}
             target={target}
+            sessionId={sessionId}
             onDownload={handleDownload}
           />
         ) : fileContent.binary ? (

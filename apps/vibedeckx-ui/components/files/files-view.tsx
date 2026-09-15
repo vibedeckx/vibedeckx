@@ -20,9 +20,12 @@ interface FilesViewProps {
   project?: Project | null;
   selectedBranch?: string | null;
   navRequest?: { path: string; line: number | null; nonce: number } | null;
+  // The conversation this tab was opened from. Only reads of paths outside the
+  // checkout use it — those live on whichever machine the agent wrote them on.
+  sessionId?: string | null;
 }
 
-export function FilesView({ projectId, project, selectedBranch, navRequest }: FilesViewProps) {
+export function FilesView({ projectId, project, selectedBranch, navRequest, sessionId }: FilesViewProps) {
   // Determine target based on project config — if no local path, try remote
   const target = project && !project.path ? "remote" as const : undefined;
 
@@ -69,6 +72,7 @@ export function FilesView({ projectId, project, selectedBranch, navRequest }: Fi
     projectId,
     branch: selectedBranch,
     target,
+    sessionId,
     showHidden,
   });
 
@@ -114,7 +118,7 @@ export function FilesView({ projectId, project, selectedBranch, navRequest }: Fi
   }
 
   const downloadUrl = selectedFile && projectId
-    ? api.getFileDownloadUrl(projectId, selectedFile, selectedBranch, target)
+    ? api.getFileDownloadUrl(projectId, selectedFile, selectedBranch, target, sessionId)
     : null;
 
   return (
@@ -305,6 +309,7 @@ export function FilesView({ projectId, project, selectedBranch, navRequest }: Fi
               projectId={projectId}
               branch={selectedBranch}
               target={target}
+              sessionId={sessionId}
               scrollToLine={jumpTarget?.line ?? null}
               scrollKey={jumpTarget?.nonce}
               onJump={jumpTo}

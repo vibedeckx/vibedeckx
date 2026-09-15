@@ -977,6 +977,8 @@ export interface FileContentResponse {
   tooLarge?: boolean;
   content: string | null;
   size: number;
+  /** Remote the file was read from — absent for a local read, or an older hub. */
+  serverId?: string;
 }
 
 export interface UploadResponse {
@@ -2726,11 +2728,13 @@ export const api = {
     projectId: string,
     filePath: string,
     branch?: string | null,
-    target?: "local" | "remote"
+    target?: "local" | "remote",
+    sessionId?: string | null
   ): Promise<FileContentResponse> {
     const params = new URLSearchParams({ path: filePath });
     if (branch) params.set("branch", branch);
     if (target) params.set("target", target);
+    if (sessionId) params.set("sessionId", sessionId);
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/file-content?${params.toString()}`);
     if (!res.ok) {
       const error = await res.json();
@@ -2758,15 +2762,21 @@ export const api = {
     return res.json();
   },
 
+  // `sessionId` tells the backend which conversation is asking. It only matters
+  // for a path outside the checkout: the machine that wrote `/tmp/shot.png` is
+  // the one the session's agent runs on, or one it reached through the
+  // cross-remote gateway — never knowable from the path alone.
   getFileDownloadUrl(
     projectId: string,
     filePath: string,
     branch?: string | null,
-    target?: "local" | "remote"
+    target?: "local" | "remote",
+    sessionId?: string | null
   ): string {
     const params = new URLSearchParams({ path: filePath });
     if (branch) params.set("branch", branch);
     if (target) params.set("target", target);
+    if (sessionId) params.set("sessionId", sessionId);
     return `${getApiBase()}/api/projects/${projectId}/file-download?${params.toString()}`;
   },
 
@@ -2774,19 +2784,22 @@ export const api = {
   // Used for inline previews (e.g. images): a plain <img src={downloadUrl}> can't
   // send the Authorization header the download route requires under --auth, so we
   // fetch here and hand the caller an object URL via URL.createObjectURL.
+  // Returns the bytes together with the machine they came from (empty for a
+  // local read), so a preview can say which remote an artifact actually lives on.
   async getFileBlob(
     projectId: string,
     filePath: string,
     branch?: string | null,
-    target?: "local" | "remote"
-  ): Promise<Blob> {
-    const url = this.getFileDownloadUrl(projectId, filePath, branch, target);
+    target?: "local" | "remote",
+    sessionId?: string | null
+  ): Promise<{ blob: Blob; serverId: string | null }> {
+    const url = this.getFileDownloadUrl(projectId, filePath, branch, target, sessionId);
     const res = await authFetch(url);
     if (!res.ok) {
       const error = await res.json().catch(() => ({ error: res.statusText }));
       throw new Error(error.error || "Failed to load file");
     }
-    return res.blob();
+    return { blob: await res.blob(), serverId: res.headers.get("X-Vibedeckx-Source-Server") };
   },
 
   // Fetch the file as a blob (carrying auth headers) and trigger a real browser
@@ -2798,9 +2811,10 @@ export const api = {
     projectId: string,
     filePath: string,
     branch?: string | null,
-    target?: "local" | "remote"
+    target?: "local" | "remote",
+    sessionId?: string | null
   ): Promise<void> {
-    const url = this.getFileDownloadUrl(projectId, filePath, branch, target);
+    const url = this.getFileDownloadUrl(projectId, filePath, branch, target, sessionId);
     const res = await authFetch(url);
     if (!res.ok) {
       const error = await res.json().catch(() => ({ error: res.statusText }));

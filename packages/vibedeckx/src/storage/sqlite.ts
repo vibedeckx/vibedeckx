@@ -618,6 +618,12 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     );
 
     CREATE INDEX IF NOT EXISTS idx_cross_remote_audit_target ON cross_remote_audit(target_remote_id, seq);
+
+    -- listSessionTargets asks "which machines has this session touched?" on the
+    -- path of every artifact hover, so it must not scan a table that grows with
+    -- every gateway call ever made. seq trails session_id to serve the
+    -- most-recent-first ordering from the index.
+    CREATE INDEX IF NOT EXISTS idx_cross_remote_audit_session ON cross_remote_audit(session_id, seq);
   `);
 
   // The original registry schema made (target_id, worktree_path) globally

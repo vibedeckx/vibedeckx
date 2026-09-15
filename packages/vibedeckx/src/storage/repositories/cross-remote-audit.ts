@@ -28,6 +28,29 @@ export const createCrossRemoteAuditRepo = (
         .execute();
     },
 
+    listSessionTargets: async (sessionId, userId, limit = 8) => {
+      let query = kdb
+        .selectFrom("cross_remote_audit")
+        .select(["target_remote_id"])
+        .select((eb) => eb.fn.max("seq").as("last_seq"))
+        .where("session_id", "=", sessionId)
+        // `denied` and `offline` rows are attempts the gateway turned away
+        // before anything ran on the machine — the call left no trace there, so
+        // the machine is not somewhere this session could have written a file.
+        // `error`/`timeout` DID reach it (a timed-out command can still have
+        // written its output), so they stay.
+        .where("status", "not in", ["denied", "offline"]);
+      // Unscoped in solo mode, where there is no tenant to scope to (the same
+      // `userId?` convention the rest of the repos use).
+      if (userId) query = query.where("user_id", "=", userId);
+      const rows = await query
+        .groupBy("target_remote_id")
+        .orderBy("last_seq", "desc")
+        .limit(limit)
+        .execute();
+      return rows.map((row) => row.target_remote_id);
+    },
+
     listByTarget: async (targetRemoteId, limit = 100) => {
       const rows = await kdb
         .selectFrom("cross_remote_audit")
