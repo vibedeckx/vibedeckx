@@ -487,13 +487,18 @@ export const PromptInputActionAddAttachments = ({
   ...props
 }: PromptInputActionAddAttachmentsProps) => {
   const attachments = usePromptInputAttachments();
+  const closeMenu = useContext(ActionMenuCloseContext);
 
   return (
     <DropdownMenuItem
       {...props}
       onSelect={(e) => {
+        // Opening the picker has to stay inside the user gesture, and Radix's
+        // own close would race it — so suppress that and close the menu in the
+        // next task, once the picker is up.
         e.preventDefault();
         attachments.openFileDialog();
+        setTimeout(() => closeMenu?.(), 0);
       }}
     >
       <ImageIcon className="mr-2 size-4" /> {label}
@@ -1090,9 +1095,44 @@ export const PromptInputButton = ({
 };
 
 export type PromptInputActionMenuProps = ComponentProps<typeof DropdownMenu>;
-export const PromptInputActionMenu = (props: PromptInputActionMenuProps) => (
-  <DropdownMenu {...props} />
-);
+
+/**
+ * Lets an item close the menu on its own. `PromptInputActionAddAttachments`
+ * has to `preventDefault` its select — Radix's own close would run while the
+ * browser is bringing up the file picker — so it needs another way out, or
+ * the menu sits on top of the composer after a file is picked.
+ */
+const ActionMenuCloseContext = createContext<(() => void) | null>(null);
+
+export const PromptInputActionMenu = ({
+  open,
+  defaultOpen,
+  onOpenChange,
+  ...props
+}: PromptInputActionMenuProps) => {
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(defaultOpen ?? false);
+  const isControlled = open !== undefined;
+  const handleOpenChange = useCallback(
+    (next: boolean) => {
+      if (!isControlled) {
+        setUncontrolledOpen(next);
+      }
+      onOpenChange?.(next);
+    },
+    [isControlled, onOpenChange]
+  );
+  const close = useCallback(() => handleOpenChange(false), [handleOpenChange]);
+
+  return (
+    <ActionMenuCloseContext.Provider value={close}>
+      <DropdownMenu
+        open={isControlled ? open : uncontrolledOpen}
+        onOpenChange={handleOpenChange}
+        {...props}
+      />
+    </ActionMenuCloseContext.Provider>
+  );
+};
 
 export type PromptInputActionMenuTriggerProps = PromptInputButtonProps;
 
