@@ -143,6 +143,43 @@ describe("useMergeStatusAutoRefresh (merge-target:updated trigger)", () => {
   });
 });
 
+describe("useMergeStatusAutoRefresh (files:changed trigger)", () => {
+  it("refetches on a Files-tab write to the same project", () => {
+    const refetch = vi.fn();
+    render(refetch, new Map(), "p1");
+
+    act(() => {
+      capturedListener?.({ type: "files:changed", projectId: "p1", branch: "dev1", change: "deleted" });
+    });
+    expect(refetch).toHaveBeenCalledTimes(1);
+
+    // An upload dirties the tree just as a delete does, and a delete can just
+    // as easily clean it (an untracked file) — both directions must refetch.
+    act(() => {
+      capturedListener?.({ type: "files:changed", projectId: "p1", branch: null, change: "uploaded" });
+    });
+    expect(refetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not refetch on a write to a different project", () => {
+    const refetch = vi.fn();
+    render(refetch, new Map(), "p1");
+    act(() => {
+      capturedListener?.({ type: "files:changed", projectId: "p2", branch: "dev1", change: "deleted" });
+    });
+    expect(refetch).not.toHaveBeenCalled();
+  });
+
+  it("does not refetch without a selected project", () => {
+    const refetch = vi.fn();
+    render(refetch, new Map(), null);
+    act(() => {
+      capturedListener?.({ type: "files:changed", projectId: null, branch: null, change: "deleted" });
+    });
+    expect(refetch).not.toHaveBeenCalled();
+  });
+});
+
 describe("useMergeStatusAutoRefresh (visible-tab backstop poll)", () => {
   const originalVisibilityState = Object.getOwnPropertyDescriptor(document, "visibilityState");
 

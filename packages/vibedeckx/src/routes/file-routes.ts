@@ -22,6 +22,24 @@ async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
   };
 }
 
+/**
+ * Announce a working-tree write from the Files tab. Best-effort: the write
+ * already succeeded, so a failure to notify must not turn a 200 into a 500 —
+ * consumers still have their backstop poll.
+ */
+function emitFilesChanged(
+  fastify: FastifyInstance,
+  projectId: string,
+  branch: string | null,
+  change: "deleted" | "uploaded",
+): void {
+  try {
+    fastify.eventBus.emit({ type: "files:changed", projectId, branch, change });
+  } catch (err) {
+    fastify.log.warn({ err }, "failed to emit files:changed");
+  }
+}
+
 interface BrowseEntry {
   name: string;
   type: "file" | "directory";
@@ -978,6 +996,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         },
         { reverseConnectManager: fastify.reverseConnectManager },
       );
+      if (result.ok) emitFilesChanged(fastify, project.id, branch ?? null, "uploaded");
       return reply.code(proxyStatus(result)).send(result.data);
     }
 
@@ -988,6 +1007,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const basePath = resolveWorktreePath(project.path, branch ?? null);
     try {
       const uploaded = await writeUploadedFiles(basePath, relativePath, collected);
+      emitFilesChanged(fastify, project.id, branch ?? null, "uploaded");
       return reply.code(200).send({ uploaded });
     } catch (err) {
       const status = (err as { statusCode?: number }).statusCode;
@@ -1044,6 +1064,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         undefined,
         { reverseConnectManager: fastify.reverseConnectManager },
       );
+      if (result.ok) emitFilesChanged(fastify, project.id, branch ?? null, "deleted");
       return reply.code(proxyStatus(result)).send(result.data);
     }
 
@@ -1054,6 +1075,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     try {
       const basePath = resolveWorktreePath(project.path, branch ?? null);
       const deleted = await deletePath(basePath, filePath);
+      emitFilesChanged(fastify, project.id, branch ?? null, "deleted");
       return reply.code(200).send({ deleted });
     } catch (err) {
       const status = (err as { statusCode?: number }).statusCode;

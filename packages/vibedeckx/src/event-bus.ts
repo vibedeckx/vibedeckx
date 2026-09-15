@@ -14,6 +14,14 @@ export type GlobalEvent =
   | { type: "executor:started"; projectId: string; executorId: string; processId: string; target?: string }
   | { type: "executor:stopped"; projectId: string; executorId: string; processId: string; exitCode: number; target?: string; tailOutput?: string; finalResult?: string }
   | { type: "merge-target:updated"; projectId: string; branch: string }
+  // The Files tab wrote to a workspace's working tree. No commit is involved,
+  // so nothing else announces it — surfaces that show working-tree state (the
+  // sidebar's dirty marker) would otherwise wait out their backstop poll, and
+  // the window-focus trigger never fires because the user never left the tab.
+  // Emitted hub-side for both local writes and ones proxied to a worker, so
+  // the worker needs no change. `branch` is the workspace written to; null is
+  // the root workspace.
+  | { type: "files:changed"; projectId: string; branch: string | null; change: "deleted" | "uploaded" }
   // A schedule was created, edited or removed. Consumers of the project's
   // schedule list refetch on it, so a schedule created from a surface that
   // doesn't own that list (the agent window's propose_schedule card) still

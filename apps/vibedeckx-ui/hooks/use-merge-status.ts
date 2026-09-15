@@ -308,9 +308,10 @@ export function deserializeBranchSet(key: string): Set<string> {
 /**
  * Live refresh triggers for merge status: refetch when an agent finishes a
  * turn (branch leaves the active set), on window focus, when an executor for
- * this project stops, and on a visible-tab backstop poll (30s active / 60s
- * idle, fully stopped while the tab is hidden). The tip-SHA cache makes
- * redundant refetches nearly free.
+ * this project stops, when the Files tab writes to a working tree, and on a
+ * visible-tab backstop poll (30s active / 60s idle, fully stopped while the
+ * tab is hidden). The tip-SHA cache makes redundant refetches nearly free —
+ * a write that leaves both tips alone re-runs only the dirty check.
  */
 export function useMergeStatusAutoRefresh(
   refetch: () => void,
@@ -348,6 +349,12 @@ export function useMergeStatusAutoRefresh(
       projectId !== null &&
       evt.projectId === projectId
     ) {
+      refetch();
+    }
+    // A Files-tab delete or upload changes the working tree without a commit.
+    // The user never leaves the window, so the focus trigger can't fire — the
+    // dirty marker would otherwise lag by up to a full poll interval.
+    if (evt.type === "files:changed" && projectId !== null && evt.projectId === projectId) {
       refetch();
     }
   });
