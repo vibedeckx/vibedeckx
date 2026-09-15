@@ -16,7 +16,14 @@ import {
   TaskGetUI,
   TaskListResultUI,
 } from "./task-tools";
-import { ReadToolUseUI, ReadToolResultUI, WriteToolUseUI, WriteToolResultUI } from "./file-tools";
+import {
+  ReadToolUseUI,
+  ReadToolResultUI,
+  WriteToolUseUI,
+  WriteToolResultUI,
+  ImageToolResultUI,
+  parseImageBlocks,
+} from "./file-tools";
 import { BashToolUseUI, BashToolResultUI } from "./bash-tools";
 import { GrepToolUseUI, GrepToolResultUI } from "./grep-tools";
 import { GlobToolUseUI, GlobToolResultUI } from "./glob-tools";
@@ -572,6 +579,19 @@ function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
   // The proposal's result is a fixed acknowledgement written for the agent, not
   // for the user — the card above already says everything a reader needs.
   if (tool === PROPOSE_SCHEDULE_TOOL) return null;
+
+  // The screenshot the agent just looked at (Read/ImageView on an image) —
+  // shown inline regardless of tool name, so the user sees what the agent saw.
+  const images = parseImageBlocks(output);
+  if (images) {
+    return (
+      <div className="flex gap-3 py-3 pl-11">
+        <div className="flex-1 min-w-0 overflow-hidden">
+          <ImageToolResultUI images={images} />
+        </div>
+      </div>
+    );
+  }
 
   // Task tool results get custom rendering
   const isTaskTool = ["TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet"].includes(tool);

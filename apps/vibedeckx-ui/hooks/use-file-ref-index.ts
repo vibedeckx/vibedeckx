@@ -16,7 +16,7 @@ interface Args {
   enabled?: boolean;
 }
 
-type FileListResult = { files: string[]; truncated: boolean };
+type FileListResult = { files: string[]; truncated: boolean; root?: string };
 
 // Backoff schedule (~15s total) for remote projects whose file list isn't ready
 // at mount: the remote can answer with an empty list before its worktree is
@@ -55,9 +55,12 @@ export async function loadFilesWithRetry(
 }
 
 // Loads the project's flat file list (with retry for not-yet-ready remotes) once
-// per project/branch/target and builds a resolution index. Returns null while
-// loading or on persistent failure (refs stay plain text and upgrade to links
-// when the index arrives).
+// per project/branch/target and builds a resolution index. Returns null only
+// while loading (refs stay plain text and upgrade to links when the index
+// arrives). Persistent failure yields an EMPTY index rather than null: no repo
+// ref will resolve either way, but a non-null index is what lets FileRefLink
+// keep linking paths outside the repo (`/tmp/shot.png`), which are read by
+// path and never needed the list in the first place.
 export function useFileRefIndex({
   projectId,
   branch,
@@ -77,8 +80,8 @@ export function useFileRefIndex({
     loadFilesWithRetry(() => api.listProjectFiles(projectId, branch, target), {
       cancelled: () => key !== keyRef.current,
     }).then((res) => {
-      if (key !== keyRef.current || !res) return;
-      setIndex(buildFileRefIndex(res.files));
+      if (key !== keyRef.current) return;
+      setIndex(res ? buildFileRefIndex(res.files, res.root) : buildFileRefIndex([]));
     });
   }, [projectId, branch, target, enabled]);
 

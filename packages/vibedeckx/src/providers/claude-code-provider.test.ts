@@ -129,6 +129,40 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     ]);
   });
 
+  // Tool results come back on `user` lines. Text results are dropped (they
+  // would double the transcript for nothing), but an image result — the
+  // screenshot the agent just looked at via Read/ImageView — is surfaced so
+  // the conversation can show it inline. The tool name is left empty; the
+  // session manager fills it from the matching tool_use entry.
+  it("surfaces an image-bearing tool_result from a user line", () => {
+    const content = [
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+    ];
+    const line = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_img", content }] },
+    });
+    expect(provider.parseStdoutLine(line, SESSION)).toEqual([
+      { type: "tool_result", tool: "", output: JSON.stringify(content), toolUseId: "toolu_img" },
+    ]);
+  });
+
+  it("still ignores text-only tool results and plain user echoes", () => {
+    const textResult = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "toolu_txt", content: [{ type: "text", text: "1\tconst x = 1;" }] },
+          { type: "tool_result", tool_use_id: "toolu_str", content: "(Bash completed with no output)" },
+        ],
+      },
+    });
+    expect(provider.parseStdoutLine(textResult, SESSION)).toEqual([]);
+    const echo = JSON.stringify({ type: "user", message: { role: "user", content: "hello" } });
+    expect(provider.parseStdoutLine(echo, SESSION)).toEqual([]);
+  });
+
   it("ignores task events missing task_id", () => {
     const line = JSON.stringify({ type: "system", subtype: "task_notification", status: "completed" });
     expect(provider.parseStdoutLine(line, SESSION)).toEqual([]);

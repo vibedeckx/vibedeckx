@@ -68,6 +68,51 @@ export function ReadToolUseUI({ input }: { input: unknown }) {
   );
 }
 
+// --- Image tool results ---
+
+export interface ImageBlock {
+  mediaType: string;
+  data: string;
+}
+
+// A Read/ImageView on an image comes back as a JSON content array with
+// `{type:"image",source:{type:"base64",media_type,data}}` blocks (the backend
+// only forwards image-bearing results — see extractImageToolResults). Returns
+// null for ordinary text output so callers fall through to their usual UI.
+export function parseImageBlocks(output: string): ImageBlock[] | null {
+  if (!output.startsWith("[") || !output.includes('"type":"image"')) return null;
+  try {
+    const blocks = JSON.parse(output) as unknown;
+    if (!Array.isArray(blocks)) return null;
+    const images: ImageBlock[] = [];
+    for (const b of blocks as Array<Record<string, unknown>>) {
+      if (!b || b.type !== "image") continue;
+      const source = b.source as { type?: string; media_type?: string; data?: string } | undefined;
+      if (source?.type !== "base64" || typeof source.data !== "string") continue;
+      images.push({ mediaType: source.media_type ?? "image/png", data: source.data });
+    }
+    return images.length > 0 ? images : null;
+  } catch {
+    return null;
+  }
+}
+
+export function ImageToolResultUI({ images }: { images: ImageBlock[] }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {images.map((img, i) => (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          key={i}
+          src={`data:${img.mediaType};base64,${img.data}`}
+          alt="Image viewed by the agent"
+          className="max-w-sm max-h-80 rounded-lg border border-border object-contain"
+        />
+      ))}
+    </div>
+  );
+}
+
 export function ReadToolResultUI({ output }: { output: string }) {
   const lineCount = output.split("\n").length;
 

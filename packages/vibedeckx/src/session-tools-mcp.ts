@@ -66,6 +66,15 @@ export const PROPOSE_SCHEDULE_DESCRIPTION = [
 ].join("\n");
 
 /**
+ * Soft guidance only — the conversation links any absolute path the agent
+ * mentions regardless (see FileRefLink), this just makes the path more likely
+ * to come out complete and on its own line instead of buried mid-sentence.
+ */
+export const ARTIFACT_PATH_HINT =
+  "Files for the user to look at: when you produce a screenshot, image, or report file for "
+  + "the user, write its absolute path on its own line in your reply so it can be previewed.";
+
+/**
  * Server-level `instructions` returned from MCP `initialize`. Claude Code folds
  * these into the system prompt, so they are read even when the model never
  * considers the tool list — which is the actual failure mode: "set up a nightly
@@ -77,6 +86,8 @@ export const SESSION_TOOLS_MCP_INSTRUCTIONS = [
   "When the user asks for anything recurring — nightly, hourly, every morning, on a cron, \"keep",
   "watching\" — call it instead of writing a crontab entry, systemd timer, or setInterval loop.",
   "Scheduling inside the user's own product remains ordinary coding work.",
+  "",
+  ARTIFACT_PATH_HINT,
 ].join("\n");
 
 /**
@@ -89,6 +100,7 @@ export const SESSION_TOOLS_SYSTEM_PROMPT_HINT = [
   `morning, on a cron, "keep watching"), call the \`${CANONICAL_PROPOSE_SCHEDULE_TOOL}\` tool. That`,
   "is the only way to schedule work here — do not hand-roll a crontab entry, systemd timer, or",
   "setInterval loop for it. Writing scheduling into the user's own project is still normal coding.",
+  ARTIFACT_PATH_HINT,
 ].join(" ");
 
 export const PROPOSE_SCHEDULE_INPUT_SCHEMA = {

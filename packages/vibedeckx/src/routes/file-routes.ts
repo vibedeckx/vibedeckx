@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
+import os from "os";
 import fs from "fs/promises";
 import { createReadStream, constants as fsConstants } from "fs";
 import { execFile } from "child_process";
@@ -78,6 +79,42 @@ async function isWithinBaseReal(basePath: string, candidatePath: string): Promis
   } catch {
     return false;
   }
+}
+
+// Where a read-only route (file-content / file-download) may look. Repo-relative
+// paths are always confined to the worktree (lexical + realpath). An absolute or
+// `~/` path is honoured verbatim only when `allowOutside` is set: the agent
+// mentions files it wrote outside the checkout — `/tmp/splash-vs-icon.png`, a
+// build artifact under a gitignored dir — and the conversation links them for
+// preview. The worker-side `/api/path/*` routes always allow it (they only exist
+// on `vibedeckx connect` workers, i.e. the user's own machine, and every call
+// arrives through the hub's authenticated tunnel). The hub's project routes
+// allow it only in solo mode (`!authEnabled`), where the operator is the sole
+// user; a multi-tenant hub keeps its local checkouts confined.
+async function resolveReadPath(
+  basePath: string,
+  filePath: string,
+  allowOutside: boolean,
+): Promise<{ fullPath: string } | { status: 403 | 404; error: string }> {
+  const outside = path.isAbsolute(filePath) || filePath === "~" || filePath.startsWith("~/");
+  if (outside && allowOutside) {
+    const expanded = filePath.startsWith("~") ? path.join(os.homedir(), filePath.slice(1)) : filePath;
+    return { fullPath: path.resolve(expanded) };
+  }
+  if (!isPathSafe(basePath, filePath)) {
+    return { status: 403, error: "Path traversal not allowed" };
+  }
+  const fullPath = path.resolve(basePath, filePath);
+  if (!(await isWithinBaseReal(basePath, fullPath))) {
+    return { status: 404, error: "File not found" };
+  }
+  return { fullPath };
+}
+
+// Whether the hub's own project-scoped read routes may follow paths outside the
+// checkout (see resolveReadPath). Solo/no-auth = the operator's own machine.
+function hubAllowsOutsideReads(fastify: FastifyInstance): boolean {
+  return !fastify.authEnabled;
 }
 
 // base64 inflates ~33%, so 11MB → ~14.7MB encoded, leaving headroom under the
@@ -408,7 +445,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     try {
       const result = await listProjectFiles(basePath);
-      return reply.code(200).send(result);
+      // `root` (additive, absent from older workers) lets the conversation's
+      // file-ref index tell an absolute path inside this checkout from one
+      // outside it, instead of guessing by basename.
+      return reply.code(200).send({ ...result, root: path.resolve(basePath) });
     } catch (err) {
       fastify.log.warn({ err, basePath }, "listProjectFiles failed");
       return reply.code(500).send({ error: "Failed to list files" });
@@ -428,18 +468,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const branch = req.query.branch;
     const basePath = resolveWorktreePath(projectPath, branch ?? null);
 
-    if (!isPathSafe(basePath, filePath)) {
-      return reply.code(403).send({ error: "Path traversal not allowed" });
+    const resolved = await resolveReadPath(basePath, filePath, true);
+    if ("status" in resolved) {
+      return reply.code(resolved.status).send({ error: resolved.error });
     }
-
-    const fullPath = path.resolve(basePath, filePath);
+    const { fullPath } = resolved;
 
     try {
-      if (!(await isWithinBaseReal(basePath, fullPath))) {
+      const stat = await fs.stat(fullPath);
+      if (!stat.isFile()) {
         return reply.code(404).send({ error: "File not found" });
       }
-
-      const stat = await fs.stat(fullPath);
 
       if (stat.size > MAX_FILE_SIZE) {
         return reply.code(200).send({ binary: false, tooLarge: true, content: null, size: stat.size });
@@ -470,19 +509,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const branch = req.query.branch;
     const basePath = resolveWorktreePath(projectPath, branch ?? null);
 
-    if (!isPathSafe(basePath, filePath)) {
-      return reply.code(403).send({ error: "Path traversal not allowed" });
+    const resolved = await resolveReadPath(basePath, filePath, true);
+    if ("status" in resolved) {
+      return reply.code(resolved.status).send({ error: resolved.error });
     }
-
-    const fullPath = path.resolve(basePath, filePath);
+    const { fullPath } = resolved;
     const fileName = path.basename(fullPath);
 
     try {
-      if (!(await isWithinBaseReal(basePath, fullPath))) {
+      if (!(await fs.stat(fullPath)).isFile()) {
         return reply.code(404).send({ error: "File not found" });
       }
-
-      await fs.access(fullPath);
       const stream = createReadStream(fullPath);
       return reply
         .header("Content-Disposition", `attachment; filename="${fileName}"`)
@@ -709,7 +746,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     try {
       const result = await listProjectFiles(basePath);
-      return reply.code(200).send(result);
+      // `root` (additive, absent from older workers) lets the conversation's
+      // file-ref index tell an absolute path inside this checkout from one
+      // outside it, instead of guessing by basename.
+      return reply.code(200).send({ ...result, root: path.resolve(basePath) });
     } catch (err) {
       fastify.log.warn({ err, basePath }, "listProjectFiles failed");
       return reply.code(500).send({ error: "Failed to list files" });
@@ -766,18 +806,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const basePath = resolveWorktreePath(project.path, branch ?? null);
 
-    if (!isPathSafe(basePath, filePath)) {
-      return reply.code(403).send({ error: "Path traversal not allowed" });
+    const resolved = await resolveReadPath(basePath, filePath, hubAllowsOutsideReads(fastify));
+    if ("status" in resolved) {
+      return reply.code(resolved.status).send({ error: resolved.error });
     }
-
-    const fullPath = path.resolve(basePath, filePath);
+    const { fullPath } = resolved;
 
     try {
-      if (!(await isWithinBaseReal(basePath, fullPath))) {
+      const stat = await fs.stat(fullPath);
+      if (!stat.isFile()) {
         return reply.code(404).send({ error: "File not found" });
       }
-
-      const stat = await fs.stat(fullPath);
 
       if (stat.size > MAX_FILE_SIZE) {
         return reply.code(200).send({ binary: false, tooLarge: true, content: null, size: stat.size });
@@ -913,19 +952,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const basePath = resolveWorktreePath(project.path, branch ?? null);
 
-    if (!isPathSafe(basePath, filePath)) {
-      return reply.code(403).send({ error: "Path traversal not allowed" });
+    const resolved = await resolveReadPath(basePath, filePath, hubAllowsOutsideReads(fastify));
+    if ("status" in resolved) {
+      return reply.code(resolved.status).send({ error: resolved.error });
     }
-
-    const fullPath = path.resolve(basePath, filePath);
+    const { fullPath } = resolved;
     const fileName = path.basename(fullPath);
 
     try {
-      if (!(await isWithinBaseReal(basePath, fullPath))) {
+      if (!(await fs.stat(fullPath)).isFile()) {
         return reply.code(404).send({ error: "File not found" });
       }
-
-      await fs.access(fullPath);
       const stream = createReadStream(fullPath);
       return reply
         .header("Content-Disposition", `attachment; filename="${fileName}"`)

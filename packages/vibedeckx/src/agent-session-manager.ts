@@ -468,6 +468,31 @@ export class WorkspaceCheckoutUnavailableError extends Error {
   }
 }
 
+/**
+ * For a tool_result whose output is a JSON content array with image blocks
+ * (see extractImageToolResults), return a short textual stand-in; null for
+ * ordinary text outputs.
+ */
+function describeImageToolOutput(output: string): string | null {
+  if (!output.startsWith("[") || !output.includes('"type":"image"')) return null;
+  try {
+    const blocks = JSON.parse(output) as Array<Record<string, unknown>>;
+    if (!Array.isArray(blocks)) return null;
+    const parts: string[] = [];
+    for (const b of blocks) {
+      if (b?.type === "image") {
+        const mt = (b.source as { media_type?: string } | undefined)?.media_type ?? "image";
+        parts.push(`[image ${mt}]`);
+      } else if (b?.type === "text" && typeof b.text === "string") {
+        parts.push(b.text);
+      }
+    }
+    return parts.join("\n");
+  } catch {
+    return null;
+  }
+}
+
 export class AgentSessionManager {
   private sessions: Map<string, RunningSession> = new Map();
   private storage: Storage;
@@ -2229,9 +2254,18 @@ export class AgentSessionManager {
         session.store.currentAssistantIndex = null;
         const trKey = `tool_result:${event.toolUseId}`;
         const { index: trIndex, isNew: trIsNew } = session.store.toolTracker.getOrCreate(trKey);
+        // Claude's stream-json result lines carry no tool name — recover it
+        // from the tool_use entry the result answers so the UI can pick a
+        // tool-specific renderer.
+        let tool = event.tool;
+        if (!tool) {
+          const tuIndex = session.store.toolTracker.get(`tool_use:${event.toolUseId}`);
+          const tuEntry = tuIndex !== undefined ? session.store.entries[tuIndex] : undefined;
+          if (tuEntry?.type === "tool_use") tool = tuEntry.tool;
+        }
         const trMessage: AgentMessage = {
           type: "tool_result",
-          tool: event.tool,
+          tool,
           output: event.output,
           toolUseId: event.toolUseId,
           timestamp,
@@ -4016,7 +4050,10 @@ export class AgentSessionManager {
           break;
         }
         case "tool_result": {
-          const truncatedOutput = entry.output.length > 2000 ? entry.output.substring(0, 2000) + "..." : entry.output;
+          // An image result is a base64 blob: 2000 chars of it tell the model
+          // nothing, so describe it instead.
+          const output = describeImageToolOutput(entry.output) ?? entry.output;
+          const truncatedOutput = output.length > 2000 ? output.substring(0, 2000) + "..." : output;
           lines.push(`<historical_tool_result>${truncatedOutput}</historical_tool_result>`);
           break;
         }

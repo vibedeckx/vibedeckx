@@ -20,9 +20,16 @@ function basenameOf(p: string): string {
   return i >= 0 ? p.slice(i + 1) : p;
 }
 
-export function buildFileRefIndex(files: string[]): FileRefIndex {
+// `root` is the checkout's absolute path as reported by list-files (absent
+// from older workers). With it, an absolute reference is decided exactly:
+// inside the root it must name a listed file, outside it is not a repo file at
+// all — so `/tmp/screenshot.png` can no longer be hijacked by a repo file that
+// happens to share its basename. Without it we fall back to the tail-match
+// heuristic, which is all an older worker leaves us.
+export function buildFileRefIndex(files: string[], root?: string | null): FileRefIndex {
   const version = `idx-${++nextIndexVersion}`;
   const fullPaths = new Set(files);
+  const rootPrefix = root ? root.replace(/\/+$/, "") + "/" : null;
   const byBasename = new Map<string, string[]>();
   for (const f of files) {
     const base = basenameOf(f);
@@ -35,6 +42,13 @@ export function buildFileRefIndex(files: string[]): FileRefIndex {
     version,
     resolve(rawPath: string): string[] {
       if (!rawPath) return [];
+      if (rootPrefix && (rawPath.startsWith("/") || rawPath.startsWith("~/"))) {
+        // `~/` cannot be expanded here (the home dir is the agent machine's),
+        // so it is never a repo path when the root is known.
+        if (!rawPath.startsWith(rootPrefix)) return [];
+        const rel = rawPath.slice(rootPrefix.length);
+        return fullPaths.has(rel) ? [rel] : [];
+      }
       // Normalize away leading slashes so absolute paths an agent emits (e.g. a
       // remote working dir like "/src/eve/packages/.../todo.ts") are treated the
       // same as repo-relative ones.

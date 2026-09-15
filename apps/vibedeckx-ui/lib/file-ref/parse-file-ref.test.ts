@@ -87,3 +87,25 @@ describe("parseFileHref", () => {
     expect(parseFileHref("src/a.ts")).toEqual({ rawPath: "src/a.ts", line: null });
   });
 });
+
+describe("scanFileRefs — absolute and home-relative paths", () => {
+  it("matches an absolute path in prose", () => {
+    const refs = scanFileRefs("saved to /tmp/splash-vs-icon.png for review");
+    expect(refs.map((r) => r.rawPath)).toEqual(["/tmp/splash-vs-icon.png"]);
+    expect(refs[0].start).toBe("saved to ".length);
+  });
+
+  it("matches a ~/ path and keeps the tilde", () => {
+    const refs = scanFileRefs("see ~/shots/after.png");
+    expect(refs.map((r) => r.rawPath)).toEqual(["~/shots/after.png"]);
+  });
+
+  it("matches an absolute path with a line suffix", () => {
+    const refs = scanFileRefs("/src/eve/packages/x/todo.ts:56 is the spot");
+    expect(refs[0]).toMatchObject({ rawPath: "/src/eve/packages/x/todo.ts", line: 56 });
+  });
+
+  it("never lifts the path out of a URL", () => {
+    expect(scanFileRefs("open https://example.com/a/b.png now")).toEqual([]);
+  });
+});

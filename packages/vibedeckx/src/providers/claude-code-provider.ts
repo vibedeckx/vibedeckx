@@ -9,7 +9,7 @@ import {
   type SessionToolsMcpConfig,
 } from "../session-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
-import { parseClaudeLine, serializeUserInput } from "../protocol/claude-code/codec.js";
+import { parseClaudeLine, serializeUserInput, extractImageToolResults } from "../protocol/claude-code/codec.js";
 import {
   buildClaudeMcpConfigArg,
   buildClaudeSessionSpawnConfig,
@@ -76,7 +76,15 @@ export class ClaudeCodeProvider implements AgentProvider {
     }
 
     if (msg.type === "user") {
-      return [];
+      // Tool results ride back on `user` lines. Only image-bearing ones are
+      // surfaced (see extractImageToolResults); the tool name is filled in by
+      // the session manager from the matching tool_use entry.
+      return extractImageToolResults(msg).map((r) => ({
+        type: "tool_result" as const,
+        tool: "",
+        output: r.output,
+        toolUseId: r.toolUseId,
+      }));
     }
 
     if (msg.type === "assistant") {

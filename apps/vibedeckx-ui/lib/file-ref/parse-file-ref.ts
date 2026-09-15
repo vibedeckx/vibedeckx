@@ -9,9 +9,13 @@ export interface ScannedRef {
 }
 
 // A "pathish" core must contain at least one separator (`.` or `/`) so bare
-// words never match. Optional suffix: `:line(:col)?` or `#Lstart(-L?end)?`.
+// words never match. An optional leading `/` or `~/` admits absolute paths —
+// the agent's `/tmp/screenshot.png` or a remote checkout's full path — while
+// the lookbehind still refuses to start inside `://` or after a word char, so
+// the path part of a URL is never lifted out. Optional suffix: `:line(:col)?`
+// or `#Lstart(-L?end)?`.
 const FILE_REF =
-  /(?<![\w./-])([\w-]+(?:[./][\w-]+)+)(?::(\d+)(?::\d+)?|#L(\d+)(?:-L?\d+)?)?/g;
+  /(?<![\w./-])((?:~?\/)?[\w-]+(?:[./][\w-]+)+)(?::(\d+)(?::\d+)?|#L(\d+)(?:-L?\d+)?)?/g;
 
 // Literal markdown-link syntax `[label](href)` appearing in plain text or inline
 // code (where markdown itself does NOT parse it as a link — e.g. inside

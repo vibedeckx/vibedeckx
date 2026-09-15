@@ -75,3 +75,37 @@ describe("buildFileRefIndex cache identity (cross-project processor cache)", () 
     expect(JSON.stringify({ index: a })).not.toBe(JSON.stringify({ index: null }));
   });
 });
+
+describe("buildFileRefIndex.resolve with a known checkout root", () => {
+  const idx = buildFileRefIndex([...files, "screenshot.png"], "/work/repo");
+
+  it("resolves an absolute path inside the root exactly", () => {
+    expect(idx.resolve("/work/repo/apps/ui/todo.ts")).toEqual(["apps/ui/todo.ts"]);
+    expect(idx.resolve("/work/repo/screenshot.png")).toEqual(["screenshot.png"]);
+  });
+
+  it("does not let a same-basename repo file hijack an absolute path outside the root", () => {
+    expect(idx.resolve("/tmp/screenshot.png")).toEqual([]);
+    expect(idx.resolve("/tmp/apps/ui/todo.ts")).toEqual([]);
+    expect(idx.resolve("~/screenshot.png")).toEqual([]);
+  });
+
+  it("treats an unlisted file inside the root (gitignored, created mid-session) as unresolved", () => {
+    expect(idx.resolve("/work/repo/out/shot.png")).toEqual([]);
+  });
+
+  it("does not confuse a sibling directory sharing the root as a prefix", () => {
+    expect(idx.resolve("/work/repo-old/apps/ui/todo.ts")).toEqual([]);
+  });
+
+  it("keeps resolving relative references as before", () => {
+    expect(idx.resolve("todo.ts").sort()).toEqual(
+      ["apps/ui/todo.ts", "packages/eve/src/runtime/framework-tools/todo.ts"].sort(),
+    );
+    expect(idx.resolve("execution/compaction.ts")).toEqual(["packages/eve/src/execution/compaction.ts"]);
+  });
+
+  it("tolerates a trailing slash on the root", () => {
+    expect(buildFileRefIndex(files, "/work/repo/").resolve("/work/repo/apps/ui/todo.ts")).toEqual(["apps/ui/todo.ts"]);
+  });
+});

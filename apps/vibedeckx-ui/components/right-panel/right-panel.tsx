@@ -210,7 +210,11 @@ export function RightPanel({
     [setActiveTab],
   );
 
-  const navValue = useMemo(() => ({ openFile, index }), [openFile, index]);
+  const scope = useMemo(
+    () => (projectId ? { projectId, branch: selectedBranch ?? null, target } : null),
+    [projectId, selectedBranch, target],
+  );
+  const navValue = useMemo(() => ({ openFile, index, scope }), [openFile, index, scope]);
 
   const agentTabFocus = useMemo(
     () => ({

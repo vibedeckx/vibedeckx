@@ -2709,7 +2709,7 @@ export const api = {
     projectId: string,
     branch?: string | null,
     target?: "local" | "remote"
-  ): Promise<{ files: string[]; truncated: boolean }> {
+  ): Promise<{ files: string[]; truncated: boolean; root?: string }> {
     const params = new URLSearchParams();
     if (branch) params.set("branch", branch);
     if (target) params.set("target", target);
