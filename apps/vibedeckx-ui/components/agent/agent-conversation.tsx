@@ -128,8 +128,11 @@ function AttachmentHeader({ uploads, workspaceKey, apiRef }: {
     // pt-3/pb-0 + p-0: the block-end addon variant pads its bottom and the
     // attachments div pads all sides — stacked with the textarea's pt-3 they
     // left ~31px under the thumbnails; separation now comes from the textarea
-    // padding alone
-    <PromptInputHeader className="pt-3 pb-0">
+    // padding alone.
+    // pl-12/pr-2 overrides the variant's px-3 so the chips line up with the
+    // first character of the textarea (menu button 36px + textarea px-3),
+    // matching the Translate badge row.
+    <PromptInputHeader className="pt-3 pb-0 pl-12 pr-2">
       <PromptInputAttachments className="p-0">
         {(attachment) => (
           <PromptInputAttachment
