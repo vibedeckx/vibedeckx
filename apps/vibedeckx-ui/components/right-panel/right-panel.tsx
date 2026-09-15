@@ -339,6 +339,7 @@ export function RightPanel({
             selectedBranch={selectedBranch}
             navRequest={navRequest}
             sessionId={agentSessionId}
+            active={displayTab === 'files'}
           />
         </div>
       </div>

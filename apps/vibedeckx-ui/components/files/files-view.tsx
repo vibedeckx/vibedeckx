@@ -23,9 +23,14 @@ interface FilesViewProps {
   // The conversation this tab was opened from. Only reads of paths outside the
   // checkout use it — those live on whichever machine the agent wrote them on.
   sessionId?: string | null;
+  // False while the Files tab is hidden. The view stays mounted to keep its
+  // tree and scroll state, so its splitter has to be told it is not interactive
+  // — a hidden handle still measures a rect (0×0 at the viewport origin) that
+  // the library would otherwise hit-test against.
+  active?: boolean;
 }
 
-export function FilesView({ projectId, project, selectedBranch, navRequest, sessionId }: FilesViewProps) {
+export function FilesView({ projectId, project, selectedBranch, navRequest, sessionId, active = true }: FilesViewProps) {
   // Determine target based on project config — if no local path, try remote
   const target = project && !project.path ? "remote" as const : undefined;
 
@@ -296,7 +301,7 @@ export function FilesView({ projectId, project, selectedBranch, navRequest, sess
           </Command>
         </ResizablePanel>
 
-        <ResizableHandle withHandle />
+        <ResizableHandle withHandle disabled={!active} />
 
         {/* File preview (right) */}
         <ResizablePanel defaultSize={67} minSize={25}>
