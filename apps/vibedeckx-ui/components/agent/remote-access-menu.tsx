@@ -70,7 +70,7 @@ export function RemoteAccessMenuItem({
         <div className="px-2 pt-1.5 pb-2">
           <div className="text-sm font-medium">Remote access</div>
           <div className="text-xs text-muted-foreground">
-            Machines this agent can reach
+            {sourceRemoteId ? "Other machines this agent can reach" : "Machines this agent can reach"}
           </div>
         </div>
         <DropdownMenuSeparator />
@@ -94,7 +94,9 @@ export function RemoteAccessMenuItem({
               </div>
               <div className="text-sm font-medium">No machines available</div>
               <div className="text-xs text-muted-foreground">
-                Enable cross-remote access for a machine in Remote Servers.
+                {/* "another": the session's own machine is never listed, so
+                    enabling access on it would not make this list non-empty. */}
+                Enable cross-remote access for another machine in Remote Servers.
               </div>
             </div>
           )}
