@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { splitVPasteMarkers, vfileMarker } from "./vpaste-chip";
+import { splitVPasteMarkers, takeRemotesMarker, vfileMarker } from "./vpaste-chip";
 
 describe("splitVPasteMarkers", () => {
   it("parses vpaste and vfile markers in one string, in order", () => {
@@ -34,6 +34,17 @@ describe("splitVPasteMarkers", () => {
   it("does not treat a malformed vfile tag as a chip", () => {
     const text = '<vfile path="/tmp/x" size="1" />';
     expect(splitVPasteMarkers(text)).toEqual([{ kind: "text", text }]);
+  });
+});
+
+describe("takeRemotesMarker", () => {
+  it("lifts the grant block and the blank lines before it out of the text", () => {
+    const block = '<vremotes names="ubuntu-1, mac-mini">\nCross-remote access granted.\n</vremotes>';
+    expect(takeRemotesMarker(`do it\n\n${block}`)).toEqual({ text: "do it", names: "ubuntu-1, mac-mini" });
+  });
+
+  it("leaves text without a block untouched", () => {
+    expect(takeRemotesMarker("do it\n\n")).toEqual({ text: "do it\n\n", names: null });
   });
 });
 

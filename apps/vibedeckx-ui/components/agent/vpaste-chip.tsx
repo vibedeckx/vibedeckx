@@ -23,20 +23,34 @@ function formatSize(bytes: number): string {
 }
 
 /**
- * The hub's `<vremotes>` block, rendered as one small chip. The block's prose
- * is written for the agent; `names` carries the same list in a form the UI can
- * show without re-parsing it.
+ * The hub's `<vremotes>` block, shown as quiet metadata on the message header.
+ * It records what the turn was allowed to reach — context about the message,
+ * not part of what the user typed — so it stays out of the body. The block's
+ * prose is written for the agent; `names` carries the same list for the UI.
  */
-export function VRemotesChip({ names }: { names: string }) {
+export function RemoteGrantMeta({ names }: { names: string }) {
   return (
     <span
-      className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-xs align-baseline text-emerald-700 dark:text-emerald-400"
-      title="Machines this session may reach with cross-remote tools"
+      className="flex min-w-0 items-baseline gap-1 text-xs font-normal text-muted-foreground"
+      title={`Remote access: ${names}`}
     >
-      <Server className="w-3 h-3 shrink-0" />
-      <span className="truncate max-w-[28ch]">Remote access: {names || "none"}</span>
+      <Server className="w-3 h-3 shrink-0 self-center" />
+      <span className="truncate">{names}</span>
     </span>
   );
+}
+
+/**
+ * Pull the `<vremotes>` block out of message text. Returns the text without it
+ * (and without the blank lines the hub put in front of it), plus its names.
+ */
+export function takeRemotesMarker(text: string): { text: string; names: string | null } {
+  const found = { names: null as string | null };
+  const stripped = text.replace(new RegExp(VREMOTES_MARKER_RE.source, "g"), (_m, names: string) => {
+    found.names = names;
+    return "";
+  });
+  return found.names === null ? { text, names: null } : { text: stripped.trimEnd(), names: found.names };
 }
 
 export function VPasteChip({ path, size, name }: VPasteChipProps) {

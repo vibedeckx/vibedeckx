@@ -36,7 +36,7 @@ import { TaskOutputToolUseUI, TaskOutputToolResultUI } from "./task-output-tools
 import { FileChangeToolUseUI, FileChangeToolResultUI } from "./file-change-tools";
 import { PROPOSE_SCHEDULE_TOOL, ScheduleProposalUI } from "./schedule-proposal";
 import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./cross-remote-tools";
-import { VPasteChip, VRemotesChip, splitVPasteMarkers } from "./vpaste-chip";
+import { VPasteChip, RemoteGrantMeta, splitVPasteMarkers, takeRemotesMarker } from "./vpaste-chip";
 import { Fragment, useState } from "react";
 
 interface AgentMessageProps {
@@ -161,7 +161,8 @@ function renderTextWithVPaste(text: string) {
             </span>
           );
         }
-        if (seg.kind === "remotes") return <VRemotesChip key={i} names={seg.names} />;
+        // UserMessage lifts the grant block into its header before rendering.
+        if (seg.kind === "remotes") return null;
         return <VPasteChip key={i} path={seg.path} size={seg.size} name={seg.name} />;
       })}
     </div>
@@ -195,21 +196,52 @@ function UserMessage({
       </div>
     );
   }
+  // The hub appends a `<vremotes>` block to every message of a session with
+  // grants; it belongs in the header, so take it out of the body first.
+  let remoteNames: string | null = null;
+  let body: string | ContentPart[];
+  if (typeof content === "string") {
+    const taken = takeRemotesMarker(content);
+    remoteNames = taken.names;
+    body = taken.text;
+  } else {
+    body = [];
+    for (const part of content) {
+      if (part.type !== "text") {
+        body.push(part);
+        continue;
+      }
+      const taken = takeRemotesMarker(part.text);
+      if (taken.names !== null) remoteNames = taken.names;
+      // A part that was only the block leaves nothing to render.
+      if (taken.names === null || taken.text.length > 0) body.push({ ...part, text: taken.text });
+    }
+  }
   return (
     <div className="flex gap-3 py-3">
       <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-primary/10 flex items-center justify-center">
         <User className="w-3.5 h-3.5 text-primary" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
-        <p className="text-sm font-medium text-foreground mb-1">You</p>
+        {/* Baseline, not center: "You" and the smaller grant text have different
+            line boxes, and centering them lifts the smaller text off the line. */}
+        <p className="flex min-w-0 items-baseline gap-1.5 text-sm font-medium text-foreground mb-1">
+          <span className="shrink-0">You</span>
+          {remoteNames && (
+            <>
+              <span className="shrink-0 text-muted-foreground/60" aria-hidden>·</span>
+              <RemoteGrantMeta names={remoteNames} />
+            </>
+          )}
+        </p>
         <div
           className="text-foreground max-w-none break-words"
           style={{ fontSize: "var(--conv-font-size, 14px)" }}
         >
-          {typeof content === "string" ? (
-            renderTextWithVPaste(content)
+          {typeof body === "string" ? (
+            renderTextWithVPaste(body)
           ) : (
-            content.map((part, i) =>
+            body.map((part, i) =>
               part.type === "text" ? (
                 <Fragment key={i}>{renderTextWithVPaste(part.text)}</Fragment>
               ) : (
