@@ -40,7 +40,7 @@ import type { ChatStatus, FileUIPart } from "ai";
 import {
   AlertCircleIcon,
   ArrowUpIcon,
-  ImageIcon,
+  FilePlusIcon,
   Loader2Icon,
   MicIcon,
   PaperclipIcon,
@@ -501,7 +501,7 @@ export const PromptInputActionAddAttachments = ({
         setTimeout(() => closeMenu?.(), 0);
       }}
     >
-      <ImageIcon className="mr-2 size-4" /> {label}
+      <FilePlusIcon className="mr-2 size-4" /> {label}
     </DropdownMenuItem>
   );
 };
