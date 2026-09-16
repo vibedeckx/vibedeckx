@@ -544,6 +544,8 @@ export interface RemoteSessionCreationIntent {
   /** Lifecycle adapter's operation key; null for legacy `/new` intents. */
   prepare_operation_id: string | null;
   prepared_at: number | null;
+  /** Frozen cross-remote grant context for the first proxied instruction (§6). */
+  first_turn_grant_context: string | null;
 }
 
 export interface RemoteReviewerCreationIntent {
@@ -925,6 +927,24 @@ export interface Storage {
     rotateToken(id: string, userId?: string): Promise<string | undefined>;
     revokeToken(id: string, userId?: string): Promise<boolean>;
     delete(id: string, userId?: string): Promise<boolean>;
+  };
+  /**
+   * Which remote machines this agent session's agent may reach through the
+   * cross-remote gateway (docs/cross-remote-session-grants-design.md).
+   * Machine tier is the ceiling; this is the effective set. Deliberately NOT
+   * consulted by `canReachRemote`, which also serves the user's own artifact
+   * reads — revoking a grant must not take the user's screenshot links away.
+   */
+  sessionRemoteGrants: {
+    /**
+     * Granted remote ids for a session, oldest grant first. Grants written by
+     * one `replace` share a timestamp, so their relative order is arbitrary —
+     * anything user-visible sorts by machine name instead.
+     */
+    list(sessionId: string): Promise<string[]>;
+    /** Whole-list replacement in one transaction; `[]` clears every grant. */
+    replace(sessionId: string, userId: string, remoteServerIds: string[]): Promise<void>;
+    deleteBySession(sessionId: string): Promise<void>;
   };
   crossRemoteAudit: {
     insert(entry: CrossRemoteAuditEntry): Promise<void>;
@@ -1475,6 +1495,15 @@ export interface Storage {
     markPrepared: (localSessionId: string, preparedAt: number) => Promise<void>;
     /** Hub GC: drop unconfirmed lifecycle intents whose worker row has long since expired. */
     discardStaleLifecycleIntents: (opts: { cutoff: number; limit: number }) => Promise<number>;
+    /**
+     * Freeze the cross-remote grant context used for this session's first
+     * proxied instruction. Write-once (`WHERE first_turn_grant_context IS
+     * NULL`): every retry of the same activation must send byte-identical
+     * text, or the worker's content hash rejects it as an idempotency
+     * conflict. Returns the text now stored, which for a second caller is the
+     * first caller's, not its own.
+     */
+    setFirstTurnGrantContext: (localSessionId: string, text: string) => Promise<string | undefined>;
   };
   remoteReviewerCreationIntents: {
     begin: (intent: {

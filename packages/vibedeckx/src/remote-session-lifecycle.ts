@@ -19,6 +19,7 @@ import type { EventBus } from "./event-bus.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
 import { extractUserText } from "./utils/session-title.js";
+import { appendContextBlock, buildRemoteGrantContext } from "./cross-remote-grant-context.js";
 import { WATCH_WINDOW_MS as NOTIFICATION_WATCH_WINDOW_MS } from "./remote-notification-sync.js";
 import {
   bindRemoteSessionMapping,
@@ -61,6 +62,8 @@ export interface RemotePrepareParams {
   /** Caller-preallocated worker-side id (project chat pins both halves of the identity); minted otherwise. */
   remoteSessionId?: string;
   userId: string | undefined;
+  /** Cross-remote machines allowed from the composer before the session existed (§7). */
+  grantedRemoteIds?: string[];
 }
 
 export interface RemoteActivateParams {
@@ -71,6 +74,8 @@ export interface RemoteActivateParams {
   origin?: "workflow";
   notificationDisposition?: NotificationDisposition;
   userId: string | undefined;
+  /** The composer's declaration as of the send (§0.1); see the local input's note. */
+  grantedRemoteIds?: string[];
 }
 
 export type RemoteUnreachable = { kind: "remote_unreachable"; status: number; detail: unknown; view?: SessionLifecycleView };
@@ -142,6 +147,17 @@ export class RemoteSessionLifecycleAdapter {
       this.deps.remoteSessionMap.set(localSessionId, { remoteServerId: params.remoteServerId, remoteSessionId, branch: params.branch });
     }
     const crossRemoteMcp = await this.mintFor(localSessionId, params.userId, params.remoteServerId);
+    const frozen = await this.withFrozenGrantContext(localSessionId, params.userId, params.instruction);
+    if (!frozen.ok) {
+      if (preRegistered) this.deps.remoteSessionMap.delete(localSessionId);
+      // Local storage failure, not the tunnel — but the caller contract is the
+      // one `remote_unreachable` already carries: nothing was delivered, and
+      // the same key retries. `detail` is a string so it becomes the reported
+      // `error`, otherwise the user would be told the worker was unreachable
+      // and go looking in the wrong place.
+      return { kind: "remote_unreachable", status: 0, detail: frozen.error };
+    }
+    const instruction = frozen.instruction;
     const activityAt = this.now();
     const result = await proxyToRemoteAuto(
       params.remoteServerId, "POST", "/api/path/agent-sessions/start",
@@ -149,7 +165,7 @@ export class RemoteSessionLifecycleAdapter {
         path: params.remotePath, branch: params.branch, permissionMode: params.permissionMode,
         agentType: params.agentType, model: params.model, sessionId: remoteSessionId,
         operationId: params.operationId, purpose: params.purpose, owner: params.owner ?? null,
-        instruction: params.instruction, force: params.force === true, origin: params.origin,
+        instruction, force: params.force === true, origin: params.origin,
         notificationDisposition: params.notificationDisposition,
         ...(crossRemoteMcp ? { crossRemoteMcp } : {}),
       },
@@ -194,6 +210,14 @@ export class RemoteSessionLifecycleAdapter {
     }
     const remoteSessionId = params.remoteSessionId ?? randomUUID();
     const localSessionId = params.localSessionId ?? `remote-${params.remoteServerId}-${params.projectId}-${remoteSessionId}`;
+    // Before the intent, not after: the intent is what a concurrent replay of
+    // this operation finds and activates, so it must never be findable without
+    // its grants. A failure here aborts the whole operation — nothing has been
+    // created yet, and starting an agent with an allowlist we failed to record
+    // is exactly what this feature exists to prevent.
+    if (params.grantedRemoteIds) {
+      await this.deps.storage.sessionRemoteGrants.replace(localSessionId, params.userId ?? "", params.grantedRemoteIds);
+    }
     await intents.begin({
       localSessionId,
       remoteSessionId,
@@ -209,6 +233,40 @@ export class RemoteSessionLifecycleAdapter {
       prepareOperationId: params.operationId,
     });
     return { kind: "ids", localSessionId, remoteSessionId, existing: undefined };
+  }
+
+  /**
+   * The grant block for a remote session's FIRST instruction, frozen on the
+   * intent row (§6).
+   *
+   * The worker hashes the whole instruction to decide whether a retry of the
+   * same activation key is a replay or a conflict, and a failed activation
+   * (`resident_limit`, `spawn_failed`) keeps that hash. Regenerating the block
+   * from current grants would therefore turn "activation failed, user grants
+   * the machine, retries" — the very flow the composer invites — into
+   * `idempotency_conflict`. So the first text wins for every later attempt;
+   * the gateway still judges by the live grant table, and the next ordinary
+   * message regenerates the block from scratch.
+   */
+  private async withFrozenGrantContext(
+    localSessionId: string,
+    userId: string | undefined,
+    instruction: string | ContentPart[],
+  ): Promise<{ ok: true; instruction: string | ContentPart[] } | { ok: false; error: string }> {
+    let frozen: string;
+    try {
+      const fresh = (await buildRemoteGrantContext(this.deps.storage, localSessionId, userId)) ?? "";
+      frozen = await this.deps.storage.remoteSessionCreationIntents.setFirstTurnGrantContext(localSessionId, fresh)
+        ?? fresh;
+    } catch (err) {
+      // Falling back to the raw instruction would defeat the freeze: a later
+      // attempt that succeeds would send different bytes under the same
+      // activation key and be refused as an idempotency conflict. Send
+      // nothing instead, and let the caller retry the whole operation.
+      console.error(`[RemoteLifecycle] grant context freeze failed for ${localSessionId}:`, err);
+      return { ok: false, error: `grant context could not be recorded: ${(err as Error)?.message ?? err}` };
+    }
+    return { ok: true, instruction: appendContextBlock(instruction, frozen.length > 0 ? frozen : null) };
   }
 
   private mintFor(localSessionId: string, userId: string | undefined, remoteServerId: string) {
@@ -259,6 +317,19 @@ export class RemoteSessionLifecycleAdapter {
     const target = await this.resolve(params.localSessionId);
     if (!target) return { kind: "not_found" };
     const { remoteServerId, remoteSessionId, projectId, branch, remotePath, mapping, intent } = target;
+
+    // Before the block is frozen, so it describes the list this turn runs under.
+    if (params.grantedRemoteIds) {
+      await this.deps.storage.sessionRemoteGrants
+        .replace(params.localSessionId, params.userId ?? "", params.grantedRemoteIds);
+    }
+    // Before the legacy fork, so both worker generations get the same text.
+    const frozen = await this.withFrozenGrantContext(params.localSessionId, params.userId, params.instruction);
+    if (!frozen.ok) {
+      // Nothing has been registered or proxied yet; see the note in `start()`.
+      return { kind: "remote_unreachable", status: 0, detail: frozen.error };
+    }
+    params = { ...params, instruction: frozen.instruction };
 
     if (!(await this.supports(remoteServerId))) {
       return this.legacyActivate(params, target);

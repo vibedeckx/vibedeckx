@@ -46,6 +46,13 @@ describe("cross-remote access", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  /**
+   * Machine tier is only the ceiling: every target must ALSO be on the
+   * session's allowlist (docs/cross-remote-session-grants-design.md §5), so
+   * the tier cases below grant first and then test the tier.
+   */
+  const grant = (...ids: string[]) => storage.sessionRemoteGrants.replace("sess-1", "user-1", ids);
+
   it("maps every tool to a tier", () => {
     expect(TOOL_TIERS).toEqual({
       remote_read_file: "read",
@@ -86,6 +93,7 @@ describe("cross-remote access", () => {
       const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
       connected.add(b.id);
+      await grant(b.id);
 
       const result = await resolveTarget(deps, payload(), b.id, "read");
       expect(result.ok).toBe(true);
@@ -94,6 +102,7 @@ describe("cross-remote access", () => {
     it("denies a read-tier target for an exec-tier tool", async () => {
       const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
+      await grant(b.id);
 
       const result = await resolveTarget(deps, payload(), b.id, "exec");
       expect(result).toEqual({ ok: false, reason: "not_accessible" });
@@ -103,6 +112,7 @@ describe("cross-remote access", () => {
       const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
       connected.add(b.id);
+      await grant(b.id);
 
       const result = await resolveTarget(deps, payload(), b.id, "read");
       expect(result.ok).toBe(true);
@@ -110,6 +120,7 @@ describe("cross-remote access", () => {
 
     it("denies a target left at the default 'off' tier", async () => {
       const b = await storage.remoteServers.create({ name: "b" }, "user-1");
+      await grant(b.id);
       const result = await resolveTarget(deps, payload(), b.id, "read");
       expect(result).toEqual({ ok: false, reason: "not_accessible" });
     });
@@ -117,6 +128,7 @@ describe("cross-remote access", () => {
     it("denies a target left at the default 'off' tier for an exec-tier tool", async () => {
       // The read-tier variant above never exercises tierSatisfies('off', 'exec').
       const b = await storage.remoteServers.create({ name: "b" }, "user-1");
+      await grant(b.id);
       const result = await resolveTarget(deps, payload(), b.id, "exec");
       expect(result).toEqual({ ok: false, reason: "not_accessible" });
     });
@@ -124,6 +136,7 @@ describe("cross-remote access", () => {
     it("denies a target owned by another user", async () => {
       const b = await storage.remoteServers.create({ name: "b" }, "user-2");
       await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-2");
+      await grant(b.id);
 
       const result = await resolveTarget(deps, payload({ userId: "user-1" }), b.id, "read");
       expect(result).toEqual({ ok: false, reason: "not_accessible" });
@@ -144,19 +157,25 @@ describe("cross-remote access", () => {
       const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
       connected.add(b.id);
+      await grant(b.id);
 
       const result = await resolveTarget(deps, payload({ sourceRemoteServerId: null }), b.id, "read");
       expect(result.ok).toBe(true);
     });
 
     it("denies an unknown remote id", async () => {
+      // An id that does not exist cannot be granted either (the grant table
+      // has an FK to remote_servers), so this is refused one step earlier than
+      // it used to be. `canReachRemote`'s own not-found branch is covered by
+      // the other-user case above, where the scoped lookup misses.
       const result = await resolveTarget(deps, payload(), "does-not-exist", "read");
-      expect(result).toEqual({ ok: false, reason: "not_accessible" });
+      expect(result).toEqual({ ok: false, reason: "not_granted" });
     });
 
     it("reports a target that is not connected as offline", async () => {
       const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
+      await grant(b.id);
 
       const result = await resolveTarget(deps, payload(), b.id, "exec");
       expect(result).toEqual({ ok: false, reason: "offline" });
@@ -166,13 +185,72 @@ describe("cross-remote access", () => {
       const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
       connected.add(b.id);
+      await grant(b.id);
 
       const result = await resolveTarget(deps, payload(), b.id, "exec");
       expect(result.ok).toBe(true);
     });
+
+    it("denies a reachable target the session was never granted", async () => {
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
+      await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
+      connected.add(b.id);
+
+      expect(await resolveTarget(deps, payload(), b.id, "exec")).toEqual({ ok: false, reason: "not_granted" });
+    });
+
+    it("denies again as soon as the grant is revoked, with no re-mint in between", async () => {
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
+      await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
+      connected.add(b.id);
+      await grant(b.id);
+      expect((await resolveTarget(deps, payload(), b.id, "exec")).ok).toBe(true);
+
+      await grant();
+      expect(await resolveTarget(deps, payload(), b.id, "exec")).toEqual({ ok: false, reason: "not_granted" });
+    });
+
+    it("keeps the source-machine refusal ahead of the grant check", async () => {
+      // Granting a session its own machine must not change the answer, and the
+      // reason must stay `not_accessible` rather than leaking `not_granted`.
+      const a = await storage.remoteServers.create({ name: "a" }, "user-1");
+      await storage.remoteServers.update(a.id, { cross_remote_access: "exec" }, "user-1");
+      connected.add(a.id);
+      await grant(a.id);
+
+      expect(await resolveTarget(deps, payload({ sourceRemoteServerId: a.id }), a.id, "read"))
+        .toEqual({ ok: false, reason: "not_accessible" });
+    });
+
+    it("scopes grants to the session that owns them", async () => {
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
+      await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
+      connected.add(b.id);
+      await grant(b.id);
+
+      expect(await resolveTarget(deps, payload({ sessionId: "sess-2" }), b.id, "exec"))
+        .toEqual({ ok: false, reason: "not_granted" });
+    });
   });
 
   describe("listAccessibleRemotes", () => {
+    it("hides an opted-in remote the session has not been granted", async () => {
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
+      const c = await storage.remoteServers.create({ name: "c" }, "user-1");
+      await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
+      await storage.remoteServers.update(c.id, { cross_remote_access: "exec" }, "user-1");
+      await grant(c.id);
+
+      const list = await listAccessibleRemotes(deps, payload({ sourceRemoteServerId: null }));
+      expect(list.map((r) => r.id)).toEqual([c.id]);
+    });
+
+    it("returns nothing for a session with no grants at all", async () => {
+      const b = await storage.remoteServers.create({ name: "b" }, "user-1");
+      await storage.remoteServers.update(b.id, { cross_remote_access: "exec" }, "user-1");
+      expect(await listAccessibleRemotes(deps, payload({ sourceRemoteServerId: null }))).toEqual([]);
+    });
+
     it("returns opted-in remotes, excluding the source and 'off' remotes", async () => {
       const a = await storage.remoteServers.create({ name: "a" }, "user-1");
       const b = await storage.remoteServers.create({ name: "b" }, "user-1");
@@ -181,6 +259,7 @@ describe("cross-remote access", () => {
       await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
       // c stays 'off'
       connected.add(b.id);
+      await grant(a.id, b.id, c.id);
 
       const list = await listAccessibleRemotes(deps, payload({ sourceRemoteServerId: a.id }));
       expect(list).toEqual([{
@@ -202,6 +281,7 @@ describe("cross-remote access", () => {
       const b = await storage.remoteServers.create({ name: "b" }, "user-1");
       await storage.remoteServers.update(a.id, { cross_remote_access: "exec" }, "user-1");
       await storage.remoteServers.update(b.id, { cross_remote_access: "read" }, "user-1");
+      await grant(a.id, b.id);
 
       const list = await listAccessibleRemotes(deps, payload({ sourceRemoteServerId: null }));
       expect(list.map((r) => r.id).sort()).toEqual([a.id, b.id].sort());

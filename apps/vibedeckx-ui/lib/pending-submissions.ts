@@ -30,6 +30,12 @@ export interface PendingSubmission {
   content: string | ContentPart[] | null;
   permissionMode?: "plan" | "edit";
   model?: string | null;
+  /**
+   * Cross-remote machines ticked in the composer, carried in the create body.
+   * The server honours them when this operation really is new and ignores
+   * them on replay, so a retry cannot resurrect a machine revoked since.
+   */
+  grantedRemoteIds?: string[];
   createdAt: number;
 }
 

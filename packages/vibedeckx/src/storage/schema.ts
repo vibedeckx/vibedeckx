@@ -381,6 +381,18 @@ export interface RemoteSessionMappingsTable {
   notification_watch_until: number | null;
 }
 
+/**
+ * Per-agent-session allowlist of remote machines the agent may reach through
+ * the cross-remote gateway. Keyed by LOCAL session id (including `remote-`
+ * prefixed ones, which have no `agent_sessions` row at all), so no FK.
+ */
+export interface AgentSessionRemoteGrantsTable {
+  session_id: string;
+  remote_server_id: string;
+  user_id: string;
+  granted_at: string;
+}
+
 export interface RemoteSessionCreationIntentsTable {
   local_session_id: string;
   remote_session_id: string;
@@ -408,6 +420,14 @@ export interface RemoteSessionCreationIntentsTable {
   prepare_operation_id: string | null;
   /** Epoch ms when the worker acknowledged the prepare; null until then. */
   prepared_at: number | null;
+  /**
+   * Cross-remote grant context block used for this session's FIRST proxied
+   * instruction, frozen on first write. The worker hashes the whole
+   * instruction for activation idempotency, so a retry that regenerated this
+   * text from current grants would read as `idempotency_conflict` — exactly
+   * the retry the grant UI invites the user to make.
+   */
+  first_turn_grant_context: string | null;
 }
 
 export interface RemoteReviewerCreationIntentsTable {
@@ -634,6 +654,7 @@ export interface DB {
   project_remotes: ProjectRemotesTable;
   remote_session_mappings: RemoteSessionMappingsTable;
   remote_session_creation_intents: RemoteSessionCreationIntentsTable;
+  agent_session_remote_grants: AgentSessionRemoteGrantsTable;
   remote_reviewer_creation_intents: RemoteReviewerCreationIntentsTable;
   notification_outbox: NotificationOutboxTable;
   notifications: NotificationsTable;

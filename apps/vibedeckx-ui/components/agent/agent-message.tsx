@@ -36,7 +36,7 @@ import { TaskOutputToolUseUI, TaskOutputToolResultUI } from "./task-output-tools
 import { FileChangeToolUseUI, FileChangeToolResultUI } from "./file-change-tools";
 import { PROPOSE_SCHEDULE_TOOL, ScheduleProposalUI } from "./schedule-proposal";
 import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./cross-remote-tools";
-import { VPasteChip, splitVPasteMarkers } from "./vpaste-chip";
+import { VPasteChip, VRemotesChip, splitVPasteMarkers } from "./vpaste-chip";
 import { Fragment, useState } from "react";
 
 interface AgentMessageProps {
@@ -153,15 +153,17 @@ function renderTextWithVPaste(text: string) {
       className="text-foreground max-w-none break-words"
       style={{ fontSize: "var(--conv-font-size, 14px)" }}
     >
-      {segments.map((seg, i) =>
-        seg.kind === "text" ? (
-          <span key={i} className="whitespace-pre-wrap break-words">
-            {seg.text}
-          </span>
-        ) : (
-          <VPasteChip key={i} path={seg.path} size={seg.size} name={seg.name} />
-        )
-      )}
+      {segments.map((seg, i) => {
+        if (seg.kind === "text") {
+          return (
+            <span key={i} className="whitespace-pre-wrap break-words">
+              {seg.text}
+            </span>
+          );
+        }
+        if (seg.kind === "remotes") return <VRemotesChip key={i} names={seg.names} />;
+        return <VPasteChip key={i} path={seg.path} size={seg.size} name={seg.name} />;
+      })}
     </div>
   );
 }

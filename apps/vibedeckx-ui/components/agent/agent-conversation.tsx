@@ -57,6 +57,9 @@ import { TurnEndDivider } from "./turn-end-divider";
 import { extractTurnAnswer } from "./turn-answer";
 import { BackgroundTasksBar } from "./background-tasks-bar";
 import { ModelPicker } from "./model-picker";
+import { RemoteAccessMenuItem, RemoteAccessChips } from "./remote-access-menu";
+import { useSessionRemoteGrants } from "@/hooks/use-session-remote-grants";
+import { useAppConfig } from "@/hooks/use-app-config";
 import { cn } from "@/lib/utils";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { ReservedWidthLabel } from "@/components/ui/reserved-width-label";
@@ -418,6 +421,20 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   useEffect(() => {
     onActiveSessionChange?.(activeSessionId);
   }, [activeSessionId, onActiveSessionChange]);
+
+  // Cross-remote grants for this conversation. Hidden entirely when the server
+  // cannot mint a gateway token, so the menu never offers a control that
+  // nothing downstream would honour.
+  const { config: appConfig } = useAppConfig();
+  const remoteGrantsEnabled = appConfig?.crossRemoteSessionGrants === true;
+  const remoteGrants = useSessionRemoteGrants(
+    activeSessionId,
+    `${projectId ?? ""}::${branch ?? ""}`,
+    remoteGrantsEnabled,
+  );
+  // A remote project's sessions run ON that machine, and a session can never
+  // be granted its own machine.
+  const sourceRemoteId = project?.agent_mode && project.agent_mode !== "local" ? project.agent_mode : undefined;
 
   // On unmount (tab/workspace switch) nothing is on screen any more. Reported
   // through a ref so this fires ONLY on unmount, not on every id change.
@@ -831,17 +848,18 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         // No persisted session yet (placeholder): one `start` under a stable
         // key creates, spawns and delivers; the session exists only once it
         // has the message (prepared-session lifecycle, §10.1).
-        const started = await startConversation(content, permissionMode, pendingModel);
+        const started = await startConversation(content, permissionMode, pendingModel, remoteGrants.selectedIds);
+        if (started) remoteGrants.adoptInto(started.session.id);
         // Arm the title-pending loader the moment the session is real so the
         // dropdown goes straight from "New Session" to the skeleton.
         if (started && isOriginDisplayed(started.origin)) {
           setPendingTitleSessionId(started.session.id);
         }
       } else {
-        await sendMessage(content);
+        await sendMessage(content, undefined, remoteGrants.selectedIds);
       }
     }
-  }), [handleNewConversation, session, startConversation, sendMessage, permissionMode, pendingModel, onStatusChange, isOriginDisplayed]);
+  }), [handleNewConversation, session, startConversation, sendMessage, permissionMode, pendingModel, onStatusChange, isOriginDisplayed, remoteGrants]);
 
   const handlePasteText = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>, text: string) => {
@@ -926,7 +944,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       && Date.now() - entry.createdAt < PREPARED_MAX_AGE_MS;
 
   const createPrepared = async (): Promise<PreparedEntry> => {
-    const prepared = await prepareConversation(permissionMode, pendingModel);
+    const prepared = await prepareConversation(permissionMode, pendingModel, remoteGrants.selectedIds);
     // `prepareConversation` has already surfaced its own toast.
     if (!prepared) throw new Error("Failed to prepare session");
     return {
@@ -1213,13 +1231,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       if (!preparedIsCurrent(owned ?? preparedRef.current)) await abandonPrepared();
       const prepared = owned?.prepared ?? null;
       owned = null;
+      const draftGrantIds = remoteGrants.selectedIds;
       // First send: the session becomes real (cached, connected, selected)
       // only when the server has accepted the instruction.
       const started = prepared
-        ? await activateConversation(prepared, content)
-        : await startConversation(content, permissionMode, pendingModel);
+        ? await activateConversation(prepared, content, draftGrantIds)
+        : await startConversation(content, permissionMode, pendingModel, draftGrantIds);
       if (started) {
         releaseDetached();
+        // The conversation this composer's chips were declared for now exists.
+        remoteGrants.adoptInto(started.session.id);
         console.log(`[AgentConversation] handleSubmit: started session ${started.session.id}`);
         // Arm the title-pending loader now that the session exists so the
         // dropdown trigger goes straight from "New Session" to skeleton.
@@ -1241,7 +1262,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     } else {
       console.log(`[AgentConversation] handleSubmit: existing session ${session.id}, status=${status}`);
       try {
-        await sendMessage(content);
+        // The chips ride with the message: what the composer shows is what
+        // this turn runs under.
+        await sendMessage(content, undefined, remoteGrants.selectedIds);
       } catch (e) {
         return await fail("Failed to send message", e);
       }
@@ -1705,6 +1728,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           {/* Attachment thumbnails/chips — only rendered when files are attached */}
           <AttachmentHeader uploads={uploads} workspaceKey={`${projectId}::${branch}`} apiRef={attachmentListRef} />
           <div className="relative flex w-full flex-col">
+            {remoteGrantsEnabled && (
+              <RemoteAccessChips
+                granted={remoteGrants.granted}
+                onRevoke={(server) => remoteGrants.toggle(server, false)}
+              />
+            )}
             {/* Translate badge row — only when enabled */}
             {translateEnabled && (
               <div className="flex items-center pl-12 pr-2 pt-1.5 pb-0.5">
@@ -1726,6 +1755,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
 
                 <PromptInputActionMenuContent>
                   <PromptInputActionAddAttachments label="Add files" />
+                  {remoteGrantsEnabled && (
+                    <RemoteAccessMenuItem
+                      granted={remoteGrants.granted}
+                      onToggle={remoteGrants.toggle}
+                      sourceRemoteId={sourceRemoteId}
+                    />
+                  )}
                   <PromptInputActionMenuItem
                     onSelect={() => {
                       setTranslateEnabled(!translateEnabled);

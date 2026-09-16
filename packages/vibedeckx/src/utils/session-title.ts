@@ -2,6 +2,7 @@ import { generateText } from "ai";
 import type { Storage } from "../storage/types.js";
 import type { ContentPart } from "../agent-types.js";
 import { getChatProviderConfig, isModelConfigured, resolveFastChatModel } from "./chat-model.js";
+import { stripRemoteGrantContext } from "../cross-remote-grant-context.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLanguageModel = any;
@@ -39,11 +40,16 @@ export async function isChatModelConfigured(storage: Storage, userId: string): P
  * may be either a raw string or an array of TextPart/ImagePart blocks.
  */
 export function extractUserText(content: string | ContentPart[]): string {
-  if (typeof content === "string") return content;
-  return content
-    .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
-    .map((p) => p.text)
-    .join(" ");
+  const text = typeof content === "string"
+    ? content
+    : content
+      .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+      .map((p) => p.text)
+      .join(" ");
+  // The hub appends a <vremotes> grant block to every user message of a
+  // granted session. It is machine-addressed context, not something the user
+  // wrote — titles and review briefs must not see it.
+  return stripRemoteGrantContext(text);
 }
 
 /**

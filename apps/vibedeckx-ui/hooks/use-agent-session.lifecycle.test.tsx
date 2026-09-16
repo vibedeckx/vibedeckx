@@ -17,6 +17,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
     startAgentSession: vi.fn(),
     prepareAgentSession: vi.fn(),
     activateAgentSession: vi.fn(),
+    getSessionRemoteGrants: vi.fn(async () => ({ grants: [], requiresRestart: false })),
     cancelPreparedAgentSession: vi.fn(async () => ({ status: 200, kind: "cancelled" })),
     authFetch: vi.fn(),
     getFreshToken: vi.fn().mockResolvedValue("test-token"),
@@ -26,7 +27,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 
 import {
   startAgentSession, prepareAgentSession, activateAgentSession, cancelPreparedAgentSession, authFetch,
-  type LifecycleResponse,
+  type LifecycleResponse, type LifecycleView,
 } from "@/lib/api";
 import { useAgentSession } from "./use-agent-session";
 import { readPendingSubmission, writePendingSubmission } from "@/lib/pending-submissions";
@@ -70,7 +71,7 @@ async function flush() {
 }
 
 const KEY = workspaceKey("p1", "main", null);
-const view = (sessionId: string, state: "pending_first_turn" | "active" = "active") => ({
+const view = (sessionId: string, state: LifecycleView["state"] = "active"): LifecycleView => ({
   sessionId, projectId: "p1", branch: "main", state, purpose: "interactive", leaseHeld: false,
   activationKey: "k", activationAttempt: 1, activatedAt: 1, activationErrorCode: null, userEntryIndex: 0,
   expiredReason: null, expiredAt: null, pendingExpiresAt: null,
@@ -143,10 +144,60 @@ describe("startConversation", () => {
     const key = start.mock.calls[0][1].operationId;
     expect(readPendingSubmission(KEY)?.operationId).toBe(key);
 
-    start.mockResolvedValueOnce(activated());
+    // The refusal named the identity it had already prepared, so the resend
+    // activates that one under the same key rather than preparing again. The
+    // id also gives the composer somewhere to save a grant edited since.
+    expect(readPendingSubmission(KEY)?.sessionId).toBe("s-new");
+    activate.mockResolvedValueOnce(activated());
     await act(async () => { await latest!.startConversation("hello"); });
-    expect(start.mock.calls[1][1].operationId).toBe(key);
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(activate).toHaveBeenCalledWith("s-new", expect.objectContaining({ activationKey: key }));
     expect(latest!.session?.id).toBe("s-new");
+  });
+
+  it("a replay carries the declaration the submission was made with", async () => {
+    // Nobody is at the keyboard during a refresh replay, so the submission is
+    // the only record of what the composer had declared.
+    writePendingSubmission({
+      workspaceKey: KEY, projectId: "p1", branch: "main", agentMode: "local",
+      operationId: "op-replay", sessionId: null, content: "hello",
+      grantedRemoteIds: ["srv-a"], createdAt: Date.now(),
+    });
+    start.mockResolvedValueOnce(activated());
+    await render("main");
+
+    await vi.waitFor(() => expect(start).toHaveBeenCalled());
+    expect(start.mock.calls[0][1]).toMatchObject({ operationId: "op-replay", grantedRemoteIds: ["srv-a"] });
+  });
+
+  it("records the send-time declaration on an activate, not the one prepare stored", async () => {
+    // The identity was minted when a file was picked; the chips can have
+    // changed before the send, and it is the send the user expects to run
+    // under.
+    prepare.mockResolvedValueOnce({ status: 200, kind: "prepared", lifecycle: view("s-prep", "pending_first_turn") });
+    await render("main");
+    const prepared = await act(async () => latest!.prepareConversation(undefined, null, ["srv-a"]));
+
+    activate.mockResolvedValueOnce({ status: 409, kind: "retryable_failure", lifecycle: view("s-prep", "pending_first_turn"), error: "spawn failed" });
+    await act(async () => { await latest!.activateConversation(prepared!, "hello", []); });
+
+    // Not ["srv-a"]: the failed activation delivered nothing, so the retry is
+    // still free to apply what the user actually chose.
+    expect(activate.mock.calls[0][1]).toMatchObject({ grantedRemoteIds: [] });
+    expect(readPendingSubmission(KEY)?.grantedRemoteIds).toEqual([]);
+  });
+
+  it("a replay activates under the declaration the send recorded", async () => {
+    writePendingSubmission({
+      workspaceKey: KEY, projectId: "p1", branch: "main", agentMode: "local",
+      operationId: "op-act", sessionId: "s-prep", content: "hello",
+      grantedRemoteIds: [], createdAt: Date.now(),
+    });
+    activate.mockResolvedValueOnce(activated());
+    await render("main");
+
+    await vi.waitFor(() => expect(activate).toHaveBeenCalled());
+    expect(activate.mock.calls[0][1]).toMatchObject({ activationKey: "op-act", grantedRemoteIds: [] });
   });
 
   it("a transport failure keeps the key; different text starts a new operation", async () => {

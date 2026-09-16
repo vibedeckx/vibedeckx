@@ -3,6 +3,7 @@
 import { useRef, useState, useEffect, useCallback, type RefObject } from "react";
 import type { AgentMessage } from "@/hooks/use-agent-session";
 import { findScrollParent } from "@/lib/scroll";
+import { VREMOTES_MARKER_RE } from "./vpaste-chip";
 
 function getMessagePreview(msg: AgentMessage): string {
   if (msg.type !== "user") return "";
@@ -16,7 +17,9 @@ function getMessagePreview(msg: AgentMessage): string {
           .join(" ");
   const hasImages =
     typeof content !== "string" && content.some((p) => p.type === "image");
-  const firstLine = text.split("\n")[0] ?? "";
+  // The hub appends a <vremotes> grant block to every message of a granted
+  // session; a marker's preview should show what the user wrote.
+  const firstLine = text.replace(VREMOTES_MARKER_RE, "").trim().split("\n")[0] ?? "";
   const truncated =
     firstLine.length > 80 ? firstLine.slice(0, 77) + "..." : firstLine;
   return truncated || (hasImages ? "(Image)" : "");

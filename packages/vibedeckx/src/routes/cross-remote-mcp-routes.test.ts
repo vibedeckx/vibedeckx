@@ -56,6 +56,10 @@ describe("cross-remote MCP gateway", () => {
     await storage.remoteServers.update(targetId, { cross_remote_access: "exec" }, "user-1");
     await storage.remoteServers.updateWorkerVersion(targetId, "0.3.23", [...REMOTE_MCP_CAPABILITIES]);
     connected = new Set([targetId]);
+    // Every tier/transport case below also has to clear the session allowlist
+    // (docs/cross-remote-session-grants-design.md §5); the grant gate itself
+    // is exercised by its own tests near the end of this file.
+    await storage.sessionRemoteGrants.replace("sess-1", "user-1", [targetId]);
 
     app = Fastify();
     app.decorate("storage", storage);
@@ -143,7 +147,8 @@ describe("cross-remote MCP gateway", () => {
     expect(body.result.instructions).toContain("look at the ubuntu machine");
     expect(body.result.instructions).toContain("If exactly one accessible remote matches");
     expect(body.result.instructions).toContain("ask the user which target they mean");
-    expect(body.result.instructions).toContain("instead of silently falling back to local");
+    expect(body.result.instructions).toContain("never silently fall back to the local workspace");
+    expect(body.result.instructions).toContain("Allow remote access");
   });
 
   it("returns 202 with no body for the initialized notification", async () => {
@@ -208,6 +213,39 @@ describe("cross-remote MCP gateway", () => {
     );
   });
 
+  it("refuses a tool call against a machine this session was never granted", async () => {
+    await storage.sessionRemoteGrants.replace("sess-1", "user-1", []);
+
+    const res = await call(tokenFor(), "remote_bash", { remoteId: targetId, command: "uptime" });
+    expect(res.json().result.isError).toBe(true);
+    expect(res.json().result.content[0].text).toContain("Allow remote access");
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+
+    const rows = await storage.crossRemoteAudit.listByTarget(targetId);
+    expect(rows[0].status).toBe("denied");
+  });
+
+  it("hides ungranted machines from list_accessible_remotes", async () => {
+    await storage.sessionRemoteGrants.replace("sess-1", "user-1", []);
+    const res = await call(tokenFor(), "list_accessible_remotes", {});
+    expect(JSON.parse(res.json().result.content[0].text)).toEqual([]);
+  });
+
+  it("refuses an already-open broker handle once the grant is revoked", async () => {
+    // The handle is a stateless signed token, so revocation cannot invalidate
+    // it directly — the gateway's per-call check is what has to stop it.
+    proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data: { workerHandle: "worker-1", tools: [] } });
+    const opened = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, transport: STDIO });
+    const handle = JSON.parse(opened.json().result.content[0].text).handle;
+
+    await storage.sessionRemoteGrants.replace("sess-1", "user-1", []);
+    proxyToRemoteAuto.mockClear();
+
+    const res = await call(tokenFor(), "remote_mcp_ping", { handle });
+    expect(res.json().result.isError).toBe(true);
+    expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+  });
+
   it("rejects a broker handle from another source session", async () => {
     proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data: { workerHandle: "worker-1", tools: [] } });
     const opened = await call(tokenFor(), "remote_mcp_open", { remoteId: targetId, transport: STDIO });
@@ -243,6 +281,7 @@ describe("cross-remote MCP gateway", () => {
     const old = await storage.remoteServers.create({ name: "old" }, "user-1");
     await storage.remoteServers.update(old.id, { cross_remote_access: "exec" }, "user-1");
     connected.add(old.id);
+    await storage.sessionRemoteGrants.replace("sess-1", "user-1", [targetId, old.id]);
     const res = await call(tokenFor(), "remote_mcp_open", { remoteId: old.id, transport: STDIO });
     expect(res.json().result.content[0].text).toContain("upgrade");
     expect(proxyToRemoteAuto).not.toHaveBeenCalled();
@@ -348,6 +387,7 @@ describe("cross-remote MCP gateway", () => {
   it("list_accessible_remotes excludes the source remote", async () => {
     const source = await storage.remoteServers.create({ name: "a" }, "user-1");
     await storage.remoteServers.update(source.id, { cross_remote_access: "exec" }, "user-1");
+    await storage.sessionRemoteGrants.replace("sess-1", "user-1", [targetId, source.id]);
 
     const res = await call(tokenFor({ sourceRemoteServerId: source.id }), "list_accessible_remotes", {});
     const text = res.json().result.content[0].text;
@@ -440,6 +480,9 @@ describe("cross-remote MCP gateway", () => {
   it("denies a target owned by another user without leaking existence", async () => {
     const other = await storage.remoteServers.create({ name: "other" }, "user-2");
     await storage.remoteServers.update(other.id, { cross_remote_access: "exec" }, "user-2");
+    // Granted, so the refusal comes from the tenant-scoped lookup rather than
+    // from the allowlist — that is the leak this test is about.
+    await storage.sessionRemoteGrants.replace("sess-1", "user-1", [targetId, other.id]);
 
     const res = await call(tokenFor(), "remote_bash", { remoteId: other.id, command: "id" });
     expect(res.json().result.content[0].text).toContain("not found or not accessible");
@@ -449,6 +492,7 @@ describe("cross-remote MCP gateway", () => {
   it("reports an unconnected target as offline and audits it", async () => {
     const unconnected = await storage.remoteServers.create({ name: "c" }, "user-1");
     await storage.remoteServers.update(unconnected.id, { cross_remote_access: "exec" }, "user-1");
+    await storage.sessionRemoteGrants.replace("sess-1", "user-1", [targetId, unconnected.id]);
 
     const res = await call(tokenFor(), "remote_bash", { remoteId: unconnected.id, command: "uptime" });
     expect(res.json().result.isError).toBe(true);

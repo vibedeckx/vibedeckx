@@ -12,6 +12,7 @@ import {
   clearPendingSubmission, readPendingSubmission, sameSubmissionContent, writePendingSubmission,
   type PendingSubmission,
 } from "@/lib/pending-submissions";
+
 import type { AgentType, BackgroundTask, WorkflowRun } from "@/lib/api";
 import {
   workspaceKey,
@@ -245,11 +246,13 @@ async function loadExistingSession(
 async function sendMessageToSession(
   sessionId: string,
   content: string | ContentPart[],
+  /** What the composer is showing; omitted means "no opinion, leave the grants alone". */
+  grantedRemoteIds?: string[],
 ): Promise<void> {
   const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/message`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify({ content, ...(grantedRemoteIds ? { grantedRemoteIds } : {}) }),
   });
 
   if (!response.ok) {
@@ -1674,7 +1677,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
 
   // Send user message - optionally accepts sessionId for immediate use after session creation
   const sendMessage = useCallback(
-    async (content: string | ContentPart[], sessionId?: string) => {
+    async (
+      content: string | ContentPart[],
+      sessionId?: string,
+      /** Cross-remote machines the composer is showing; applied before delivery. */
+      grantedRemoteIds?: string[],
+    ) => {
       const targetSessionId = sessionId || session?.id;
       if (!targetSessionId) {
         console.warn("[AgentSession] sendMessage: no session ID available (sessionId param:", sessionId, ", session?.id:", session?.id, ")");
@@ -1688,7 +1696,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       try {
         // Send via REST API (more reliable than WebSocket for important actions)
         const trimmed = typeof content === "string" ? content.trim() : content;
-        await sendMessageToSession(targetSessionId, trimmed);
+        await sendMessageToSession(targetSessionId, trimmed, grantedRemoteIds);
       } catch (e) {
         const errorMsg = e instanceof Error ? e.message : "Failed to send message";
         console.error("[AgentSession] Failed to send message:", errorMsg);
@@ -2111,7 +2119,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // reports it real (activated / replayed / uncertain).
   // ===================================================================
 
-  /** Suspend on the eviction dialog; false = declined or workspace switched. */
+/** Suspend on the eviction dialog; false = declined or workspace switched. */
   const promptForEviction = useCallback(async (
     data: { maxResidentAgentProcesses?: number; runningSessions?: RunningResidentSession[] },
     generation: number,
@@ -2230,6 +2238,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   ): Promise<EnsuredAgentSession | null> => {
     let force = false;
     let waits = 0;
+    let current = pending;
     for (;;) {
       let data: LifecycleResponse;
       try {
@@ -2246,10 +2255,18 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         return null;
       }
       if (lifecycleSessionReady(data.kind) && data.session) {
-        clearPendingSubmission(pending.workspaceKey, pending.operationId);
+        clearPendingSubmission(current.workspaceKey, current.operationId);
         return adoptActivatedSession(data, origin);
       }
       if (sessionGenerationRef.current !== generation) return null;
+      // A refusal that still created the identity (resident_limit, in_progress)
+      // names it. Remember it: the next attempt then activates that same row,
+      // and — because the create body is ignored on replay — grant edits made
+      // in between have a session id to be saved against.
+      if (!current.sessionId && data.lifecycle?.sessionId) {
+        current = { ...current, sessionId: data.lifecycle.sessionId };
+        writePendingSubmission(current);
+      }
       switch (data.kind) {
         case "resident_limit": {
           const evict = await promptForEviction(data, generation);
@@ -2276,7 +2293,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         default: {
           // expired / conflicts / not_found / permanent failures: this key is
           // finished. Clear it so the next send starts a fresh operation.
-          clearPendingSubmission(pending.workspaceKey, pending.operationId);
+          clearPendingSubmission(current.workspaceKey, current.operationId);
           const msg = data.error ?? `Failed to start session (${data.kind})`;
           setError(msg);
           toast.error("Failed to send message", { description: msg });
@@ -2303,6 +2320,8 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     content: string | ContentPart[],
     permissionMode?: "plan" | "edit",
     model?: string | null,
+    /** Composer draft grants; they land inside `start`'s prepare, before the instruction is delivered. */
+    grantedRemoteIds?: string[],
   ): Promise<EnsuredAgentSession | null> => {
     const ctx = currentOrigin();
     if (!ctx) return Promise.resolve(null);
@@ -2328,10 +2347,17 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         // cancelled so its pending identity does not wait for its TTL.
         const existing = readPendingSubmission(key);
         const retrying = existing !== null && sameSubmissionContent(existing.content, content);
-        const pending: PendingSubmission = retrying ? { ...existing!, content } : {
-          workspaceKey: key, projectId: origin.projectId, branch: origin.branch, agentMode: origin.agentMode ?? "local",
-          operationId: crypto.randomUUID(), sessionId: null, content, permissionMode, model: model ?? null, createdAt: Date.now(),
-        };
+        // On a retry the draft the user can see now wins over the one the
+        // first attempt carried. The server ignores it when it replays an
+        // operation it already knows — so a stale client cannot resurrect a
+        // revoked machine — and honours it when the key really is new.
+        const pending: PendingSubmission = retrying
+          ? { ...existing!, content, grantedRemoteIds: grantedRemoteIds ?? existing!.grantedRemoteIds }
+          : {
+            workspaceKey: key, projectId: origin.projectId, branch: origin.branch, agentMode: origin.agentMode ?? "local",
+            operationId: crypto.randomUUID(), sessionId: null, content, permissionMode, model: model ?? null,
+            grantedRemoteIds, createdAt: Date.now(),
+          };
         const replaced = writePendingSubmission(pending);
         if (replaced?.sessionId) void cancelPreparedAgentSession(replaced.sessionId).catch(() => undefined);
 
@@ -2340,6 +2366,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           : startAgentSession(origin.projectId, {
             operationId: pending.operationId, branch: origin.branch, permissionMode: pending.permissionMode ?? permissionMode,
             agentType, model: pending.model ?? model, instruction: content, force,
+            grantedRemoteIds: pending.grantedRemoteIds ?? grantedRemoteIds,
           }));
       } finally {
         if (firstSendInFlightRef.current.get(key) === promise) firstSendInFlightRef.current.delete(key);
@@ -2355,6 +2382,8 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const prepareConversation = useCallback(async (
     permissionMode?: "plan" | "edit",
     model?: string | null,
+    /** Draft grants as they stand at pick time; the send re-writes them, since the user may tick more after. */
+    grantedRemoteIds?: string[],
   ): Promise<PreparedConversation | null> => {
     const ctx = currentOrigin();
     if (!ctx) return null;
@@ -2366,7 +2395,8 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     const existing = readPendingSubmission(key);
     let pending: PendingSubmission = existing && existing.content === null ? existing : {
       workspaceKey: key, projectId: origin.projectId, branch: origin.branch, agentMode: origin.agentMode ?? "local",
-      operationId: crypto.randomUUID(), sessionId: null, content: null, permissionMode, model: model ?? null, createdAt: Date.now(),
+      operationId: crypto.randomUUID(), sessionId: null, content: null, permissionMode, model: model ?? null,
+      grantedRemoteIds, createdAt: Date.now(),
     };
     const replaced = writePendingSubmission(pending);
     if (replaced?.sessionId) void cancelPreparedAgentSession(replaced.sessionId).catch(() => undefined);
@@ -2377,6 +2407,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         data = await prepareAgentSession(origin.projectId, {
           operationId: pending.operationId, branch: origin.branch, permissionMode: pending.permissionMode ?? permissionMode,
           agentType, model: pending.model ?? model, purpose: "interactive_upload",
+          grantedRemoteIds: pending.grantedRemoteIds ?? grantedRemoteIds,
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Failed to prepare session";
@@ -2409,16 +2440,22 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const activateConversation = useCallback((
     prepared: PreparedConversation,
     content: string | ContentPart[],
+    /** The composer's declaration as of the send — the identity was prepared earlier. */
+    grantedRemoteIds?: string[],
   ): Promise<EnsuredAgentSession | null> => {
     const key = workspaceKey(prepared.origin.projectId, prepared.origin.branch, prepared.origin.agentMode);
     const generation = sessionGenerationRef.current;
     const existing = readPendingSubmission(key);
+    // The declaration as of THIS send supersedes the one prepare stored: the
+    // identity was minted when a file was picked, and the chips can have
+    // changed since. Recorded on the submission so a replay — which has
+    // nobody at the keyboard — activates under the same list.
     const pending: PendingSubmission = existing && existing.operationId === prepared.operationId
-      ? { ...existing, sessionId: prepared.sessionId, content }
+      ? { ...existing, sessionId: prepared.sessionId, content, grantedRemoteIds }
       : {
         workspaceKey: key, projectId: prepared.origin.projectId, branch: prepared.origin.branch,
         agentMode: prepared.origin.agentMode ?? "local", operationId: prepared.operationId,
-        sessionId: prepared.sessionId, content, createdAt: Date.now(),
+        sessionId: prepared.sessionId, content, grantedRemoteIds, createdAt: Date.now(),
       };
     writePendingSubmission(pending);
     const run = async (): Promise<EnsuredAgentSession | null> => {
@@ -2426,7 +2463,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       setError(null);
       try {
         return await runFirstSend(prepared.origin, generation, pending, (force) =>
-          activateAgentSession(prepared.sessionId, { activationKey: prepared.operationId, instruction: content, force }));
+          activateAgentSession(prepared.sessionId, {
+            activationKey: prepared.operationId, instruction: content, force, grantedRemoteIds,
+          }));
       } finally {
         if (firstSendInFlightRef.current.get(key) === promise) firstSendInFlightRef.current.delete(key);
         if (sessionGenerationRef.current === generation) setIsLoading(false);
@@ -2459,11 +2498,19 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     const origin = createAgentWorkspaceIdentity(pending.projectId, pending.branch, pending.agentMode, null)!;
     const content = pending.content!;
     console.log(`[AgentSession] Replaying pending first send ${pending.operationId} for ${pending.workspaceKey}`);
+    // Both branches carry what the composer declared when this send was made:
+    // a replay runs with nobody at the keyboard, so the submission is the only
+    // record of it. An activation that failed before delivering has not
+    // applied anything yet, so the retry is still free to get it right.
     return runFirstSend(origin, generation, pending, (force) => pending.sessionId
-      ? activateAgentSession(pending.sessionId, { activationKey: pending.operationId, instruction: content, force })
+      ? activateAgentSession(pending.sessionId, {
+        activationKey: pending.operationId, instruction: content, force,
+        grantedRemoteIds: pending.grantedRemoteIds,
+      })
       : startAgentSession(pending.projectId, {
         operationId: pending.operationId, branch: pending.branch, permissionMode: pending.permissionMode,
         agentType, model: pending.model, instruction: content, force,
+        grantedRemoteIds: pending.grantedRemoteIds,
       }));
   };
 

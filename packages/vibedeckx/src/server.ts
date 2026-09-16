@@ -39,6 +39,7 @@ import browserRoutes from "./routes/browser-routes.js";
 import browserProxyRoutes from "./routes/browser-proxy-routes.js";
 import crossRemoteTargetRoutes from "./routes/cross-remote-target-routes.js";
 import crossRemoteMcpRoutes from "./routes/cross-remote-mcp-routes.js";
+import { crossRemoteMcpEnabled } from "./cross-remote-mcp-config.js";
 import sessionMcpRoutes from "./routes/session-mcp-routes.js";
 import scheduleRoutes from "./routes/schedule-routes.js";
 import searchRoutes from "./routes/search-routes.js";
@@ -331,6 +332,11 @@ export const createServer = async (opts: {
     // middleware 401 from an older hub (which lacks the endpoint AND its
     // exemptions) is never confused with a genuinely rejected token.
     reverseConnectIdentity: true,
+    // Per-session cross-remote grants (the composer's "Allow remote access").
+    // Off without a public URL (no gateway token is minted at all) and off in
+    // solo/no-auth mode (the mint refuses an unscoped token), so the UI hides
+    // the entry rather than offering a control that cannot do anything.
+    crossRemoteSessionGrants: crossRemoteMcpEnabled() && authEnabled,
   }));
 
   // Register plugins and routes

@@ -410,6 +410,7 @@ const mapRemoteCreationIntent = (
   updated_at: row.updated_at,
   prepare_operation_id: row.prepare_operation_id ?? null,
   prepared_at: row.prepared_at ?? null,
+  first_turn_grant_context: row.first_turn_grant_context ?? null,
 });
 
 const mapRemoteReviewerCreationIntent = (
@@ -875,7 +876,12 @@ export const createAgentSessionRepos = (
     },
 
     delete: async (id) => {
-      await kdb.deleteFrom("agent_sessions").where("id", "=", id).execute();
+      await kdb.transaction().execute(async (trx) => {
+        await trx.deleteFrom("agent_sessions").where("id", "=", id).execute();
+        // No FK from the grant table (it also keys `remote-` sessions), so the
+        // cascade is manual.
+        await trx.deleteFrom("agent_session_remote_grants").where("session_id", "=", id).execute();
+      });
     },
 
     // The original inline statement is `INSERT ... ON CONFLICT(session_id,
@@ -1561,6 +1567,8 @@ export const createAgentSessionRepos = (
             .where("remote_session_id", "=", row.remote_session_id)
             .execute();
         }
+        await trx.deleteFrom("agent_session_remote_grants")
+          .where("session_id", "=", localSessionId).execute();
         return (result.numDeletedRows ?? 0n) > 0n;
       });
     },
@@ -1600,6 +1608,7 @@ export const createAgentSessionRepos = (
         up_to_entry_index: intent.upToEntryIndex ?? null,
         prepare_operation_id: intent.prepareOperationId ?? null,
         prepared_at: null,
+        first_turn_grant_context: null,
         status: "pending",
         error: null,
         created_at: h.nowMs(),
@@ -1668,6 +1677,23 @@ export const createAgentSessionRepos = (
       await kdb.updateTable("remote_session_creation_intents")
         .set({ prepared_at: preparedAt, error: null, updated_at: h.nowMs() })
         .where("local_session_id", "=", localSessionId).execute();
+    },
+
+    // Write-once, then read back whatever won: a concurrent retry must reuse
+    // the first writer's text rather than believe its own.
+    setFirstTurnGrantContext: async (localSessionId, text) => {
+      return kdb.transaction().execute(async (trx) => {
+        await trx.updateTable("remote_session_creation_intents")
+          .set({ first_turn_grant_context: text })
+          .where("local_session_id", "=", localSessionId)
+          .where("first_turn_grant_context", "is", null)
+          .execute();
+        const row = await trx.selectFrom("remote_session_creation_intents")
+          .select("first_turn_grant_context")
+          .where("local_session_id", "=", localSessionId)
+          .executeTakeFirst();
+        return row?.first_turn_grant_context ?? undefined;
+      });
     },
 
     discardStaleLifecycleIntents: async ({ cutoff, limit }) => {

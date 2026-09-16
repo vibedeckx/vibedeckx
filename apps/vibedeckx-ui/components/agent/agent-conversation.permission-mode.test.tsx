@@ -111,7 +111,16 @@ vi.mock("@/lib/api", () => ({
   ]),
   translateText: vi.fn(),
   branchAgentSession: vi.fn(),
-  api: { getActiveWorkflowRuns: vi.fn().mockResolvedValue({ runs: [] }) },
+  sendAgentSessionMessage: vi.fn(),
+  setSessionRemoteGrants: vi.fn(),
+  // The composer asks whether the server offers per-session cross-remote
+  // grants; with no config it stays off, so no grant request is ever made.
+  getPersistedConfig: () => null,
+  api: {
+    getActiveWorkflowRuns: vi.fn().mockResolvedValue({ runs: [] }),
+    getConfig: vi.fn().mockResolvedValue({ authEnabled: false }),
+    getRemoteServers: vi.fn().mockResolvedValue([]),
+  },
 }));
 
 vi.mock("@/components/ui/dropdown-menu", async (importOriginal) => {
@@ -223,7 +232,7 @@ describe("AgentConversation permissionMode", () => {
     await act(async () => {
       await ref.current!.submitMessage("hi");
     });
-    expect(startConversation).toHaveBeenCalledWith("hi", "edit", null);
+    expect(startConversation).toHaveBeenCalledWith("hi", "edit", null, undefined);
   });
 
   it("re-syncs when a plan session is swapped for another plan session without a null in between", async () => {
@@ -255,7 +264,7 @@ describe("AgentConversation permissionMode", () => {
     await act(async () => {
       await ref.current!.submitMessage("plan this");
     });
-    expect(startConversation).toHaveBeenCalledWith("plan this", "plan", null);
+    expect(startConversation).toHaveBeenCalledWith("plan this", "plan", null, undefined);
   });
 
   it("delivers imperative first-sends as one start under the current mode", async () => {
@@ -277,6 +286,6 @@ describe("AgentConversation permissionMode", () => {
     });
 
     expect(startConversation).toHaveBeenCalledTimes(1);
-    expect(startConversation).toHaveBeenCalledWith("start task", "edit", null);
+    expect(startConversation).toHaveBeenCalledWith("start task", "edit", null, undefined);
   });
 });

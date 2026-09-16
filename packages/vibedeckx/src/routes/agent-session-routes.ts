@@ -11,6 +11,9 @@ import "../server-types.js";
 import { writePasteToTempFile } from "../utils/paste-file.js";
 import { writeAttachmentToTempFile, MAX_ATTACHMENT_BYTES, ATTACHMENT_BODY_LIMIT } from "../utils/attachment-file.js";
 import { extractUserText } from "../utils/session-title.js";
+import { appendRemoteGrantContext } from "../cross-remote-grant-context.js";
+import { validateSessionGrantIds } from "../cross-remote-access.js";
+import { authorizeLocalSession, authorizeRemoteSession, resolveRemoteSessionOwner } from "./session-ownership.js";
 import { projectMessagesForBrief } from "../utils/review-brief.js";
 import type { RemoteSessionInfo } from "../server-types.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
@@ -1588,18 +1591,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // ignored by pre-refresh workers): workers cannot re-mint at spawn (no hub
     // secret, no user auth), so the hub attaches a fresh token to every
     // forwarded message and the worker swaps it in for the next wake.
-    Body: { content: string | ContentPart[]; idempotencyKey?: string; crossRemoteMcp?: CrossRemoteMcpConfig };
+    // `grantedRemoteIds` is the composer asserting what this conversation may
+    // reach, as of the message being sent (docs/cross-remote-session-grants-design.md
+    // §0.1). Absent means "no opinion" — every non-composer sender omits it —
+    // and leaves the table alone.
+    Body: {
+      content: string | ContentPart[];
+      idempotencyKey?: string;
+      crossRemoteMcp?: CrossRemoteMcpConfig;
+      grantedRemoteIds?: unknown;
+    };
   }>("/api/agent-sessions/:sessionId/message", { bodyLimit: 10 * 1024 * 1024 }, async (req, reply) => {
     const authResult = requireAuth(req, reply);
     if (authResult === null) return;
     const userId = resolveUserId(authResult);
-    const { content, idempotencyKey } = req.body;
+    const { content: rawContent, idempotencyKey } = req.body;
 
     console.log(`[API] POST /message: sessionId=${req.params.sessionId}, isRemote=${req.params.sessionId.startsWith("remote-")}, remoteMapSize=${fastify.remoteSessionMap.size}`);
 
     // Validate: must be a non-empty string or non-empty array
-    const isValidString = typeof content === "string" && content.trim().length > 0;
-    const isValidArray = Array.isArray(content) && content.length > 0;
+    const isValidString = typeof rawContent === "string" && rawContent.trim().length > 0;
+    const isValidArray = Array.isArray(rawContent) && rawContent.length > 0;
     if (!isValidString && !isValidArray) {
       return reply.code(400).send({ error: "Content is required" });
     }
@@ -1610,12 +1622,49 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     // Cap the typed-text portion. Long content should be uploaded via /paste
     // and sent here as a <vpaste/> marker (< 100 bytes per paste).
-    const textLen = messageTextLength(content);
+    const textLen = messageTextLength(rawContent);
     if (textLen > MESSAGE_TEXT_CHAR_LIMIT) {
       return reply.code(413).send({
         error: `Message text exceeds ${MESSAGE_TEXT_CHAR_LIMIT} characters (got ${textLen}). Use /api/agent-sessions/:id/paste for long content.`,
       });
     }
+
+    // The grant list the composer is showing, applied before anything is
+    // delivered: this message and everything the agent does in response run
+    // under it. Written first so the context block below describes the list
+    // that is now in force, not the one it replaced.
+    if (req.body.grantedRemoteIds !== undefined) {
+      const raw = req.body.grantedRemoteIds;
+      if (!Array.isArray(raw) || raw.some((id) => typeof id !== "string")) {
+        return reply.code(400).send({ error: "grantedRemoteIds must be an array of strings" });
+      }
+      // Before the write, not after: the branches below each resolve the
+      // session their own way and only reject at the end, which would leave
+      // this having already rewritten another tenant's grant list. An empty
+      // list passes id validation trivially, so without this gate knowing a
+      // session id is enough to clear its access.
+      const owned = req.params.sessionId.startsWith("remote-")
+        ? await authorizeRemoteSession(fastify.storage, req.params.sessionId, authResult)
+        : await authorizeLocalSession(fastify.storage, req.params.sessionId, authResult);
+      if (!owned) return reply.code(404).send({ error: "Session not found" });
+      const ids = [...new Set(raw as string[])];
+      const sourceRemoteServerId = req.params.sessionId.startsWith("remote-")
+        ? (await resolveRemoteSessionOwner(fastify.storage, req.params.sessionId)).remoteServerId
+        : undefined;
+      const rejection = await validateSessionGrantIds(fastify.storage, ids, authResult, sourceRemoteServerId);
+      if (rejection) return reply.code(400).send({ error: rejection });
+      await fastify.storage.sessionRemoteGrants.replace(req.params.sessionId, userId, ids);
+    }
+
+    // Cross-remote grant context (docs/cross-remote-session-grants-design.md
+    // §6): regenerated from the database on every turn, so a grant added or
+    // revoked is reflected without restarting the agent. Appended after the
+    // size cap above — the cap is on what the user typed.
+    const content = await appendRemoteGrantContext(fastify.storage, req.params.sessionId, userId, rawContent)
+      .catch((err) => {
+        console.error(`[API] grant context build failed for ${req.params.sessionId}:`, err);
+        return rawContent;
+      });
 
     if (req.params.sessionId.startsWith("remote-")) {
       const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, authResult);
@@ -1801,7 +1850,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const claim = await fastify.storage.agentInstructionDeliveries.claim({
         sessionId: req.params.sessionId,
         idempotencyKey,
-        contentHash: instructionContentHash(content),
+        // The user's own text, not the delivered text: the hub-appended grant
+        // block is regenerated per turn, so hashing it would make a retry of
+        // the same key after a grant edit read as a content conflict.
+        contentHash: instructionContentHash(rawContent),
         claimToken: instructionReceiverToken,
       });
       if (claim === "conflict") {

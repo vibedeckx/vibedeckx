@@ -20,6 +20,7 @@ import { createExecutorRepos } from "./repositories/executors.js";
 import { createAgentSessionRepos } from "./repositories/agent-sessions.js";
 import { createWorkspaceRepos } from "./repositories/workspace.js";
 import { createCrossRemoteAuditRepo } from "./repositories/cross-remote-audit.js";
+import { createSessionRemoteGrantRepo } from "./repositories/session-remote-grants.js";
 import { createMergeTargetsRepo } from "./repositories/merge-targets.js";
 import { createSearchCacheRepos } from "./repositories/search-cache.js";
 import { createWorkflowRunRepos } from "./repositories/workflow-runs.js";
@@ -569,6 +570,22 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     CREATE INDEX IF NOT EXISTS idx_remote_session_creation_intents_pending
       ON remote_session_creation_intents(status, remote_server_id, updated_at);
 
+    -- Per-session cross-remote allowlist. The machine tier
+    -- (remote_servers.cross_remote_access) is the ceiling; this table is what
+    -- the agent of one session may actually reach. No FK on session_id:
+    -- remote- prefixed sessions live only in remote_session_mappings /
+    -- creation intents, so half the keys would have nothing to point at.
+    CREATE TABLE IF NOT EXISTS agent_session_remote_grants (
+      session_id TEXT NOT NULL,
+      remote_server_id TEXT NOT NULL REFERENCES remote_servers(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      granted_at TEXT NOT NULL,
+      PRIMARY KEY (session_id, remote_server_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_session_remote_grants_session
+      ON agent_session_remote_grants(session_id);
+
     CREATE TABLE IF NOT EXISTS remote_reviewer_creation_intents (
       local_reviewer_session_id TEXT PRIMARY KEY,
       remote_reviewer_session_id TEXT NOT NULL,
@@ -760,6 +777,11 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
   if (!remoteCreationIntentColumns.some((column) => column.name === "prepare_operation_id")) {
     db.exec("ALTER TABLE remote_session_creation_intents ADD COLUMN prepare_operation_id TEXT DEFAULT NULL");
     db.exec("ALTER TABLE remote_session_creation_intents ADD COLUMN prepared_at INTEGER DEFAULT NULL");
+  }
+  // Cross-remote session grants: the frozen first-turn context block (see the
+  // column doc in schema.ts).
+  if (!remoteCreationIntentColumns.some((column) => column.name === "first_turn_grant_context")) {
+    db.exec("ALTER TABLE remote_session_creation_intents ADD COLUMN first_turn_grant_context TEXT DEFAULT NULL");
   }
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_session_creation_intents_prepare_operation
@@ -2253,6 +2275,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createAgentSessionRepos(kdb, h),
     ...createWorkspaceRepos(kdb, h),
     ...createCrossRemoteAuditRepo(kdb),
+    ...createSessionRemoteGrantRepo(kdb),
     ...createMergeTargetsRepo(kdb),
     ...createSearchCacheRepos(kdb, h),
     ...createWorkflowRunRepos(kdb),

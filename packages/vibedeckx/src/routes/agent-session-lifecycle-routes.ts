@@ -29,6 +29,8 @@ import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-re
 import { isSessionPurpose, type SessionPurpose } from "../session-lifecycle-log.js";
 import { toLifecycleResponse, type SessionLifecycleView, type SessionOwner } from "../agent-session-lifecycle.js";
 import { RemoteSessionLifecycleAdapter } from "../remote-session-lifecycle.js";
+import { authorizeLocalSession, authorizeRemoteSession } from "./session-ownership.js";
+import { validateSessionGrantIds } from "../cross-remote-access.js";
 import "../server-types.js";
 
 const KEY_MAX = 512;
@@ -60,6 +62,12 @@ interface PrepareBody {
   model?: string | null;
   purpose?: string;
   owner?: unknown;
+  /**
+   * Cross-remote machines the user allowed in the composer before the session
+   * existed. Only the hub's project routes read it; it is never forwarded to a
+   * worker (the gateway that enforces it lives here).
+   */
+  grantedRemoteIds?: unknown;
 }
 interface StartBody extends PrepareBody {
   instruction?: unknown;
@@ -75,7 +83,12 @@ interface ActivateBody {
   origin?: "workflow";
   notificationDisposition?: NotificationDisposition;
   crossRemoteMcp?: unknown;
+  /** The composer's declaration as of the send; the prepare-time one may be stale. */
+  grantedRemoteIds?: unknown;
 }
+
+/** `ids: undefined` = the client sent no grant field at all, so nothing is written. */
+type GrantCheck = { ok: true; ids: string[] | undefined } | { ok: false; error: string };
 
 export interface LifecycleRoutesOptions {
   /** Test seam: replaces the adapter built from the instance's decorations. */
@@ -155,6 +168,17 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
   };
   const ALL_PURPOSES: readonly SessionPurpose[] = ["interactive", "interactive_upload", "commander", "project_chat", "workflow_review"];
   const CLIENT_PURPOSES: readonly SessionPurpose[] = ["interactive", "interactive_upload"];
+
+  /** The composer's draft grant list, checked by the shared rule before it reaches the lifecycle. */
+  async function checkGrants(value: unknown, userId: string | undefined, sourceRemoteServerId: string | null): Promise<GrantCheck> {
+    if (value === undefined) return { ok: true, ids: undefined };
+    if (!Array.isArray(value) || value.some((id) => typeof id !== "string")) {
+      return { ok: false, error: "grantedRemoteIds must be an array of strings" };
+    }
+    const ids = [...new Set(value as string[])];
+    const rejection = await validateSessionGrantIds(fastify.storage, ids, userId, sourceRemoteServerId);
+    return rejection ? { ok: false, error: rejection } : { ok: true, ids };
+  }
 
   // -------------------------------------------------------------------------
   // Worker: path-based prepare / start
@@ -248,6 +272,8 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     if (!validKey(req.body.operationId)) return reply.code(400).send({ error: "operationId must contain 1-512 characters" });
     const purpose = purposeOf(req.body.purpose, CLIENT_PURPOSES);
     if (!purpose) return reply.code(400).send({ error: "Invalid purpose" });
+    const grants = await checkGrants(req.body.grantedRemoteIds, ctx.userId, ctx.remote?.serverId ?? null);
+    if (!grants.ok) return reply.code(400).send({ error: grants.error });
     const common = {
       operationId: req.body.operationId,
       branch: req.body.branch ?? null,
@@ -263,7 +289,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
       if (missing) return reply.code(409).send(workspaceMissingOnRemoteBody(missing));
       const result = await remote().prepare({
         ...common, projectId: ctx.project.id, remoteServerId: ctx.remote.serverId, remotePath: ctx.remote.path,
-        userId: ctx.userId,
+        userId: ctx.userId, grantedRemoteIds: grants.ids,
       });
       return send(reply, result);
     }
@@ -271,6 +297,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
       ...common,
       sessionId: typeof req.body.sessionId === "string" ? req.body.sessionId : undefined,
       projectId: ctx.project.id,
+      grants: grants.ids && { userId: ctx.userId, remoteServerIds: grants.ids },
     });
     return send(reply, result);
   });
@@ -281,6 +308,8 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     if (!validKey(req.body.operationId)) return reply.code(400).send({ error: "operationId must contain 1-512 characters" });
     if (!validInstruction(req.body.instruction)) return reply.code(400).send({ error: "Instruction is required" });
     if (req.body.purpose !== undefined && req.body.purpose !== "interactive") return reply.code(400).send({ error: "Invalid purpose" });
+    const grants = await checkGrants(req.body.grantedRemoteIds, ctx.userId, ctx.remote?.serverId ?? null);
+    if (!grants.ok) return reply.code(400).send({ error: grants.error });
     const common = {
       operationId: req.body.operationId,
       branch: req.body.branch ?? null,
@@ -300,6 +329,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
       const result = await remote().start({
         ...common, purpose: "interactive", projectId: ctx.project.id,
         remoteServerId: ctx.remote.serverId, remotePath: ctx.remote.path,
+        grantedRemoteIds: grants.ids,
       });
       return send(reply, result, fallback);
     }
@@ -309,6 +339,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
       : undefined;
     const result = await fastify.agentSessionLifecycle.start({
       ...common, purpose: "interactive", sessionId, projectId: ctx.project.id, crossRemoteMcp,
+      grants: grants.ids && { userId: ctx.userId, remoteServerIds: grants.ids },
     });
     return send(reply, result, fallback);
   });
@@ -317,23 +348,10 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
   // Both: by-id activate / cancel, dispatching on the remote- prefix
   // -------------------------------------------------------------------------
 
-  /** Local rows are authorized through their projected project; pending rows are bound, so the projection exists. */
-  async function authorizeLocal(sessionId: string, authResult: string | undefined): Promise<boolean> {
-    const activity = await fastify.storage.agentSessions.getActivityById(sessionId, "runtime");
-    if (!activity) return false;
-    return Boolean(await fastify.storage.projects.getById(activity.projectId, authResult));
-  }
-
-  /** Remote ids resolve through the durable intent (pending) or the mapping (active). */
-  async function authorizeRemote(sessionId: string, authResult: string | undefined): Promise<boolean> {
-    const [intent, mapping] = await Promise.all([
-      fastify.storage.remoteSessionCreationIntents.getByLocal(sessionId),
-      fastify.storage.remoteSessionMappings.getByLocal(sessionId),
-    ]);
-    const projectId = mapping?.project_id ?? intent?.project_id;
-    if (!projectId) return false;
-    return Boolean(await fastify.storage.projects.getById(projectId, authResult));
-  }
+  const authorizeLocal = (sessionId: string, authResult: string | undefined) =>
+    authorizeLocalSession(fastify.storage, sessionId, authResult);
+  const authorizeRemote = (sessionId: string, authResult: string | undefined) =>
+    authorizeRemoteSession(fastify.storage, sessionId, authResult);
 
   fastify.post<{ Params: { sessionId: string }; Body: ActivateBody }>("/api/agent-sessions/:sessionId/activate", { bodyLimit: 10 * 1024 * 1024 }, async (req, reply) => {
     const authResult = requireAuth(req, reply);
@@ -352,12 +370,18 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     if (sessionId.startsWith("remote-")) {
       if (!(await authorizeRemote(sessionId, authResult))) return reply.code(404).send({ kind: "not_found", error: "Session not found" });
       const intent = await fastify.storage.remoteSessionCreationIntents.getByLocal(sessionId);
-      return send(reply, await remote().activate({ ...common, localSessionId: sessionId, userId: authResult }), {
+      const remoteGrants = await checkGrants(req.body.grantedRemoteIds, authResult, intent?.remote_server_id ?? null);
+      if (!remoteGrants.ok) return reply.code(400).send({ error: remoteGrants.error });
+      return send(reply, await remote().activate({
+        ...common, localSessionId: sessionId, userId: authResult, grantedRemoteIds: remoteGrants.ids,
+      }), {
         permissionMode: intent?.permission_mode ?? "edit", agentType: intent?.agent_type ?? "claude-code", model: intent?.model ?? null,
       });
     }
 
     if (!(await authorizeLocal(sessionId, authResult))) return reply.code(404).send({ kind: "not_found", error: "Session not found" });
+    const grants = await checkGrants(req.body.grantedRemoteIds, authResult, null);
+    if (!grants.ok) return reply.code(400).send({ error: grants.error });
     // Re-minted per spawn (the worker half adopts a hub-supplied config, the
     // hub half mints its own for a local session).
     const crossRemoteMcp = crossRemoteOf(req.body.crossRemoteMcp)
@@ -365,6 +389,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
         .catch(() => undefined);
     const result = await fastify.agentSessionLifecycle.activate({
       ...common, sessionId, crossRemoteMcp, userId: resolveUserId(authResult),
+      grants: grants.ids && { userId: resolveUserId(authResult), remoteServerIds: grants.ids },
     });
     return send(reply, result, { permissionMode: "edit", agentType: "claude-code", model: null });
   });

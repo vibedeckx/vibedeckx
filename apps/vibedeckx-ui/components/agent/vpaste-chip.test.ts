@@ -17,6 +17,20 @@ describe("splitVPasteMarkers", () => {
     expect(splitVPasteMarkers("plain")).toEqual([{ kind: "text", text: "plain" }]);
   });
 
+  it("parses the hub's cross-remote grant block into one chip", () => {
+    const block = '<vremotes names="ubuntu-1, mac-mini">\nCross-remote access granted for this session: ubuntu-1 (id: a, exec).\n</vremotes>';
+    expect(splitVPasteMarkers(`do it\n\n${block}`)).toEqual([
+      { kind: "text", text: "do it\n\n" },
+      { kind: "remotes", names: "ubuntu-1, mac-mini" },
+    ]);
+  });
+
+  it("parses an empty grant list without collapsing the segment", () => {
+    expect(splitVPasteMarkers('<vremotes names="">x</vremotes>')).toEqual([
+      { kind: "remotes", names: "" },
+    ]);
+  });
+
   it("does not treat a malformed vfile tag as a chip", () => {
     const text = '<vfile path="/tmp/x" size="1" />';
     expect(splitVPasteMarkers(text)).toEqual([{ kind: "text", text }]);

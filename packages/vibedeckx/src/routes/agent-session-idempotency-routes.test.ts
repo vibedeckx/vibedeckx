@@ -20,6 +20,8 @@ describe("path agent session preallocated identity", () => {
     const messages: Record<string, unknown>[] = [];
     const projects = new Map<string, Record<string, unknown>>();
     const deliveries = new Map<string, { hash: string; status: "pending" | "sent"; token: string | null }>();
+    const grants = new Map<string, string[]>();
+    const remoteServers = new Map<string, Record<string, unknown>>();
     const sendUserMessage = vi.fn(async () => {
       messages.push({ type: "user", content: "delivered" });
       return true;
@@ -67,6 +69,15 @@ describe("path agent session preallocated identity", () => {
           : undefined,
         getLifecycleById: async (id: string) => lifecycleRow?.id === id ? lifecycleRow : undefined,
       },
+      sessionRemoteGrants: {
+        list: async (sessionId: string) => grants.get(sessionId) ?? [],
+        replace: async (sessionId: string, _userId: string, ids: string[]) => { grants.set(sessionId, ids); },
+      },
+      remoteServers: {
+        getById: async (id: string) => remoteServers.get(id),
+      },
+      remoteSessionCreationIntents: { getByLocal: async () => undefined },
+      remoteSessionMappings: { getByLocal: async () => undefined },
       agentInstructionDeliveries: {
         claim: async ({ sessionId, idempotencyKey, contentHash, claimToken }: {
           sessionId: string; idempotencyKey: string; contentHash: string; claimToken: string;
@@ -126,6 +137,15 @@ describe("path agent session preallocated identity", () => {
       createNewSession,
       sendUserMessage,
       deleteSession,
+      grantRemote: (sessionId: string, id: string, name: string, access: "read" | "exec") => {
+        remoteServers.set(id, { id, name, cross_remote_access: access });
+        grants.set(sessionId, [...(grants.get(sessionId) ?? []), id]);
+      },
+      grantsOf: async (sessionId: string) => grants.get(sessionId) ?? [],
+      /** A machine the user owns but this session has not been granted. */
+      knownRemote: (id: string, name: string, access: "off" | "read" | "exec") => {
+        remoteServers.set(id, { id, name, cross_remote_access: access });
+      },
       appendMessage: (message: Record<string, unknown> = { type: "user", content: "delivered" }) => {
         messages.push(message);
       },
@@ -345,6 +365,135 @@ describe("path agent session preallocated identity", () => {
 
     expect(first.statusCode).toBe(200);
     expect(conflict.statusCode).toBe(409);
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  /** docs/cross-remote-session-grants-design.md §0.1. */
+  it("applies the grants the message asserts, then describes them to the agent", async () => {
+    const { sendUserMessage, knownRemote } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    knownRemote("srv-a", "ubuntu-1", "exec");
+
+    await app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "look", grantedRemoteIds: ["srv-a"] },
+    });
+
+    // Written before the block is built, so what the agent is told is the list
+    // now in force — not the one it replaced.
+    const delivered = sendUserMessage.mock.calls[0][1] as string;
+    expect(delivered).toMatch(/^look\n\n<vremotes names="ubuntu-1">/);
+  });
+
+  it("leaves the grants alone when the sender has no opinion", async () => {
+    // Commander, workflow and project-chat senders omit the field; their
+    // messages must not revoke what the composer set.
+    const { sendUserMessage, grantRemote } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    grantRemote("worker-id", "srv-a", "ubuntu-1", "exec");
+
+    await app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/message", payload: { content: "look" },
+    });
+    expect(sendUserMessage.mock.calls[0][1] as string).toContain("ubuntu-1");
+  });
+
+  it("revokes when the message asserts an empty list", async () => {
+    const { sendUserMessage, grantRemote } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    grantRemote("worker-id", "srv-a", "ubuntu-1", "exec");
+
+    await app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "look", grantedRemoteIds: [] },
+    });
+    expect(sendUserMessage.mock.calls[0][1]).toBe("look");
+  });
+
+  it("will not touch the grants of a session that is not the caller's", async () => {
+    // An empty list passes id validation trivially, so without an ownership
+    // gate BEFORE the write, knowing a session id would be enough to clear
+    // someone else's access — the 404 that follows cannot take it back.
+    const { sendUserMessage, grantRemote, grantsOf, projects } = makeApp(true);
+    projects.set("path:/repo", { id: "path:/repo", path: "/repo", user_id: "someone-else" });
+    await app.register(agentSessionRoutes);
+    grantRemote("worker-id", "srv-a", "ubuntu-1", "exec");
+
+    const res = await app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "look", grantedRemoteIds: [] },
+    });
+    expect(res.statusCode).toBe(404);
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    expect(await grantsOf("worker-id")).toEqual(["srv-a"]);
+  });
+
+  it("refuses a machine above its ceiling and delivers nothing", async () => {
+    const { sendUserMessage, knownRemote } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    knownRemote("srv-off", "dormant", "off");
+
+    const res = await app.inject({
+      method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "look", grantedRemoteIds: ["srv-off"] },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("appends the session's cross-remote grants to every delivered message", async () => {
+    const { sendUserMessage, grantRemote } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+
+    await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message", payload: { content: "first" } });
+    expect(sendUserMessage.mock.calls[0][1]).toBe("first");
+
+    // Granted mid-session: the next message carries the block, with no
+    // restart and no re-mint.
+    grantRemote("worker-id", "srv-a", "ubuntu-1", "exec");
+    await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message", payload: { content: "second" } });
+    const delivered = sendUserMessage.mock.calls[1][1] as string;
+    expect(delivered).toMatch(/^second\n\n<vremotes names="ubuntu-1">/);
+    expect(delivered).toContain("ubuntu-1 (id: srv-a, exec)");
+  });
+
+  it("keys delivery idempotency on the user's text, so a grant edit between retries still replays", async () => {
+    const { sendUserMessage, grantRemote } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+
+    const first = await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "One", idempotencyKey: "delivery-1" } });
+    grantRemote("worker-id", "srv-a", "ubuntu-1", "exec");
+    const replay = await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "One", idempotencyKey: "delivery-1" } });
+
+    expect(first.statusCode).toBe(200);
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json()).toMatchObject({ replayed: true });
     expect(sendUserMessage).toHaveBeenCalledTimes(1);
   });
 

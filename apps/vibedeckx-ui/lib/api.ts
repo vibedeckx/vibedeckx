@@ -136,6 +136,13 @@ export interface AppConfig {
   // Ephemeral / network-only — NEVER persisted (see persistConfig). Drives the
   // header Discord button; unsetting the server env var must reliably hide it.
   discordInviteUrl?: string;
+  /**
+   * Whether the composer offers "Allow remote access". False (or absent, on an
+   * older server) when the cross-remote gateway cannot mint a token at all —
+   * no public URL, or solo/no-auth mode — so the entry stays hidden rather
+   * than granting something nothing will honour.
+   */
+  crossRemoteSessionGrants?: boolean;
 }
 
 let _cachedConfig: AppConfig | null = null;
@@ -1434,6 +1441,8 @@ export interface StartAgentSessionRequest {
   model?: string | null;
   instruction: string | LifecycleContentPart[];
   force?: boolean;
+  /** Cross-remote machines ticked in the composer before the session existed. */
+  grantedRemoteIds?: string[];
 }
 
 /** prepare + activate in one round trip (§10.1 text-only first send). */
@@ -1449,6 +1458,7 @@ export interface PrepareAgentSessionRequest {
   agentType?: string;
   model?: string | null;
   purpose?: "interactive" | "interactive_upload";
+  grantedRemoteIds?: string[];
 }
 
 /** Identity only — no process, invisible to every list — for the paste/upload first send. */
@@ -1460,6 +1470,8 @@ export interface ActivateAgentSessionRequest {
   activationKey: string;
   instruction: string | LifecycleContentPart[];
   force?: boolean;
+  /** The composer's declaration as of the send; the prepare-time one may be stale. */
+  grantedRemoteIds?: string[];
 }
 
 export function activateAgentSession(sessionId: string, body: ActivateAgentSessionRequest): Promise<LifecycleResponse> {
@@ -1469,6 +1481,17 @@ export function activateAgentSession(sessionId: string, body: ActivateAgentSessi
 export function cancelPreparedAgentSession(sessionId: string, reason: "cancelled" | "owner_failed" = "cancelled"): Promise<LifecycleResponse> {
   return lifecycleRequest(`${getApiBase()}/api/agent-sessions/${sessionId}/preparation`, "DELETE", { reason });
 }
+
+// ============ Cross-remote session grants ============
+
+export interface SessionRemoteGrant {
+  id: string;
+  name: string;
+  access: CrossRemoteAccess;
+  online: boolean;
+}
+
+
 
 export interface RunningResidentSession {
   id: string;

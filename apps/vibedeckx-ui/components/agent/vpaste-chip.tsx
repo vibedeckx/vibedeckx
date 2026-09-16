@@ -1,6 +1,6 @@
 "use client";
 
-import { FileText, Paperclip } from "lucide-react";
+import { FileText, Paperclip, Server } from "lucide-react";
 
 interface VPasteChipProps {
   path: string;
@@ -22,6 +22,23 @@ function formatSize(bytes: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
 }
 
+/**
+ * The hub's `<vremotes>` block, rendered as one small chip. The block's prose
+ * is written for the agent; `names` carries the same list in a form the UI can
+ * show without re-parsing it.
+ */
+export function VRemotesChip({ names }: { names: string }) {
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-xs align-baseline text-emerald-700 dark:text-emerald-400"
+      title="Machines this session may reach with cross-remote tools"
+    >
+      <Server className="w-3 h-3 shrink-0" />
+      <span className="truncate max-w-[28ch]">Remote access: {names || "none"}</span>
+    </span>
+  );
+}
+
 export function VPasteChip({ path, size, name }: VPasteChipProps) {
   const Icon = name === undefined ? FileText : Paperclip;
   return (
@@ -39,7 +56,12 @@ export function VPasteChip({ path, size, name }: VPasteChipProps) {
 export const VPASTE_MARKER_RE = /<vpaste path="([^"]+)" size="(\d+)" \/>/g;
 /** Uploaded non-image attachment: file on the agent's machine, referenced by path. */
 export const VFILE_MARKER_RE = /<vfile path="([^"]+)" name="([^"]*)" size="(\d+)" \/>/g;
-const ANY_MARKER_RE = new RegExp(`${VPASTE_MARKER_RE.source}|${VFILE_MARKER_RE.source}`, "g");
+/** Hub-injected cross-remote grant context; `names` is the display list. */
+export const VREMOTES_MARKER_RE = /<vremotes names="([^"]*)">[\s\S]*?<\/vremotes>/g;
+const ANY_MARKER_RE = new RegExp(
+  `${VPASTE_MARKER_RE.source}|${VFILE_MARKER_RE.source}|${VREMOTES_MARKER_RE.source}`,
+  "g",
+);
 
 export function vfileMarker(file: { path: string; name: string; size: number }): string {
   return `<vfile path="${file.path}" name="${file.name}" size="${file.size}" />`;
@@ -51,7 +73,8 @@ export function vfileMarker(file: { path: string; name: string; size: number }):
  */
 export type VPasteSegment =
   | { kind: "text"; text: string }
-  | { kind: "chip"; path: string; size: number; name?: string };
+  | { kind: "chip"; path: string; size: number; name?: string }
+  | { kind: "remotes"; names: string };
 
 export function splitVPasteMarkers(text: string): VPasteSegment[] {
   const segments: VPasteSegment[] = [];
@@ -64,8 +87,10 @@ export function splitVPasteMarkers(text: string): VPasteSegment[] {
     }
     if (match[1] !== undefined) {
       segments.push({ kind: "chip", path: match[1], size: Number(match[2]) });
-    } else {
+    } else if (match[3] !== undefined) {
       segments.push({ kind: "chip", path: match[3], name: match[4], size: Number(match[5]) });
+    } else {
+      segments.push({ kind: "remotes", names: match[6] });
     }
     lastIndex = match.index + match[0].length;
   }

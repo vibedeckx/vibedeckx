@@ -24,6 +24,8 @@ export const TOOL_TIERS: Record<string, CrossRemoteTier> = {
 };
 
 export const MAX_IN_FLIGHT_PER_SESSION = 4;
+/** One grant list is one pass through the composer menu; longer is not a user's intent. */
+export const MAX_SESSION_GRANTS = 64;
 export const REMOTE_MCP_CAPABILITIES = [
   "http:POST /api/path/cross-remote/mcp/open",
   "http:POST /api/path/cross-remote/mcp/list-tools",
@@ -37,7 +39,7 @@ export const supportsRemoteMcpBroker = (server: RemoteServer): boolean =>
 
 /** Structural subset of FastifyInstance, so the gateway route can pass `fastify` directly. */
 export interface AccessDeps {
-  storage: Pick<Storage, "remoteServers">;
+  storage: Pick<Storage, "remoteServers" | "sessionRemoteGrants">;
   reverseConnectManager: { isConnected(remoteServerId: string): boolean };
   remoteSessionMap: Map<string, unknown>;
   agentSessionManager: { getSessionProcessAlive(sessionId: string): boolean };
@@ -64,7 +66,7 @@ export function isSessionUsable(deps: AccessDeps, sessionId: string): boolean {
 
 export type ResolveResult =
   | { ok: true; server: RemoteServer }
-  | { ok: false; reason: "not_accessible" | "offline" };
+  | { ok: false; reason: "not_accessible" | "offline" | "not_granted" };
 
 /** What the tier check itself needs — no session, no token. */
 export type ReachDeps = Pick<AccessDeps, "storage" | "reverseConnectManager">;
@@ -75,7 +77,12 @@ export type ReachDeps = Pick<AccessDeps, "storage" | "reverseConnectManager">;
  * Split out of `resolveTarget` because the gateway is not the only caller: a
  * cross-remote artifact the conversation links (`artifact-read-targets.ts`)
  * is read from a machine the agent touched, and must be gated by exactly the
- * grant that let it touch it — one policy, not two.
+ * tier that let it touch it — one policy, not two.
+ *
+ * Deliberately tier-only: this path also serves the USER opening a screenshot
+ * or a file link, and revoking the session's grant must not take those away
+ * (docs/cross-remote-session-grants-design.md §3.4). The session allowlist is
+ * applied one level up, in `resolveTarget`.
  */
 export async function canReachRemote(
   deps: ReachDeps,
@@ -93,6 +100,16 @@ export async function canReachRemote(
   return { ok: true, server };
 }
 
+/**
+ * The session-scoped half of the policy: which machines the user explicitly
+ * allowed this conversation to reach, from the composer's + menu. Read fresh
+ * on every call, so a revocation takes effect on the next tool use without
+ * restarting the agent process or re-minting its token.
+ */
+async function grantedTo(deps: AccessDeps, sessionId: string): Promise<Set<string>> {
+  return new Set(await deps.storage.sessionRemoteGrants.list(sessionId));
+}
+
 export async function resolveTarget(
   deps: AccessDeps,
   payload: CrossRemoteTokenPayload,
@@ -103,6 +120,11 @@ export async function resolveTarget(
     return { ok: false, reason: "not_accessible" };
   }
 
+  // Checked before the tier so an ungranted machine reports the actionable
+  // reason ("ask the user to allow it") rather than a generic refusal.
+  const granted = await grantedTo(deps, payload.sessionId);
+  if (!granted.has(targetRemoteId)) return { ok: false, reason: "not_granted" };
+
   return canReachRemote(deps, payload.userId, targetRemoteId, requiredTier);
 }
 
@@ -110,10 +132,14 @@ export async function listAccessibleRemotes(
   deps: AccessDeps,
   payload: CrossRemoteTokenPayload,
 ): Promise<Array<{ id: string; name: string; access: CrossRemoteAccess; online: boolean; mcp_broker_supported: boolean }>> {
-  const servers = await deps.storage.remoteServers.getAll(payload.userId);
+  const [servers, granted] = await Promise.all([
+    deps.storage.remoteServers.getAll(payload.userId),
+    grantedTo(deps, payload.sessionId),
+  ]);
   return servers
     .filter((s) => s.cross_remote_access !== "off")
     .filter((s) => s.id !== payload.sourceRemoteServerId)
+    .filter((s) => granted.has(s.id))
     .map((s) => ({
       id: s.id,
       name: s.name,
@@ -121,6 +147,35 @@ export async function listAccessibleRemotes(
       online: isOnline(deps, s),
       mcp_broker_supported: supportsRemoteMcpBroker(s),
     }));
+}
+
+/**
+ * Validate a grant list against the machine tier (the ceiling) and the
+ * session's own machine, shared by the two routes that accept one: the
+ * composer's create body and the grant API. All-or-nothing — one bad id
+ * rejects the request rather than quietly granting fewer machines than the
+ * user ticked. Returns null when the list is acceptable.
+ */
+export async function validateSessionGrantIds(
+  storage: Pick<Storage, "remoteServers">,
+  ids: string[],
+  userId: string | undefined,
+  sourceRemoteServerId: string | null | undefined,
+): Promise<string | null> {
+  if (ids.length > MAX_SESSION_GRANTS) {
+    return `At most ${MAX_SESSION_GRANTS} remotes can be granted to one session`;
+  }
+  for (const id of ids) {
+    if (sourceRemoteServerId && id === sourceRemoteServerId) {
+      return `Remote ${id} is the machine this session runs on`;
+    }
+    const server = await storage.remoteServers.getById(id, userId);
+    if (!server) return `Remote ${id} not found`;
+    if (server.cross_remote_access === "off") {
+      return `Remote ${server.name} has cross-remote access turned off`;
+    }
+  }
+  return null;
 }
 
 export class SessionConcurrencyGuard {

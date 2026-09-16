@@ -296,4 +296,122 @@ describe("RemoteSessionLifecycleAdapter", () => {
     expect(remoteSessionMap.has(v.sessionId)).toBe(false);
     expect(ensureStream).not.toHaveBeenCalled();
   });
+
+  /** docs/cross-remote-session-grants-design.md §6, §7. */
+  describe("cross-remote session grants", () => {
+    const machine = async (name: string) => {
+      const row = await storage.remoteServers.create({ name }, "u1");
+      await storage.remoteServers.update(row.id, { cross_remote_access: "exec" }, "u1");
+      return row.id;
+    };
+
+    it("persists the grants with the intent, before any worker call", async () => {
+      const target = await machine("ubuntu-1");
+      let grantsAtCall: string[] = [];
+      proxyToRemoteAuto.mockImplementationOnce(async () => {
+        const intent = await storage.remoteSessionCreationIntents.getByPrepareOperationId("op-1");
+        grantsAtCall = await storage.sessionRemoteGrants.list(intent!.local_session_id);
+        return ok("activated", view({ sessionId: intent!.remote_session_id, state: "active" }));
+      });
+
+      const result = await adapter.start({ ...params(), instruction: "hello", grantedRemoteIds: [target] });
+      expect(result.kind).toBe("activated");
+      expect(grantsAtCall).toEqual([target]);
+    });
+
+    it("sends a byte-identical instruction on a retry after the grants changed", async () => {
+      // `resident_limit` leaves the worker's content hash in place, so the
+      // retry the UI invites (fail → grant another machine → send again) must
+      // not look like different content.
+      const a = await machine("ubuntu-1");
+      const b = await machine("mac-mini");
+      proxyToRemoteAuto.mockResolvedValueOnce(fail("resident_limit", view({ sessionId: "r1" }), 409));
+      const first = await adapter.start({ ...params(), instruction: "hello", grantedRemoteIds: [a] });
+      expect(first.kind).toBe("resident_limit");
+      const sentFirst = proxyToRemoteAuto.mock.calls[0][3].instruction;
+      expect(sentFirst).toContain("ubuntu-1");
+
+      const intent = await storage.remoteSessionCreationIntents.getByPrepareOperationId("op-1");
+      await storage.sessionRemoteGrants.replace(intent!.local_session_id, "u1", [a, b]);
+      await storage.remoteServers.update(a, { name: "renamed" }, "u1");
+
+      proxyToRemoteAuto.mockResolvedValueOnce(ok("activated", view({ sessionId: intent!.remote_session_id, state: "active" })));
+      const retry = await adapter.start({ ...params(), instruction: "hello" });
+      expect(retry.kind).toBe("activated");
+      // Neither the new grant nor the rename may move the delivered bytes.
+      expect(proxyToRemoteAuto.mock.calls[1][3].instruction).toBe(sentFirst);
+    });
+
+    it("freezes an empty block just as firmly as a populated one", async () => {
+      const a = await machine("ubuntu-1");
+      proxyToRemoteAuto.mockResolvedValueOnce(fail("resident_limit", view({ sessionId: "r1" }), 409));
+      const first = await adapter.start({ ...params(), instruction: "hello" });
+      expect(first.kind).toBe("resident_limit");
+      expect(proxyToRemoteAuto.mock.calls[0][3].instruction).toBe("hello");
+
+      const intent = await storage.remoteSessionCreationIntents.getByPrepareOperationId("op-1");
+      await storage.sessionRemoteGrants.replace(intent!.local_session_id, "u1", [a]);
+      proxyToRemoteAuto.mockResolvedValueOnce(ok("activated", view({ sessionId: intent!.remote_session_id, state: "active" })));
+
+      const retry = await adapter.start({ ...params(), instruction: "hello" });
+      expect(retry.kind).toBe("activated");
+      expect(proxyToRemoteAuto.mock.calls[1][3].instruction).toBe("hello");
+    });
+
+    it("records the grants before the intent a replay could activate", async () => {
+      const target = await machine("ubuntu-1");
+      let grantsWhenIntentAppeared: string[] | null = null;
+      const realBegin = storage.remoteSessionCreationIntents.begin.bind(storage.remoteSessionCreationIntents);
+      vi.spyOn(storage.remoteSessionCreationIntents, "begin").mockImplementationOnce(async (intent) => {
+        grantsWhenIntentAppeared = await storage.sessionRemoteGrants.list(intent.localSessionId);
+        return realBegin(intent);
+      });
+      proxyToRemoteAuto.mockResolvedValueOnce(ok("activated", view({ sessionId: "r1", state: "active" })));
+
+      await adapter.start({ ...params(), instruction: "hello", grantedRemoteIds: [target] });
+      expect(grantsWhenIntentAppeared).toEqual([target]);
+    });
+
+    it("refuses to start at all when the grants cannot be recorded", async () => {
+      const target = await machine("ubuntu-1");
+      vi.spyOn(storage.sessionRemoteGrants, "replace").mockRejectedValueOnce(new Error("disk full"));
+
+      await expect(adapter.start({ ...params(), instruction: "hello", grantedRemoteIds: [target] }))
+        .rejects.toThrow("disk full");
+      // Nothing was created and nothing was sent: an agent must not spawn with
+      // an allowlist the hub failed to write down.
+      expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+      expect(await storage.remoteSessionCreationIntents.getByPrepareOperationId("op-1")).toBeUndefined();
+    });
+
+    it("sends nothing when the first-turn block cannot be frozen, so the retry stays byte-identical", async () => {
+      const target = await machine("ubuntu-1");
+      vi.spyOn(storage.remoteSessionCreationIntents, "setFirstTurnGrantContext")
+        .mockRejectedValueOnce(new Error("db busy"));
+
+      const failed = await adapter.start({ ...params(), instruction: "hello", grantedRemoteIds: [target] });
+      expect(failed.kind).toBe("remote_unreachable");
+      expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+
+      // The retry is the first delivery, so it defines the bytes.
+      proxyToRemoteAuto.mockResolvedValueOnce(ok("activated", view({ sessionId: "r1", state: "active" })));
+      const retry = await adapter.start({ ...params(), instruction: "hello" });
+      expect(retry.kind).toBe("activated");
+      expect(proxyToRemoteAuto.mock.calls[0][3].instruction).toContain("ubuntu-1");
+    });
+
+    it("a retried start does not overwrite grants the user edited in between", async () => {
+      const a = await machine("ubuntu-1");
+      const b = await machine("mac-mini");
+      proxyToRemoteAuto.mockResolvedValueOnce({ ok: false, status: 0, errorCode: "network_error", data: null });
+      expect((await adapter.start({ ...params(), instruction: "hello", grantedRemoteIds: [a] })).kind).toBe("remote_unreachable");
+
+      const intent = await storage.remoteSessionCreationIntents.getByPrepareOperationId("op-1");
+      await storage.sessionRemoteGrants.replace(intent!.local_session_id, "u1", [b]);
+
+      proxyToRemoteAuto.mockResolvedValueOnce(ok("activated", view({ sessionId: intent!.remote_session_id, state: "active" })));
+      await adapter.start({ ...params(), instruction: "hello", grantedRemoteIds: [a] });
+      expect(await storage.sessionRemoteGrants.list(intent!.local_session_id)).toEqual([b]);
+    });
+  });
 });

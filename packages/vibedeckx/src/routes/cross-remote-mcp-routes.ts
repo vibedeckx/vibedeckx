@@ -30,6 +30,7 @@ import "../server-types.js";
 const PROTOCOL_VERSION = "2024-11-05";
 const AUDIT_ARGS_MAX = 1024;
 const NOT_ACCESSIBLE = "remote not found or not accessible";
+const NOT_GRANTED = "remote not granted to this session; ask the user to allow it from the composer's + menu (Allow remote access)";
 
 interface JsonRpcRequest {
   jsonrpc: string;
@@ -50,7 +51,8 @@ const REMOTE_ID_PROP = {
 export const CROSS_REMOTE_MCP_INSTRUCTIONS = [
   "Use these tools when the task requires inspecting or operating another remote machine, or using an MCP server reachable from that remote.",
   "Treat a machine or host name in the user's request (for example, 'look at the ubuntu machine') as an explicit target signal, not as a request to inspect the current local workspace. Call `list_accessible_remotes` and match the user's wording against the returned remote names and ids before reading files or running local commands.",
-  "If exactly one accessible remote matches the named machine, perform the requested work on that remote. If multiple remotes match, or the wording could reasonably refer to either the local machine or a remote, ask the user which target they mean before operating. If no remote matches, say so instead of silently falling back to local.",
+  "If exactly one accessible remote matches the named machine, perform the requested work on that remote. If multiple remotes match, or the wording could reasonably refer to either the local machine or a remote, ask the user which target they mean before operating.",
+  "The user grants remotes to this session from the composer's + menu (Allow remote access). If the list is empty, or the machine the user named is missing from it, tell them to grant it there; never silently fall back to the local workspace.",
   "Cross-remote can discover accessible machines, inspect files, directories, paths, and processes, run commands on exec-tier remotes, and persistently use MCP servers reachable from those remotes. Available operations depend on the remote's access tier, online state, and worker capabilities.",
   "Call `list_accessible_remotes` first to discover the remote id, access tier, online state, and whether its MCP broker is supported.",
   "For a remote MCP server, call `remote_mcp_open` once, use the returned tool schemas and handle for repeated `remote_mcp_call` calls, then call `remote_mcp_close` when the work is complete. Do not reopen the MCP server for every tool call.",
@@ -62,7 +64,7 @@ export const CROSS_REMOTE_MCP_INSTRUCTIONS = [
 const TOOLS = [
   {
     name: "list_accessible_remotes",
-    description: "List remote machines this agent may access, including their names, ids, access tiers, and online status. Call this before acting whenever the user names or otherwise identifies a machine/host, so the request is routed to the intended target instead of the current local machine.",
+    description: "List the remote machines the user has granted to this session, including their names, ids, access tiers, and online status. Call this before acting whenever the user names or otherwise identifies a machine/host, so the request is routed to the intended target instead of the current local machine.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -447,7 +449,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!resolved.ok) {
       const status: CrossRemoteAuditStatus = resolved.reason === "offline" ? "offline" : "denied";
       await audit(payload, remoteId, toolName, target.summary, status, null, startedAt);
-      return textResult(resolved.reason === "offline" ? `Remote ${remoteId} is offline` : NOT_ACCESSIBLE, true);
+      if (resolved.reason === "offline") return textResult(`Remote ${remoteId} is offline`, true);
+      return textResult(resolved.reason === "not_granted" ? NOT_GRANTED : NOT_ACCESSIBLE, true);
     }
     if (isMcpTool && !supportsRemoteMcpBroker(resolved.server)) {
       await audit(payload, remoteId, toolName, target.summary, "denied", null, startedAt);

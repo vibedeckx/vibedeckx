@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import path from "path";
 import { execFileSync } from "child_process";
 import { createSqliteStorage } from "./storage/sqlite.js";
-import { AgentSessionManager } from "./agent-session-manager.js";
+import { AgentSessionManager, WorkspaceCheckoutUnavailableError } from "./agent-session-manager.js";
 import { AgentSessionLifecycleService } from "./agent-session-lifecycle.js";
 import type { Storage } from "./storage/types.js";
 
@@ -336,5 +336,141 @@ describe("AgentSessionLifecycleService (local, integrated)", () => {
     expect(replay.kind).toBe("idempotency_conflict"); // hash "h" was seeded, not hashInstruction("x")
     expect(spawn).not.toHaveBeenCalled();
     await manager2.shutdown();
+  });
+
+  /** docs/cross-remote-session-grants-design.md §6, §7. */
+  describe("cross-remote session grants", () => {
+    const grantMachine = async (name: string) => {
+      const row = await storage.remoteServers.create({ name }, "user-1");
+      await storage.remoteServers.update(row.id, { cross_remote_access: "exec" }, "user-1");
+      return row.id;
+    };
+
+    it("start persists the grants before the first instruction is delivered", async () => {
+      const machine = await grantMachine("ubuntu-1");
+      // The gateway reads the grant table on the agent's very first tool call,
+      // so the write has to be durable before stdin sees the instruction.
+      const order: string[] = [];
+      const realReplace = storage.sessionRemoteGrants.replace.bind(storage.sessionRemoteGrants);
+      vi.spyOn(storage.sessionRemoteGrants, "replace").mockImplementation(async (...args) => {
+        await realReplace(...args);
+        order.push("grants");
+      });
+      stdinWrite.mockImplementation(() => { order.push("stdin"); });
+
+      const result = await service.start({
+        ...base, operationId: "op-g", sessionId: "sg", purpose: "interactive",
+        instruction: "look at ubuntu-1", userId: "user-1",
+        grants: { userId: "user-1", remoteServerIds: [machine] },
+      });
+      expect(result.kind).toBe("activated");
+      expect(order).toEqual(["grants", "stdin"]);
+      expect(await storage.sessionRemoteGrants.list("sg")).toEqual([machine]);
+
+      const entries = await storage.agentSessions.getEntries("sg");
+      const delivered = (JSON.parse(entries[0].data) as { content: string }).content;
+      expect(delivered).toContain("look at ubuntu-1");
+      expect(delivered).toContain(`ubuntu-1 (id: ${machine}, exec)`);
+    });
+
+    it("hashes the user's text, not the delivered text, so a grant edit between retries still replays", async () => {
+      const a = await grantMachine("ubuntu-1");
+      const b = await grantMachine("mac-mini");
+      await service.prepare({ ...base, operationId: "op-h", sessionId: "sh", purpose: "interactive" });
+      await storage.sessionRemoteGrants.replace("sh", "user-1", [a]);
+
+      const first = await service.activate({ sessionId: "sh", activationKey: "op-h", instruction: "go", userId: "user-1" });
+      expect(first.kind).toBe("activated");
+
+      // The user adds a machine and presses send again under the same key.
+      await storage.sessionRemoteGrants.replace("sh", "user-1", [a, b]);
+      const retry = await service.activate({ sessionId: "sh", activationKey: "op-h", instruction: "go", userId: "user-1" });
+      expect(retry.kind).toBe("replayed");
+      expect(stdinWrite).toHaveBeenCalledTimes(1);
+    });
+
+    it("activate applies the declaration the send carried, not the one prepare stored", async () => {
+      // The upload path prepares when a file is picked and sends later; the
+      // chips can change in between, and the send is what the user expects
+      // this turn to run under.
+      const a = await grantMachine("ubuntu-1");
+      const b = await grantMachine("mac-mini");
+      await service.prepare({
+        ...base, operationId: "op-u", sessionId: "su", purpose: "interactive",
+        grants: { userId: "user-1", remoteServerIds: [a] },
+      });
+
+      const result = await service.activate({
+        sessionId: "su", activationKey: "op-u", instruction: "go", userId: "user-1",
+        grants: { userId: "user-1", remoteServerIds: [b] },
+      });
+      expect(result.kind).toBe("activated");
+      expect(await storage.sessionRemoteGrants.list("su")).toEqual([b]);
+
+      const entries = await storage.agentSessions.getEntries("su");
+      const delivered = (JSON.parse(entries[0].data) as { content: string }).content;
+      expect(delivered).toContain("mac-mini");
+      expect(delivered).not.toContain("ubuntu-1");
+    });
+
+    it("appends nothing when the session has no grants", async () => {
+      const result = await service.start({
+        ...base, operationId: "op-n", sessionId: "sn", purpose: "interactive",
+        instruction: "hello", userId: "user-1",
+      });
+      expect(result.kind).toBe("activated");
+      const entries = await storage.agentSessions.getEntries("sn");
+      expect(JSON.parse(entries[0].data)).toMatchObject({ type: "user", content: "hello" });
+    });
+
+    it("the grants are already there the moment the row becomes findable", async () => {
+      // A concurrent replay of the same operation can find the row and
+      // activate it; it must never find one whose allowlist has not landed.
+      const machine = await grantMachine("ubuntu-1");
+      let grantsWhenRowAppeared: string[] = [];
+      const realPrepare = manager.prepareSessionRow.bind(manager);
+      vi.spyOn(manager, "prepareSessionRow").mockImplementationOnce(async (input) => {
+        grantsWhenRowAppeared = await storage.sessionRemoteGrants.list(input.sessionId);
+        return realPrepare(input);
+      });
+
+      await service.prepare({
+        ...base, operationId: "op-b", sessionId: "sb", purpose: "interactive",
+        grants: { userId: "user-1", remoteServerIds: [machine] },
+      });
+      expect(grantsWhenRowAppeared).toEqual([machine]);
+    });
+
+    it("drops the grants again when the row it wrote them for never appears", async () => {
+      const machine = await grantMachine("ubuntu-1");
+      vi.spyOn(manager, "prepareSessionRow").mockRejectedValueOnce(
+        new WorkspaceCheckoutUnavailableError("no workspace checkout"),
+      );
+
+      const result = await service.prepare({
+        ...base, operationId: "op-w", sessionId: "sw", purpose: "interactive",
+        grants: { userId: "user-1", remoteServerIds: [machine] },
+      });
+      expect(result.kind).toBe("workspace_unavailable");
+      expect(await storage.sessionRemoteGrants.list("sw")).toEqual([]);
+    });
+
+    it("a replayed prepare leaves the grants the user edited in between alone", async () => {
+      const a = await grantMachine("ubuntu-1");
+      const b = await grantMachine("mac-mini");
+      await service.prepare({
+        ...base, operationId: "op-r", sessionId: "sr", purpose: "interactive",
+        grants: { userId: "user-1", remoteServerIds: [a] },
+      });
+      await storage.sessionRemoteGrants.replace("sr", "user-1", [b]);
+
+      // The client retries the same prepare, still carrying its original draft.
+      const again = await service.prepare({
+        ...base, operationId: "op-r", sessionId: "sr", purpose: "interactive",
+        grants: { userId: "user-1", remoteServerIds: [a] },
+      });
+      expect(again.kind).toBe("replayed");
+      expect(await storage.sessionRemoteGrants.list("sr")).toEqual([b]);
+    });
   });
 });

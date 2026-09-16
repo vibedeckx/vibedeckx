@@ -128,6 +128,14 @@ vi.mock("@/hooks/use-agent-session", () => ({
   }),
 }));
 
+// The composer's grant controls: inert here — the selection rides with the
+// message, so there is no separate save for a send to wait on.
+vi.mock("@/hooks/use-session-remote-grants", () => ({
+  useSessionRemoteGrants: () => ({
+    granted: [], selectedIds: undefined, toggle: vi.fn(), adoptInto: vi.fn(),
+  }),
+}));
+
 vi.mock("@/hooks/use-surface-commander-session", () => ({
   useSurfaceCommanderSession: vi.fn(),
 }));
@@ -167,7 +175,16 @@ vi.mock("@/lib/api", () => ({
   branchAgentSession: vi.fn(),
   // Only reached once a session exists: the reviewer-run hook polls for the
   // session's workflow runs on mount. Nothing here reads the result.
-  api: { getActiveWorkflowRuns: vi.fn().mockResolvedValue({ runs: [] }) },
+  sendAgentSessionMessage: vi.fn(),
+  setSessionRemoteGrants: vi.fn(),
+  // The composer asks whether the server offers per-session cross-remote
+  // grants; with no config it stays off, so no grant request is ever made.
+  getPersistedConfig: () => null,
+  api: {
+    getActiveWorkflowRuns: vi.fn().mockResolvedValue({ runs: [] }),
+    getConfig: vi.fn().mockResolvedValue({ authEnabled: false }),
+    getRemoteServers: vi.fn().mockResolvedValue([]),
+  },
 }));
 
 // Radix's DropdownMenu opens on pointerdown and portals its content; jsdom has
@@ -720,7 +737,7 @@ describe("AgentConversation pendingModel", () => {
 
       // Text-only: one start under a stable key; the submission stays pending
       // so resending retries the same operation. Nothing to discard.
-      expect(startConversation).toHaveBeenCalledWith("retry me", "edit", null);
+      expect(startConversation).toHaveBeenCalledWith("retry me", "edit", null, undefined);
       expect(cancelPreparedConversation).not.toHaveBeenCalled();
       expect(draftState.set).toHaveBeenLastCalledWith("retry me");
     });
@@ -733,8 +750,8 @@ describe("AgentConversation pendingModel", () => {
         await promptState.submit!({ text: "x".repeat(2001), files: [] });
       });
 
-      expect(prepareConversation).toHaveBeenCalledWith("edit", null);
-      expect(activateConversation).toHaveBeenCalledWith(prepared, '<vpaste path="/tmp/paste" size="2001" />');
+      expect(prepareConversation).toHaveBeenCalledWith("edit", null, undefined);
+      expect(activateConversation).toHaveBeenCalledWith(prepared, '<vpaste path="/tmp/paste" size="2001" />', undefined);
       expect(startConversation).not.toHaveBeenCalled();
       expect(cancelPreparedConversation).not.toHaveBeenCalled();
     });
@@ -770,7 +787,7 @@ describe("AgentConversation pendingModel", () => {
       await render("pA", "featA");
 
       expect(uploadAttachment).toHaveBeenCalledTimes(1);
-      expect(prepareConversation).toHaveBeenCalledWith("edit", null);
+      expect(prepareConversation).toHaveBeenCalledWith("edit", null, undefined);
       expect(activateConversation).not.toHaveBeenCalled();
 
       await act(async () => {
@@ -782,6 +799,7 @@ describe("AgentConversation pendingModel", () => {
       expect(activateConversation).toHaveBeenCalledWith(
         prepared,
         'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
+        undefined,
       );
     });
 
@@ -803,7 +821,7 @@ describe("AgentConversation pendingModel", () => {
         await promptState.submit!({ text: "plain", files: [] });
       });
       expect(activateConversation).not.toHaveBeenCalled();
-      expect(startConversation).toHaveBeenCalledWith("plain", "edit", null);
+      expect(startConversation).toHaveBeenCalledWith("plain", "edit", null, undefined);
     });
 
     it("does not cancel another workspace's identity when an old submission fails", async () => {
@@ -875,10 +893,11 @@ describe("AgentConversation pendingModel", () => {
       });
 
       expect(cancelPreparedConversation).toHaveBeenCalledWith(prepared);
-      expect(prepareConversation).toHaveBeenLastCalledWith("edit", "opus");
+      expect(prepareConversation).toHaveBeenLastCalledWith("edit", "opus", undefined);
       expect(activateConversation).toHaveBeenCalledWith(
         preparedForOpus,
         '<vpaste path="/tmp/paste" size="2001" />\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
+        undefined,
       );
     });
 
@@ -906,7 +925,7 @@ describe("AgentConversation pendingModel", () => {
       expect(uploadAttachment).toHaveBeenCalledTimes(1);
       expect(startConversation).toHaveBeenCalledWith(
         'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
-        "edit", null,
+        "edit", null, undefined,
       );
     });
 
@@ -931,7 +950,7 @@ describe("AgentConversation pendingModel", () => {
       expect(uploadAttachment).toHaveBeenCalledTimes(1);
       expect(startConversation).toHaveBeenCalledWith(
         'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
-        "edit", null,
+        "edit", null, undefined,
       );
     });
 
@@ -1034,9 +1053,11 @@ describe("AgentConversation pendingModel", () => {
         uploadAttachment.mockResolvedValueOnce({ path: "/tmp/att/spec.pdf", name: "spec.pdf", size: 5, mediaType: "application/pdf" });
         promptState.files = [blobPdf];
         await render("pA", "featA");
-        // Reading the blob and uploading it settle over several microtasks.
-        await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
-        expect(uploadAttachment).toHaveBeenCalledTimes(1);
+        // Reading the blob and uploading it settle over an unbounded number of
+        // renders, so wait for the upload itself rather than a fixed tick.
+        await act(async () => {
+          await vi.waitFor(() => expect(uploadAttachment).toHaveBeenCalledTimes(1));
+        });
 
         let finishActivate!: (value: null) => void;
         activateConversation.mockImplementationOnce(() => new Promise((resolve) => { finishActivate = resolve; }));
@@ -1092,6 +1113,7 @@ describe("AgentConversation pendingModel", () => {
       expect(activateConversation).toHaveBeenCalledWith(
         prepared,
         'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
+        undefined,
       );
       expect(startConversation).not.toHaveBeenCalled();
     });
@@ -1108,7 +1130,7 @@ describe("AgentConversation pendingModel", () => {
       expect(activateConversation).toHaveBeenCalledWith(prepared, [
         { type: "text", text: 'both\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />' },
         { type: "image", mediaType: "image/png", data: "iVBORw0KGgo=" },
-      ]);
+      ], undefined);
     });
 
     it("inlines a mislabeled image with the media type its bytes actually are", async () => {
@@ -1125,7 +1147,7 @@ describe("AgentConversation pendingModel", () => {
       // No upload needed → no prepare; single-shot start with the image part.
       expect(startConversation).toHaveBeenCalledWith(
         [{ type: "text", text: "look" }, { type: "image", mediaType: "image/jpeg", data: "/9j/4AAQ" }],
-        "edit", null,
+        "edit", null, undefined,
       );
     });
 
@@ -1145,7 +1167,7 @@ describe("AgentConversation pendingModel", () => {
 
       expect(uploadAttachment).toHaveBeenCalledTimes(1);
       expect(uploadAttachment.mock.calls[0][0].name).toBe("huge.png");
-      expect(activateConversation).toHaveBeenCalledWith(prepared, `big\n<vfile path="/tmp/att/huge.png" name="huge.png" size="${rawBytes}" />`);
+      expect(activateConversation).toHaveBeenCalledWith(prepared, `big\n<vfile path="/tmp/att/huge.png" name="huge.png" size="${rawBytes}" />`, undefined);
     });
 
     it("caps attachments at the server limit at pick time and names the refused files", async () => {
@@ -1176,7 +1198,7 @@ describe("AgentConversation pendingModel", () => {
         "s-new",
         expect.any(Function),
       );
-      expect(activateConversation).toHaveBeenCalledWith(prepared, 'hm\n<vfile path="/tmp/att/fake.png" name="fake.png" size="11" />');
+      expect(activateConversation).toHaveBeenCalledWith(prepared, 'hm\n<vfile path="/tmp/att/fake.png" name="fake.png" size="11" />', undefined);
     });
 
     it("sends an image type the model cannot see (SVG) as a file, not inline", async () => {
@@ -1197,6 +1219,7 @@ describe("AgentConversation pendingModel", () => {
       expect(activateConversation).toHaveBeenCalledWith(
         prepared,
         'use this\n<vfile path="/tmp/att/logo.svg" name="logo.svg" size="5" />',
+        undefined,
       );
     });
 

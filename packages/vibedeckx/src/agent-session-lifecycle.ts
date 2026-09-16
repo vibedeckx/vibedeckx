@@ -24,6 +24,7 @@ import { WorkspaceCheckoutUnavailableError, type FirstSendOptions } from "./agen
 import type { SnapshotState } from "./utils/review-snapshot.js";
 import type { CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { logSessionLifecycle, type SessionPurpose } from "./session-lifecycle-log.js";
+import { appendRemoteGrantContext } from "./cross-remote-grant-context.js";
 import type {
   AgentSessionLifecycleRow,
   AgentSessionLifecycleState,
@@ -159,6 +160,14 @@ export interface PrepareAgentSessionInput {
   purpose: SessionPurpose;
   owner?: SessionOwner;
   startSnapshot?: SnapshotState | null;
+  /**
+   * Cross-remote machines the user allowed from the composer before this
+   * session existed. Persisted BEFORE the row itself, so the row is never
+   * findable — or activatable by a concurrent replay — without them, and the
+   * very first tool call of the turn passes the gateway
+   * (docs/cross-remote-session-grants-design.md §7).
+   */
+  grants?: { userId: string; remoteServerIds: string[] };
 }
 
 export type PrepareResult =
@@ -179,6 +188,13 @@ export interface ActivateAgentSessionInput {
   crossRemoteMcp?: CrossRemoteMcpConfig;
   /** Emit `session:status running` on activation (commander surfacing). */
   announceRunning?: boolean;
+  /**
+   * The composer's cross-remote declaration as of the send. Carried here and
+   * not only on prepare because the upload path prepares when a file is
+   * picked and sends later — the chips can change in between, and it is the
+   * send that the user expects this turn to run under.
+   */
+  grants?: { userId: string; remoteServerIds: string[] };
 }
 
 export type ActivationResult =
@@ -406,6 +422,7 @@ export class AgentSessionLifecycleService {
       purpose: input.purpose,
       owner: input.owner,
       startSnapshot: input.startSnapshot,
+      grants: input.grants,
     });
     if (prepared.kind === "idempotency_conflict" || prepared.kind === "workspace_unavailable") return prepared;
     if (prepared.kind === "expired") return { kind: "expired", view: prepared.view };
@@ -451,6 +468,14 @@ export class AgentSessionLifecycleService {
 
     const sessionId = input.sessionId ?? randomUUID();
     const model = input.model?.trim() ? input.model.trim() : null;
+    // Grants land BEFORE the row they belong to. The row is what a concurrent
+    // replay of this same operation can find and activate, so it must never be
+    // findable without them — writing after would leave a window in which the
+    // agent starts with an empty allowlist. Legal because the grant table has
+    // no FK on session_id; the catch below removes them if no row appears.
+    if (input.grants) {
+      await this.storage.sessionRemoteGrants.replace(sessionId, input.grants.userId, input.grants.remoteServerIds);
+    }
     try {
       await this.runtime.prepareSessionRow({
         sessionId,
@@ -470,7 +495,18 @@ export class AgentSessionLifecycleService {
       // Lost a concurrent duplicate on the unique prepare_operation_id index:
       // the winner's row is the answer.
       const raced = await this.storage.agentSessions.getLifecycleByPrepareOperationId(input.operationId);
-      if (raced) return this.replayPrepare(raced, input, now);
+      if (raced) {
+        // Only when the winner minted a different id are ours orphans. With a
+        // caller-supplied id both calls wrote the same row, and deleting would
+        // take the winner's grants with it.
+        if (input.grants && raced.id !== sessionId) {
+          await this.storage.sessionRemoteGrants.deleteBySession(sessionId).catch(() => {});
+        }
+        return this.replayPrepare(raced, input, now);
+      }
+      // No row exists under this operation, so the grants written above belong
+      // to an identity that will never be.
+      if (input.grants) await this.storage.sessionRemoteGrants.deleteBySession(sessionId).catch(() => {});
       if (error instanceof WorkspaceCheckoutUnavailableError || /workspace checkout/i.test(String((error as Error)?.message))) {
         return { kind: "workspace_unavailable", detail: (error as Error).message };
       }
@@ -644,12 +680,29 @@ export class AgentSessionLifecycleService {
         return beforeSend.lifecycle_state === "expired" ? { kind: "expired", view } : { kind: "activation_conflict", view };
       }
 
+      // Applied before the block below is built, so what the agent is told is
+      // the list this turn actually runs under.
+      if (input.grants) {
+        await this.storage.sessionRemoteGrants.replace(sessionId, input.grants.userId, input.grants.remoteServerIds);
+      }
+
       // First instruction: entry persisted (evidence recorded) → stdin.
+      //
+      // The grant block is appended HERE, not in `activate()`: the content
+      // hash and `activation_content_json` are taken from the user's own text
+      // before this point, so renaming a machine or editing grants between
+      // two retries of the same activation key cannot turn a replay into an
+      // idempotency conflict.
+      const instruction = await appendRemoteGrantContext(this.storage, sessionId, input.userId, input.instruction)
+        .catch((err) => {
+          console.error(`[SessionLifecycle] grant context build failed for ${sessionId}:`, err);
+          return input.instruction;
+        });
       let userEntryIndex: number | null = null;
       let accepted = false;
       let sendError: unknown;
       try {
-        accepted = await this.runtime.sendUserMessage(sessionId, input.instruction, projectPath, input.userId ?? "local", {
+        accepted = await this.runtime.sendUserMessage(sessionId, instruction, projectPath, input.userId ?? "local", {
           origin: input.origin,
           notificationDisposition: input.notificationDisposition,
           onUserEntryPersisted: async (entryIndex) => {
