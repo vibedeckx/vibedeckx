@@ -332,7 +332,7 @@ export const createServer = async (opts: {
     // middleware 401 from an older hub (which lacks the endpoint AND its
     // exemptions) is never confused with a genuinely rejected token.
     reverseConnectIdentity: true,
-    // Per-session cross-remote grants (the composer's "Allow remote access").
+    // Per-session cross-remote grants (the composer's "Remote access").
     // Off without a public URL (no gateway token is minted at all) and off in
     // solo/no-auth mode (the mint refuses an unscoped token), so the UI hides
     // the entry rather than offering a control that cannot do anything.

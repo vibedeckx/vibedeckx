@@ -12,7 +12,7 @@ import { api, type RemoteServer, type SessionRemoteGrant } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 /**
- * "Allow remote access": the composer's entry to per-session cross-remote
+ * "Remote access": the composer's entry to per-session cross-remote
  * grants (docs/cross-remote-session-grants-design.md §8). It is also how the
  * feature is discovered at all — an agent reaches no other machine until a
  * user ticks one here.
@@ -53,7 +53,7 @@ export function RemoteAccessMenuItem({
     <DropdownMenuSub onOpenChange={(open) => { if (open) load(); }}>
       <DropdownMenuSubTrigger disabled={disabled}>
         <Server className="mr-2 size-4" />
-        Allow remote access
+        Remote access
         {granted.length > 0 && (
           <span className="ml-2 text-xs text-muted-foreground">{granted.length}</span>
         )}

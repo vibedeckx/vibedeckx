@@ -137,7 +137,7 @@ export interface AppConfig {
   // header Discord button; unsetting the server env var must reliably hide it.
   discordInviteUrl?: string;
   /**
-   * Whether the composer offers "Allow remote access". False (or absent, on an
+   * Whether the composer offers "Remote access". False (or absent, on an
    * older server) when the cross-remote gateway cannot mint a token at all —
    * no public URL, or solo/no-auth mode — so the entry stays hidden rather
    * than granting something nothing will honour.

@@ -148,7 +148,7 @@ describe("cross-remote MCP gateway", () => {
     expect(body.result.instructions).toContain("If exactly one accessible remote matches");
     expect(body.result.instructions).toContain("ask the user which target they mean");
     expect(body.result.instructions).toContain("never silently fall back to the local workspace");
-    expect(body.result.instructions).toContain("Allow remote access");
+    expect(body.result.instructions).toContain("Remote access");
   });
 
   it("returns 202 with no body for the initialized notification", async () => {
@@ -218,7 +218,7 @@ describe("cross-remote MCP gateway", () => {
 
     const res = await call(tokenFor(), "remote_bash", { remoteId: targetId, command: "uptime" });
     expect(res.json().result.isError).toBe(true);
-    expect(res.json().result.content[0].text).toContain("Allow remote access");
+    expect(res.json().result.content[0].text).toContain("Remote access");
     expect(proxyToRemoteAuto).not.toHaveBeenCalled();
 
     const rows = await storage.crossRemoteAudit.listByTarget(targetId);
