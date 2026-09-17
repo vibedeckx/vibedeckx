@@ -131,6 +131,9 @@ export function describeCron(expr: string): string | null {
   } catch {
     return null;
   }
+  // "At 09:00, only on Monday" — the "only" carries nothing the day list
+  // doesn't already say, and the preview line is tight.
+  description = description.replace(/, only (on|in) /g, ", $1 ");
   // croner fires when EITHER day field matches once both are restricted, but
   // cronstrue reads as AND whatever logicalAndDayFields says (", and on Monday",
   // or a bare ", Monday through Friday" for ranges) — so say it outright.

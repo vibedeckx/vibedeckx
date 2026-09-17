@@ -45,6 +45,11 @@ describe("previewCron", () => {
     }
   });
 
+  it("drops cronstrue's redundant \"only\" from the description", () => {
+    expect(describeCron("0 9 * * 1,3,5")).toBe("At 09:00, on Monday, Wednesday, and Friday");
+    expect(describeCron("0 9 * * 1")).toBe("At 09:00, on Monday");
+  });
+
   it("describes restricted day-of-month + weekday as OR, matching croner's firing", () => {
     const either = " (runs when either the day of month or the weekday matches)";
     expect(describeCron("0 9 1-7 * 1")).toBe(`At 09:00, between day 1 and 7 of the month, or on Monday${either}`);
