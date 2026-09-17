@@ -36,11 +36,16 @@ const WEEKDAY_CHIPS: Array<[number, string]> = [
   [1, "Mon"], [2, "Tue"], [3, "Wed"], [4, "Thu"], [5, "Fri"], [6, "Sat"], [0, "Sun"],
 ];
 
-/** "Mon, Wed, Fri" / "Mon–Fri" / "Every day" for the weekly picker's trigger. */
+/**
+ * "Mon, Wed, Fri" / "Mon–Fri" / "Every day" for the weekly picker's trigger.
+ * Past three days the names no longer fit the trigger, and the preview below
+ * spells the set out in full anyway, so they collapse to a count.
+ */
 function summarizeWeekdays(days: number[]): string {
   const on = WEEKDAY_CHIPS.filter(([d]) => days.includes(d));
   if (on.length === 7) return "Every day";
   if (on.length === 5 && on.every(([d]) => d >= 1 && d <= 5)) return "Mon–Fri";
+  if (on.length > 3) return `${on.length} days a week`;
   return on.map(([, label]) => label).join(", ");
 }
 
@@ -170,7 +175,7 @@ export function ScheduleTimingField({
         {frequency === "weekly" && (
           <div className="flex min-w-0 gap-2">
             <WeekdayPicker value={builder.weekdays} onToggle={toggleWeekday} disabled={disabled} />
-            {timeBox("w-[96px] shrink-0 px-2.5")}
+            {timeBox("w-[84px] shrink-0 px-2")}
           </div>
         )}
         {frequency === "monthly" && (

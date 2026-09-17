@@ -242,7 +242,7 @@ export function ScheduleFormDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] min-w-0 gap-0 overflow-hidden bg-card p-0 grid-rows-[auto_minmax(0,1fr)_auto] sm:w-full sm:max-w-[520px]"
+        className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] min-w-0 gap-0 overflow-hidden bg-card p-0 grid-rows-[auto_minmax(0,1fr)_auto] sm:w-full sm:max-w-[470px]"
         onKeyDown={(e) => {
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !submitDisabled) {
             e.preventDefault();
