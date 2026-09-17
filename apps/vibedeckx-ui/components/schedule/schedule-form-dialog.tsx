@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -14,6 +14,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api, type ProjectRemote, type PromptProvider, type Schedule, type ScheduleInput, type Worktree } from "@/lib/api";
+import { browserTimezone, previewCron } from "@/lib/schedule-cron";
+import { ScheduleTimingField } from "./schedule-timing-field";
 
 // Radix Select items can't have an empty-string value; sentinel for the main worktree.
 const MAIN = "__main__";
@@ -56,7 +58,7 @@ export function ScheduleFormDialog({
     setError(null);
     setName(initial?.name ?? "");
     setCronExpr(initial?.cron_expr ?? "0 9 * * *");
-    setTimezone(initial?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
+    setTimezone(initial?.timezone ?? browserTimezone());
     setTarget(initial?.target ?? "local");
     setRunType(initial?.run_type ?? "command");
     setPromptProvider(initial?.prompt_provider ?? "claude");
@@ -96,9 +98,15 @@ export function ScheduleFormDialog({
     return () => { cancelled = true; };
   }, [open, projectId, target]);
 
+  const preview = useMemo(() => previewCron(cronExpr, timezone || "UTC"), [cronExpr, timezone]);
+
   const handleSubmit = async () => {
     if (!name.trim() || !content.trim()) {
       setError("Name and content are required");
+      return;
+    }
+    if (!preview.ok) {
+      setError(preview.error);
       return;
     }
     const minutes = parseInt(timeoutMinutes, 10);
@@ -140,7 +148,7 @@ export function ScheduleFormDialog({
         <DialogHeader className="min-w-0">
           <DialogTitle>{initial ? "Edit Scheduled Task" : "New Scheduled Task"}</DialogTitle>
           <DialogDescription>
-            Run a command or a Claude prompt on a cron schedule
+            Run a command or an agent prompt on a schedule
           </DialogDescription>
         </DialogHeader>
         <div
@@ -152,17 +160,14 @@ export function ScheduleFormDialog({
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Daily log analysis" disabled={loading} />
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Cron</label>
-              <Input value={cronExpr} onChange={(e) => setCronExpr(e.target.value)} placeholder="0 9 * * *" className="font-mono" disabled={loading} />
-              <p className="text-xs text-muted-foreground">5-field cron — “0 9 * * *” = every day at 09:00</p>
-            </div>
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Timezone</label>
-              <Input value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="Asia/Shanghai" disabled={loading} />
-            </div>
-          </div>
+          <ScheduleTimingField
+            cronExpr={cronExpr}
+            onCronExprChange={setCronExpr}
+            timezone={timezone || "UTC"}
+            onTimezoneChange={setTimezone}
+            preview={preview}
+            disabled={loading}
+          />
 
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
@@ -271,7 +276,7 @@ export function ScheduleFormDialog({
           <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={loading || !name.trim() || !content.trim()}>
+          <Button onClick={handleSubmit} disabled={loading || !name.trim() || !content.trim() || !preview.ok}>
             {loading ? "Saving..." : initial ? "Save" : "Create"}
           </Button>
         </DialogFooter>

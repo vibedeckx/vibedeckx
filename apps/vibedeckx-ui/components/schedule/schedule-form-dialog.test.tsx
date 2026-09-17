@@ -78,3 +78,53 @@ describe("ScheduleFormDialog sizing", () => {
     expect(textarea?.className).toContain("overflow-auto");
   });
 });
+
+describe("ScheduleFormDialog timing", () => {
+  const render = async (initial: Schedule, onSubmit = vi.fn(async () => {})) => {
+    await act(async () => {
+      root.render(
+        <ScheduleFormDialog open onOpenChange={vi.fn()} onSubmit={onSubmit} initial={initial} worktrees={[]} projectId="project-1" />,
+      );
+    });
+    return onSubmit;
+  };
+  const preview = () => document.body.querySelector<HTMLElement>("[data-slot='schedule-preview']");
+
+  it("opens a recognizable cron in the builder with a readable preview", async () => {
+    await render({ ...schedule, cron_expr: "0 9 * * 1-5", timezone: "Asia/Shanghai" });
+    expect(document.body.querySelector("[aria-label='Frequency']")?.textContent).toBe("Weekdays");
+    expect(document.body.querySelector<HTMLInputElement>("input[aria-label='Time']")?.value).toBe("09:00");
+    expect(preview()?.textContent).toContain("At 09:00, Monday through Friday");
+    expect(preview()?.textContent).toContain("(Asia/Shanghai)");
+    expect(preview()?.textContent).toContain("Next:");
+  });
+
+  it("falls back to the raw cron editor for shapes the builder can't express", async () => {
+    await render({ ...schedule, cron_expr: "0 9 1-7 * 1" });
+    expect(document.body.querySelector("[aria-label='Frequency']")?.textContent).toBe("Custom (cron)");
+    expect(document.body.querySelector<HTMLInputElement>("input[aria-label='Cron expression']")?.value).toBe("0 9 1-7 * 1");
+  });
+
+  it("keeps the custom editor mounted when an edit passes through a builder shape", async () => {
+    await render({ ...schedule, cron_expr: "0 9-17 * * *" });
+    const input = () => document.body.querySelector<HTMLInputElement>("input[aria-label='Cron expression']");
+    const type = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input(), value);
+        input()!.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    await type("0 9 * * *");
+    expect(document.body.querySelector("[aria-label='Frequency']")?.textContent).toBe("Custom (cron)");
+    expect(input()?.value).toBe("0 9 * * *");
+    await type("0 9-18 * * *");
+    expect(input()?.value).toBe("0 9-18 * * *");
+  });
+
+  it("blocks saving an invalid cron", async () => {
+    await render({ ...schedule, cron_expr: "0 9 * *" });
+    expect(preview()?.querySelector(".text-destructive")).not.toBeNull();
+    const save = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Save");
+    expect(save?.disabled).toBe(true);
+  });
+});

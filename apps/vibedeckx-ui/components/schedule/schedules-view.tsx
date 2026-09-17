@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { describeCron, formatNextRun } from "@/lib/schedule-cron";
 import { ScheduleFormDialog } from "./schedule-form-dialog";
 
 const STATUS_STYLES: Record<string, string> = {
@@ -42,6 +43,12 @@ function parseTs(ts: string): Date {
 }
 function fmtTs(ts: string | null | undefined): string {
   return ts ? parseTs(ts).toLocaleString() : "—";
+}
+/** "At 09:00, Monday through Friday · next: Fri, Sep 18, 09:00 (Asia/Shanghai)" */
+function scheduleSummary(schedule: Schedule): string {
+  const when = describeCron(schedule.cron_expr) ?? schedule.cron_expr;
+  const next = schedule.next_run_at ? formatNextRun(parseTs(schedule.next_run_at), schedule.timezone) : "—";
+  return `${when} · next: ${next}`;
 }
 function fmtDuration(run: ScheduleRun): string {
   if (!run.finished_at) return "…";
@@ -231,7 +238,7 @@ export function SchedulesView({
         <>
           <PageHeader
             title={selected.name}
-            description={`${selected.cron_expr} · ${selected.timezone} · next: ${fmtTs(selected.next_run_at)}`}
+            description={scheduleSummary(selected)}
             actions={
               <div className="flex items-center gap-2">
                 <Button size="sm" onClick={handleRunNow} disabled={!!selected.running}>
