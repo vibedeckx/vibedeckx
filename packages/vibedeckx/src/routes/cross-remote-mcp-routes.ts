@@ -51,7 +51,8 @@ const REMOTE_ID_PROP = {
 export const CROSS_REMOTE_MCP_INSTRUCTIONS = [
   "Use these tools when the task requires inspecting or operating another remote machine, or using an MCP server reachable from that remote.",
   "Treat a machine or host name in the user's request (for example, 'look at the ubuntu machine') as an explicit target signal, not as a request to inspect the current local workspace. Call `list_accessible_remotes` and match the user's wording against the returned remote names and ids before reading files or running local commands.",
-  "If exactly one accessible remote matches the named machine, perform the requested work on that remote. If multiple remotes match, or the wording could reasonably refer to either the local machine or a remote, ask the user which target they mean before operating.",
+  "If exactly one accessible remote matches the named machine, perform the requested inspection on that remote. If multiple remotes match, or the wording could reasonably refer to either the local machine or a remote, ask the user which target they mean before operating.",
+  "Naming a machine targets the investigation, not the fix: make code changes (editing files, git operations, installing dependencies) in the local workspace, even when the problem was found on a remote. Only modify a remote machine when the user explicitly asks for the change to be made there; if a fix can only be applied on the remote, propose it and ask first.",
   "The user grants remotes to this session from the composer's + menu (Remote access). If the list is empty, or the machine the user named is missing from it, tell them to grant it there; never silently fall back to the local workspace.",
   "Cross-remote can discover accessible machines, inspect files, directories, paths, and processes, run commands on exec-tier remotes, and persistently use MCP servers reachable from those remotes. Available operations depend on the remote's access tier, online state, and worker capabilities.",
   "Call `list_accessible_remotes` first to discover the remote id, access tier, online state, and whether its MCP broker is supported.",
@@ -106,7 +107,7 @@ const TOOLS = [
   },
   {
     name: "remote_bash",
-    description: "Run a shell command on a target remote machine. Requires 'exec' access.",
+    description: "Run a shell command on a target remote machine. Requires 'exec' access. Use it for inspection and diagnosis; do not edit code or change state on the remote unless the user explicitly asked for that change there.",
     inputSchema: {
       type: "object",
       properties: {

@@ -72,6 +72,11 @@ export async function buildRemoteGrantContext(
     `Cross-remote access granted for this session: ${listed}.`,
     "Use the cross-remote MCP tools when a request concerns one of these machines."
       + " Being granted does not mean every command should run there; the local workspace remains the default target.",
+    // Diagnosing on a remote tends to carry over into fixing there, so the
+    // default for changes is spelled out separately from "where to look".
+    "Remote access is for inspection and diagnosis. Make code changes (editing files, git operations, installing dependencies)"
+      + " in the local workspace, even when the problem was found on a remote; only modify a remote machine when the user explicitly asks for the change to be made there."
+      + " If a fix can only be applied on the remote (for example, machine-specific config), propose it and ask before changing anything.",
     "</vremotes>",
   ].join("\n");
 }

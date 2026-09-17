@@ -148,6 +148,7 @@ describe("cross-remote MCP gateway", () => {
     expect(body.result.instructions).toContain("If exactly one accessible remote matches");
     expect(body.result.instructions).toContain("ask the user which target they mean");
     expect(body.result.instructions).toContain("never silently fall back to the local workspace");
+    expect(body.result.instructions).toContain("Naming a machine targets the investigation, not the fix");
     expect(body.result.instructions).toContain("Remote access");
   });
 

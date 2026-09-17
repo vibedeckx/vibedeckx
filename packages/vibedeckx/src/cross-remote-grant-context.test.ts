@@ -50,6 +50,9 @@ describe("cross-remote grant context", () => {
     expect(block).toContain(`mac-mini (id: ${b}, read), ubuntu-1 (id: ${a}, exec)`);
     // Being granted is not an instruction to run everything there.
     expect(block).toContain("the local workspace remains the default target");
+    // Nor an invitation to fix code on the machine where the bug was found.
+    expect(block).toContain("Make code changes (editing files, git operations, installing dependencies) in the local workspace");
+    expect(block).toContain("only modify a remote machine when the user explicitly asks");
   });
 
   it("leaves out a machine whose tier was turned off after the grant", async () => {
