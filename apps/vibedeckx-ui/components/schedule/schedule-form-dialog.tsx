@@ -1,24 +1,93 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import {
+  Check,
+  Clock,
+  Folder,
+  GitBranch,
+  Info,
+  Loader2,
+  Monitor,
+  Plus,
+  Server,
+  Trash2,
+  TriangleAlert,
+  X,
+} from "lucide-react";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
-  DialogFooter,
-  DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { api, type ProjectRemote, type PromptProvider, type Schedule, type ScheduleInput, type Worktree } from "@/lib/api";
+import {
+  api,
+  type ProjectRemote,
+  type PromptProvider,
+  type Schedule,
+  type ScheduleInput,
+  type ScheduleRun,
+  type Worktree,
+} from "@/lib/api";
 import { browserTimezone, previewCron } from "@/lib/schedule-cron";
+import { formatDuration } from "@/lib/format-duration";
+import { isMacPlatform } from "@/lib/tab-shortcuts";
+import { cn } from "@/lib/utils";
 import { ScheduleTimingField } from "./schedule-timing-field";
+import {
+  BOX_INPUT,
+  CONTROL_INPUT,
+  CONTROL_TRIGGER,
+  ControlBox,
+  FieldLabel,
+  HintLine,
+  InlineLink,
+  Segmented,
+  Strip,
+} from "./schedule-form-chrome";
 
 // Radix Select items can't have an empty-string value; sentinel for the main worktree.
 const MAIN = "__main__";
+
+const noopSubscribe = () => () => {};
+
+const PROVIDER_LABELS: Record<PromptProvider, string> = { claude: "Claude", codex: "Codex" };
+
+// SQLite timestamps are UTC "YYYY-MM-DD HH:MM:SS"; ISO strings pass through.
+function parseTs(ts: string): Date {
+  return new Date(ts.includes("T") ? ts : ts.replace(" ", "T") + "Z");
+}
+
+function relativeTime(at: Date): string {
+  const seconds = Math.max(0, Math.round((Date.now() - at.getTime()) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+/** "succeeded in 3m 12s" / "failed after 40s" / "running now" for the edit-mode strip. */
+function describeRunOutcome(run: ScheduleRun): string {
+  const elapsed = run.finished_at
+    ? formatDuration(parseTs(run.finished_at).getTime() - parseTs(run.started_at).getTime())
+    : null;
+  switch (run.status) {
+    case "completed": return elapsed ? `succeeded in ${elapsed}` : "succeeded";
+    case "failed": return elapsed ? `failed after ${elapsed}` : "failed";
+    case "timeout": return elapsed ? `timed out after ${elapsed}` : "timed out";
+    case "killed": return elapsed ? `stopped after ${elapsed}` : "stopped";
+    case "skipped": return "skipped";
+    default: return "running now";
+  }
+}
 
 export function ScheduleFormDialog({
   open,
@@ -27,6 +96,8 @@ export function ScheduleFormDialog({
   initial,
   worktrees,
   projectId,
+  onOpenRun,
+  onDelete,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -35,6 +106,10 @@ export function ScheduleFormDialog({
   initial?: Schedule | null;
   worktrees: Worktree[];
   projectId?: string;
+  /** Edit mode: "Open run" on the last-run strip. The dialog closes itself first. */
+  onOpenRun?: (run: ScheduleRun) => void;
+  /** Edit mode: "Delete task" in the footer. The dialog closes itself first. */
+  onDelete?: (schedule: Schedule) => void;
 }) {
   const [name, setName] = useState("");
   const [cronExpr, setCronExpr] = useState("0 9 * * *");
@@ -47,10 +122,12 @@ export function ScheduleFormDialog({
   const [cwdMode, setCwdMode] = useState<"branch" | "directory">("branch");
   const [branch, setBranch] = useState<string>(MAIN);
   const [targetWorktrees, setTargetWorktrees] = useState<Worktree[]>(worktrees);
+  const [targetLoading, setTargetLoading] = useState(false);
   const [directory, setDirectory] = useState("");
   const [timeoutMinutes, setTimeoutMinutes] = useState("30");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const isMac = useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
 
   // (Re)seed fields each time the dialog opens
   useEffect(() => {
@@ -89,16 +166,20 @@ export function ScheduleFormDialog({
   useEffect(() => {
     let cancelled = false;
     if (!open || !projectId || target === "local") return;
+    setTargetLoading(true);
     api.getProjectWorktrees(projectId, target)
       .then((items) => { if (!cancelled) setTargetWorktrees(items); })
       .catch((err) => {
         console.error("Failed to load target worktrees:", err);
         if (!cancelled) setTargetWorktrees([{ branch: null }]);
-      });
+      })
+      .finally(() => { if (!cancelled) setTargetLoading(false); });
     return () => { cancelled = true; };
   }, [open, projectId, target]);
 
   const preview = useMemo(() => previewCron(cronExpr, timezone || "UTC"), [cronExpr, timezone]);
+
+  const submitDisabled = loading || !name.trim() || !content.trim() || !preview.ok;
 
   const handleSubmit = async () => {
     if (!name.trim() || !content.trim()) {
@@ -142,22 +223,80 @@ export function ScheduleFormDialog({
     }
   };
 
+  const editing = Boolean(initial);
+  const lastRun = initial?.last_run ?? null;
+  const remoteName = target === "local"
+    ? null
+    : (remotes.find((r) => r.remote_server_id === target)?.server_name ?? target);
+  const submitLabel = editing ? "Save" : "Create";
+
+  // The strip only ever shows one thing: a submit failure wins over the
+  // standing "fix the cron" reminder, which in turn mirrors the disabled button.
+  const blocker = error ?? (preview.ok ? null : "Fix the cron expression before saving.");
+
+  const footNote = runType === "prompt"
+    ? `${PROVIDER_LABELS[promptProvider]} runs unattended on ${remoteName ?? "this machine"}`
+    : "Runs even while the app is closed";
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100dvh-2rem)] min-w-0 max-w-lg grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden">
-        <DialogHeader className="min-w-0">
-          <DialogTitle>{initial ? "Edit Scheduled Task" : "New Scheduled Task"}</DialogTitle>
-          <DialogDescription>
-            Run a command or an agent prompt on a schedule
-          </DialogDescription>
-        </DialogHeader>
+      <DialogContent
+        showCloseButton={false}
+        className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] min-w-0 gap-0 overflow-hidden bg-card p-0 grid-rows-[auto_minmax(0,1fr)_auto] sm:w-full sm:max-w-[520px]"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !submitDisabled) {
+            e.preventDefault();
+            void handleSubmit();
+          }
+        }}
+      >
+        <div className="flex items-start gap-3 border-b bg-secondary px-4 py-3.5">
+          <span className="grid size-7 shrink-0 place-items-center rounded-lg border border-primary/20 bg-accent text-accent-foreground">
+            <Clock className="size-[15px]" />
+          </span>
+          <div className="min-w-0">
+            <DialogTitle className="text-[14.5px] font-semibold tracking-tight">
+              {editing ? "Edit Scheduled Task" : "New Scheduled Task"}
+            </DialogTitle>
+            <DialogDescription className="mt-0.5 max-w-[42ch] text-[11.5px] leading-snug">
+              {editing
+                ? "Changes take effect from the next run. The current run, if any, finishes on the old settings."
+                : "Run a command or an agent prompt on a schedule."}
+            </DialogDescription>
+          </div>
+          <DialogClose className="ml-auto grid size-6 shrink-0 place-items-center rounded-md border border-transparent text-muted-foreground/70 transition-colors hover:border-border hover:bg-muted hover:text-foreground">
+            <X className="size-3.5" />
+            <span className="sr-only">Close</span>
+          </DialogClose>
+        </div>
+
         <div
           data-slot="schedule-form-body"
-          className="min-h-0 min-w-0 space-y-4 overflow-x-hidden overflow-y-auto px-0.5"
+          className="flex min-h-0 min-w-0 flex-col gap-[13px] overflow-x-hidden overflow-y-auto px-4 pt-3.5 pb-1"
         >
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Name</label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Daily log analysis" disabled={loading} />
+          {editing && lastRun && (
+            <Strip tone="info" icon={<Info />}>
+              Last run <b className="font-semibold">{relativeTime(parseTs(lastRun.started_at))}</b>
+              {" · "}{describeRunOutcome(lastRun)}
+              {onOpenRun && lastRun.status !== "skipped" && (
+                <>
+                  {" · "}
+                  <InlineLink onClick={() => { onOpenChange(false); onOpenRun(lastRun); }}>Open run</InlineLink>
+                </>
+              )}
+            </Strip>
+          )}
+
+          <div className="flex min-w-0 flex-col gap-[7px]">
+            <FieldLabel note={name.trim() ? undefined : "Required"}>Name</FieldLabel>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Daily log analysis"
+              aria-label="Name"
+              className={cn(CONTROL_INPUT, "h-[34px] px-[11px]")}
+              disabled={loading}
+            />
           </div>
 
           <ScheduleTimingField
@@ -169,117 +308,197 @@ export function ScheduleFormDialog({
             disabled={loading}
           />
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Type</label>
-              <Select value={runType} onValueChange={(v) => setRunType(v as "command" | "prompt")} disabled={loading}>
-                <SelectTrigger size="sm">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="command">Command (shell)</SelectItem>
-                  <SelectItem value="prompt">Prompt</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            {runType === "prompt" && (
-              <div className="space-y-2">
-                <label className="text-sm font-medium">Agent</label>
+          <div className="flex min-w-0 flex-col gap-[7px]">
+            <FieldLabel
+              after={runType === "prompt" && (
                 <Select value={promptProvider} onValueChange={(v) => setPromptProvider(v as PromptProvider)} disabled={loading}>
-                  <SelectTrigger size="sm">
+                  <SelectTrigger
+                    size="sm"
+                    aria-label="Agent"
+                    className="h-[23px] gap-1 rounded-[7px] border-input bg-card px-2 py-0 text-[11px] font-medium text-secondary-foreground shadow-none hover:bg-muted [&_svg:not([class*='size-'])]:size-2.5"
+                  >
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="claude">Claude</SelectItem>
-                    <SelectItem value="codex">Codex</SelectItem>
+                    {(Object.keys(PROVIDER_LABELS) as PromptProvider[]).map((p) => (
+                      <SelectItem key={p} value={p}>{PROVIDER_LABELS[p]}</SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
-              </div>
-            )}
-          </div>
-
-          <div className="space-y-2">
-            <label className="text-sm font-medium">{runType === "command" ? "Command" : "Prompt"}</label>
+              )}
+              trailing={
+                <Segmented
+                  label="Task type"
+                  value={runType}
+                  onChange={setRunType}
+                  disabled={loading}
+                  options={[
+                    { value: "command", label: "Command (shell)" },
+                    { value: "prompt", label: "Prompt" },
+                  ]}
+                />
+              }
+            >
+              {runType === "command" ? "Command" : "Prompt"}
+            </FieldLabel>
             <Textarea
               value={content}
               onChange={(e) => setContent(e.target.value)}
               placeholder={runType === "command" ? "./scripts/scan.sh --daily" : "Analyze today's server logs under ./logs and summarize anomalies"}
-              className="field-sizing-fixed min-h-[80px] min-w-0 max-w-full resize-y overflow-auto font-mono text-sm"
+              aria-label={runType === "command" ? "Command" : "Prompt"}
+              className={cn(
+                CONTROL_INPUT,
+                "field-sizing-fixed min-h-[74px] min-w-0 max-w-full resize-y overflow-auto px-[11px] py-2 font-mono text-xs leading-[1.55] md:text-xs",
+              )}
               disabled={loading}
             />
           </div>
 
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Target</label>
-            <Select value={target} onValueChange={(v) => { setTarget(v); setBranch(MAIN); }} disabled={loading}>
-              <SelectTrigger size="sm">
-                <SelectValue placeholder="Local" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="local">Local</SelectItem>
-                {remotes.map((r) => (
-                  <SelectItem key={r.remote_server_id} value={r.remote_server_id}>
-                    {r.server_name ?? r.remote_server_id}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <label className="text-sm font-medium">Runs in</label>
-              <Select value={cwdMode} onValueChange={(v) => setCwdMode(v as "branch" | "directory")} disabled={loading}>
-                <SelectTrigger size="sm">
-                  <SelectValue />
+          <div className="flex min-w-0 flex-col gap-[7px]">
+            <FieldLabel note="Runs in">Target</FieldLabel>
+            <div className="grid min-w-0 grid-cols-2 gap-2.5">
+              <Select value={target} onValueChange={(v) => { setTarget(v); setBranch(MAIN); }} disabled={loading}>
+                <SelectTrigger size="sm" aria-label="Target" className={CONTROL_TRIGGER}>
+                  <SelectValue placeholder="Local" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="branch">Workspace (branch)</SelectItem>
-                  <SelectItem value="directory">Directory</SelectItem>
+                  <SelectItem value="local">
+                    <Monitor className="size-3 text-muted-foreground/70" />
+                    Local
+                  </SelectItem>
+                  {remotes.map((r) => (
+                    <SelectItem key={r.remote_server_id} value={r.remote_server_id}>
+                      <Server className="size-3 text-muted-foreground/70" />
+                      {r.server_name ?? r.remote_server_id}
+                    </SelectItem>
+                  ))}
                 </SelectContent>
               </Select>
-            </div>
-            <div className="space-y-2">
+
               {cwdMode === "branch" ? (
-                <>
-                  <label className="text-sm font-medium">Workspace</label>
+                targetLoading ? (
+                  <ControlBox disabled className="cursor-default px-2.5">
+                    <Loader2 className="animate-spin" />
+                    <span className="truncate">Loading workspaces…</span>
+                  </ControlBox>
+                ) : (
                   <Select value={branch} onValueChange={setBranch} disabled={loading}>
-                    <SelectTrigger size="sm">
+                    <SelectTrigger size="sm" aria-label="Workspace" className={CONTROL_TRIGGER}>
                       <SelectValue placeholder="Select workspace" />
                     </SelectTrigger>
                     <SelectContent>
                       {targetWorktrees.map((wt) => (
                         <SelectItem key={wt.branch ?? MAIN} value={wt.branch ?? MAIN}>
-                          {wt.branch ?? "main"}
+                          <GitBranch className="size-3 text-muted-foreground/70" />
+                          <span className="font-mono text-xs">{wt.branch ?? "main"}</span>
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
+                )
+              ) : (
+                <ControlBox disabled={loading}>
+                  <Folder />
+                  <input
+                    value={directory}
+                    onChange={(e) => setDirectory(e.target.value)}
+                    placeholder="/var/log/myapp"
+                    aria-label="Directory"
+                    spellCheck={false}
+                    className={cn(BOX_INPUT, "font-mono text-xs tracking-tight")}
+                    disabled={loading}
+                  />
+                </ControlBox>
+              )}
+            </div>
+            <HintLine>
+              {cwdMode === "branch" ? (
+                <>
+                  <span>
+                    {remoteName
+                      ? targetLoading
+                        ? `Workspaces on ${remoteName}`
+                        : `${targetWorktrees.length} ${targetWorktrees.length === 1 ? "workspace" : "workspaces"} on this remote`
+                      : "Workspace (branch)"}
+                    {" · "}
+                  </span>
+                  <InlineLink onClick={() => setCwdMode("directory")} disabled={loading}>switch to a plain directory</InlineLink>
+                  <span>if the task is not repo work</span>
                 </>
               ) : (
                 <>
-                  <label className="text-sm font-medium">Directory</label>
-                  <Input value={directory} onChange={(e) => setDirectory(e.target.value)} placeholder="/var/log/myapp" className="font-mono" disabled={loading} />
+                  <span>Directory mode · no workspace is checked out for this run · </span>
+                  <InlineLink onClick={() => setCwdMode("branch")} disabled={loading}>use a workspace instead</InlineLink>
                 </>
               )}
-            </div>
+            </HintLine>
           </div>
 
-          <div className="space-y-2">
-            <label className="text-sm font-medium">Timeout (minutes)</label>
-            <Input value={timeoutMinutes} onChange={(e) => setTimeoutMinutes(e.target.value)} className="w-24" disabled={loading} />
+          <div className="flex min-w-0 flex-col gap-[7px]">
+            <FieldLabel>Timeout</FieldLabel>
+            <ControlBox disabled={loading} className="w-32">
+              <input
+                value={timeoutMinutes}
+                onChange={(e) => setTimeoutMinutes(e.target.value)}
+                inputMode="numeric"
+                aria-label="Timeout in minutes"
+                className={BOX_INPUT}
+                disabled={loading}
+              />
+              <span className="text-[11px] whitespace-nowrap text-muted-foreground/70">minutes</span>
+            </ControlBox>
           </div>
 
-          {error && <div className="text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md">{error}</div>}
+          {blocker && (
+            <Strip tone="rose" icon={<TriangleAlert />}>{blocker}</Strip>
+          )}
         </div>
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={loading}>
+
+        <div className="mt-2.5 flex min-w-0 items-center gap-2.5 overflow-hidden border-t bg-secondary px-4 py-2.5">
+          <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden text-[11px] text-muted-foreground">
+            {editing && initial && onDelete ? (
+              <>
+                <Trash2 className="size-3 shrink-0 text-muted-foreground/70" />
+                <InlineLink onClick={() => { onOpenChange(false); onDelete(initial); }} disabled={loading}>
+                  Delete task
+                </InlineLink>
+              </>
+            ) : (
+              <>
+                <Info className="size-3 shrink-0 text-muted-foreground/70" />
+                <span className="truncate">{footNote}</span>
+              </>
+            )}
+          </span>
+          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => onOpenChange(false)} disabled={loading}>
             Cancel
           </Button>
-          <Button onClick={handleSubmit} disabled={loading || !name.trim() || !content.trim() || !preview.ok}>
-            {loading ? "Saving..." : initial ? "Save" : "Create"}
+          <Button
+            size="sm"
+            className="h-7 gap-1.5 text-xs"
+            aria-label={submitLabel}
+            onClick={() => void handleSubmit()}
+            disabled={submitDisabled}
+          >
+            {loading ? (
+              <>
+                <Loader2 className="size-3 animate-spin" />
+                Saving…
+              </>
+            ) : (
+              <>
+                {editing ? <Check className="size-3" /> : <Plus className="size-3" />}
+                {submitLabel}
+                <kbd
+                  className="rounded border border-primary-foreground/30 bg-primary-foreground/15 px-1 font-mono text-[10px] leading-[1.4] text-primary-foreground/90"
+                  title={isMac ? "Command+Enter" : "Ctrl+Enter"}
+                >
+                  {isMac ? "⌘⏎" : "Ctrl⏎"}
+                </kbd>
+              </>
+            )}
           </Button>
-        </DialogFooter>
+        </div>
       </DialogContent>
     </Dialog>
   );

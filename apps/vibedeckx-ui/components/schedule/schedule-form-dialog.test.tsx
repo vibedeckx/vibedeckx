@@ -124,7 +124,8 @@ describe("ScheduleFormDialog timing", () => {
   it("blocks saving an invalid cron", async () => {
     await render({ ...schedule, cron_expr: "0 9 * *" });
     expect(preview()?.querySelector(".text-destructive")).not.toBeNull();
-    const save = [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Save");
+    const save = document.body.querySelector<HTMLButtonElement>("button[aria-label='Save']");
     expect(save?.disabled).toBe(true);
+    expect(document.body.querySelector("[role='alert']")?.textContent).toContain("Fix the cron expression before saving.");
   });
 });

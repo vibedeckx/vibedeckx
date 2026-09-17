@@ -399,6 +399,8 @@ export function SchedulesView({
             }}
             worktrees={worktrees}
             projectId={projectId}
+            onOpenRun={openRun}
+            onDelete={setPendingDelete}
           />
         </>
       )}
