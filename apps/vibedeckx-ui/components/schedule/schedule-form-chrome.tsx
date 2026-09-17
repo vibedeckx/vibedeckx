@@ -9,9 +9,14 @@ import { cn } from "@/lib/utils";
  * selects and pickers so mixed rows read as a single line.
  */
 
-/** Trigger geometry for shadcn `Select` / `Popover` triggers sitting next to text boxes. */
+/**
+ * Trigger geometry for shadcn `Select` / `Popover` triggers sitting next to text boxes.
+ * `SelectTrigger` sets its height through `data-[size=…]` variants, which a plain
+ * `h-*` here cannot override — so both variants are pinned to the row height too.
+ */
 export const CONTROL_TRIGGER =
-  "h-[34px] w-full min-w-0 rounded-[9px] border-input bg-card px-2.5 text-[12.5px] shadow-none " +
+  "h-[34px] data-[size=sm]:h-[34px] data-[size=default]:h-[34px] " +
+  "w-full min-w-0 rounded-[9px] border-input bg-card px-2.5 text-[12.5px] shadow-none " +
   "hover:bg-muted focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-accent " +
   "dark:bg-card dark:hover:bg-muted [&_svg:not([class*='size-'])]:size-3";
 
