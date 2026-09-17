@@ -129,10 +129,20 @@ export function Segmented<T extends string>({
   );
 }
 
-/** One-line muted hint under a field. */
-export function HintLine({ children }: { children: ReactNode }) {
+/**
+ * One-line muted hint under a field. `nowrap` keeps it to a single line
+ * whatever the dialog width — for hints whose text changes with the field's
+ * mode, where a wrap would shift everything below on every toggle. The caller
+ * then marks which part may truncate.
+ */
+export function HintLine({ children, nowrap }: { children: ReactNode; nowrap?: boolean }) {
   return (
-    <p className="m-0 flex min-w-0 flex-wrap items-center gap-x-1.5 text-[10.5px] leading-snug text-muted-foreground/80">
+    <p
+      className={cn(
+        "m-0 flex min-w-0 items-center gap-x-1.5 text-[10.5px] leading-snug text-muted-foreground/80",
+        nowrap ? "flex-nowrap whitespace-nowrap" : "flex-wrap",
+      )}
+    >
       {children}
     </p>
   );

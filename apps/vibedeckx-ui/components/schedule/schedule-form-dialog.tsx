@@ -411,25 +411,26 @@ export function ScheduleFormDialog({
                 </ControlBox>
               )}
             </div>
-            <HintLine>
+            {/* One line in both modes — the description truncates rather than
+                wrapping, so toggling the mode never shifts the fields below. */}
+            <HintLine nowrap>
+              <span className="truncate">
+                {cwdMode === "branch"
+                  ? remoteName
+                    ? targetLoading
+                      ? `Loading workspaces on ${remoteName}`
+                      : `${targetWorktrees.length} ${targetWorktrees.length === 1 ? "workspace" : "workspaces"} on ${remoteName}`
+                    : "Runs in the selected workspace"
+                  : "Runs straight in this directory, with no workspace"}
+              </span>
+              <span className="shrink-0">·</span>
               {cwdMode === "branch" ? (
                 <>
-                  <span>
-                    {remoteName
-                      ? targetLoading
-                        ? `Workspaces on ${remoteName}`
-                        : `${targetWorktrees.length} ${targetWorktrees.length === 1 ? "workspace" : "workspaces"} on this remote`
-                      : "Workspace (branch)"}
-                    {" · "}
-                  </span>
-                  <InlineLink onClick={() => setCwdMode("directory")} disabled={loading}>switch to a plain directory</InlineLink>
-                  <span>if the task is not repo work</span>
+                  <InlineLink onClick={() => setCwdMode("directory")} disabled={loading}>use a plain directory</InlineLink>
+                  <span className="shrink-0">for non-repo work</span>
                 </>
               ) : (
-                <>
-                  <span>Directory mode · no workspace is checked out for this run · </span>
-                  <InlineLink onClick={() => setCwdMode("branch")} disabled={loading}>use a workspace instead</InlineLink>
-                </>
+                <InlineLink onClick={() => setCwdMode("branch")} disabled={loading}>use a workspace instead</InlineLink>
               )}
             </HintLine>
           </div>
