@@ -82,7 +82,7 @@ export function attachLocalProcessStream(
  * 把单个远程进程（remote- 前缀）的流通过后端代理接到 send 回调。
  * 复用现有代理逻辑：reverse-connect 虚拟通道 / 直连上游 WS、ping 保活、
  * finished 时清理 remoteExecutorMap + markFinished + emit executor:stopped、
- * 上游关闭无终止信号时补发 finished。
+ * 上游关闭无终止信号时：记录已是终态才补发 finished，否则发可重试 error（断线≠进程结束）。
  */
 export function attachRemoteProcessStream(
   fastify: FastifyInstance,
@@ -237,13 +237,22 @@ export function attachRemoteProcessStream(
     remoteWs.on("close", async () => {
       clearInterval(pingInterval);
       if (!terminalSignalSent) {
+        // A closed channel is a transport event, not a process exit. Only a row
+        // already recorded as terminal proves the process ended; otherwise the
+        // browser retries and the worker's buffer (or the monitor) reports the
+        // real outcome.
+        let row: Awaited<ReturnType<typeof fastify.storage.remoteExecutorProcesses.getById>>;
         try {
-          const row = await fastify.storage.remoteExecutorProcesses.getById(processId);
-          console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream CLOSE without real finished → FABRICATING finished processId=${processId} executorId=${info.executorId} transport=reverse-connect dbStatus=${row?.status} dbExitCode=${row?.exit_code ?? "null"} sentExitCode=${row?.exit_code ?? 0} — THIS flips UI to Stopped while remote process may still be running`);
-          send({ type: "finished", exitCode: row?.exit_code ?? 0 });
+          row = await fastify.storage.remoteExecutorProcesses.getById(processId);
         } catch (error) {
           console.error(`[ExecutorStream] Failed to fetch process row on close:`, error);
-          send({ type: "finished", exitCode: 0 });
+        }
+        if (row && row.status !== "running") {
+          console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream CLOSE without real finished, row already terminal processId=${processId} dbStatus=${row.status} dbExitCode=${row.exit_code ?? "null"}`);
+          send({ type: "finished", exitCode: row.exit_code ?? 0 });
+        } else {
+          console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream CLOSE without real finished processId=${processId} executorId=${info.executorId} dbStatus=${row?.status ?? "missing"} — sending retryable error, process state unchanged`);
+          send({ type: "error", message: "Remote connection lost", retryable: true });
         }
         terminalSignalSent = true;
       } else {

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { toast } from "sonner";
-import { api, getAuthToken, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess } from "@/lib/api";
+import { api, ExecutorProcessRequestError, getAuthToken, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess } from "@/lib/api";
 import { useGlobalEventStream } from "@/hooks/global-event-stream";
 
 function getApiBase(): string {
@@ -19,6 +19,21 @@ export function buildExecutorEventsUrl(): string {
   const token = getAuthToken();
   const tokenParam = token ? `?token=${encodeURIComponent(token)}` : "";
   return `${getApiBase()}/api/events${tokenParam}`;
+}
+
+/**
+ * Whether a failed stop proves the process is gone. Only a 404 does — a
+ * transport failure or an unconfirmed remote stop leaves it running.
+ */
+export function stopFailureMeansStopped(error: unknown): boolean {
+  return error instanceof ExecutorProcessRequestError && error.status === 404;
+}
+
+/** The confirmed running process a rejected start points at, if any. */
+export function alreadyRunningProcessId(error: unknown): string | null {
+  if (!(error instanceof ExecutorProcessRequestError) || error.status !== 409) return null;
+  const { code, processId } = error.body;
+  return code === "already_running" && typeof processId === "string" ? processId : null;
 }
 
 export function buildRunningProcessMaps(processes: ExecutorProcess[]): {
@@ -308,11 +323,11 @@ export function useExecutors(
 
   // Start executor
   const startExecutor = useCallback(async (executorId: string) => {
-    try {
-      const processId = await api.startExecutor(executorId, executorMode);
-      const target = executorMode ?? "local";
+    const target = executorMode ?? "local";
+    const trackRunning = (processId: string) => {
       setRunningProcesses((prev) => {
         const entries = prev.get(executorId) ?? [];
+        if (entries.some((e) => e.processId === processId)) return prev;
         const newMap = new Map(prev);
         newMap.set(executorId, [...entries, { processId, target }]);
         return newMap;
@@ -322,6 +337,10 @@ export function useExecutors(
         newMap.set(executorId, { processId, target });
         return newMap;
       });
+    };
+    try {
+      const processId = await api.startExecutor(executorId, executorMode);
+      trackRunning(processId);
       // Mirror the SSE handler's optimistic "Last run" update so locally
       // initiated starts also refresh the hover label without waiting for
       // the next executor-list refetch.
@@ -343,6 +362,16 @@ export function useExecutors(
       return processId;
     } catch (error) {
       console.error("Failed to start executor:", error);
+      // Already running (e.g. the UI lost track of it): show it again so it
+      // can be stopped, rather than starting a second copy.
+      const runningProcessId = alreadyRunningProcessId(error);
+      if (runningProcessId) {
+        trackRunning(runningProcessId);
+        toast.info("Executor is already running", { description: "Stop it before starting again." });
+      } else if (error instanceof ExecutorProcessRequestError
+        && (error.body.code === "starting" || error.body.code === "start_unknown")) {
+        toast.error("Executor not started", { description: error.message });
+      }
       return null;
     }
   }, [executorMode]);
@@ -357,11 +386,19 @@ export function useExecutors(
     try {
       await api.stopProcess(targetProcessId);
     } catch (error) {
-      // Process already finished — still need to clear stale local state
       console.error("Failed to stop executor:", error);
+      if (!stopFailureMeansStopped(error)) {
+        // The stop may never have reached the process (e.g. its remote was
+        // unreachable). Keep it running so Stop can be retried, and resync
+        // with the server's view.
+        toast.error("Failed to stop executor", {
+          description: `${error instanceof Error ? error.message : String(error)}. The process may still be running.`,
+        });
+        void fetchRunningProcesses();
+        return;
+      }
     }
-    // Always clear from runningProcesses — if the stop call failed the
-    // process is already gone, so the entry is stale either way.
+    // Stopped, or a 404: the process is gone and its entry is stale.
     setRunningProcesses((prev) => {
       const entries = prev.get(executorId);
       if (!entries) return prev;
@@ -381,7 +418,7 @@ export function useExecutors(
       newMap.delete(executorId);
       return newMap;
     });
-  }, [runningProcesses, executorMode]);
+  }, [runningProcesses, executorMode, fetchRunningProcesses]);
 
   // Mark process as finished (called when WebSocket receives finished message)
   const markProcessFinished = useCallback((executorId: string, processId?: string | null) => {

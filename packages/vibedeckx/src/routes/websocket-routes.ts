@@ -204,13 +204,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
          * `detach` silences this subscription's `send`; `cleanup` tears the
          * upstream down. They are separate because tearing down is not
          * instantaneous and not silent: for a remote process,
-         * `attachRemoteProcessStream` fabricates `finished` when the proxy
-         * channel closes (it cannot tell "the channel went away" from "the
-         * process exited"). On a client-initiated unsubscribe that frame would
-         * land on a socket that is still open, and the browser would mark a
-         * still-running remote executor as stopped — the Start button appearing
-         * under live output once the executor item unmounts and remounts (a
-         * right-panel tab switch, a workspace switch).
+         * `attachRemoteProcessStream` reports a closed proxy channel (a
+         * retryable error, or `finished` when the row is already terminal).
+         * On a client-initiated unsubscribe that frame would land on a socket
+         * that is still open: the browser would re-subscribe to a stream it
+         * just dropped, or mark a remote executor as stopped under live output
+         * once the executor item unmounts and remounts (a right-panel tab
+         * switch, a workspace switch).
          * So detach first, then clean up: nothing the teardown emits reaches a
          * client that already stopped listening.
          */

@@ -6,6 +6,7 @@ import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
 import type { ExecutorType, PromptProvider } from "../storage/types.js";
 import { ProcessEffectConflictError } from "../process-manager.js";
+import { createRemoteExecutorStarts, listWorkerRunningProcessIds } from "../remote-executor-starts.js";
 import { requireAuth as requireRawAuth } from "../server.js";
 import {
   requireUserFacingOrTrustedProxyUserId,
@@ -14,6 +15,8 @@ import {
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  const remoteStarts = createRemoteExecutorStarts(fastify);
+
   // Execute command at a path (for remote executor)
   fastify.post<{
     Body: { path: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; branch?: string | null; pty?: boolean; processId?: string; effectFingerprint?: string };
@@ -138,11 +141,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(400).send({ error: `Remote server configuration not found for executor_mode="${executorMode}"` });
       }
 
-      const result = await proxyToRemoteAuto(
-        executorMode,
-        "POST",
-        `/api/path/execute`,
-        {
+      const outcome = await remoteStarts.start({
+        executorId: executor.id,
+        projectId: project.id,
+        remoteServerId: executorMode,
+        branch,
+        body: {
           path: remoteConfig.remote_path,
           command: executor.command,
           executor_type: executor.executor_type,
@@ -151,40 +155,26 @@ const routes: FastifyPluginAsync = async (fastify) => {
           cwd: executor.cwd || undefined,
           pty: executor.pty,
         },
-        { reverseConnectManager: fastify.reverseConnectManager }
-      );
-      if (result.ok) {
-        const remoteData = result.data as { processId: string };
-        const localProcessId = `remote-${executor.id}-${remoteData.processId}`;
-        const remoteInfo = {
-          remoteServerId: executorMode,
-          remoteProcessId: remoteData.processId,
-          executorId: executor.id,
-          projectId: project.id,
-        };
-        fastify.remoteExecutorMap.set(localProcessId, remoteInfo);
-        // Detect completion independently of any frontend log-proxy connection,
-        // so executor:stopped fires (and the map is cleared) even if the user
-        // navigates away before the process finishes.
-        fastify.remoteExecutorMonitor.watch(localProcessId, remoteInfo);
-        await fastify.storage.remoteExecutorProcesses.insert(localProcessId, {
-          remoteServerId: executorMode,
-          remoteProcessId: remoteData.processId,
-          executorId: executor.id,
-          projectId: project.id,
-          branch: branch ?? undefined,
-          machineId: fastify.reverseConnectManager.getMachineId(executorMode),
-        });
-        fastify.eventBus.emit({
-          type: "executor:started",
-          projectId: project.id,
-          executorId: executor.id,
-          processId: localProcessId,
-          target: executorMode,
-        });
-        return reply.code(200).send({ processId: localProcessId });
+      });
+      switch (outcome.kind) {
+        case "started":
+          return reply.code(200).send({ processId: outcome.processId });
+        case "already_running":
+          return reply.code(409).send({
+            error: "Executor is already running on this target",
+            code: "already_running",
+            processId: outcome.processId,
+          });
+        case "starting":
+          return reply.code(409).send({ error: "Executor is already starting on this target", code: "starting" });
+        case "unknown":
+          return reply.code(503).send({
+            error: `Start result unknown (${outcome.error}). Starting again once the remote is back is safe.`,
+            code: "start_unknown",
+          });
+        case "rejected":
+          return reply.code(proxyStatus(outcome.result)).send(outcome.result.data);
       }
-      return reply.code(proxyStatus(result)).send(result.data);
     }
 
     if (!project.path) {
@@ -220,15 +210,34 @@ const routes: FastifyPluginAsync = async (fastify) => {
           undefined,
           { reverseConnectManager: fastify.reverseConnectManager }
         );
-        if (result.ok) {
-          fastify.eventBus.emit({
-            type: "executor:stopped",
-            projectId: remoteInfo.projectId ?? "",
-            executorId: remoteInfo.executorId,
-            processId: req.params.processId,
-            exitCode: 0,
-            target: remoteInfo.remoteServerId,
-          });
+        if (!result.ok && result.status === 404) {
+          // The worker's stop() also answers 404 when it could not signal a
+          // process it still tracks, so confirm against its running list
+          // before treating the process as gone.
+          const running = await listWorkerRunningProcessIds(fastify, remoteInfo.remoteServerId);
+          if (!running || running.has(remoteInfo.remoteProcessId)) {
+            return reply.code(502).send({
+              error: running
+                ? "Remote process could not be stopped and is still running"
+                : "Remote process could not be stopped and its state could not be verified",
+            });
+          }
+        }
+        // Anything else (transport failure, 5xx) leaves the process as running:
+        // a failed request says nothing about whether it stopped.
+        if (result.ok || result.status === 404) {
+          fastify.remoteExecutorMonitor.unwatch(req.params.processId);
+          if (!remoteInfo.stoppedEmitted) {
+            remoteInfo.stoppedEmitted = true;
+            fastify.eventBus.emit({
+              type: "executor:stopped",
+              projectId: remoteInfo.projectId ?? "",
+              executorId: remoteInfo.executorId,
+              processId: req.params.processId,
+              exitCode: 0,
+              target: remoteInfo.remoteServerId,
+            });
+          }
           fastify.remoteExecutorMap.delete(req.params.processId);
           // Preserve the DB row so the UI can show "Last run" + reconnect to
           // the buffered output via getById fallback in the WS route.

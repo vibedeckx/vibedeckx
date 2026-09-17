@@ -19,13 +19,13 @@ const REMOTE_INFO = {
   stoppedEmitted: false,
 };
 
-function makeFastify(opts: { connected: boolean; known?: boolean }) {
+function makeFastify(opts: { connected: boolean; known?: boolean; getById?: () => Promise<unknown> }) {
   const adapters: VirtualWsAdapter[] = [];
   const fastify = {
     remoteExecutorMap: new Map(opts.known === false ? [] : [["remote-p1", REMOTE_INFO]]),
     storage: {
       remoteExecutorProcesses: {
-        getById: vi.fn(async () => undefined),
+        getById: vi.fn(opts.getById ?? (async () => undefined)),
         markFinished: vi.fn(async () => undefined),
       },
     },
@@ -84,5 +84,35 @@ describe("attachRemoteProcessStream error classification", () => {
       expect.objectContaining({ message: "Remote process not found" }),
     ]);
     expect(errors(sent)[0].retryable).toBeUndefined();
+  });
+});
+
+/**
+ * A closed proxy channel is a transport event. Reporting it as `finished` is
+ * what flipped a still-running remote executor to Start while its worker was
+ * briefly unreachable, so only a row that already records the exit may end
+ * the stream authoritatively.
+ */
+describe("attachRemoteProcessStream upstream close without a finished frame", () => {
+  const closeUpstream = async (getById: () => Promise<unknown>) => {
+    const { fastify, adapters } = makeFastify({ connected: true, getById });
+    const { sent } = await attach(fastify);
+    adapters[0].emit("close");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    return sent.filter((m) => m.type === "finished" || m.type === "error");
+  };
+
+  it("sends the recorded exit when the row is already terminal", async () => {
+    const sent = await closeUpstream(async () => ({ status: "completed", exit_code: 3 }));
+    expect(sent).toEqual([{ type: "finished", exitCode: 3 }]);
+  });
+
+  it.each([
+    ["still running", async () => ({ status: "running", exit_code: null })],
+    ["missing", async () => undefined],
+    ["unreadable", async () => { throw new Error("db locked"); }],
+  ])("sends a retryable error when the row is %s", async (_label, getById) => {
+    const sent = await closeUpstream(getById);
+    expect(sent).toEqual([{ type: "error", message: "Remote connection lost", retryable: true }]);
   });
 });

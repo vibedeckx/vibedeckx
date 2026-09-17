@@ -51,7 +51,7 @@ describe("POST /api/executors/:id/start — workspace-derived working directory"
     app.decorate("authEnabled", true);
     app.decorate("storage", storage);
     app.decorate("processManager", { start, get: vi.fn(), stop: vi.fn(), getRunningProcessIds: vi.fn(() => []), getProcessProjectId: vi.fn(() => null) });
-    app.decorate("reverseConnectManager", { isConnected: () => false, getMachineId: () => null });
+    app.decorate("reverseConnectManager", { isConnected: () => false, getMachineId: () => null, setStatusChangeHandler: vi.fn() });
     app.decorate("remoteExecutorMap", new Map());
     app.decorate("remoteExecutorMonitor", { watch: vi.fn() });
     app.decorate("eventBus", { emit: vi.fn() });

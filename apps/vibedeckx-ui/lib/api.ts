@@ -343,6 +343,34 @@ export interface RemoteUnreachableBody {
   lastKnownUsage: RemoteUsage | null;
 }
 
+export interface ExecutorProcessErrorBody {
+  error?: string;
+  /** Remote start conflicts: `already_running` (carries processId), `starting`, `start_unknown`. */
+  code?: string;
+  processId?: string;
+}
+
+/**
+ * Start/stop failure that keeps the HTTP status and body: whether the process
+ * is still running depends on which failure it was, not just that one happened.
+ */
+export class ExecutorProcessRequestError extends Error {
+  readonly status: number;
+  readonly body: ExecutorProcessErrorBody;
+
+  constructor(status: number, body: ExecutorProcessErrorBody) {
+    super(body.error ?? `Request failed with status ${status}`);
+    this.name = "ExecutorProcessRequestError";
+    this.status = status;
+    this.body = body;
+  }
+
+  static async fromResponse(res: Response): Promise<ExecutorProcessRequestError> {
+    const body = (await res.json().catch(() => ({}))) as ExecutorProcessErrorBody;
+    return new ExecutorProcessRequestError(res.status, body ?? {});
+  }
+}
+
 export class ProjectRemoteUnlinkError extends Error {
   readonly body: RemoteInUseBody | RemoteUnreachableBody;
 
@@ -2109,10 +2137,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ target }),
     });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error);
-    }
+    if (!res.ok) throw await ExecutorProcessRequestError.fromResponse(res);
     const data = await res.json();
     return data.processId;
   },
@@ -2121,10 +2146,7 @@ export const api = {
     const res = await authFetch(`${getApiBase()}/api/executor-processes/${processId}/stop`, {
       method: "POST",
     });
-    if (!res.ok) {
-      const error = await res.json();
-      throw new Error(error.error);
-    }
+    if (!res.ok) throw await ExecutorProcessRequestError.fromResponse(res);
   },
 
   async getRunningProcesses(): Promise<ExecutorProcess[]> {

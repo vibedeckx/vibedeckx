@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ExecutorProcess } from "@/lib/api";
 import {
+  alreadyRunningProcessId,
   buildExecutorEventsUrl,
   buildRunningProcessMaps,
   pruneLastStartedProcess,
+  stopFailureMeansStopped,
 } from "./use-executors";
 
 vi.mock("@/lib/api", async () => {
@@ -14,7 +16,7 @@ vi.mock("@/lib/api", async () => {
   };
 });
 
-import { getAuthToken } from "@/lib/api";
+import { ExecutorProcessRequestError, getAuthToken } from "@/lib/api";
 
 function makeProcess(
   id: string,
@@ -108,5 +110,35 @@ describe("buildExecutorEventsUrl", () => {
         configurable: true,
       });
     }
+  });
+});
+
+describe("stopFailureMeansStopped", () => {
+  it("clears the process only when the server says it is gone", () => {
+    expect(stopFailureMeansStopped(new ExecutorProcessRequestError(404, { error: "Process not found" }))).toBe(true);
+  });
+
+  it.each([
+    ["an unreachable remote", new ExecutorProcessRequestError(502, { error: "Remote server is not connected" })],
+    ["an unverified remote stop", new ExecutorProcessRequestError(502, { error: "Remote process could not be stopped" })],
+    ["a network failure", new TypeError("Failed to fetch")],
+  ])("keeps the process running after %s", (_label, error) => {
+    expect(stopFailureMeansStopped(error)).toBe(false);
+  });
+});
+
+describe("alreadyRunningProcessId", () => {
+  it("returns the confirmed process of an already-running conflict", () => {
+    const error = new ExecutorProcessRequestError(409, { code: "already_running", processId: "remote-e1-p1" });
+    expect(alreadyRunningProcessId(error)).toBe("remote-e1-p1");
+  });
+
+  it.each([
+    ["a start still in flight", new ExecutorProcessRequestError(409, { code: "starting" })],
+    ["a disabled target", new ExecutorProcessRequestError(409, { error: "Executor is disabled for this target" })],
+    ["an unknown start result", new ExecutorProcessRequestError(503, { code: "start_unknown" })],
+    ["a conflict without a process", new ExecutorProcessRequestError(409, { code: "already_running" })],
+  ])("ignores %s", (_label, error) => {
+    expect(alreadyRunningProcessId(error)).toBeNull();
   });
 });

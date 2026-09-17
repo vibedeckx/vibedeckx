@@ -31,7 +31,7 @@ describe("POST /api/path/execute authorization", () => {
       getRunningProcessIds: vi.fn(() => options.runningProcessIds ?? []),
       getProcessProjectId: vi.fn(() => options.liveProjectId ?? null),
     });
-    app.decorate("reverseConnectManager", { isConnected: () => false });
+    app.decorate("reverseConnectManager", { isConnected: () => false, setStatusChangeHandler: vi.fn() });
     app.decorate("remoteExecutorMap", new Map());
     app.decorate("remoteExecutorMonitor", { watch: vi.fn() });
     app.decorate("eventBus", { emit: vi.fn() });
