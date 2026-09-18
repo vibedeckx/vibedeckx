@@ -1512,6 +1512,34 @@ describe("WorkflowEngine", () => {
       expect(await statusOf(run.id)).toBe("discussing");
     });
 
+    it("abort → retry → completion: the retried verdict is attributed past the aborted entry", async () => {
+      const run = await start();
+      await toGate(run);
+      await engine.handleExternalUserMessage("s-rev");
+      agentOps.sendUserMessage.mockImplementationOnce(async (sessionId: string, content: string, _p?: string, _u?: string, opts?: SendOpts) => {
+        await storage.workflowRunSteps.abandonOpenByRun(run.id, "superseded mid-send");
+        try {
+          await acceptInstruction(sessionId, content, opts);
+        } catch (err) {
+          // The runtime's contract for a send aborted before stdin
+          // (AgentSessionManager.abortSendBeforeStdin): the entry stays, fenced
+          // off by a silent failed turn_end. Without the fence the aborted
+          // entry would read as the opener of the retried turn.
+          reviewerEntries.push({ type: "turn_end", timestamp: 1, outcome: "failed", notificationDisposition: "internal" } as AgentMessage);
+          throw err;
+        }
+        return true;
+      });
+      await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "send-failed" });
+
+      await engine.requestFinalVerdict(run.id);
+      const verdict = (await stepsOf(run.id)).find((st) => st.kind === "final_verdict" && st.status === "dispatched")!;
+      expect(verdict.user_entry_index).toBe(reviewerEntries.length - 1);
+      emitCompleted("s-rev", reviewerTurnEnd("Final verdict: ship"));
+      await vi.waitFor(async () => expect(await statusOf(run.id)).toBe("waiting_feedback"));
+      expect((await storage.workflowRuns.getById(run.id))?.feedback_snapshot).toBe("Final verdict: ship");
+    });
+
     describe("unknown delivery outcome", () => {
       /** Another live claim holds the key: we sent nothing, but someone may be sending. */
       const nextClaimIsBusy = () =>
@@ -1537,6 +1565,26 @@ describe("WorkflowEngine", () => {
         const done = await storage.workflowRuns.getById(run.id);
         expect(done?.feedback_snapshot).toBe("Final verdict: needs-changes");
         expect(done?.error).toBeNull();
+      });
+
+      it("feedback reported unknown that did land: the source's completion finishes the run instead of leaving a live gate", async () => {
+        const run = await start();
+        await toGate(run);
+        nextClaimIsBusy();
+        await expect(engine.approveFeedback(run.id)).rejects.toMatchObject({ code: "send-failed" });
+        expect(await statusOf(run.id)).toBe("waiting_feedback");
+
+        // The other sender delivered it, and the source acted on it.
+        const step = (await stepsOf(run.id)).find((st) => st.kind === "feedback")!;
+        const index = sourceEntries.length;
+        sourceEntries.push({ type: "user", content: "[Review Feedback] …", timestamp: 1, origin: "workflow" });
+        await storage.workflowRunSteps.setUserEntryIndex(step.id, index);
+        sourceEntries.push({ type: "assistant", content: "Applied.", timestamp: 2 }, { type: "turn_end", timestamp: 3 });
+        emitCompleted("s-src", sourceEntries.length - 1);
+
+        await vi.waitFor(async () => expect(await statusOf(run.id)).toBe("completed"));
+        expect((await stepsOf(run.id)).find((st) => st.kind === "feedback")?.status).toBe("claimed");
+        expect((await storage.workflowRuns.getById(run.id))?.error).toBeNull();
       });
 
       it("retry re-uses the same step, key and payload", async () => {
@@ -1614,6 +1662,26 @@ describe("WorkflowEngine", () => {
         expect(done.status).toBe("completed");
         expect(agentOps.sendUserMessage.mock.calls.length).toBe(sendsBefore + 1);
         expect(agentOps.sendUserMessage.mock.calls.at(-1)![1]).toContain("edited after the crash");
+      });
+
+      it("feedback that DID land, with the completing CAS lost: the late claim finishes the run", async () => {
+        const run = await start();
+        await toGate(run);
+        // The send was accepted (entry + index recorded) and the source even
+        // finished the turn — but `sending_feedback → completed` never landed.
+        await storage.workflowRuns.transition(run.id, "waiting_feedback", "sending_feedback");
+        await openStep(run.id, "feedback", "s-src");
+        const index = sourceEntries.length;
+        sourceEntries.push({ type: "user", content: "[Review Feedback] …", timestamp: 1, origin: "workflow" });
+        await storage.workflowRunSteps.setUserEntryIndex("crashed-feedback", index);
+        sourceEntries.push({ type: "assistant", content: "Applied.", timestamp: 2 }, { type: "turn_end", timestamp: 3, outcome: "completed" } as AgentMessage);
+
+        const engine2 = await restart();
+        expect(await storage.workflowRunSteps.getById("crashed-feedback"))
+          .toMatchObject({ status: "claimed", output_snapshot: "Applied." });
+        // Not stranded in a state that can be neither approved nor cancelled.
+        expect(await storage.workflowRuns.getById(run.id)).toMatchObject({ status: "completed", error: null });
+        expect(engine2.isSessionInActiveRun("s-src")).toBe(false);
       });
 
       it("a final-verdict request that never left returns the run to discussing", async () => {

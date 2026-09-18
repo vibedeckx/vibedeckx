@@ -2973,27 +2973,28 @@ export class AgentSessionManager {
     // the turn's opening entry, because that's the only place the *intent*
     // behind the turn is known — and it has to survive a restart for crash
     // repair and remote outbox generation to agree with the live path.
-    const userEntryIndex = await this.pushEntry(sessionId, {
-      type: "user",
-      content,
-      timestamp: Date.now(),
-      ...(opts?.origin ? { origin: opts.origin } : {}),
-      notificationDisposition: disposition,
-      // Lifecycle activation: an entry-write failure must abort before stdin
-      // (strict), or the session would be marked active with no durable turn.
-    }, true, userId, { strictPersist: opts?.onUserEntryPersisted !== undefined });
-    // Lifecycle activation records the evidence line here — after the entry
-    // is durable, before the stdin write — so crash recovery can tell "no
-    // side effect yet" from "delivery unprovable" (design §8.2/§8.3).
-    if (opts?.onUserEntryPersisted) {
-      try {
-        await opts.onUserEntryPersisted(userEntryIndex);
-      } catch (error) {
-        // Aborted before stdin: no turn was opened, so a session this send
-        // flipped to "running" must not be left looking busy forever.
-        if (openedFromIdle) await this.revertToIdleAfterAbortedSend(session);
-        throw error;
-      }
+    //
+    // Everything up to the stdin write is one abortable section: a strict
+    // entry-write failure and a throwing evidence hook both mean "nothing was
+    // sent", and both must leave the session idle with the turn boundary
+    // closed (see abortSendBeforeStdin).
+    try {
+      const userEntryIndex = await this.pushEntry(sessionId, {
+        type: "user",
+        content,
+        timestamp: Date.now(),
+        ...(opts?.origin ? { origin: opts.origin } : {}),
+        notificationDisposition: disposition,
+        // Lifecycle activation: an entry-write failure must abort before stdin
+        // (strict), or the session would be marked active with no durable turn.
+      }, true, userId, { strictPersist: opts?.onUserEntryPersisted !== undefined });
+      // Lifecycle activation records the evidence line here — after the entry
+      // is durable, before the stdin write — so crash recovery can tell "no
+      // side effect yet" from "delivery unprovable" (design §8.2/§8.3).
+      if (opts?.onUserEntryPersisted) await opts.onUserEntryPersisted(userEntryIndex);
+    } catch (error) {
+      if (openedFromIdle) await this.abortSendBeforeStdin(session);
+      throw error;
     }
 
     // Send to agent stdin via provider
@@ -3032,6 +3033,8 @@ export class AgentSessionManager {
       return true;
     } catch (error) {
       console.error(`[AgentSession] Failed to send message:`, error);
+      // The write itself failed: same "nothing was sent" boundary as above.
+      if (openedFromIdle && session.turnOpenSince === null) await this.abortSendBeforeStdin(session);
       return false;
     }
   }
@@ -4185,21 +4188,19 @@ export class AgentSessionManager {
     // Push user message to store (+ persist to DB). Same ordering contract as
     // the resident path (sendUserMessageClaimed): entry durable → await the
     // caller's evidence hook → only then stdin.
-    const userEntryIndex = await this.pushEntry(session.id, {
-      type: "user",
-      content: userMessage,
-      timestamp: Date.now(),
-      ...(origin ? { origin } : {}),
-      notificationDisposition,
-    }, true, userId, { strictPersist: opts?.onUserEntryPersisted !== undefined });
-    if (opts?.onUserEntryPersisted) {
-      try {
-        await opts.onUserEntryPersisted(userEntryIndex);
-      } catch (error) {
-        // The process is up but was told nothing: leave it resident and idle.
-        await this.revertToIdleAfterAbortedSend(session);
-        throw error;
-      }
+    try {
+      const userEntryIndex = await this.pushEntry(session.id, {
+        type: "user",
+        content: userMessage,
+        timestamp: Date.now(),
+        ...(origin ? { origin } : {}),
+        notificationDisposition,
+      }, true, userId, { strictPersist: opts?.onUserEntryPersisted !== undefined });
+      if (opts?.onUserEntryPersisted) await opts.onUserEntryPersisted(userEntryIndex);
+    } catch (error) {
+      // The process is up but was told nothing: leave it resident and idle.
+      await this.abortSendBeforeStdin(session);
+      throw error;
     }
     session.turnOpenSince = Date.now();
     session.turnDisposition = notificationDisposition;
@@ -4223,22 +4224,37 @@ export class AgentSessionManager {
     });
     if (!written) {
       session.turnOpenSince = null;
-      await this.revertToIdleAfterAbortedSend(session);
+      await this.abortSendBeforeStdin(session);
     }
     return written;
   }
 
   /**
-   * A send flipped the session to "running" and then aborted before stdin was
-   * written. Nothing is in flight, so put the status back — but only while the
-   * process is still ours and alive; an exit that landed meanwhile has already
-   * settled the status through its own handler.
+   * A send flipped an idle session to "running" and then aborted before stdin
+   * was written (strict entry-write failure, a throwing evidence hook, or the
+   * write itself failing). Two things must be undone, or the NEXT send breaks:
+   *
+   *  - the turn boundary: the user entry may already be in the transcript, and
+   *    an entry with no `turn_end` after it reads as the OPENER of whatever
+   *    turn comes next — wrong notification disposition, and a workflow
+   *    dispatch whose recorded index no longer matches its own turn. Close it
+   *    with a `failed` turn_end; `internal` so it notifies nobody.
+   *  - the status: nothing is in flight, so a session left "running" would
+   *    refuse every retry as busy.
+   *
+   * Only while the process is still ours and alive — an exit that landed
+   * meanwhile has already settled both through its own handler.
    */
-  private async revertToIdleAfterAbortedSend(session: RunningSession): Promise<void> {
+  private async abortSendBeforeStdin(session: RunningSession): Promise<void> {
     if (session.status !== "running" || session.turnOpenSince !== null) return;
     if (session.process && session.process.exitCode !== null) return;
+    await this.pushTurnEnd(session, "failed", "internal", Date.now());
     session.status = "stopped";
-    if (!session.skipDb) await this.storage.agentSessions.updateStatusPreservingTimestamp(session.id, "stopped");
+    if (!session.skipDb) {
+      await this.storage.agentSessions.updateStatusPreservingTimestamp(session.id, "stopped").catch((err) => {
+        console.error(`[AgentSession] Failed to restore idle status for ${session.id}:`, err);
+      });
+    }
     this.broadcastPatch(session.id, ConversationPatch.updateStatus("stopped"));
     this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
   }

@@ -461,6 +461,21 @@ T1–T6 已提交，全量后端 / 前端测试与两端 `tsc` 通过，`classif
    （结束后重新发起）。前端按 `run.error` 前缀 `投递结果未知：终稿请求` 显示“重试投递”。
 7. **claim 时清 `run.error`**：归属成功即把“投递结果未知”之类的提示清掉（有 drift 则写 drift 提示）。
 
+**Review 后的三处修正（同日）：**
+
+8. **中止的发送要关上 turn 边界。** 发送在 stdin 之前中止（严格写库失败、回调抛错、
+   stdin 写入本身失败）时，user entry 可能已在 transcript 里；后面没有 `turn_end` 的
+   entry 会被读成**下一个** turn 的 opener，于是重试成功的派发索引与自己的 turn 对不上，
+   真实结果领不到。`AgentSessionManager.abortSendBeforeStdin` 现在补一条
+   `turn_end{outcome: failed, notificationDisposition: internal}`（不产生任何通知）并把
+   状态复原为 `stopped`。§2.3 的“回调抛错的善后”以此为准。
+9. **严格写库失败也纳入中止恢复。** `pushEntry(strict)` 与回调同处一个可中止区段
+   （普通与唤醒两条路径），不再把 session 留在 `running`。
+10. **feedback 步骤的领取按 run 当前状态收尾。** 由我们的 entry 开的 turn 已完成 =
+    投递已被证明。run 若还停在 `sending_feedback`（完成迁移没落库）或 `waiting_feedback`
+    （结果曾报未知），领取与 `→ completed` 同事务完成；run CAS 落空（`approveFeedback`
+    自己刚完成）则退回只领步骤。§2.6 的“feedback 只 claim 不改 run”以此为准。
+
 **真机 e2e（本地，`--data-dir` 一次性 server + 真实 claude CLI）：**
 fresh review → 步骤 `reviewer_prompt` 索引 0、turn_end 5 被领；用户与 reviewer 讨论一轮
 （该 turn 未被领，run 保持 discussing；讨论 turn 进行中点终稿 → 409）；终稿 →

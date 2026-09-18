@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionManager, SpawnSupersededError } from "./agent-session-manager.js";
 import type { AgentSession, Storage } from "./storage/types.js";
 import type { AgentMessage } from "./agent-types.js";
+import { findTurnOpeningUserEntryIndex } from "./notification-milestones.js";
 
 /**
  * Process-bound history hydration
@@ -820,6 +821,99 @@ describe("evidence hook ordering: entry durable → hook → stdin", () => {
     })).rejects.toThrow("nope");
     expect(writes).toHaveLength(1);
     expect(s.status).toBe("stopped");
+  });
+
+  // A failed send followed by a successful one is the sequence that matters:
+  // the aborted entry must not read as the opener of the NEXT turn, or a
+  // workflow dispatch's recorded index stops matching its own turn.
+  describe("abort → retry → completion", () => {
+    const closeTurn = (manager: AgentSessionManager) => {
+      const s = session(manager);
+      s.store.entries.push({ type: "assistant", content: "verdict", timestamp: 1 }, { type: "turn_end", timestamp: 2, outcome: "completed" } as AgentMessage);
+      return s.store.entries.length - 1;
+    };
+
+    it("resident: the aborted entry is fenced off by a silent failed turn_end", async () => {
+      const { manager, rows } = await restored();
+      const s = session(manager);
+      await hydrate(manager);
+      s.process = { pid: 1, exitCode: null, stdin: { write: () => true } };
+      s.dormant = false;
+
+      let aborted = -1;
+      await expect(manager.sendUserMessage("s1", "dispatch", undefined, "local", {
+        onUserEntryPersisted: async (index) => { aborted = index; throw new Error("superseded"); },
+      })).rejects.toThrow("superseded");
+      expect(s.store.entries[aborted + 1]).toMatchObject({ type: "turn_end", outcome: "failed", notificationDisposition: "internal" });
+      expect(rows.some((r) => r.entry_index === aborted + 1 && r.data.includes('"failed"'))).toBe(true);
+
+      let retried = -1;
+      expect(await manager.sendUserMessage("s1", "dispatch", undefined, "local", {
+        onUserEntryPersisted: async (index) => { retried = index; },
+      })).toBe(true);
+      expect(findTurnOpeningUserEntryIndex(s.store.entries, closeTurn(manager))).toBe(retried);
+    });
+
+    it("wake: same fence after a throwing hook, and after a failed stdin write", async () => {
+      const { manager } = await restored();
+      let failWrite = true;
+      spawnWithStdin(manager, () => { if (failWrite) throw new Error("EPIPE"); return true; });
+      vi.spyOn(console, "error").mockImplementation(() => undefined);
+      const s = session(manager);
+
+      expect(await manager.sendUserMessage("s1", "dispatch", "/tmp/p1")).toBe(false);
+      const afterFailedWrite = s.store.entries.length;
+      expect(s.store.entries[afterFailedWrite - 1]).toMatchObject({ type: "turn_end", outcome: "failed" });
+
+      // The process stayed up, so the retry is a resident send.
+      await expect(manager.sendUserMessage("s1", "dispatch", "/tmp/p1", "local", {
+        onUserEntryPersisted: async () => { throw new Error("nope"); },
+      })).rejects.toThrow("nope");
+      expect(s.store.entries[s.store.entries.length - 1]).toMatchObject({ type: "turn_end", outcome: "failed" });
+
+      failWrite = false;
+      let retried = -1;
+      expect(await manager.sendUserMessage("s1", "dispatch", "/tmp/p1", "local", {
+        onUserEntryPersisted: async (index) => { retried = index; },
+      })).toBe(true);
+      expect(findTurnOpeningUserEntryIndex(s.store.entries, closeTurn(manager))).toBe(retried);
+    });
+
+    it("a strict entry-write failure also leaves the session idle, not stuck running", async () => {
+      const { manager, upsertEntry } = await restored();
+      const s = session(manager);
+      await hydrate(manager);
+      const writes: string[] = [];
+      s.process = { pid: 1, exitCode: null, stdin: { write: (d: string) => { writes.push(d); return true; } } };
+      s.dormant = false;
+
+      upsertEntry.mockRejectedValueOnce(new Error("disk full"));
+      await expect(manager.sendUserMessage("s1", "dispatch", undefined, "local", {
+        onUserEntryPersisted: async () => undefined,
+      })).rejects.toThrow("disk full");
+      expect(writes).toHaveLength(0);
+      expect(s.status).toBe("stopped");
+      expect(s.turnOpenSince).toBeNull();
+
+      // …so the retry is accepted instead of bouncing off a phantom turn.
+      expect(await manager.sendUserMessage("s1", "dispatch", undefined, "local", {
+        onUserEntryPersisted: async () => undefined,
+      })).toBe(true);
+      expect(writes).toHaveLength(1);
+    });
+
+    it("wake: a strict entry-write failure leaves the woken session idle", async () => {
+      const { manager, upsertEntry } = await restored();
+      const writes: string[] = [];
+      spawnWithStdin(manager, (d) => { writes.push(d); return true; });
+      upsertEntry.mockRejectedValueOnce(new Error("disk full"));
+      await expect(manager.sendUserMessage("s1", "dispatch", "/tmp/p1", "local", {
+        onUserEntryPersisted: async () => undefined,
+      })).rejects.toThrow("disk full");
+      await new Promise((r) => setTimeout(r, 40));
+      expect(writes).toHaveLength(0);
+      expect(session(manager).status).toBe("stopped");
+    });
   });
 });
 

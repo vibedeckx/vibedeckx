@@ -1540,10 +1540,34 @@ export class WorkflowEngine {
   private async claimStep(step: WorkflowRunStep, entries: AgentMessage[], boundary: number): Promise<void> {
     const output = extractLastAssistantInTurn(entries, boundary);
     if (step.kind === "feedback") {
-      // The source finished the turn our feedback opened. The run completed
-      // when the feedback was sent, so only the step records it; Phase 2 hangs
-      // the next hop here. Deliberately NOT a commander suppression: a source
+      // The source finished the turn our feedback opened; Phase 2 hangs the
+      // next hop here. Deliberately NOT a commander suppression: a source
       // completion is a user-facing event today.
+      //
+      // Normally the run completed when the feedback was sent, and only the
+      // step records this. But a completed turn opened by our entry PROVES the
+      // delivery, so a run still short of `completed` is finished here, in the
+      // same transaction as the claim:
+      //  - `sending_feedback`: the send landed but the completing CAS never
+      //    did (crash or storage error in between). Claiming the step alone
+      //    would strand the run — it can be neither approved nor cancelled.
+      //  - `waiting_feedback`: the outcome was reported unknown and the run
+      //    went back to the gate; leaving it there invites a second send of
+      //    feedback that was already delivered and acted on.
+      const run = await this.storage.workflowRuns.getById(step.run_id);
+      if (run && (run.status === "sending_feedback" || run.status === "waiting_feedback")) {
+        const completed = await this.storage.workflowRuns.claimStepAndTransition({
+          stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
+          run: { id: run.id, from: run.status, to: "completed", patch: { error: null } },
+        });
+        if (completed) {
+          const done = await this.storage.workflowRuns.getById(run.id);
+          if (done) { this.untrackRun(done); this.emitRunUpdated(done); }
+          return;
+        }
+        // Lost the run CAS — approveFeedback's own transition just completed
+        // it. The whole transaction rolled back, so claim the step on its own.
+      }
       await this.storage.workflowRuns.claimStepAndTransition({
         stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
       });
