@@ -45,11 +45,9 @@ describe("previewCron", () => {
     }
   });
 
-  it("trims cronstrue's \"only\" and its serial \"and\" from the description", () => {
-    expect(describeCron("0 9 * * 1,3,5")).toBe("At 09:00, on Monday, Wednesday, Friday");
+  it("drops cronstrue's redundant \"only\" from the description", () => {
+    expect(describeCron("0 9 * * 1,3,5")).toBe("At 09:00, on Monday, Wednesday, and Friday");
     expect(describeCron("0 9 * * 1")).toBe("At 09:00, on Monday");
-    // Two-item lists read "X and Y" with no comma, so they keep the "and".
-    expect(describeCron("0 9 * * 1,3")).toBe("At 09:00, on Monday and Wednesday");
   });
 
   it("says \"every day\" instead of reciting all seven weekdays", () => {

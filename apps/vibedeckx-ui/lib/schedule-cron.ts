@@ -158,7 +158,7 @@ export function describeCron(expr: string): string | null {
   // the "every day" that makes it a schedule, so put it back.
   if (/^At \d{2}:\d{2}$/.test(description)) description += ", every day";
   // "At 09:00, only on Monday" — the "only" carries nothing the day list
-  // doesn't already say, and the preview line is tight.
+  // doesn't already say.
   description = description.replace(/, only (on|in) /g, ", $1 ");
   // croner fires when EITHER day field matches once both are restricted, but
   // cronstrue reads as AND whatever logicalAndDayFields says (", and on Monday",
@@ -170,10 +170,6 @@ export function describeCron(expr: string): string | null {
     if (i !== -1) description = `${description.slice(0, i)}, or on ${description.slice(i + ", and on ".length)}`;
     description += " (runs when either the day of month or the weekday matches)";
   }
-  // "Monday, Wednesday, and Friday" -> "Monday, Wednesday, Friday". Only lists
-  // of three or more carry that comma, and the preview line is tight. Runs
-  // last: the day-field clause above keys off cronstrue's own ", and on ".
-  description = description.replace(/, and /g, ", ");
   return description;
 }
 
