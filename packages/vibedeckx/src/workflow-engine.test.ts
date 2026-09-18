@@ -2026,6 +2026,110 @@ describe("WorkflowEngine", () => {
         expect(gate3).toMatchObject({ round: 3, max_rounds: 2 });
       });
 
+      it("restart: a re-review that never left goes back to the gate — unbound, retryable — not to failed", async () => {
+        const gate = await toGate();
+        // Crashed after the CAS bound the reviewer and the step row was opened,
+        // before the evidence hook: no entry index ⇒ stdin was never written.
+        await storage.workflowRuns.transition(gate.id, "waiting_rereview", "waiting_reviewer", { reviewer_session_id: "s-rev" });
+        await storage.workflowRunSteps.open({
+          id: "crashed-rereview", run_id: gate.id, role: "reviewer", kind: "rereview_prompt",
+          session_id: "s-rev", idempotency_key: `run:${gate.id}:step:crashed-rereview`, payload_hash: "h",
+        });
+
+        const engine2 = new WorkflowEngine(storage, agentOps);
+        await engine2.init();
+        const after = await storage.workflowRuns.getById(gate.id);
+        expect(after).toMatchObject({ status: "waiting_rereview", reviewer_session_id: null });
+        expect(after?.error).toContain("未送达");
+        expect((await storage.workflowRunSteps.getById("crashed-rereview"))?.status).toBe("abandoned");
+        expect((await storage.notificationOutbox.listAfter(0, 100)).some((r) => r.kind === "workflow_failed")).toBe(false);
+        expect(engine2.isSessionInActiveRun("s-src")).toBe(true);
+        expect(engine2.isSessionInActiveRun("s-rev")).toBe(false);
+
+        expect((await engine2.approveRereview(gate.id)).status).toBe("waiting_reviewer");
+      });
+
+      // The reviewer's reservation must be check-and-set with no await in
+      // between, and released only by the call that made it.
+      describe("reviewer reservation under concurrency", () => {
+        /** Park the next read of `sessionId`'s transcript until `release()`. */
+        function parkTranscriptRead(sessionId: string) {
+          let release!: () => void;
+          const parked = new Promise<void>((r) => { release = r; });
+          let reached!: () => void;
+          const arrived = new Promise<void>((r) => { reached = r; });
+          const original = agentOps.getRawMessages.getMockImplementation()!;
+          let armed = true;
+          agentOps.getRawMessages.mockImplementation(((id: string) => {
+            if (armed && id === sessionId) {
+              armed = false;
+              reached();
+              return parked.then(() => original(id));
+            }
+            return original(id);
+          }) as never);
+          return { arrived, release, restore: () => agentOps.getRawMessages.mockImplementation(original) };
+        }
+
+        it("a re-review in flight holds the reviewer: a review started ON that session meanwhile is refused, not overwritten", async () => {
+          const gate = await toGate();
+          const park = parkTranscriptRead("s-src"); // approveRereview reads the source transcript after reserving
+          const rereview = engine.approveRereview(gate.id);
+          await park.arrived;
+
+          await expect(engine.startAdhocReview({ project, branch: "dev", sourceSessionId: "s-rev" }))
+            .rejects.toMatchObject({ code: "session-busy" });
+
+          park.release();
+          expect((await rereview).status).toBe("waiting_reviewer");
+          park.restore();
+          expect(engine.shouldSuppressAgentEvent("s-rev")).toBe(true); // still this run's reviewer
+          expect((await storage.workflowRuns.getActiveBySession("s-rev"))?.id).toBe(gate.id);
+        });
+
+        it("a review that reserved the session first wins: the re-review is refused and leaves that reservation alone", async () => {
+          const gate = await toGate();
+          // Another review is starting with the old reviewer session as ITS source,
+          // parked right after its synchronous reservation.
+          const park = parkTranscriptRead("s-rev");
+          const other = engine.startAdhocReview({
+            project, branch: "dev", sourceSessionId: "s-rev", newReviewerSessionId: "s-rev-2", runId: "11111111-1111-4111-8111-111111111111",
+          }).catch((err: unknown) => err);
+          await vi.waitFor(() => expect(engine.isSessionInActiveRun("s-rev")).toBe(true));
+
+          await expect(engine.approveRereview(gate.id)).rejects.toMatchObject({ code: "session-busy" });
+          // The refused call must not have released a reservation it never owned.
+          expect(engine.isSessionInActiveRun("s-rev")).toBe(true);
+          expect(await statusOf(gate.id)).toBe("waiting_rereview");
+
+          park.release();
+          await other;
+          park.restore();
+        });
+
+        it("the same gate submitted twice: one re-review goes out, and the loser does not strip the winner's reservation", async () => {
+          const gate = await toGate();
+          const sendsBefore = agentOps.sendUserMessage.mock.calls.length;
+          const results = await Promise.allSettled([engine.approveRereview(gate.id), engine.approveRereview(gate.id)]);
+          expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+          const lost = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+          expect(lost.reason).toMatchObject({ code: "bad-state" });
+
+          expect(agentOps.sendUserMessage.mock.calls.length).toBe(sendsBefore + 1);
+          expect(await storage.workflowRuns.getById(gate.id)).toMatchObject({ status: "waiting_reviewer", reviewer_session_id: "s-rev" });
+          expect(engine.shouldSuppressAgentEvent("s-rev")).toBe(true);
+        });
+
+        it("a refused re-review gives its own reservation back, so the gate can be retried", async () => {
+          const gate = await toGate();
+          await storage.agentSessions.updateStatus("s-src", "running");
+          await expect(engine.approveRereview(gate.id)).rejects.toMatchObject({ code: "source-running" });
+          expect(engine.isSessionInActiveRun("s-rev")).toBe(false);
+          await storage.agentSessions.updateStatus("s-src", "stopped");
+          expect((await engine.approveRereview(gate.id)).status).toBe("waiting_reviewer");
+        });
+      });
+
       it("rejects gate actions that do not belong to the state", async () => {
         const gate = await toGate();
         await expect(engine.approveFeedback(gate.id)).rejects.toMatchObject({ code: "bad-state" });

@@ -216,7 +216,8 @@ self-report；发起弹窗里同时勾了 blind 与循环时注明这一点。
 - **面板 `waiting_feedback`**：结论徽标（ship / needs-changes / cannot-verify / 未识别）；
   循环 run 显示"第 N / M 轮"。`ship` 时主按钮是"接受并结束"，"仍发送反馈"降为次要。
 - **面板 `waiting_rereview`**："source 已按反馈完成修改" + 「发起第 N 轮复审」「结束循环」；
-  超上限时改为"已达上限 M 轮" + 「再加一轮」「结束循环」；reviewer 不可用时显示原因并禁用复审。
+  超上限时改为"已达上限 M 轮" + 「再加一轮」「结束循环」。**reviewer 不可用不做预检**（第一刀的
+  实际交互，见 §11-7）：复审按钮始终可点，点击后由后端给出原因，run 留在闸门上。
 - 过期点击解释（`review-run-panel.tsx` 的 `explain…`）补上新状态与新动作的文案。
 
 ## 8. 测试
@@ -274,6 +275,21 @@ L1–L6 已提交；后端 2719 / 前端 1230 个测试通过，两端 `tsc` 干
 5. **前端状态序**：`waiting_rereview` 与 `waiting_reviewer` 同级，否则“未发出 → 退回闸门”这一步
    合法的后退会被当成过期帧丢掉（`hooks/preparing-reviews.ts`）。
 6. 新增存储读取 `workflowRuns.getLoopRound(loopId, round)`，闸门据此找上一轮的 reviewer。
+
+7. **闸门不预检 reviewer 是否可用。** 设计 §7 原写“显示原因并禁用复审”；实现是点击后才知道：
+   后端返回原因（409 / `reviewer-unavailable`），面板在闸门下方显示，run 留在 `waiting_rereview`，
+   可重试或结束循环。预检需要面板为每个闸门另发一次 reviewer-candidate 查询并处理其过期，
+   第一刀不做；`running` 这类暂时原因本来也只能靠再点一次。
+
+**Review 后的修正（同日）：**
+
+8. **`approveRereview` 的 reviewer 预留改为同步的“检查并预留”**，与发起入口同一规则：读写
+   `participants` 之间没有 `await`，竞争的发起不会被覆盖。表里已有**本闸门**的条目 = 同一闸门的
+   另一次 `rereview` 正在进行 → `bad-state`；失败清理只释放本次调用自己的预留（此前 CAS 落空时的
+   无条件删除会清掉并发成功那一次的占用）。
+9. **重启对账与实时路径对齐**：循环后续轮次（`loop_id` 非空且 `round > 1`）的 `rereview_prompt`
+   若证明未送达，退回 `waiting_rereview` 并解绑 reviewer，而不是 `failRun`；一次性复审仍然失败
+   （它没有闸门可回）。
 
 **真机 e2e（本地，`--data-dir` 一次性 server + 真实 claude CLI，上限设为 1）：**
 第 1 轮 `needs-changes` 被解析 → approve → source 完成后 4s 内出现第 2 轮闸门（未绑定 reviewer）→

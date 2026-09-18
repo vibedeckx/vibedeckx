@@ -718,6 +718,17 @@ export class WorkflowEngine {
       case "final_verdict":
         return this.storage.workflowRuns.transition(run.id, "waiting_reviewer", "discussing", { error: note });
       case "rereview_prompt":
+        // A loop's later round has a gate to go back to — same choice as the
+        // live path (approveRereview): unbind the reviewer and let the user
+        // confirm again. `init()` rebuilds participants from the row afterwards,
+        // so the unbound reviewer is simply not tracked. A one-shot re-review
+        // has nothing to return to and fails, as its live send failure does.
+        if (run.loop_id && run.round > 1) {
+          return this.storage.workflowRuns.transition(run.id, "waiting_reviewer", "waiting_rereview", {
+            reviewer_session_id: null,
+            error: "复审任务因服务重启未送达 reviewer，可直接重新发起这一轮复审。",
+          });
+        }
         await this.failRun(run, "复审任务因服务重启未送达 reviewer。请重新发起 review。");
         return true;
       case "reviewer_prompt":
@@ -881,38 +892,61 @@ export class WorkflowEngine {
     const reviewerSessionId = await this.loopReviewerSessionId(gate);
     if (!reviewerSessionId) throw new WorkflowError("reviewer-unavailable", "找不到上一轮的 reviewer session");
 
+    // Check-and-reserve, synchronously — the same rule as the start entry: no
+    // await between reading the participants table and writing it, so a
+    // competing start cannot slip a reservation in between and have it
+    // overwritten here. An entry for THIS gate means another `rereview` of it
+    // is already in flight (the gate row binds no reviewer, so nothing else
+    // puts one there): refuse rather than share — and never release — a
+    // reservation this call does not own.
     const held = this.participants.get(reviewerSessionId);
-    const activeElsewhere = await this.storage.workflowRuns.getActiveBySession(reviewerSessionId);
-    if ((held && held.runId !== gate.id) || (activeElsewhere && activeElsewhere.id !== gate.id)) {
-      throw new WorkflowError("session-busy", "上一轮的 reviewer 正在另一个 review 里");
+    if (held) {
+      throw held.runId === gate.id
+        ? new WorkflowError("bad-state", "这一轮复审正在发起中")
+        : new WorkflowError("session-busy", "上一轮的 reviewer 正在另一个 review 里");
     }
-    const reviewerNow = await this.storage.agentSessions.getById(reviewerSessionId);
-    if (reviewerNow?.status === "running") {
-      throw new WorkflowError("session-busy", "reviewer 正在回复中，请等待其完成后再发起复审");
-    }
-    const reviewerSession = await this.assertReviewerReusable(reviewerSessionId, gate.project_id, gate.branch);
-
-    const sourceSession = await this.storage.agentSessions.getById(gate.source_session_id);
-    if (sourceSession?.status === "running") {
-      throw new WorkflowError("source-running", "source session 正在运行，请等待当前 turn 完成后再发起复审");
-    }
-    // Review what the user sees NOW: they may have kept working with the
-    // source while the gate waited.
-    const entries = await this.agentOps.getRawMessages(gate.source_session_id);
-    const turnEndIndex = extractLatestTurnEndIndex(entries) ?? gate.source_turn_end_index;
-    const sourceProjection = await this.storage.agentSessions.getActivityById(gate.source_session_id, "workflow-reviewer");
-    const worktreePath = sourceProjection?.worktreePath ?? resolveWorktreePath(project.path, gate.branch);
-    const target = captureReviewTarget(worktreePath);
-
-    // Reserve synchronously with the CAS's own await boundary in mind: the
-    // reviewer becomes a participant before anything is sent to it.
     this.participants.set(reviewerSessionId, { runId: gate.id, role: "reviewer" });
-    const claimed = await this.storage.workflowRuns.transition(gate.id, "waiting_rereview", "waiting_reviewer", {
-      reviewer_session_id: reviewerSessionId, error: null,
-    });
-    if (!claimed) {
-      this.participants.delete(reviewerSessionId);
-      throw new WorkflowError("bad-state", "run 状态已变化（可能已被处理）");
+    // From here on the reservation is ours until the CAS below hands it to the
+    // run; every exit before that must give it back.
+    const releaseReservation = () => {
+      const current = this.participants.get(reviewerSessionId);
+      if (current?.runId === gate.id && current.role === "reviewer") this.participants.delete(reviewerSessionId);
+    };
+
+    let reviewerSession: AgentSession;
+    let entries: AgentMessage[];
+    let turnEndIndex: number;
+    let target: ReviewTarget;
+    try {
+      const activeElsewhere = await this.storage.workflowRuns.getActiveBySession(reviewerSessionId);
+      if (activeElsewhere && activeElsewhere.id !== gate.id) {
+        throw new WorkflowError("session-busy", "上一轮的 reviewer 正在另一个 review 里");
+      }
+      const reviewerNow = await this.storage.agentSessions.getById(reviewerSessionId);
+      if (reviewerNow?.status === "running") {
+        throw new WorkflowError("session-busy", "reviewer 正在回复中，请等待其完成后再发起复审");
+      }
+      reviewerSession = await this.assertReviewerReusable(reviewerSessionId, gate.project_id, gate.branch);
+
+      const sourceSession = await this.storage.agentSessions.getById(gate.source_session_id);
+      if (sourceSession?.status === "running") {
+        throw new WorkflowError("source-running", "source session 正在运行，请等待当前 turn 完成后再发起复审");
+      }
+      // Review what the user sees NOW: they may have kept working with the
+      // source while the gate waited.
+      entries = await this.agentOps.getRawMessages(gate.source_session_id);
+      turnEndIndex = extractLatestTurnEndIndex(entries) ?? gate.source_turn_end_index;
+      const sourceProjection = await this.storage.agentSessions.getActivityById(gate.source_session_id, "workflow-reviewer");
+      const worktreePath = sourceProjection?.worktreePath ?? resolveWorktreePath(project.path, gate.branch);
+      target = captureReviewTarget(worktreePath);
+
+      const claimed = await this.storage.workflowRuns.transition(gate.id, "waiting_rereview", "waiting_reviewer", {
+        reviewer_session_id: reviewerSessionId, error: null,
+      });
+      if (!claimed) throw new WorkflowError("bad-state", "run 状态已变化（可能已被处理）");
+    } catch (err) {
+      releaseReservation();
+      throw err;
     }
     await this.storage.workflowRuns.update(gate.id, {
       source_turn_end_index: turnEndIndex,
@@ -934,7 +968,7 @@ export class WorkflowEngine {
       const back = await this.storage.workflowRuns.transition(gate.id, "waiting_reviewer", "waiting_rereview", {
         reviewer_session_id: null, error: reason,
       });
-      if (back) this.participants.delete(reviewerSessionId);
+      if (back) releaseReservation();
       const rolled = await this.storage.workflowRuns.getById(gate.id);
       if (rolled) this.emitRunUpdated(rolled);
       throw new WorkflowError(busy ? "session-busy" : outcome.kind === "mode-switch-failed" ? "reviewer-unavailable" : "send-failed", reason);
