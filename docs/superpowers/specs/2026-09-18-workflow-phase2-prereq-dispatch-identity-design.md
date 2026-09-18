@@ -3,6 +3,8 @@
 > 日期：2026-09-18 · 分支：dev1 · 状态：**设计稿 v2，待用户确认后出实施计划**
 > v2 吸收了一轮外部审阅（Codex）：去掉“唯一 open 步骤”猜测、派发只对空闲 session、
 > 重试复用步骤与键、claim 与 run 迁移同事务、对账只认 `completed` 结局、claim 单一调用方、T7 暂缓。
+> v2.1（第二轮审阅）：结果未知时 run 不回滚、仍接收身份匹配的完成；空闲检查与发送在
+> session 互斥锁内原子完成；改稿后的重试不得沿用原键。
 > 上游：主 spec [`2026-07-17-workflow-engine-review-loop-design.md`](./2026-07-17-workflow-engine-review-loop-design.md)
 > §3.2b / §6 "Phase 2 的前置"。本文只做前置，不做循环模板、不解析 verdict、不动 UI。
 > 所有 file:line 以 main = dev1 @ f769b6cd 为准。
@@ -165,17 +167,29 @@ user entry；`ActivateAgentSessionInput`（`agent-session-lifecycle.ts:180-198`�
 
 ### 2.4 发送时序（引擎侧，四个发送点统一）
 
-**前提：引擎只向空闲 session 派发。** 目标 session `status === "running"` 时不发送，
-返回 409 `session-busy`（`requestFinalVerdict` 今天已如此，`:1312-1315`；
-`approveFeedback` 与复用路径补同样的前置检查）。空闲时派发的 user entry 必然
+**前提：引擎只向空闲 session 派发，且空闲检查与发送在同一把锁内。** 用户的 `/message`
+路由在 `serializeSessionMutation(sessionId)` 下投递（`agent-session-routes.ts:82-95, 1833`）；
+引擎的 `deliverInstruction` 走同一把每 session 互斥锁，并在锁内**重新检查**
+`status !== "running"`，不满足则不发送、返回 `session-busy`（证明无副作用）。
+只在发送前查一次空闲是不够的：用户的讨论消息可能在检查与发送之间抢先落地，
+派发就会被 CLI 排到运行中的 turn 之后，讨论回复先完成时无法与派发区分。
+（`requestFinalVerdict` 今天的前置检查 `:1312-1315` 保留为快速失败；`approveFeedback`
+与复用路径补同样的前置检查。引擎在发送前做的 run 状态 CAS 若因用户消息触发的
+`handleExternalUserMessage` 而被推回 `discussing`，引擎的回滚 CAS 落空即可，无害。）空闲时派发的 user entry 必然
 自己开一个 turn，归属判定才能只靠“开 turn 的 entry”一条规则（2.5）；mid-turn
 steering 与 CLI 排队两种歧义形态由此被排除在引擎派发之外（用户自己 mid-turn
 发消息不受影响，那不是派发）。
 
 **步骤 = 一次逻辑派发，重试复用。** 步骤 id 与键在一次逻辑派发内固定：同一
-run 的同一 `(kind, round)` 只有一行；用户点“重试”（今天 = 发送失败回滚到
-`waiting_feedback` 后再点 approve）复用原步骤、原键、原 payload，让账本判断是
-复放还是重投。只有新的逻辑派发（下一轮终稿请求、下一轮反馈）才新建步骤。
+run 的同一 `(kind, round)` 只有一行，并记录 payload 的内容哈希；用户重试（再点
+approve / 再点生成终稿）复用原步骤、原键、原 payload，让账本判断是复放（已 sent
+→ 不重投）还是重投（已 released）。只有新的逻辑派发（下一轮终稿请求、下一轮
+反馈）才新建步骤。**改稿不是重试**：若存在结果未知的 `feedback` 步骤而用户带着
+不同内容再次 approve，返回 409 `bad-state`“上一次投递结果未知，请先重试原文或结束
+review”——既不能偷偷沿用原键发新内容，也不能忽略修改继续发旧内容。为此
+`requestFinalVerdict` 除 `discussing` 外也接受“`waiting_reviewer` 且存在结果未知的
+`final_verdict` 步骤”作为重试入口；panel 在 run.error 标记未知时显示“重试投递”
+（最小前端改动，见 T5）。
 
 ```
 1. step = steps.getOrCreate({ run_id, kind, round }) → 已存在则复用 id/key/payload，否则
@@ -188,8 +202,11 @@ run 的同一 `(kind, round)` 只有一行；用户点“重试”（今天 = �
    证明无副作用 not_running（entry 落库前拒绝）/ conflict / lifecycle retryable_failure
               → steps.abandon(step.id, reason)，再做现有的 run 状态回滚；下次重试重建同 (kind, round) 步骤
    结果未知 busy / 抛错 / unconfirmed（markSent 失败）/ lifecycle uncertain
-              → 步骤保持 dispatched，error = "投递结果未知"；run 回滚并在 run.error 提示
-                “请检查目标 session 是否已收到，再重试或结束”；重试复用同键 → 账本给出 replayed 或再投
+              → 步骤保持 dispatched，error = "投递结果未知"；**run 不回滚**，停在派发后的等待态
+                （reviewer 侧 kind → waiting_reviewer；feedback → 退回 waiting_feedback，因 completed
+                须以发送确认为据），run.error 提示“投递结果未知：若目标已收到，其完成会自动归属；
+                否则请重试（复用同一条指令）或结束”。没收到发送确认不等于没有发送——若随后
+                收到身份匹配的完成事件，走 2.5/2.6 正常归属，真实结果不会因回滚而被拒收。
 ```
 
 激活路径的例外：lifecycle 已占用 `onUserEntryPersisted` 写 `activation_user_entry_index`
@@ -321,7 +338,10 @@ commander。Phase 2 让引擎接管这一跳时再把“已 claim 的 feedback �
   的 completion 不得被领）；用户 mid-turn 穿插后派发 entry 仍是开 turn 的 entry；
   分支出的 transcript 带外来 dispatch id 不误 claim；目标 running 时 409 不派发。
 - 同键重试：首投已 sent → replayed 不重投；首投 released → 重投一次；结果未知路径
-  保持 dispatched 并复用键。
+  保持 dispatched 并复用键；结果未知后改稿 approve → 409。
+- 结果未知后真实完成到达：run 仍在等待态，身份匹配 → 正常进入 waiting_feedback。
+- 竞争：空闲检查通过后、发送前用户消息抢先 → 锁内重检 → session-busy，不发送；
+  讨论回复的完成不被领。
 - 崩溃窗口：entry 落库后、回填前崩溃 → 对账按 dispatch.id 找回；claim 后、run 迁移前
   不存在独立崩溃窗口（同事务）。
 - `init()` 对账：定位三来源；结局 completed / failed / server_restart / 无 turn_end。
@@ -335,11 +355,11 @@ commander。Phase 2 让引擎接管这一跳时再把“已 claim 的 feedback �
 
 | # | 任务 | 范围 |
 |---|---|---|
-| T1 | 抽出 `deliverInstruction` 助手，路由与 project-chat 本地改用（缺口 A 的地基、F） | hub+worker，无行为变化 |
+| T1 | 抽出 `deliverInstruction` 助手，路由与 project-chat 本地改用（缺口 A 的地基、F）；`serializeSessionMutation` 目前是路由插件内的闭包（`agent-session-routes.ts:82`），须一并提到共享模块供引擎复用 | hub+worker，无行为变化 |
 | T2 | 唤醒路径 await stdin + 转发 opts（D3） | worker |
 | T3 | 存储：`workflow_run_steps` + 仓库 + `AgentMessage.dispatch` + `FirstSendOptions.dispatch` + lifecycle 转发 | worker |
 | T4 | 引擎四个发送点落步骤行、带键、回填 `user_entry_index`（2.4） | worker |
-| T5 | `claimDispatch` + 步骤驱动 `handleTaskCompleted` + legacy fallback + ChatSessionManager 直接调用（2.5/2.6） | worker |
+| T5 | 步骤驱动 `handleTaskCompleted`（事务性 claim）+ legacy fallback + 结果未知的重试入口 + panel“重试投递”按钮（2.5/2.6） | worker + 前端 |
 | T6 | `init()` 对账（2.7） | worker |
 | T7 | hub 远程分支记录结果 + 版本门控（D4）——**暂缓，单独立项** | hub |
 | T8 | 真机 e2e + 主 spec §3.1/§3.2/§6 同步 | — |
