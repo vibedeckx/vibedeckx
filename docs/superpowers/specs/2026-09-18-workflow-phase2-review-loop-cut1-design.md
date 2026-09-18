@@ -1,6 +1,6 @@
 # Phase 2 第一刀：Review 闭环（循环复审）
 
-> 日期：2026-09-18 · 分支：dev1 · 状态：**设计稿 v1，待用户确认后出实施计划**
+> 日期：2026-09-18 · 分支：dev1 · 状态：**v1.1 已确认（2026-09-18）**：§10 五点用户同意；吸收一轮外部审阅的三处（§3 完整匹配、§4 占用检查与确认未发送回到闸门）。实施计划见 `../plans/2026-09-18-workflow-phase2-review-loop-cut1.md`
 > 上游：主 spec [`2026-07-17-workflow-engine-review-loop-design.md`](./2026-07-17-workflow-engine-review-loop-design.md) §3.2b / §6；
 > 前置（已实现）：[`2026-09-18-workflow-phase2-prereq-dispatch-identity-design.md`](./2026-09-18-workflow-phase2-prereq-dispatch-identity-design.md)。
 > 所有 file:line 以 dev1 @ 2d2a20fb 为准。
@@ -79,9 +79,14 @@ review，须先结束循环——与"一个 session 同时只在一个活跃 run
 
 `parseVerdict(text): "ship" | "needs-changes" | "cannot-verify" | null`：
 1. 自下而上找**最后一行**含 `verdict`（不分大小写）的行；
-2. 去掉 markdown 标记后，在该行（该行没有则取其后第一个非空行）里找三个词；
-3. **恰好命中一个**才算数；一个都没有、或同一处出现多个（reviewer 把选项原样抄了一遍）
-   → `null`。
+2. 规整：去掉行首列表编号、markdown 强调与反引号，去掉 `verdict` 标签本身，再去掉**首尾**的
+   分隔符与空白（`: ： — – -`、句号）——只剥首尾，`needs-changes` 中间的连字符不动；
+3. 剩余部分转小写后必须**完整等于**三个枚举之一才算数。剩余为空则对其后第一个非空行
+   做同样的规整与完整匹配；其余一律 `null`。
+
+“包含某个词”不够：`Verdict: do not ship` 含且仅含 `ship`，会被读成放行，进而把主按钮
+变成“接受并结束”并取消下一轮复审。完整匹配不做任何自然语言判断，`ship (with notes)`
+这类也落到 `null`——代价只是交给人。
 
 宁可 `null` 也不猜：`null` 与 `cannot-verify` 在流程上同等对待——**交给人**，闸门不给
 任何 verdict 驱动的默认动作，只是显示"未识别结论"。
@@ -109,6 +114,7 @@ waiting_feedback 的闸门（按 verdict）：
 
 source 完成反馈那一轮（feedback 步骤被领取，前置 §2.6 / §7-10）：
   若 run.loop_id 非空 且 run.verdict !== 'ship'
+     且 source 当前不在任何活跃 run 里（见下“占用”）
       → 同一事务内创建下一轮 run：
           { loop_id, round: N+1, max_rounds, status: waiting_rereview,
             source_session_id, reviewer_session_id: NULL, review_focus, review_span: 'this_turn',
@@ -126,6 +132,14 @@ waiting_rereview 的闸门：
 ```
 
 要点：
+- **占用：新 review 优先，旧循环不再续接。** 反馈发送成功时 run 即 `completed` 并释放
+  source（`approveFeedback`），而 feedback 步骤的领取是异步的（完成事件，或重启对账的迟到
+  领取）。这中间用户可能已对同一 source 发起了另一次 review；此时再创建闸门就会出现同一
+  source 的两个活跃 run。规则：下一轮的插入以“source 不是任何活跃 run 的 source 或
+  reviewer”为条件，写成 `INSERT … WHERE NOT EXISTS` 放在领取事务里（与发起入口的
+  `getActiveBySession` 同一口径）；引擎另查内存 `participants`（发起入口在首个 await 之前
+  同步预留的那张表），并在插入成功后立刻登记 source。条件不成立 → 只领取步骤，循环到此
+  为止，不报错。反方向已由现有约束覆盖：闸门存在时对 source 另起 review 得到 409。
 - **创建下一轮与领取 feedback 步骤同事务**：`claimStepAndTransition` 增加可选的 `nextRun`
   插入。崩溃不会出现"步骤领了、下一轮闸门没出来"；重启对账的迟到领取走同一条路径，
   同样会把闸门补出来。
@@ -134,7 +148,17 @@ waiting_rereview 的闸门：
   他现在看到的状态。source 正在运行 → 409 `source-running`（现有守卫）；reviewer 正在
   运行 → 409 `session-busy`（前置的空闲派发规则）。
 - 复用路径的派发逻辑目前内联在 `prepareAdhocReview` 里（`workflow-engine.ts` reuse 分支）。
-  抽成 `dispatchRereview(run, reviewerSessionId, project)`，发起入口与 `rereview` 闸门共用。
+  抽成 `dispatchRereview(run, reviewerSessionId, project)`，发起入口与 `rereview` 闸门共用——
+  但**失败处理不共用**。发起入口今天在派发返回 `no_side_effect`（含锁内重检发现 reviewer
+  忙）时直接 `failRun`，对一次性发起是合理的；闸门照搬就会让一次并发聊天终止整个循环。
+  闸门的规则：
+  - `rereview` 先 CAS `waiting_rereview → waiting_reviewer` 并绑定 `reviewer_session_id`
+    （reviewer 成为参与者）；
+  - **确认未发送**（`no_side_effect`，含 busy、plan 模式切换失败）→ CAS 回
+    `waiting_rereview`、清空 `reviewer_session_id`、释放 reviewer 的参与者登记，`run.error`
+    写原因；原闸门可重试，不自动重试；
+  - **投递结果未知** → 留在 `waiting_reviewer`，沿用前置的步骤对账与提示。
+  为此 `dispatchRereview` 只返回派发结果，由调用方决定 `failRun` 还是回到闸门。
 - 通知：**不新增里程碑种类**。反馈 turn 的处置是 `result`（`FEEDBACK_TURN`），source 完成
   时本来就会响一次 `session_result_ready`，点进去就是 source 会话，面板上正是下一轮闸门。
 
