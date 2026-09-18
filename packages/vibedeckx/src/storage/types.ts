@@ -2086,6 +2086,8 @@ export interface Storage {
     getAllActive(): Promise<WorkflowRun[]>;
     getActiveBySession(sessionId: string): Promise<WorkflowRun | undefined>;
     getLatestCompletedBySource(sourceSessionId: string): Promise<WorkflowRun | undefined>;
+    /** The run of one round of a review loop (latest row if a round was ever re-created). */
+    getLoopRound(loopId: string, round: number): Promise<WorkflowRun | undefined>;
     /**
      * Source sessions on this branch that have at least one completed review —
      * i.e. the exact set for which `getLatestCompletedBySource` can return a

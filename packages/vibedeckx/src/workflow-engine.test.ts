@@ -1796,6 +1796,246 @@ describe("WorkflowEngine", () => {
     });
   });
 
+  // Phase 2 cut 1 (docs/superpowers/specs/2026-09-18-workflow-phase2-review-loop-cut1-design.md):
+  // one run per round; the next round's gate IS the next round's run.
+  describe("review loop", () => {
+    const emitCompleted = (sessionId: string, turnEndEntryIndex: number) =>
+      bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId, turnEndEntryIndex });
+    const statusOf = async (runId: string) => (await storage.workflowRuns.getById(runId))?.status;
+    const settle = () => new Promise((r) => setTimeout(r, 60));
+    const activeRuns = () => storage.workflowRuns.getActive("p1", "dev");
+
+    const startLoop = (maxRounds = 3) => engine.startAdhocReview({
+      project, branch: "dev", sourceSessionId: "s-src", reviewFocus: "focus on tests", loop: { maxRounds },
+    });
+    /** Reviewer finishes its open turn with `reply`; wait for the feedback gate. */
+    async function reviewerVerdict(run: { id: string }, reply: string) {
+      emitCompleted("s-rev", reviewerTurnEnd(reply));
+      await vi.waitFor(async () => expect(await statusOf(run.id)).toBe("waiting_feedback"));
+    }
+    /** Source finishes the turn the feedback opened. Returns its turn_end index. */
+    function sourceAppliesFeedback(reply = "Applied the feedback.") {
+      sourceEntries.push({ type: "assistant", content: reply, timestamp: 1 }, { type: "turn_end", timestamp: 2 });
+      const turnEnd = sourceEntries.length - 1;
+      emitCompleted("s-src", turnEnd);
+      return turnEnd;
+    }
+    async function gateOf(loopId: string, round: number) {
+      return vi.waitFor(async () => {
+        const gate = (await activeRuns()).find((r) => r.loop_id === loopId && r.round === round);
+        expect(gate).toBeDefined();
+        return gate!;
+      });
+    }
+    const NEEDS = "Found a bug in foo.ts.\n\n1. **Verdict — needs-changes**\n2. Blocking findings: foo.ts:3";
+    const SHIP = "All good now.\n\n1. **Verdict：** ship\n2. Blocking findings: none";
+
+    it("stores the parsed verdict with the feedback — for single-pass reviews too", async () => {
+      const run = await start();
+      await reviewerVerdict(run, NEEDS);
+      expect(await storage.workflowRuns.getById(run.id)).toMatchObject({ verdict: "needs-changes", loop_id: null });
+      const unreadable = await storage.workflowRuns.getById(run.id);
+      expect(unreadable?.feedback_snapshot).toContain("Found a bug");
+    });
+
+    it("a verdict it cannot read exactly stays null — never a guessed ship", async () => {
+      const run = await start();
+      await reviewerVerdict(run, "Verdict: do not ship this yet");
+      expect((await storage.workflowRuns.getById(run.id))?.verdict).toBeNull();
+    });
+
+    it("needs-changes → feedback → source done ⇒ the round-2 gate appears, holding only the source", async () => {
+      const run = await startLoop();
+      expect(run).toMatchObject({ loop_id: run.id, round: 1, max_rounds: 3 });
+      await reviewerVerdict(run, NEEDS);
+      await engine.approveFeedback(run.id);
+      expect(await activeRuns()).toHaveLength(0);
+
+      const turnEnd = sourceAppliesFeedback();
+      const gate = await gateOf(run.id, 2);
+      expect(gate).toMatchObject({
+        status: "waiting_rereview", loop_id: run.id, round: 2, max_rounds: 3, reviewer_session_id: null,
+        source_session_id: "s-src", source_turn_end_index: turnEnd, review_focus: "focus on tests", verdict: null,
+      });
+      expect(engine.isSessionInActiveRun("s-src")).toBe(true);
+      expect(engine.isSessionInActiveRun("s-rev")).toBe(false);
+      expect(engine.shouldSuppressAgentEvent("s-rev")).toBe(false);
+      // The gate occupies the source like any active run.
+      await expect(start()).rejects.toMatchObject({ code: "session-busy" });
+    });
+
+    it("full loop: needs-changes → fix → re-review on the SAME reviewer → ship → accept ends it", async () => {
+      const run = await startLoop();
+      await reviewerVerdict(run, NEEDS);
+      await engine.approveFeedback(run.id);
+      sourceAppliesFeedback();
+      const gate = await gateOf(run.id, 2);
+
+      await storage.agentSessions.updateStatus("s-rev", "stopped");
+      const round2 = await engine.approveRereview(gate.id);
+      expect(round2).toMatchObject({ id: gate.id, status: "waiting_reviewer", reviewer_session_id: "s-rev", error: null });
+      expect(agentOps.prepareReviewer).toHaveBeenCalledTimes(1); // round 1 only — round 2 re-used the reviewer
+      const prompt = agentOps.sendUserMessage.mock.calls.at(-1)!;
+      expect(prompt[0]).toBe("s-rev");
+      expect(prompt[1]).toContain("previous review");
+      expect((await storage.workflowRunSteps.listByRun(gate.id)).map((st) => st.kind)).toEqual(["rereview_prompt"]);
+      // It reviews the source's latest completed turn.
+      expect(round2.source_turn_end_index).toBe(sourceEntries.length - 1);
+
+      await reviewerVerdict(round2, SHIP);
+      expect((await storage.workflowRuns.getById(gate.id))?.verdict).toBe("ship");
+      const sendsBefore = agentOps.sendUserMessage.mock.calls.length;
+      const done = await engine.acceptResult(gate.id);
+      expect(done.status).toBe("completed");
+      expect(agentOps.sendUserMessage.mock.calls.length).toBe(sendsBefore); // nothing sent
+      expect(await activeRuns()).toHaveLength(0);
+      expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+    });
+
+    it("ship: even if the user still sends the notes, no further round is scheduled", async () => {
+      const run = await startLoop();
+      await reviewerVerdict(run, SHIP);
+      await engine.approveFeedback(run.id);
+      sourceAppliesFeedback();
+      await vi.waitFor(async () => {
+        expect((await storage.workflowRunSteps.listByRun(run.id)).find((st) => st.kind === "feedback")?.status).toBe("claimed");
+      });
+      expect(await activeRuns()).toHaveLength(0);
+    });
+
+    it("a single-pass review never produces a gate", async () => {
+      const run = await start();
+      await reviewerVerdict(run, NEEDS);
+      await engine.approveFeedback(run.id);
+      sourceAppliesFeedback();
+      await vi.waitFor(async () => {
+        expect((await storage.workflowRunSteps.listByRun(run.id)).find((st) => st.kind === "feedback")?.status).toBe("claimed");
+      });
+      expect(await activeRuns()).toHaveLength(0);
+    });
+
+    it("a review the user started in the meantime wins: the old loop does not continue", async () => {
+      const run = await startLoop();
+      await reviewerVerdict(run, NEEDS);
+      await engine.approveFeedback(run.id);
+      // Source already finished (status stopped), its completion not processed yet:
+      sourceEntries.push({ type: "assistant", content: "Applied.", timestamp: 1 }, { type: "turn_end", timestamp: 2 });
+      const feedbackTurnEnd = sourceEntries.length - 1;
+      const newer = await engine.startAdhocReview({
+        project, branch: "dev", sourceSessionId: "s-src", reviewerAgentType: "claude-code", newReviewerSessionId: "s-rev-2",
+      });
+      emitCompleted("s-src", feedbackTurnEnd);
+      await vi.waitFor(async () => {
+        expect((await storage.workflowRunSteps.listByRun(run.id)).find((st) => st.kind === "feedback")?.status).toBe("claimed");
+      });
+      const active = await activeRuns();
+      expect(active.map((r) => r.id)).toEqual([newer.id]);
+    });
+
+    it("restart: a feedback turn that completed while we were down still produces the gate", async () => {
+      const run = await startLoop();
+      await reviewerVerdict(run, NEEDS);
+      await engine.approveFeedback(run.id);
+      sourceEntries.push({ type: "assistant", content: "Applied.", timestamp: 1 }, { type: "turn_end", timestamp: 2, outcome: "completed" } as AgentMessage);
+
+      const engine2 = new WorkflowEngine(storage, agentOps);
+      await engine2.init();
+      const gate = (await activeRuns()).find((r) => r.round === 2);
+      expect(gate).toMatchObject({ status: "waiting_rereview", loop_id: run.id });
+      expect(engine2.isSessionInActiveRun("s-src")).toBe(true);
+      // …and a gate that is simply sitting there survives a restart untouched.
+      const engine3 = new WorkflowEngine(storage, agentOps);
+      await engine3.init();
+      expect(await storage.workflowRuns.getById(gate!.id)).toMatchObject({ status: "waiting_rereview", error: null });
+      expect(engine3.isSessionInActiveRun("s-src")).toBe(true);
+    });
+
+    describe("the re-review gate", () => {
+      async function toGate(maxRounds = 3) {
+        const run = await startLoop(maxRounds);
+        await reviewerVerdict(run, NEEDS);
+        await engine.approveFeedback(run.id);
+        sourceAppliesFeedback();
+        await storage.agentSessions.updateStatus("s-rev", "stopped");
+        return gateOf(run.id, 2);
+      }
+
+      it("a busy reviewer does NOT end the loop: back to the gate, reviewer unbound, retry works", async () => {
+        const gate = await toGate();
+        // Passes the pre-checks, then loses the race under the session lock.
+        const realGetById = storage.agentSessions.getById.bind(storage.agentSessions);
+        let reads = 0;
+        const spy = vi.spyOn(storage.agentSessions, "getById").mockImplementation(async (id: string, ...rest: never[]) => {
+          const row = await realGetById(id, ...rest);
+          if (id === "s-rev" && row && ++reads >= 3) return { ...row, status: "running" as const };
+          return row;
+        });
+        await expect(engine.approveRereview(gate.id)).rejects.toMatchObject({ code: "session-busy" });
+        spy.mockRestore();
+
+        const back = await storage.workflowRuns.getById(gate.id);
+        expect(back).toMatchObject({ status: "waiting_rereview", reviewer_session_id: null });
+        expect(back?.error).toContain("复审未发出");
+        expect(engine.isSessionInActiveRun("s-rev")).toBe(false);
+
+        expect((await engine.approveRereview(gate.id)).status).toBe("waiting_reviewer");
+      });
+
+      it("refuses up front while the reviewer is mid-turn or the source is running — the gate is untouched", async () => {
+        const gate = await toGate();
+        await storage.agentSessions.updateStatus("s-rev", "running");
+        await expect(engine.approveRereview(gate.id)).rejects.toMatchObject({ code: "session-busy" });
+        await storage.agentSessions.updateStatus("s-rev", "stopped");
+        await storage.agentSessions.updateStatus("s-src", "running");
+        await expect(engine.approveRereview(gate.id)).rejects.toMatchObject({ code: "source-running" });
+        expect(await storage.workflowRuns.getById(gate.id)).toMatchObject({ status: "waiting_rereview", error: null });
+      });
+
+      it("a prompt that did not leave returns to the gate instead of failing the run", async () => {
+        const gate = await toGate();
+        agentOps.sendUserMessage.mockResolvedValueOnce(false);
+        await expect(engine.approveRereview(gate.id)).rejects.toMatchObject({ code: "send-failed" });
+        expect(await storage.workflowRuns.getById(gate.id)).toMatchObject({ status: "waiting_rereview", reviewer_session_id: null });
+        expect((await storage.notificationOutbox.listAfter(0, 100)).some((r) => r.kind === "workflow_failed")).toBe(false);
+      });
+
+      it("a deleted reviewer cannot continue the loop; ending it is the way out", async () => {
+        const gate = await toGate();
+        await storage.agentSessions.delete("s-rev");
+        await expect(engine.approveRereview(gate.id)).rejects.toMatchObject({ code: "reviewer-unavailable" });
+        expect(await statusOf(gate.id)).toBe("waiting_rereview");
+        const ended = await engine.cancelRun(gate.id);
+        expect(ended?.status).toBe("cancelled");
+        expect(engine.isSessionInActiveRun("s-src")).toBe(false);
+      });
+
+      it("at the cap the gate needs an explicit extension, which adds exactly one round", async () => {
+        const gate = await toGate(1);
+        expect(gate).toMatchObject({ round: 2, max_rounds: 1 });
+        await expect(engine.approveRereview(gate.id)).rejects.toMatchObject({ code: "bad-state" });
+        expect(await statusOf(gate.id)).toBe("waiting_rereview");
+
+        const round2 = await engine.approveRereview(gate.id, { extend: true });
+        expect(round2).toMatchObject({ status: "waiting_reviewer", max_rounds: 2 });
+
+        // Round 3 is over the (extended) cap again.
+        await reviewerVerdict(round2, NEEDS);
+        await engine.approveFeedback(gate.id);
+        sourceAppliesFeedback("Applied again.");
+        const gate3 = await gateOf(gate.loop_id!, 3);
+        expect(gate3).toMatchObject({ round: 3, max_rounds: 2 });
+      });
+
+      it("rejects gate actions that do not belong to the state", async () => {
+        const gate = await toGate();
+        await expect(engine.approveFeedback(gate.id)).rejects.toMatchObject({ code: "bad-state" });
+        await expect(engine.acceptResult(gate.id)).rejects.toMatchObject({ code: "bad-state" });
+        const run = await start().catch(() => null);
+        expect(run).toBeNull(); // source is held by the gate
+      });
+    });
+  });
+
   describe("workflow milestones", () => {
     const outboxRows = () => storage.notificationOutbox.listAfter(0, 100);
 

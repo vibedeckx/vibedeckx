@@ -69,6 +69,13 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         .executeTakeFirst();
       return row ? asRun(row) : undefined;
     },
+    getLoopRound: async (loopId, round) => {
+      const row = await kdb.selectFrom("workflow_runs").selectAll()
+        .where("loop_id", "=", loopId).where("round", "=", round)
+        .orderBy("created_at", "desc").orderBy(sql`rowid`, "desc")
+        .executeTakeFirst();
+      return row ? asRun(row) : undefined;
+    },
     listReviewedSourceSessions: async (projectId, branch) => {
       const rows = await kdb
         .selectFrom("workflow_runs")

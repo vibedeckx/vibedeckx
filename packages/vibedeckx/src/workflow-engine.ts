@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { ReviewSpan, Storage, WorkflowRun, WorkflowRunStep, WorkflowRunStepKind } from "./storage/types.js";
+import type { AgentSession, ReviewSpan, Storage, WorkflowRun, WorkflowRunStep, WorkflowRunStepKind } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { AgentMessage, AgentType, NotificationDisposition, TextPart } from "./agent-types.js";
 import { findTurnOpeningUserEntryIndex, reviewReadyId, workflowFailedId } from "./notification-milestones.js";
@@ -7,6 +7,7 @@ import { deliverInstruction, instructionContentHash, serializeSessionMutation } 
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
 import { captureSnapshot, computeScope, resolveStartSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
 import { snippetTitle } from "./utils/session-title.js";
+import { parseVerdict } from "./utils/review-verdict.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 import type {
   ActivateAgentSessionInput,
@@ -72,6 +73,8 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "cancelled"
  * its waiting state, so a real completion is still attributed.
  */
 export const DELIVERY_UNKNOWN_PREFIX = "投递结果未知";
+const REREVIEW_DELIVERY_UNKNOWN =
+  `${DELIVERY_UNKNOWN_PREFIX}：复审任务可能已送达 reviewer。若其完成，结果会自动归属；否则请结束本次 review 后重新发起。`;
 
 /** The engine's own abort: the step was abandoned (cancel/takeover) while the send was in flight. */
 class DispatchSupersededError extends Error {}
@@ -556,7 +559,16 @@ export interface AdhocReviewOptions {
   /** Stable identities supplied by a hub durable-intent replay. */
   runId?: string;
   newReviewerSessionId?: string;
+  /**
+   * Review loop (Phase 2 cut 1): after the source finishes the turn the
+   * feedback opened, the engine puts up a gate for the next re-review round —
+   * every hop still user-confirmed. Absent = today's single-pass review.
+   */
+  loop?: { maxRounds: number };
 }
+
+export const LOOP_MAX_ROUNDS_DEFAULT = 3;
+export const LOOP_MAX_ROUNDS_LIMIT = 10;
 
 export class WorkflowEngine {
   private eventBus?: EventBus;
@@ -798,6 +810,224 @@ export class WorkflowEngine {
    * when one exists, otherwise the source session (a run can fail before its
    * reviewer is ever created).
    */
+  // ---------- review loop (Phase 2 cut 1) ----------
+
+  /**
+   * The gate run for the next round, if this finished round continues a loop:
+   * a loop run whose verdict was not `ship`, and whose source has not been
+   * taken by a review the user started in the meantime. The source was
+   * released when the feedback was sent, and this claim is asynchronous — a
+   * newer review wins and the old loop simply stops. This in-memory check
+   * mirrors the start entry's synchronous reservation; the insert itself is
+   * guarded again inside the transaction against the persisted active runs.
+   */
+  private nextRoundGate(run: WorkflowRun, sourceTurnEndIndex: number) {
+    if (!run.loop_id || run.verdict === "ship") return undefined;
+    const holder = this.participants.get(run.source_session_id);
+    if (holder && holder.runId !== run.id) return undefined;
+    return {
+      id: randomUUID(),
+      project_id: run.project_id,
+      branch: run.branch,
+      source_session_id: run.source_session_id,
+      source_turn_end_index: sourceTurnEndIndex,
+      review_focus: run.review_focus,
+      // Captured when the re-review is actually confirmed — the workspace may
+      // keep changing while the gate waits.
+      review_target: null,
+      loop_id: run.loop_id,
+      round: run.round + 1,
+      max_rounds: run.max_rounds,
+    };
+  }
+
+  /** The insert is conditional (see claimStepAndTransition); read it back to know. */
+  private async announceNextRoundGate(nextRunId: string | undefined): Promise<void> {
+    if (!nextRunId) return;
+    const gate = await this.storage.workflowRuns.getById(nextRunId);
+    if (!gate) return;
+    this.trackParticipants(gate);
+    this.emitRunUpdated(gate);
+  }
+
+  /** The reviewer the loop continues with: the previous round's. */
+  private async loopReviewerSessionId(gate: WorkflowRun): Promise<string | null> {
+    if (!gate.loop_id) return null;
+    const previous = await this.storage.workflowRuns.getLoopRound(gate.loop_id, gate.round - 1);
+    return previous?.reviewer_session_id ?? null;
+  }
+
+  /**
+   * Gate action `rereview`: confirm the next round. From here on the round is
+   * an ordinary re-review on the reuse path.
+   *
+   * Unlike the one-shot start, a prompt that provably did not leave does NOT
+   * fail the run — one concurrent chat with the reviewer must not end the
+   * loop. The run returns to the gate with the reviewer unbound, and the same
+   * gate can be retried. An unknown outcome stays in `waiting_reviewer` under
+   * the usual step reconciliation.
+   */
+  async approveRereview(runId: string, opts: { extend?: boolean } = {}): Promise<WorkflowRun> {
+    const gate = await this.storage.workflowRuns.getById(runId);
+    if (!gate || gate.status !== "waiting_rereview") {
+      throw new WorkflowError("bad-state", "run 不在等待复审确认的状态");
+    }
+    const overCap = gate.max_rounds !== null && gate.round > gate.max_rounds;
+    if (overCap && !opts.extend) {
+      throw new WorkflowError("bad-state", `已达轮次上限（${gate.max_rounds} 轮），需要确认追加一轮`);
+    }
+    const project = await this.storage.projects.getById(gate.project_id);
+    if (!project?.path) throw new WorkflowError("reviewer-unavailable", "项目在本机没有可用路径");
+    const reviewerSessionId = await this.loopReviewerSessionId(gate);
+    if (!reviewerSessionId) throw new WorkflowError("reviewer-unavailable", "找不到上一轮的 reviewer session");
+
+    const held = this.participants.get(reviewerSessionId);
+    const activeElsewhere = await this.storage.workflowRuns.getActiveBySession(reviewerSessionId);
+    if ((held && held.runId !== gate.id) || (activeElsewhere && activeElsewhere.id !== gate.id)) {
+      throw new WorkflowError("session-busy", "上一轮的 reviewer 正在另一个 review 里");
+    }
+    const reviewerNow = await this.storage.agentSessions.getById(reviewerSessionId);
+    if (reviewerNow?.status === "running") {
+      throw new WorkflowError("session-busy", "reviewer 正在回复中，请等待其完成后再发起复审");
+    }
+    const reviewerSession = await this.assertReviewerReusable(reviewerSessionId, gate.project_id, gate.branch);
+
+    const sourceSession = await this.storage.agentSessions.getById(gate.source_session_id);
+    if (sourceSession?.status === "running") {
+      throw new WorkflowError("source-running", "source session 正在运行，请等待当前 turn 完成后再发起复审");
+    }
+    // Review what the user sees NOW: they may have kept working with the
+    // source while the gate waited.
+    const entries = await this.agentOps.getRawMessages(gate.source_session_id);
+    const turnEndIndex = extractLatestTurnEndIndex(entries) ?? gate.source_turn_end_index;
+    const sourceProjection = await this.storage.agentSessions.getActivityById(gate.source_session_id, "workflow-reviewer");
+    const worktreePath = sourceProjection?.worktreePath ?? resolveWorktreePath(project.path, gate.branch);
+    const target = captureReviewTarget(worktreePath);
+
+    // Reserve synchronously with the CAS's own await boundary in mind: the
+    // reviewer becomes a participant before anything is sent to it.
+    this.participants.set(reviewerSessionId, { runId: gate.id, role: "reviewer" });
+    const claimed = await this.storage.workflowRuns.transition(gate.id, "waiting_rereview", "waiting_reviewer", {
+      reviewer_session_id: reviewerSessionId, error: null,
+    });
+    if (!claimed) {
+      this.participants.delete(reviewerSessionId);
+      throw new WorkflowError("bad-state", "run 状态已变化（可能已被处理）");
+    }
+    await this.storage.workflowRuns.update(gate.id, {
+      source_turn_end_index: turnEndIndex,
+      review_target: JSON.stringify(target),
+      ...(overCap ? { max_rounds: gate.round } : {}),
+    });
+    const run = (await this.storage.workflowRuns.getById(gate.id))!;
+
+    const outcome = await this.dispatchRereview({
+      run, reviewerSession, project: { id: project.id, path: project.path }, entries, turnEndIndex, target,
+    });
+    if (outcome.kind === "mode-switch-failed" || outcome.kind === "no_side_effect") {
+      const busy = outcome.kind === "no_side_effect" && outcome.busy;
+      const reason = outcome.kind === "mode-switch-failed"
+        ? "无法将 reviewer 恢复为只读 plan 模式，复审未发出。可重试，或结束循环。"
+        : busy
+          ? "reviewer 正在回复中，复审未发出。请等待其完成后重试。"
+          : "复审任务未送达 reviewer（其 session 可能未运行）。可重试，或结束循环。";
+      const back = await this.storage.workflowRuns.transition(gate.id, "waiting_reviewer", "waiting_rereview", {
+        reviewer_session_id: null, error: reason,
+      });
+      if (back) this.participants.delete(reviewerSessionId);
+      const rolled = await this.storage.workflowRuns.getById(gate.id);
+      if (rolled) this.emitRunUpdated(rolled);
+      throw new WorkflowError(busy ? "session-busy" : outcome.kind === "mode-switch-failed" ? "reviewer-unavailable" : "send-failed", reason);
+    }
+    const started = outcome.kind === "unknown"
+      ? await this.storage.workflowRuns.update(gate.id, { error: REREVIEW_DELIVERY_UNKNOWN }) ?? run
+      : run;
+    this.emitRunUpdated(started);
+    return started;
+  }
+
+  /**
+   * Gate action `accept`: take the reviewer's result as final and finish the
+   * run WITHOUT sending anything to the source. The natural exit on a `ship`
+   * verdict (the panel makes it the primary action there), but allowed on any
+   * verdict — it is the user's call. A loop ends here: no feedback step, so no
+   * next-round gate.
+   */
+  async acceptResult(runId: string): Promise<WorkflowRun> {
+    const accepted = await this.storage.workflowRuns.transition(runId, "waiting_feedback", "completed", { error: null });
+    if (!accepted) throw new WorkflowError("bad-state", "run 不在等待反馈确认的状态");
+    const done = (await this.storage.workflowRuns.getById(runId))!;
+    this.untrackRun(done);
+    this.emitRunUpdated(done);
+    return done;
+  }
+
+  // ---------- re-review (reuse path), shared by the start entry and the loop gate ----------
+
+  /**
+   * The checks that make an existing session usable as this workspace's
+   * reviewer right now. Throws `reviewer-unavailable`; returns the row.
+   */
+  private async assertReviewerReusable(reviewerSessionId: string, projectId: string, branch: string | null): Promise<AgentSession> {
+    const reviewerSession = await this.storage.agentSessions.getById(reviewerSessionId);
+    if (!reviewerSession) {
+      throw new WorkflowError("reviewer-unavailable", "上次 reviewer session 已不存在");
+    }
+    const reviewerProjection = await this.storage.agentSessions.getActivityById(reviewerSessionId, "workflow-reviewer");
+    if (!reviewerProjection || reviewerProjection.projectId !== projectId) {
+      throw new WorkflowError("reviewer-unavailable", "reviewer session 不属于当前项目");
+    }
+    if (reviewerProjection.branch !== branch) {
+      throw new WorkflowError("reviewer-unavailable", "reviewer session 不属于当前 branch");
+    }
+    if (reviewerProjection.binding === "checkout"
+      && (reviewerProjection.checkoutDeletedAt !== null || reviewerProjection.checkoutStatus !== "ready")) {
+      throw new WorkflowError("reviewer-unavailable", "reviewer session 的 workspace checkout 不可用");
+    }
+    if (!REVIEWER_AGENT_TYPES.has(reviewerSession.agent_type as AgentType)) {
+      throw new WorkflowError("reviewer-unavailable", "reviewer agent 类型不可用");
+    }
+    if (reviewerSession.status !== "stopped") {
+      throw new WorkflowError("reviewer-unavailable", "reviewer session 正在运行或不可用");
+    }
+    return reviewerSession;
+  }
+
+  /**
+   * Put the reviewer back in read-only plan mode if needed and dispatch the
+   * re-review prompt. Reports what happened and decides nothing: the one-shot
+   * start fails its run on a prompt that did not leave, the loop gate returns
+   * to the gate.
+   */
+  private async dispatchRereview(opts: {
+    run: WorkflowRun;
+    reviewerSession: AgentSession;
+    project: { id: string; path: string };
+    entries: AgentMessage[];
+    turnEndIndex: number;
+    target: ReviewTarget;
+  }): Promise<DispatchOutcome | { kind: "mode-switch-failed" }> {
+    if (opts.reviewerSession.permission_mode !== "plan") {
+      let switched = false;
+      try {
+        switched = await this.agentOps.switchMode(opts.reviewerSession.id, opts.project.path, "plan");
+      } catch { /* reported as a stable outcome below */ }
+      if (!switched) return { kind: "mode-switch-failed" };
+    }
+    const prompt = buildRereviewerPrompt({
+      taskContext: extractTaskContextBefore(opts.entries, opts.turnEndIndex),
+      // Scoped to the fix turn: an older turn's summary would describe the
+      // pre-review state and mislead the acceptance pass.
+      authorSelfReport: extractAuthorSelfReport(opts.entries, opts.turnEndIndex, { withinTurn: true }),
+      reviewFocus: opts.run.review_focus,
+      target: opts.target,
+    });
+    return this.dispatchStep({
+      run: opts.run, kind: "rereview_prompt", role: "reviewer", sessionId: opts.reviewerSession.id,
+      payload: prompt, projectPath: opts.project.path, turn: REVIEWER_TURN,
+    });
+  }
+
   // ---------- dispatch identity (Phase 2 prerequisite design §2) ----------
 
   /**
@@ -1149,30 +1379,9 @@ export class WorkflowEngine {
         ?? resolveWorktreePath(opts.project.path, opts.branch);
       const target = captureReviewTarget(worktreePath);
 
-      let reviewerSession = null;
-      if (opts.reviewerSessionId) {
-        reviewerSession = await this.storage.agentSessions.getById(opts.reviewerSessionId);
-        if (!reviewerSession) {
-          throw new WorkflowError("reviewer-unavailable", "上次 reviewer session 已不存在");
-        }
-        const reviewerProjection = await this.storage.agentSessions.getActivityById(opts.reviewerSessionId, "workflow-reviewer");
-        if (!reviewerProjection || reviewerProjection.projectId !== opts.project.id) {
-          throw new WorkflowError("reviewer-unavailable", "reviewer session 不属于当前项目");
-        }
-        if (reviewerProjection.branch !== opts.branch) {
-          throw new WorkflowError("reviewer-unavailable", "reviewer session 不属于当前 branch");
-        }
-        if (reviewerProjection.binding === "checkout"
-          && (reviewerProjection.checkoutDeletedAt !== null || reviewerProjection.checkoutStatus !== "ready")) {
-          throw new WorkflowError("reviewer-unavailable", "reviewer session 的 workspace checkout 不可用");
-        }
-        if (!REVIEWER_AGENT_TYPES.has(reviewerSession.agent_type as AgentType)) {
-          throw new WorkflowError("reviewer-unavailable", "reviewer agent 类型不可用");
-        }
-        if (reviewerSession.status !== "stopped") {
-          throw new WorkflowError("reviewer-unavailable", "reviewer session 正在运行或不可用");
-        }
-      }
+      const reviewerSession = opts.reviewerSessionId
+        ? await this.assertReviewerReusable(opts.reviewerSessionId, opts.project.id, opts.branch)
+        : null;
 
       if (existingRun && existingRun.source_turn_end_index !== turnEndIndex) {
         throw new WorkflowError("reviewer-unavailable", "workflow run cutoff does not match the replay request");
@@ -1190,6 +1399,7 @@ export class WorkflowEngine {
           // Reuse skips the preparing state entirely: its prompt is delivered
           // below, before this method returns.
           status: opts.reviewerSessionId ? "waiting_reviewer" : "preparing",
+          ...(opts.loop ? { loop_id: runId, round: 1, max_rounds: opts.loop.maxRounds } : {}),
         });
       this.trackParticipants(run);
 
@@ -1207,28 +1417,16 @@ export class WorkflowEngine {
       }
 
       if (opts.reviewerSessionId && reviewerSession) {
-        if (reviewerSession.permission_mode !== "plan") {
-          let switched = false;
-          try {
-            switched = await this.agentOps.switchMode(opts.reviewerSessionId, opts.project.path, "plan");
-          } catch { /* normalized to a stable workflow error below */ }
-          if (!switched) {
-            await this.failRun(run, "无法将 reviewer 恢复为只读 plan 模式");
-            throw new WorkflowError("reviewer-unavailable", "无法将 reviewer 恢复为只读 plan 模式");
-          }
+        // A one-shot start has nothing to go back to: a re-review that could
+        // not be sent fails the run. (The loop gate makes the other choice —
+        // see approveRereview.)
+        const outcome = await this.dispatchRereview({
+          run, reviewerSession, project: opts.project, entries, turnEndIndex, target,
+        });
+        if (outcome.kind === "mode-switch-failed") {
+          await this.failRun(run, "无法将 reviewer 恢复为只读 plan 模式");
+          throw new WorkflowError("reviewer-unavailable", "无法将 reviewer 恢复为只读 plan 模式");
         }
-        const prompt = buildRereviewerPrompt({
-          taskContext: extractTaskContextBefore(entries, turnEndIndex),
-          // Scoped to the fix turn: an older turn's summary would describe the
-          // pre-review state and mislead the acceptance pass.
-          authorSelfReport: extractAuthorSelfReport(entries, turnEndIndex, { withinTurn: true }),
-          reviewFocus: opts.reviewFocus ?? null,
-          target,
-        });
-        const outcome = await this.dispatchStep({
-          run, kind: "rereview_prompt", role: "reviewer", sessionId: opts.reviewerSessionId,
-          payload: prompt, projectPath: opts.project.path, turn: REVIEWER_TURN,
-        });
         if (outcome.kind === "no_side_effect") {
           const message = outcome.busy
             ? "上次 reviewer 正在运行，无法投递复审任务"
@@ -1237,9 +1435,7 @@ export class WorkflowEngine {
           throw new WorkflowError(outcome.busy ? "session-busy" : "send-failed", message);
         }
         const started = outcome.kind === "unknown"
-          ? await this.storage.workflowRuns.update(run.id, {
-            error: `${DELIVERY_UNKNOWN_PREFIX}：复审任务可能已送达 reviewer。若其完成，结果会自动归属；否则请结束本次 review 后重新发起。`,
-          }) ?? run
+          ? await this.storage.workflowRuns.update(run.id, { error: REREVIEW_DELIVERY_UNKNOWN }) ?? run
           : run;
         this.emitRunUpdated(started);
         return started;
@@ -1554,22 +1750,28 @@ export class WorkflowEngine {
       //    went back to the gate; leaving it there invites a second send of
       //    feedback that was already delivered and acted on.
       const run = await this.storage.workflowRuns.getById(step.run_id);
+      // Review loop: this is where the next hop attaches. The gate run for the
+      // next round is inserted by the SAME transaction that claims the step.
+      const nextRun = run ? this.nextRoundGate(run, boundary) : undefined;
       if (run && (run.status === "sending_feedback" || run.status === "waiting_feedback")) {
         const completed = await this.storage.workflowRuns.claimStepAndTransition({
           stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
           run: { id: run.id, from: run.status, to: "completed", patch: { error: null } },
+          nextRun,
         });
         if (completed) {
           const done = await this.storage.workflowRuns.getById(run.id);
           if (done) { this.untrackRun(done); this.emitRunUpdated(done); }
+          await this.announceNextRoundGate(nextRun?.id);
           return;
         }
         // Lost the run CAS — approveFeedback's own transition just completed
         // it. The whole transaction rolled back, so claim the step on its own.
       }
-      await this.storage.workflowRuns.claimStepAndTransition({
-        stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
+      const claimed = await this.storage.workflowRuns.claimStepAndTransition({
+        stepId: step.id, turnEndIndex: boundary, outputSnapshot: output, nextRun,
       });
+      if (claimed) await this.announceNextRoundGate(nextRun?.id);
       return;
     }
 
@@ -1588,7 +1790,8 @@ export class WorkflowEngine {
         id: run.id, from: "waiting_reviewer", to: "waiting_feedback",
         // `error: null` also clears a "delivery outcome unknown" note: the
         // completion just answered it.
-        patch: { feedback_snapshot: feedback, error: driftNote },
+        // Parsed by exact match; null = unrecognised = the human decides.
+        patch: { feedback_snapshot: feedback, error: driftNote, verdict: parseVerdict(output) },
         outbox: this.reviewReadyOutbox(run, step.session_id, boundary),
       },
     });
@@ -1801,7 +2004,9 @@ export class WorkflowEngine {
       (await this.storage.workflowRuns.transition(runId, "preparing", "cancelled", patch)) ||
       (await this.storage.workflowRuns.transition(runId, "waiting_reviewer", "cancelled", patch)) ||
       (await this.storage.workflowRuns.transition(runId, "waiting_feedback", "cancelled", patch)) ||
-      (await this.storage.workflowRuns.transition(runId, "discussing", "cancelled", patch));
+      (await this.storage.workflowRuns.transition(runId, "discussing", "cancelled", patch)) ||
+      // Declining the next round: the loop ends here.
+      (await this.storage.workflowRuns.transition(runId, "waiting_rereview", "cancelled", patch));
 
     if (!cancelled) {
       const current = await this.storage.workflowRuns.getById(runId);
