@@ -22,11 +22,12 @@ import { findWorkspaceMissingOnRemote, workspaceMissingOnRemoteBody } from "../w
 import { ResidentProcessLimitError, shouldShowBranchSessionInList, type AliveAgentSession } from "../resident-agent-processes.js";
 import { isSessionPurpose, logSessionLifecycle } from "../session-lifecycle-log.js";
 import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
-import { createHash, randomUUID } from "crypto";
+import { randomUUID } from "crypto";
 import { MODEL_SUGGESTIONS } from "../protocol/model-suggestions.js";
 import { WorkspaceCheckoutUnavailableError } from "../agent-session-manager.js";
 import { forgetRemoteSession } from "../remote-session-cleanup.js";
 import { buildHistoryWindow } from "../session-history-window.js";
+import { deliverInstruction, serializeSessionMutation } from "../instruction-delivery.js";
 
 // Resolve project path from a session's projectId.
 // Handles both real DB projects and path-based pseudo IDs ("path:/some/path")
@@ -60,49 +61,6 @@ function messageTextLength(content: string | ContentPart[]): number {
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
-  const instructionReceiverToken = randomUUID();
-  const instructionDeliveryLocks = new Map<string, Promise<void>>();
-  const sessionMutationLocks = new Map<string, Promise<void>>();
-
-  async function serializeInstructionDelivery<T>(key: string, effect: () => Promise<T>): Promise<T> {
-    const previous = instructionDeliveryLocks.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const tail = previous.then(() => gate);
-    instructionDeliveryLocks.set(key, tail);
-    await previous;
-    try {
-      return await effect();
-    } finally {
-      release();
-      if (instructionDeliveryLocks.get(key) === tail) instructionDeliveryLocks.delete(key);
-    }
-  }
-
-  async function serializeSessionMutation<T>(sessionId: string, effect: () => Promise<T>): Promise<T> {
-    const previous = sessionMutationLocks.get(sessionId) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const tail = previous.then(() => gate);
-    sessionMutationLocks.set(sessionId, tail);
-    await previous;
-    try {
-      return await effect();
-    } finally {
-      release();
-      if (sessionMutationLocks.get(sessionId) === tail) sessionMutationLocks.delete(sessionId);
-    }
-  }
-
-  function instructionContentHash(content: string | ContentPart[]): string {
-    const canonical = typeof content === "string"
-      ? JSON.stringify({ type: "string", content })
-      : JSON.stringify(content.map((part) => part.type === "text"
-        ? { type: "text", text: part.text }
-        : { type: "image", mediaType: part.mediaType, data: part.data }));
-    return createHash("sha256").update(canonical).digest("hex");
-  }
-
   // Helper: proxy to a remote over its reverse-connect tunnel
   function proxyAuto(
     remoteServerId: string,
@@ -1845,61 +1803,23 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(200).send({ success: true });
       }
 
-      const deliveryKey = `${req.params.sessionId}\0${idempotencyKey}`;
-      return serializeInstructionDelivery(deliveryKey, async () => {
-      const claim = await fastify.storage.agentInstructionDeliveries.claim({
-        sessionId: req.params.sessionId,
-        idempotencyKey,
-        // The user's own text, not the delivered text: the hub-appended grant
-        // block is regenerated per turn, so hashing it would make a retry of
-        // the same key after a grant edit read as a content conflict.
-        contentHash: instructionContentHash(rawContent),
-        claimToken: instructionReceiverToken,
+      // The user's own text, not the delivered text: the hub-appended grant
+      // block is regenerated per turn, so hashing it would make a retry of
+      // the same key after a grant edit read as a content conflict.
+      const result = await deliverInstruction({
+        storage: fastify.storage, sessionId: req.params.sessionId, idempotencyKey, rawContent, deliver,
       });
-      if (claim === "conflict") {
-        return reply.code(409).send({ error: "Idempotency key was already used with different content" });
+      switch (result) {
+        case "delivered": return reply.code(200).send({ success: true });
+        case "replayed": return reply.code(200).send({ success: true, replayed: true });
+        case "conflict": return reply.code(409).send({ error: "Idempotency key was already used with different content" });
+        case "busy": return reply.code(409).send({ error: "Instruction delivery is already in progress" });
+        case "not_running": return reply.code(404).send({ error: "Session not found or not running" });
+        case "ownership_lost_before_send":
+        case "ownership_lost_after_send":
+          return reply.code(409).send({ error: "Instruction delivery ownership was lost" });
+        case "unconfirmed": return reply.code(503).send({ error: "Instruction delivery could not be confirmed" });
       }
-      if (claim === "sent") return reply.code(200).send({ success: true, replayed: true });
-      if (claim === "busy") {
-        return reply.code(409).send({ error: "Instruction delivery is already in progress" });
-      }
-      let ownershipLost = false;
-      const renew = async () => {
-        try {
-          if (!(await fastify.storage.agentInstructionDeliveries.renewClaim({
-            sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
-          }))) ownershipLost = true;
-        } catch { ownershipLost = true; }
-      };
-      await renew();
-      const heartbeat = setInterval(() => { void renew(); }, 10_000);
-      heartbeat.unref();
-      try {
-        if (ownershipLost) return reply.code(409).send({ error: "Instruction delivery ownership was lost" });
-        if (!(await deliver())) {
-          await fastify.storage.agentInstructionDeliveries.release({
-            sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
-          });
-          return reply.code(404).send({ error: "Session not found or not running" });
-        }
-        await renew();
-        if (ownershipLost) return reply.code(409).send({ error: "Instruction delivery ownership was lost" });
-        const confirmed = await fastify.storage.agentInstructionDeliveries.markSent({
-          sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
-        });
-        if (!confirmed) {
-          return reply.code(503).send({ error: "Instruction delivery could not be confirmed" });
-        }
-        return reply.code(200).send({ success: true });
-      } catch (error) {
-        await fastify.storage.agentInstructionDeliveries.release({
-          sessionId: req.params.sessionId, idempotencyKey, claimToken: instructionReceiverToken,
-        });
-        throw error;
-      } finally {
-        clearInterval(heartbeat);
-      }
-      });
     });
   });
 

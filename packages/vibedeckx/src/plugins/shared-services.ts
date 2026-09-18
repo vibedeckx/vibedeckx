@@ -7,6 +7,7 @@ import { ChatSessionManager } from "../chat-session-manager.js";
 import { ProjectChatManager } from "../project-chat-manager.js";
 import { createRemoteProjectSessionReader } from "../project-chat-tools.js";
 import { WorkflowEngine, type AgentOps } from "../workflow-engine.js";
+import { deliverInstruction, serializeSessionMutation } from "../instruction-delivery.js";
 import { EventBus } from "../event-bus.js";
 import { ProxyManager } from "../utils/proxy-manager.js";
 import type { ProxyConfig } from "../utils/proxy-manager.js";
@@ -211,9 +212,22 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
         sendAgentInstruction: async (input) => {
           if (input.target === "local") {
             const project = await opts.storage.projects.getById(input.projectId, input.userId);
-            return Boolean(project?.path) && agentSessionManager.sendUserMessage(
-              input.sessionId, input.instruction, project!.path!, input.userId,
-            );
+            if (!project?.path) return false;
+            const projectPath = project.path;
+            // Same keyed ledger and per-session mutex as the /message route, so
+            // a retried project-chat operation replays instead of re-sending.
+            // Anything short of delivered/replayed is reported as not-sent; the
+            // caller already treats an attempted-but-unconfirmed send as pending.
+            return serializeSessionMutation(input.sessionId, async () => {
+              const result = await deliverInstruction({
+                storage: opts.storage, sessionId: input.sessionId,
+                idempotencyKey: input.idempotencyKey, rawContent: input.instruction,
+                deliver: () => agentSessionManager.sendUserMessage(
+                  input.sessionId, input.instruction, projectPath, input.userId,
+                ),
+              });
+              return result === "delivered" || result === "replayed";
+            });
           }
           const activityAt = Date.now();
           const result = await proxyToRemoteAuto(
