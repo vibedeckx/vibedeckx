@@ -88,6 +88,7 @@ exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes
     "agent-session-lifecycle.ts",
     "chat-session-manager.ts",
     "routes/agent-session-routes.ts",
+    "workflow-engine.ts",
   ],
   "getLifecycleByPrepareOperationId": [
     "agent-session-lifecycle.ts",
