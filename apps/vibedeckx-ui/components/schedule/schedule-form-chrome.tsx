@@ -85,7 +85,9 @@ export function FieldLabel({
       </span>
       {after}
       <span className="flex-1" />
-      {trailing ?? (note && <span className="text-[10.5px] text-muted-foreground/80">{note}</span>)}
+      {/* leading-none: a note (e.g. Custom's mono cron key) must not make the
+          row taller than the bare label, or toggling it nudges the form. */}
+      {trailing ?? (note && <span className="text-[10.5px] leading-none text-muted-foreground/80">{note}</span>)}
     </div>
   );
 }

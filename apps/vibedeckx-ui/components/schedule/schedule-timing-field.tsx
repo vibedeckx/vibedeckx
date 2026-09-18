@@ -17,7 +17,7 @@ import {
   type CronPreview,
   type Frequency,
 } from "@/lib/schedule-cron";
-import { BOX_INPUT, CONTROL_TRIGGER, ControlBox, FieldLabel, HintLine } from "./schedule-form-chrome";
+import { BOX_INPUT, CONTROL_TRIGGER, ControlBox, FieldLabel } from "./schedule-form-chrome";
 
 const FREQUENCY_LABELS: Record<Frequency, string> = {
   minutes: "Every N minutes",
@@ -124,9 +124,32 @@ export function ScheduleTimingField({
     </ControlBox>
   );
 
+  // The preview always ends on the cron itself — in Custom too, where it echoes
+  // the input — so every mode has the same lines and the same height.
+  const footLine = <div className="font-mono text-[10.5px] text-muted-foreground/70">{cronExpr}</div>;
+
   return (
     <div className="flex min-w-0 flex-col gap-[7px]">
-      <FieldLabel>Schedule</FieldLabel>
+      {/* The field-order key sits in the label row, right above the cron input,
+          so it adds no line of its own when Custom is picked. Capped at the
+          input's column width (half the row less the grid gap) so it reads as
+          that input's caption; the short names fit, the long ones are on hover. */}
+      <FieldLabel
+        // `trailing` rather than `note`: the width cap needs to be a direct
+        // child of the row for its percentage to resolve against the row.
+        // 14px leading: room for descenders inside the truncate clip, still
+        // under the label's 15px so the row keeps its height.
+        trailing={frequency === "custom" ? (
+          <span
+            title="minute · hour · day of month · month · day of week"
+            className="max-w-[calc((100%-0.625rem)/2)] min-w-0 truncate font-mono text-[10.5px] leading-[14px] text-muted-foreground/80"
+          >
+            min hour day month weekday
+          </span>
+        ) : undefined}
+      >
+        Schedule
+      </FieldLabel>
       <div className="grid min-w-0 grid-cols-2 gap-2.5">
         <Select value={frequency} onValueChange={(v) => handleFrequency(v as Frequency)} disabled={disabled}>
           <SelectTrigger size="sm" aria-label="Frequency" className={CONTROL_TRIGGER}>
@@ -209,12 +232,6 @@ export function ScheduleTimingField({
         )}
       </div>
 
-      {frequency === "custom" && (
-        <HintLine>
-          <code className="font-mono text-[10.5px] text-muted-foreground">minute hour day-of-month month day-of-week</code>
-        </HintLine>
-      )}
-
       <div
         data-slot="schedule-preview"
         className="flex min-w-0 flex-col gap-[3px] rounded-[9px] border border-border/60 bg-secondary px-2.5 py-2"
@@ -240,9 +257,7 @@ export function ScheduleTimingField({
                 "never"
               )}
             </div>
-            {frequency !== "custom" && (
-              <div className="font-mono text-[10.5px] text-muted-foreground/70">{cronExpr}</div>
-            )}
+            {footLine}
           </>
         ) : (
           <>
@@ -253,6 +268,7 @@ export function ScheduleTimingField({
             <div className="w-fit">
               <TimezonePicker value={timezone} onChange={onTimezoneChange} disabled={disabled} />
             </div>
+            {footLine}
           </>
         )}
       </div>
