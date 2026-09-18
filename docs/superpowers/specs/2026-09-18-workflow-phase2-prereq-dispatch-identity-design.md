@@ -1,6 +1,8 @@
 # Phase 2 前置：投递幂等与投递身份（dispatch identity）
 
-> 日期：2026-09-18 · 分支：dev1 · 状态：**设计稿，待用户确认后出实施计划**
+> 日期：2026-09-18 · 分支：dev1 · 状态：**设计稿 v2，待用户确认后出实施计划**
+> v2 吸收了一轮外部审阅（Codex）：去掉“唯一 open 步骤”猜测、派发只对空闲 session、
+> 重试复用步骤与键、claim 与 run 迁移同事务、对账只认 `completed` 结局、claim 单一调用方、T7 暂缓。
 > 上游：主 spec [`2026-07-17-workflow-engine-review-loop-design.md`](./2026-07-17-workflow-engine-review-loop-design.md)
 > §3.2b / §6 "Phase 2 的前置"。本文只做前置，不做循环模板、不解析 verdict、不动 UI。
 > 所有 file:line 以 main = dev1 @ f769b6cd 为准。
@@ -13,7 +15,8 @@ Phase 2 的循环要让引擎**自动派发**下一跳（reviewer 完成 → 回
 implementer 完成 → 再派 reviewer……每跳仍经人工闸门确认）。今天的引擎只在
 "一个 reviewer、一次 turn"上成立，缺两样东西：
 
-1. **投递幂等**：引擎发出的每条指令，崩溃/重试后不会重复投递，也不会静默丢失。
+1. **投递幂等**：引擎发出的每条指令，HTTP/进程级重试不会重复投递，也不会静默丢失；
+   stdin 层仍是 at-least-once（见非目标）。
 2. **投递身份**：session 跨轮复用、用户穿插自己的消息时，一条 `taskCompleted`
    仍能被归到"是哪次派发触发的"，而不是靠"这个 session 是 reviewer 且状态是
    waiting_reviewer"这种整 session 粒度的猜测。
@@ -74,7 +77,9 @@ claim_token, owner_token, lease_expires_at
 第二套 claim（lifecycle spec §6.2 禁止并行 claim 集）；步骤行记录的键即该
 activationKey。
 
-**D3 唤醒路径改为等到 stdin 写完再返回。** `wakeDormantSession` 把 500ms 延迟
+**D3 唤醒路径改为等到 stdin 写完再返回。** 术语：账本与助手所说的“delivered”
+= **运行时已接受**（user entry 已持久化，且 stdin 写入已返回或 provider 已缓冲，
+如 Codex 线程未起前的缓冲分支 `:2983-2996`），不是 CLI 已消费；两者都不是 ACK。 `wakeDormantSession` 把 500ms 延迟
 写入包成 Promise 并 `await`，写失败返回 `false`；同时把 `origin` /
 `notificationDisposition` / `onUserEntryPersisted` / `dispatch` 完整转发到唤醒
 时的 `pushEntry`。这顺带修好 lifecycle 在"prepared 后休眠再激活"场景丢失
@@ -83,7 +88,7 @@ activationKey。
 500ms 的延迟写入不触及任何超时；投递账本租约 30s、心跳 10s（`:1874`），
 lifecycle 激活租约同理，都远大于该窗口。
 
-**D4 hub 远程分支记录自身结果（可拆分任务）。** 在 `proxyAuto` 前先在 hub 的
+**D4 hub 远程分支记录自身结果——本轮暂缓。** 在 `proxyAuto` 前先在 hub 的
 账本按 `(localSessionId, key)` claim；`ok` → `markSent`；语义拒绝（status>0）→
 `release`；传输歧义（status 0）→ 保留 `pending` 行让租约自然过期，返回
 `errorCode: "delivery_uncertain"` 而非平 502。仅当 `remoteServers.worker_version ≥
@@ -160,15 +165,31 @@ user entry；`ActivateAgentSessionInput`（`agent-session-lifecycle.ts:180-198`�
 
 ### 2.4 发送时序（引擎侧，四个发送点统一）
 
+**前提：引擎只向空闲 session 派发。** 目标 session `status === "running"` 时不发送，
+返回 409 `session-busy`（`requestFinalVerdict` 今天已如此，`:1312-1315`；
+`approveFeedback` 与复用路径补同样的前置检查）。空闲时派发的 user entry 必然
+自己开一个 turn，归属判定才能只靠“开 turn 的 entry”一条规则（2.5）；mid-turn
+steering 与 CLI 排队两种歧义形态由此被排除在引擎派发之外（用户自己 mid-turn
+发消息不受影响，那不是派发）。
+
+**步骤 = 一次逻辑派发，重试复用。** 步骤 id 与键在一次逻辑派发内固定：同一
+run 的同一 `(kind, round)` 只有一行；用户点“重试”（今天 = 发送失败回滚到
+`waiting_feedback` 后再点 approve）复用原步骤、原键、原 payload，让账本判断是
+复放还是重投。只有新的逻辑派发（下一轮终稿请求、下一轮反馈）才新建步骤。
+
 ```
-1. step = steps.create({ id: uuid, run_id, round, role, kind, session_id, idempotency_key, status: dispatched })
-2. 发送（activateReviewer 或 deliverInstruction→sendUserMessage），opts = { …TURN, dispatch: {id, runId, round},
+1. step = steps.getOrCreate({ run_id, kind, round }) → 已存在则复用 id/key/payload，否则
+   create({ id: uuid, role, session_id, idempotency_key: run:<runId>:step:<id>, status: dispatched })
+2. 目标 session 若 running → 409 session-busy（不发送，步骤保持 dispatched 或刚创建）
+3. 发送（activateReviewer 或 deliverInstruction→sendUserMessage），opts = { …TURN, dispatch: {id, runId, round},
    onUserEntryPersisted: idx => steps.setUserEntryIndex(step.id, idx) }
-3. 结果：
-   delivered / replayed / activated → 保持 dispatched，等 claim
-   not_running / conflict / busy / 抛错 → 先 steps.abandon(step.id, reason)，再做现有的 run 状态回滚（不变）；
-   两者都是 CAS，顺序只影响证据先落
-   unconfirmed（markSent 失败）→ 保持 dispatched（entry 已落，下一步 claim 仍能对上）
+4. 结果分三类：
+   已接受   delivered / replayed / activated → 保持 dispatched，等 claim
+   证明无副作用 not_running（entry 落库前拒绝）/ conflict / lifecycle retryable_failure
+              → steps.abandon(step.id, reason)，再做现有的 run 状态回滚；下次重试重建同 (kind, round) 步骤
+   结果未知 busy / 抛错 / unconfirmed（markSent 失败）/ lifecycle uncertain
+              → 步骤保持 dispatched，error = "投递结果未知"；run 回滚并在 run.error 提示
+                “请检查目标 session 是否已收到，再重试或结束”；重试复用同键 → 账本给出 replayed 或再投
 ```
 
 激活路径的例外：lifecycle 已占用 `onUserEntryPersisted` 写 `activation_user_entry_index`
@@ -182,73 +203,80 @@ user entry；`ActivateAgentSessionInput`（`agent-session-lifecycle.ts:180-198`�
 `round` 取该 run 当前最大 round，reviewer 侧派发 +1；`feedback` 与其对应的
 reviewer 步骤同 round。
 
-### 2.5 归属判定（claim）
+### 2.5 归属判定（claim）——单一调用方、严格匹配
 
-新引擎方法 `claimDispatch({ sessionId, turnEndEntryIndex }) → WorkflowRunStep | null`，
-由 `ChatSessionManager.handleSessionTaskCompleted` 在现有抑制检查
-（`chat-session-manager.ts:438`）之后**直接 await 调用**——不能做成第二个总线
-订阅者：引擎的总线 handler 是 `void` 异步派发（`workflow-engine.ts:548-552`），
-其结论对 chat handler 不同步可见。
+**只有 WorkflowEngine 领取。** 它已是 `session:taskCompleted` 的订阅者
+（`workflow-engine.ts:548-552`），claim 在其 `handleTaskCompleted` 内完成；
+`ChatSessionManager` 本轮**不改**（保持 `:438` 的整 session 抑制），避免两处争抢
+同一个 CAS。commander 行为不变，所以这层耦合本轮没有必要。
 
 ```
 entries = getRawMessages(sessionId); boundary = event.turnEndEntryIndex ?? extractLatestTurnEndIndex(entries)
-open = steps.getOpenBySession(sessionId)
-         .filter(s => s.user_entry_index != null && s.user_entry_index < boundary)
-   // 过滤掉尚未落 entry 的步骤，以及 entry 落在本次 turn_end 之后的步骤：一条在派发
-   // 之前就结束的 turn（陈旧 completion 与派发赛跑）绝不能被第 3 步的"唯一 open 步骤"误领
-if open.length == 0 → null（用户自己的 turn，照旧交 commander）
-
-1. opening = findTurnOpeningUserEntry(entries, boundary)   // notification-milestones.ts:44：上一个 turn_end 之后最早的 user entry
-   if opening?.dispatch && open 中有同 id → CAS claim → 返回
-2. if !opening（排队消息：user entry 落在上一个 turn_end 之前，本 turn 无 user entry）
-   latest = findLatestUserEntry(entries)                     // :86，穿越边界向回扫
-   if latest?.dispatch && open 中有同 id → CAS claim → 返回      // 必须要求 open 匹配，否则排在派发之后的用户消息会抢 claim
-3. if open.length == 1 → CAS claim（error 记 "attributed by sole open step"）
-4. open.length > 1 且无法判定 → 不 claim，返回 null 并 console.warn；run 保持原状（人工可见：panel 显示"可能错过完成事件"路径同今天）
+opening = findTurnOpeningUserEntry(entries, boundary)   // notification-milestones.ts:44：上一个 turn_end 之后最早的 user entry
+if !opening?.dispatch → null
+step = steps.getById(opening.dispatch.id)
+if !step || step.session_id !== sessionId || step.status !== "dispatched" → null
+→ 进入 2.6 的事务性 claim
 ```
 
-claim 成功后写 `turn_end_index` 与 `output_snapshot = extractLastAssistantInTurn(entries, boundary)`
-（保持今天的取法：向回扫到第一条 user entry 为止取最后一条 assistant；用户穿插
-steering 时取的是穿插后的尾巴——这是 reviewer 看过用户话之后的最终意见，作为
-交付物是对的）。
+去掉的两条规则及原因：
+- “本 turn 无 user entry 时看最新 user entry”——派发只对空闲 session（2.4），
+  派发 entry 必开 turn，这条规则失去场景。
+- “只剩一个 open 步骤就领”——`user_entry_index < boundary` 只证明消息已记录，
+  不证明 CLI 已处理它；指令在上一轮运行期间入队时，上一轮的完成也满足该条件，
+  会被误领。**宁可不领**：步骤保持 dispatched，run 不动；无法归属的情况通过
+  `run.error` 提示“收到 reviewer 完成事件但无法确认归属，请打开其窗口查看”
+  （`console.warn` 不会出现在面板上）。
+
+**legacy fallback 只对没有任何步骤行的旧 run**（升级前创建）：此时才退回
+`participants.role === reviewer && status === waiting_reviewer` 的旧规则；
+有步骤行但 claim 失败的事件一律不接收。保留一个发布周期后删除。
 
 **claim 的 session 作用域**：`branchSession` 原样复制 entries（含 `dispatch`），
-分支出的 transcript 会带着别的 session 的 dispatch id；查找永远先按
-`session_id` 取 open 步骤再比 id，绝不按 id 单独查。
+分支出的 transcript 会带着别的 session 的 dispatch id；`step.session_id !== sessionId`
+的检查就是为此，绝不按 id 单独信任。
 
-### 2.6 `handleTaskCompleted` 改为步骤驱动
+### 2.6 步骤驱动的 `handleTaskCompleted`：claim、run 迁移、outbox 同一事务
+
+先把步骤改成 `claimed` 再推进 run，中间崩溃则重启只扫 `dispatched`，这次完成
+永久漏处理。因此三件事必须一个事务：
 
 ```
-step = claimDispatch(...)
-if !step:
-   legacy fallback（本次发布保留一版）：participants.role === reviewer && run.status === waiting_reviewer → 今天的逻辑（覆盖升级前创建的、无步骤行的 run）
-   否则 return
-按 step.kind 路由：
-   reviewer_prompt / rereview_prompt / final_verdict → 今天的 waiting_reviewer→waiting_feedback（feedback_snapshot = step.output_snapshot，review_ready 里程碑 id 不变）
-   feedback（source 完成）→ 只记证据，不改 run 状态（run 早已 completed；Phase 2 在此处接循环）
+workflowRuns.claimStepAndTransition({
+  stepId, expectStepStatus: "dispatched", turnEndIndex, outputSnapshot,
+  runId, from, to, patch, outbox?                       // 扩展 transitionWithOutbox（types.ts:2045）的模式
+}) → boolean   // 任一 CAS 不成立则整体不写，不发通知
 ```
+
+按 `step.kind` 路由：
+- `reviewer_prompt / rereview_prompt / final_verdict` → 今天的
+  `waiting_reviewer → waiting_feedback`，`feedback_snapshot = outputSnapshot`
+  （= `extractLastAssistantInTurn(entries, boundary)`，取法不变），`review_ready`
+  里程碑 id 不变，全部在上面一个事务里。
+- `feedback`（source 完成）→ 只 claim 步骤（记 `turn_end_index` / `output_snapshot`），
+  不改 run（run 早已 completed；Phase 2 在此接循环）。
 
 `feedback` 步骤的 claim **不抑制 commander**：source 的完成今天就是用户面事件
-（run 已 completed、参与者已被 `untrackRun` 移除），claim 只是留证据，
-`handleSessionTaskCompleted` 照旧继续唤醒 commander。Phase 2 让引擎接管这一跳时
-再把"已 claim 的 feedback 步骤"加入抑制条件。
-
-抑制规则**不变**：`shouldSuppressAgentEvent` 仍是"该 session 是活跃 run 的
-reviewer"（整 session），因为 `discussing` 期间 reviewer 的闲聊 turn 也不该唤醒
-commander；claim 结果是它的补充而非替代。
+（run 已 completed、参与者已被 `untrackRun` 移除），`ChatSessionManager` 照旧唤醒
+commander。Phase 2 让引擎接管这一跳时再把“已 claim 的 feedback 步骤”加入抑制条件。
 
 ### 2.7 `init()` 对账（重启后没有 completion 事件可等）
 
 `repairInterruptedTurn`（`agent-session-manager.ts:4256-4370`）会补一条
 `turn_end{outcome: server_restart}` 但**不发** `session:taskCompleted`，所以
-对账是必需的，不是可选的。对每条 `status=dispatched` 的步骤：
+对账是必需的。对每条 `status=dispatched` 的步骤，先**定位派发 entry**，再**判定
+其后的 turn 结局**，判定与实时路径用同一套校验（2.5 的 opening 匹配）：
 
-| 情况 | 处理 |
-|---|---|
-| `user_entry_index` 为 null | 发送从未落 entry → `abandon("never persisted")`；run 侧沿用今天 `init()` 的回滚/提示 |
-| entry 之后存在 `turn_end` 且 `outcome ∉ {server_restart}` | 迟到归属：现在 claim 并走 2.6 的同一 handler |
-| entry 之后的 `turn_end` 是 `server_restart` | `abandon("turn interrupted by restart")`；run 保持今天的 "可能错过完成事件" 提示 |
-| entry 之后没有 `turn_end` | session 仍在跑（或进程死了但尚未 repair）→ 保持 dispatched，等 completion |
+1. 定位：`user_entry_index` 非空则用之；为空**不等于没落 entry**（entry 持久化
+   与回填之间可能崩溃；激活路径是返回后才回填）——先按 `dispatch.id` 扫 transcript，
+   激活步骤再查 session 行的 `activation_user_entry_index`；三者皆无 → `abandon("never persisted")`，
+   run 侧沿用今天 `init()` 的回滚/提示。
+2. 结局：从 entry 往后找第一个 `turn_end`：
+   - 不存在 → session 仍在跑或尚未 repair → 保持 dispatched，等实时 completion；
+   - `outcome ∈ {completed, completed_with_pending_tasks}` 且 2.5 的 opening 匹配 →
+     现在走 2.6 的同一事务（迟到归属）；
+   - 其他结局（`failed`、`server_restart`、stopped 等）→ `abandon("turn ended: <outcome>")`；
+     run 保持今天的“可能错过完成事件”提示，由用户决定重试或结束。
 
 ### 2.8 远程
 
@@ -289,10 +317,14 @@ commander；claim 结果是它的补充而非替代。
 - `agent-session-manager` 唤醒路径：`sendUserMessage` 在 stdin 写完后才 resolve；
   写失败返回 false；`onUserEntryPersisted` 与 `dispatch` 落到 entry。
 - `workflow-run-steps` 仓库：CAS 语义（claim 二次返回 false、abandon 不覆盖 claimed）。
-- 引擎 claim 几何：正常 turn；用户 steering 穿插（earliest wins）；排队消息导致
-  本 turn 无 user entry；排在派发之后的用户消息不抢 claim；分支出的 transcript
-  带外来 dispatch id 不误 claim；多 open 步骤返回 null。
-- `init()` 对账四种情况。
+- 引擎 claim：正常 turn；**陈旧完成事件**（派发 entry 落在上一轮运行期间，上一轮
+  的 completion 不得被领）；用户 mid-turn 穿插后派发 entry 仍是开 turn 的 entry；
+  分支出的 transcript 带外来 dispatch id 不误 claim；目标 running 时 409 不派发。
+- 同键重试：首投已 sent → replayed 不重投；首投 released → 重投一次；结果未知路径
+  保持 dispatched 并复用键。
+- 崩溃窗口：entry 落库后、回填前崩溃 → 对账按 dispatch.id 找回；claim 后、run 迁移前
+  不存在独立崩溃窗口（同事务）。
+- `init()` 对账：定位三来源；结局 completed / failed / server_restart / 无 turn_end。
 - `handleTaskCompleted` 步骤驱动 + legacy fallback。
 - 真机 e2e（本地 + 双服务器）：讨论轮次中用户穿插消息后终稿仍正确归属；
   派发后 kill -9 重启，步骤被 abandon、run 提示与今天一致；同键重放返回 replayed。
@@ -309,7 +341,7 @@ commander；claim 结果是它的补充而非替代。
 | T4 | 引擎四个发送点落步骤行、带键、回填 `user_entry_index`（2.4） | worker |
 | T5 | `claimDispatch` + 步骤驱动 `handleTaskCompleted` + legacy fallback + ChatSessionManager 直接调用（2.5/2.6） | worker |
 | T6 | `init()` 对账（2.7） | worker |
-| T7 | hub 远程分支记录结果 + 版本门控（D4，可拆） | hub |
+| T7 | hub 远程分支记录结果 + 版本门控（D4）——**暂缓，单独立项** | hub |
 | T8 | 真机 e2e + 主 spec §3.1/§3.2/§6 同步 | — |
 
-T1–T6 是 Phase 2 的硬前置；T7 独立。
+T1–T6 是 Phase 2 的硬前置；T7 暂缓。
