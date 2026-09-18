@@ -45,9 +45,21 @@ describe("previewCron", () => {
     }
   });
 
-  it("drops cronstrue's redundant \"only\" from the description", () => {
-    expect(describeCron("0 9 * * 1,3,5")).toBe("At 09:00, on Monday, Wednesday, and Friday");
+  it("trims cronstrue's \"only\" and its serial \"and\" from the description", () => {
+    expect(describeCron("0 9 * * 1,3,5")).toBe("At 09:00, on Monday, Wednesday, Friday");
     expect(describeCron("0 9 * * 1")).toBe("At 09:00, on Monday");
+    // Two-item lists read "X and Y" with no comma, so they keep the "and".
+    expect(describeCron("0 9 * * 1,3")).toBe("At 09:00, on Monday and Wednesday");
+  });
+
+  it("says \"every day\" instead of reciting all seven weekdays", () => {
+    expect(describeCron("0 9 * * *")).toBe("At 09:00, every day");
+    expect(describeCron("0 9 * * 0,1,2,3,4,5,6")).toBe("At 09:00, every day");
+    expect(describeCron("0 9 * * 0-6")).toBe("At 09:00, every day");
+    // Sunday as 7 closes the set too.
+    expect(describeCron("0 9 * * 1-7")).toBe("At 09:00, every day");
+    // Schedules with no fixed time of day keep cronstrue's own wording.
+    expect(describeCron("*/15 * * * *")).toBe("Every 15 minutes");
   });
 
   it("describes restricted day-of-month + weekday as OR, matching croner's firing", () => {

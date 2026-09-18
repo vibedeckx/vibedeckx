@@ -124,27 +124,56 @@ export function previewCron(expr: string, timezone: string, count = 3): CronPrev
   return { ok: true, description: describeCron(expr), nextRuns };
 }
 
+/** True for a day-of-week field that leaves no day out, e.g. "0,1,2,3,4,5,6" or "0-6". */
+function coversEveryWeekday(field: string): boolean {
+  const days = new Set<number>();
+  for (const part of field.split(",")) {
+    const [from, to] = part.split("-");
+    const start = Number(from);
+    const end = to === undefined ? start : Number(to);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start > end) return false;
+    // Cron accepts 7 for Sunday alongside 0.
+    for (let d = start; d <= end; d++) days.add(d % 7);
+  }
+  return days.size === 7;
+}
+
 export function describeCron(expr: string): string | null {
+  const trimmed = expr.trim();
+  const parts = trimmed.split(/\s+/);
+  const dowIndex = parts.length === 5 ? 4 : 5;
+  // A weekday list naming all seven days is the same schedule as no weekday
+  // restriction, so let cronstrue describe the simpler form rather than
+  // reciting every day.
+  if (parts[dowIndex] && parts[dowIndex] !== "*" && coversEveryWeekday(parts[dowIndex])) {
+    parts[dowIndex] = "*";
+  }
   let description: string;
   try {
-    description = cronstrue.toString(expr.trim(), { use24HourTimeFormat: true, verbose: false });
+    description = cronstrue.toString(parts.join(" "), { use24HourTimeFormat: true, verbose: false });
   } catch {
     return null;
   }
+  // Without a day clause "At 09:00" alone reads like a one-off; cronstrue omits
+  // the "every day" that makes it a schedule, so put it back.
+  if (/^At \d{2}:\d{2}$/.test(description)) description += ", every day";
   // "At 09:00, only on Monday" — the "only" carries nothing the day list
   // doesn't already say, and the preview line is tight.
   description = description.replace(/, only (on|in) /g, ", $1 ");
   // croner fires when EITHER day field matches once both are restricted, but
   // cronstrue reads as AND whatever logicalAndDayFields says (", and on Monday",
   // or a bare ", Monday through Friday" for ranges) — so say it outright.
-  const fields = expr.trim().split(/\s+/);
-  const [dom, dow] = fields.length === 5 ? [fields[2], fields[4]] : [fields[3], fields[5]];
+  const [dom, dow] = parts.length === 5 ? [parts[2], parts[4]] : [parts[3], parts[5]];
   const restricted = (field: string | undefined) => field !== undefined && field !== "*" && field !== "?";
   if (restricted(dom) && restricted(dow)) {
     const i = description.lastIndexOf(", and on ");
     if (i !== -1) description = `${description.slice(0, i)}, or on ${description.slice(i + ", and on ".length)}`;
     description += " (runs when either the day of month or the weekday matches)";
   }
+  // "Monday, Wednesday, and Friday" -> "Monday, Wednesday, Friday". Only lists
+  // of three or more carry that comma, and the preview line is tight. Runs
+  // last: the day-field clause above keys off cronstrue's own ", and on ".
+  description = description.replace(/, and /g, ", ");
   return description;
 }
 
