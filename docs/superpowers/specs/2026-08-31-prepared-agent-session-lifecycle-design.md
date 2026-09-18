@@ -1,6 +1,6 @@
 # Prepared Agent Session 生命周期设计
 
-> 状态：**提案，待实现**（2026-08-31；同日经两轮评审裁剪，见 §14.6）  
+> 状态：**已实现并合入 main**（2026-09-18 对账；`lifecycle_state`、两段式 review 启动、远程 durable reviewer 创建 saga 均在 main，见 Phase 5 实现状态块；Phase 6 删旧路径待 worker 版本覆盖）。原：提案，待实现（2026-08-31；同日经两轮评审裁剪，见 §14.6）  
 > 目标：把“建立 session 身份”和“启动 agent 并接受第一条指令”拆开建模，消除
 > create-then-send 产生的空 session，同时不把两阶段协议复杂度扩散给所有调用方。  
 > 排期前提：**Phase 1+ 是开放多用户前的前置项**，不以观测数据为闸门——后果已能从

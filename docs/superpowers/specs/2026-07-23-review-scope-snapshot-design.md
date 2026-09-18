@@ -1,7 +1,7 @@
 # Review scope via per-turn git snapshots
 
 **Date:** 2026-07-23
-**Status:** Design approved, pending implementation plan
+**Status:** Implemented and merged to main (`turn_snapshots`, content-hash scope delta, `## Scope` prompt block; verified 2026-09-18). Superseded-in-part by the span selector (Phase 2) and absorbed into the master spec §3.3. Original: Design approved, pending implementation plan.
 
 ## Problem
 

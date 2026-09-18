@@ -1,7 +1,7 @@
 # Review Scope Phase 2 — span selector + distill downgrade
 
 **Date:** 2026-07-23
-**Status:** Design approved, pending implementation plan
+**Status:** Implemented and merged to main (`review_span` column, dialog Scope control, span threaded through local / remote-proxy / worker mirror; verified 2026-09-18). Absorbed into the master spec §3.3 / §5.2b. Original: Design approved, pending implementation plan.
 **Builds on:** `2026-07-23-review-scope-snapshot-design.md` (Phase 1, merged into this branch)
 
 ## Goal

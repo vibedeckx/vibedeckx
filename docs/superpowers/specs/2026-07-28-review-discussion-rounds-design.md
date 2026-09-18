@@ -1,6 +1,6 @@
 # Review 讨论轮次:与 reviewer 多轮讨论后生成终稿再过 gate
 
-日期:2026-07-28 · 分支:dev6 · 状态:已与用户对齐方向
+日期:2026-07-28 · 分支:dev6 · 状态:**已实现并合入 main**(2026-09-18 对账;`discussing` + finalize 已在 `workflow-engine.ts`)。注意:本文"用户向 source 发消息仍取消 run"一条已被 `379cc813` 推翻——source 消息现在对 run 无任何影响,以主 spec §3.4 为准。
 
 ## 背景与问题
 
