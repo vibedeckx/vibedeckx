@@ -221,10 +221,9 @@ approve / 再点生成终稿）复用原步骤、原键、原 payload，让账�
 → 不重投）还是重投（已 released）。只有新的逻辑派发（下一轮终稿请求、下一轮
 反馈）才新建步骤。**改稿不是重试**：若存在结果未知的 `feedback` 步骤而用户带着
 不同内容再次 approve，返回 409 `bad-state`“上一次投递结果未知，请先重试原文或结束
-review”——既不能偷偷沿用原键发新内容，也不能忽略修改继续发旧内容。为此
-`requestFinalVerdict` 除 `discussing` 外也接受“`waiting_reviewer` 且存在结果未知的
-`final_verdict` 步骤”作为重试入口；panel 在 run.error 标记未知时显示“重试投递”
-（最小前端改动，见 T5）。
+review”——既不能偷偷沿用原键发新内容，也不能忽略修改继续发旧内容。
+（v2.1 曾为终稿设计 `waiting_reviewer` 下的重试入口与 panel“重试投递”按钮，实现后
+按 §7 第 6 条删除。）
 
 ```
 1. step = steps.getOrCreate({ run_id, kind, round }) → 已存在则复用 id/key/payload，否则
@@ -424,7 +423,7 @@ entry JSON 无新字段，patch 缓存与 hub 侧零感知。
 | T2 | 唤醒路径 await stdin + 转发 opts，回调置于 entry 之后、stdin 之前（D3、§2.3）+ 三路径顺序钉桩测试 | worker |
 | T3 | 存储：`workflow_run_steps` + 仓库 + `effectiveEntryIndex`；`AgentOps.sendUserMessage` 增 `idempotencyKey?` / `onUserEntryPersisted?`（entry / lifecycle 输入不改） | worker |
 | T4 | 引擎四个发送点落步骤行、带键、回填 `user_entry_index`（2.4）；回调抛错时复原 session 状态（2.3） | worker |
-| T5 | `findTurnOpeningUserEntryIndex` + 步骤驱动 `handleTaskCompleted`（按索引匹配、事务性 claim）+ legacy fallback + 结果未知的重试入口 + panel“重试投递”按钮（2.5/2.6） | worker + 前端 |
+| T5 | `findTurnOpeningUserEntryIndex` + 步骤驱动 `handleTaskCompleted`（按索引匹配、事务性 claim）+ legacy fallback（2.5/2.6）；原计划的终稿重试入口与 panel 按钮实现后删除（§7 第 6 条） | worker |
 | T6 | `init()` 对账（2.7） | worker |
 | T7 | hub 远程分支记录结果 + 版本门控（D4）——**暂缓，单独立项** | hub |
 | T8 | 真机 e2e + 主 spec §3.1/§3.2/§6 同步 | — |
@@ -456,9 +455,13 @@ T1–T6 已提交，全量后端 / 前端测试与两端 `tsc` 通过，`classif
    `uncertain` 是真未知。`deliverInstruction` 为此把 `ownership_lost` 拆成 before/after 两个结果。
 5. **状态复原放在管理器里**而非引擎包装里：回调抛错或唤醒路径 stdin 写失败时，
    `AgentSessionManager` 自己把被翻成 `running` 的 session 复原为 `stopped`，lifecycle 路径同样受益。
-6. **重试入口更窄**：`requestFinalVerdict` 只在“`waiting_reviewer` 且存在带未知标记的
-   dispatched `final_verdict` 步骤”时接受重试；`rereview_prompt` 结果未知不给重试入口
-   （结束后重新发起）。前端按 `run.error` 前缀 `投递结果未知：终稿请求` 显示“重试投递”。
+6. **终稿不设重试入口（实现后删除）**：第 4 条之后，终稿的“结果未知”只剩账本 `busy`，
+   即崩溃进程留下的租约 30 秒内对同一键再派发——而重启对账先于任何重试，按钮的显示
+   条件实际不成立。故删去 `requestFinalVerdict` 在 `waiting_reviewer` 下的放宽与 panel
+   “重试投递”按钮；万一发生，run 停在 `waiting_reviewer` 并提示，真实完成仍被归属，
+   出路是向 reviewer 发消息（→ `discussing`，作废 open 步骤）后重新生成终稿（新步骤新键）。
+   反馈侧不受影响：再次 approve 本就复用原步骤；改稿前置检查保留——重启对账留下的
+   “有索引、尚无 turn_end”的 feedback 步骤也会走到它，并非只服务 `busy`。
 7. **claim 时清 `run.error`**：归属成功即把“投递结果未知”之类的提示清掉（有 drift 则写 drift 提示）。
 
 **Review 后的三处修正（同日）：**

@@ -1587,23 +1587,30 @@ describe("WorkflowEngine", () => {
         expect((await storage.workflowRuns.getById(run.id))?.error).toBeNull();
       });
 
-      it("retry re-uses the same step, key and payload", async () => {
+      it("an unknown verdict has no retry entry; discussing again abandons it and the next finalize is a fresh step", async () => {
         const run = await start();
         await toGate(run);
         await engine.handleExternalUserMessage("s-rev");
         nextClaimIsBusy();
         await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "send-failed" });
-        const before = (await stepsOf(run.id)).filter((st) => st.kind === "final_verdict");
+        const [unknown] = (await stepsOf(run.id)).filter((st) => st.kind === "final_verdict");
+        expect(await statusOf(run.id)).toBe("waiting_reviewer");
+        // Not a retry entry: the run is off the discussion track.
+        await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "bad-state" });
 
-        const retried = await engine.requestFinalVerdict(run.id);
-        expect(retried).toMatchObject({ status: "waiting_reviewer", error: null });
-        const after = (await stepsOf(run.id)).filter((st) => st.kind === "final_verdict");
-        expect(after).toHaveLength(1);
-        expect(after[0]).toMatchObject({ id: before[0].id, idempotency_key: before[0].idempotency_key, status: "dispatched", error: null });
-        expect(after[0].user_entry_index).toBe(reviewerEntries.length - 1);
+        await engine.handleExternalUserMessage("s-rev");
+        expect(await statusOf(run.id)).toBe("discussing");
+        expect((await storage.workflowRunSteps.getById(unknown.id))?.status).toBe("abandoned");
+
+        const again = await engine.requestFinalVerdict(run.id);
+        expect(again).toMatchObject({ status: "waiting_reviewer", error: null });
+        const open = (await stepsOf(run.id)).filter((st) => st.kind === "final_verdict" && st.status === "dispatched");
+        expect(open).toHaveLength(1);
+        expect(open[0].id).not.toBe(unknown.id);
+        expect(open[0].idempotency_key).not.toBe(unknown.idempotency_key);
       });
 
-      it("a waiting_reviewer run with nothing unknown is not a retry entry", async () => {
+      it("finalize from waiting_reviewer is refused", async () => {
         const run = await start();
         await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "bad-state" });
       });

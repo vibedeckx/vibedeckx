@@ -321,8 +321,8 @@ on gate approved（所有 gateType 通用）:
 `review:<runId>`），经 `deliverInstruction` 走 `/message` 路由同一本账本
 `agent_instruction_deliveries`——HTTP/进程级重试不再重复投递；stdin 层没有带 ID 的
 ACK，重复消灭不了。结果分三类：已接受 / 证明无副作用（作废步骤 + 回滚 run）/
-结果未知（步骤保持 dispatched、run 停在等待态，真实完成仍被接收，面板给“重试投递”，
-复用同一步骤与键；改稿重试 → 409）。崩溃后**不自动重投**：`init()` 按步骤行对账——
+结果未知（步骤保持 dispatched、run 停在等待态，真实完成仍被接收；反馈侧再次 approve
+复用同一步骤与键，改稿 → 409；终稿侧无专门重试入口，向 reviewer 发消息后重新生成终稿）。崩溃后**不自动重投**：`init()` 按步骤行对账——
 两列索引皆空 ⇒ 未送达 ⇒ 回滚到派发前状态（可改稿）；turn 已完成 ⇒ 迟到归属；
 turn 被重启打断 ⇒ 作废 + 诚实提示。无步骤行的旧 run 仍是“发送状态未知”。
 

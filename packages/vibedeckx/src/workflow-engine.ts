@@ -69,8 +69,7 @@ const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "cancelled"
 
 /**
  * Prefix of `run.error` while a dispatch's outcome is unknown: the run stays in
- * its waiting state (a real completion is still attributed), and the panel
- * offers "retry delivery" — which re-uses the same step, key and payload.
+ * its waiting state, so a real completion is still attributed.
  */
 export const DELIVERY_UNKNOWN_PREFIX = "投递结果未知";
 
@@ -1730,14 +1729,7 @@ export class WorkflowEngine {
    */
   async requestFinalVerdict(runId: string): Promise<WorkflowRun> {
     const run = await this.storage.workflowRuns.getById(runId);
-    if (!run || !run.reviewer_session_id) throw new WorkflowError("bad-state", "run 不在讨论状态");
-    // Retry entry: the run is already back on the reviewer track and its
-    // final-verdict dispatch is still open with an unknown outcome. Re-running
-    // re-uses that step's key and payload — a replay if it did land.
-    const retrying = run.status === "waiting_reviewer"
-      && (await this.storage.workflowRunSteps.listByRun(runId))
-        .some((st) => st.kind === "final_verdict" && st.status === "dispatched" && st.error !== null);
-    if (run.status !== "discussing" && !retrying) {
+    if (!run || !run.reviewer_session_id || run.status !== "discussing") {
       throw new WorkflowError("bad-state", "run 不在讨论状态");
     }
     // Closes the realistic race: finalize clicked while the reviewer still has
@@ -1754,25 +1746,25 @@ export class WorkflowEngine {
     if (reviewerSession && reviewerSession.status === "running") {
       throw new WorkflowError("session-busy", "reviewer 正在回复中，请等待其完成后再生成终稿");
     }
-    if (!retrying) {
-      const claimed = await this.storage.workflowRuns.transition(runId, "discussing", "waiting_reviewer", { error: null });
-      if (!claimed) throw new WorkflowError("bad-state", "run 状态已变化（可能已被处理）");
-    }
+    const claimed = await this.storage.workflowRuns.transition(runId, "discussing", "waiting_reviewer", { error: null });
+    if (!claimed) throw new WorkflowError("bad-state", "run 状态已变化（可能已被处理）");
 
     const project = await this.storage.projects.getById(run.project_id);
     const outcome = await this.dispatchStep({
       run, kind: "final_verdict", role: "reviewer", sessionId: run.reviewer_session_id,
       payload: FINAL_VERDICT_PROMPT, projectPath: project?.path ?? undefined, turn: REVIEWER_TURN,
     });
-    if (outcome.kind === "unknown" || (outcome.kind === "no_side_effect" && outcome.busy && retrying)) {
+    if (outcome.kind === "unknown") {
       // Do NOT roll back: if the prompt did land, the verdict turn's completion
-      // must still find the run waiting for it.
+      // must still find the run waiting for it. No dedicated retry entry —
+      // this needs a still-live claim from a crashed process; the way out is
+      // to message the reviewer (→ discussing, open step abandoned) and
+      // finalize again with a fresh step.
       const noted = await this.storage.workflowRuns.update(runId, {
-        error: `${DELIVERY_UNKNOWN_PREFIX}：终稿请求可能已送达 reviewer。若其完成，结果会自动归属；否则请重试投递（复用同一条指令）或结束本次 review。`,
+        error: `${DELIVERY_UNKNOWN_PREFIX}：终稿请求可能已送达 reviewer。若其完成，结果会自动归属；否则可在 reviewer 窗口继续对话后重新生成终稿，或结束本次 review。`,
       });
       if (noted) this.emitRunUpdated(noted);
-      throw new WorkflowError(outcome.kind === "unknown" ? "send-failed" : "session-busy",
-        outcome.kind === "unknown" ? "终稿请求投递结果未知" : "reviewer 正在回复中，请等待其完成");
+      throw new WorkflowError("send-failed", "终稿请求投递结果未知");
     }
     if (outcome.kind === "no_side_effect") {
       const rolledBack = await this.storage.workflowRuns.transition(runId, "waiting_reviewer", "discussing", {
@@ -1790,7 +1782,6 @@ export class WorkflowEngine {
       if (outcome.busy) throw new WorkflowError("session-busy", "reviewer 正在回复中，请等待其完成后再生成终稿");
       throw new WorkflowError("send-failed", "向 reviewer 发送终稿请求失败");
     }
-    if (retrying) await this.storage.workflowRuns.update(runId, { error: null });
     const updated = (await this.storage.workflowRuns.getById(runId))!;
     this.emitRunUpdated(updated);
     return updated;

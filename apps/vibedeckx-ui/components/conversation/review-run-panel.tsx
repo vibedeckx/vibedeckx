@@ -14,17 +14,6 @@ type GateAction = "approve" | "finalize" | "cancel";
 const ACTIVE = new Set(["preparing", "waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
 
 /**
- * The engine could not tell whether the final-verdict request reached the
- * reviewer (backend: DELIVERY_UNKNOWN_PREFIX in workflow-engine.ts, written to
- * `run.error` by requestFinalVerdict). Only this case has a retry entry while
- * the run is `waiting_reviewer`; an unknown re-review prompt does not.
- */
-const VERDICT_DELIVERY_UNKNOWN = "投递结果未知：终稿请求";
-function isVerdictDeliveryUnknown(run: WorkflowRun): boolean {
-  return run.status === "waiting_reviewer" && (run.error?.startsWith(VERDICT_DELIVERY_UNKNOWN) ?? false);
-}
-
-/**
  * 动作落空时,新状态本身往往就是最好的解释——把它写出来,而不是把后端的
  * 状态守卫原文(如 "run 不在等待反馈确认的状态")甩给用户。返回 null 表示
  * 新状态并不解释这次失败(例如投递失败 502),此时原文更准确。
@@ -280,21 +269,9 @@ export function ReviewRunPanel({
               <Loader2 className="h-3 w-3 mr-1 animate-spin" /> 正在蒸馏上下文并启动 reviewer
             </div>
           )}
-          {run.status === "waiting_reviewer" && !isVerdictDeliveryUnknown(run) && (
+          {run.status === "waiting_reviewer" && (
             <div className="flex items-center text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
               <Loader2 className="h-3 w-3 mr-1 animate-spin" /> reviewer session 正在工作
-            </div>
-          )}
-          {isVerdictDeliveryUnknown(run) && (
-            // The run stays on the reviewer track (a verdict that did land is
-            // still picked up), so there is no spinner to trust here — offer the
-            // retry instead. It re-uses the same instruction: a no-op if the
-            // first one arrived.
-            <div className="flex items-center gap-2">
-              <Button size="sm" variant="outline" disabled={busy === run.id}
-                onClick={() => act(run.id, "finalize", () => api.workflowRunGate(run.id, "finalize"))}>
-                重试投递
-              </Button>
             </div>
           )}
           {run.status === "discussing" && (
