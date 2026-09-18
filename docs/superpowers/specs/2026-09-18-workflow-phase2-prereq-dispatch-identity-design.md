@@ -79,6 +79,9 @@ activationKey。
 `notificationDisposition` / `onUserEntryPersisted` / `dispatch` 完整转发到唤醒
 时的 `pushEntry`。这顺带修好 lifecycle 在"prepared 后休眠再激活"场景丢失
 `onUserEntryPersisted` 的问题。
+影响评估：`sendUserMessage` 的调用方本就在 `deliver()` 里等完 spawn（秒级），多等
+500ms 的延迟写入不触及任何超时；投递账本租约 30s、心跳 10s（`:1874`），
+lifecycle 激活租约同理，都远大于该窗口。
 
 **D4 hub 远程分支记录自身结果（可拆分任务）。** 在 `proxyAuto` 前先在 hub 的
 账本按 `(localSessionId, key)` claim；`ok` → `markSent`；语义拒绝（status>0）→
@@ -163,9 +166,15 @@ user entry；`ActivateAgentSessionInput`（`agent-session-lifecycle.ts:180-198`�
    onUserEntryPersisted: idx => steps.setUserEntryIndex(step.id, idx) }
 3. 结果：
    delivered / replayed / activated → 保持 dispatched，等 claim
-   not_running / conflict / busy / 抛错 → steps.abandon(step.id, reason) + 现有的 run 状态回滚（不变）
+   not_running / conflict / busy / 抛错 → 先 steps.abandon(step.id, reason)，再做现有的 run 状态回滚（不变）；
+   两者都是 CAS，顺序只影响证据先落
    unconfirmed（markSent 失败）→ 保持 dispatched（entry 已落，下一步 claim 仍能对上）
 ```
+
+激活路径的例外：lifecycle 已占用 `onUserEntryPersisted` 写 `activation_user_entry_index`
+（`agent-session-lifecycle.ts:708-717`），引擎不叠第二个回调，而是在 `activateReviewer`
+返回 `activated | replayed | uncertain` 后读 `ActivationResult.view.userEntryIndex`
+（即 session 行的 `activation_user_entry_index`）回填步骤行。
 
 四个发送点：fresh reviewer 激活（`:1152-1157`，键 = activationKey，kind
 `reviewer_prompt`）、复用 reviewer（`:970`，`rereview_prompt`）、终稿请求
@@ -184,6 +193,9 @@ reviewer 步骤同 round。
 ```
 entries = getRawMessages(sessionId); boundary = event.turnEndEntryIndex ?? extractLatestTurnEndIndex(entries)
 open = steps.getOpenBySession(sessionId)
+         .filter(s => s.user_entry_index != null && s.user_entry_index < boundary)
+   // 过滤掉尚未落 entry 的步骤，以及 entry 落在本次 turn_end 之后的步骤：一条在派发
+   // 之前就结束的 turn（陈旧 completion 与派发赛跑）绝不能被第 3 步的"唯一 open 步骤"误领
 if open.length == 0 → null（用户自己的 turn，照旧交 commander）
 
 1. opening = findTurnOpeningUserEntry(entries, boundary)   // notification-milestones.ts:44：上一个 turn_end 之后最早的 user entry
@@ -215,6 +227,11 @@ if !step:
    reviewer_prompt / rereview_prompt / final_verdict → 今天的 waiting_reviewer→waiting_feedback（feedback_snapshot = step.output_snapshot，review_ready 里程碑 id 不变）
    feedback（source 完成）→ 只记证据，不改 run 状态（run 早已 completed；Phase 2 在此处接循环）
 ```
+
+`feedback` 步骤的 claim **不抑制 commander**：source 的完成今天就是用户面事件
+（run 已 completed、参与者已被 `untrackRun` 移除），claim 只是留证据，
+`handleSessionTaskCompleted` 照旧继续唤醒 commander。Phase 2 让引擎接管这一跳时
+再把"已 claim 的 feedback 步骤"加入抑制条件。
 
 抑制规则**不变**：`shouldSuppressAgentEvent` 仍是"该 session 是活跃 run 的
 reviewer"（整 session），因为 `discussing` 期间 reviewer 的闲聊 turn 也不该唤醒
