@@ -1,6 +1,6 @@
 # Phase 2 第一刀：Review 闭环（循环复审）
 
-> 日期：2026-09-18 · 分支：dev1 · 状态：**v1.1 已确认（2026-09-18）**：§10 五点用户同意；吸收一轮外部审阅的三处（§3 完整匹配、§4 占用检查与确认未发送回到闸门）。实施计划见 `../plans/2026-09-18-workflow-phase2-review-loop-cut1.md`
+> 日期：2026-09-18 · 分支：dev1 · 状态：**v1.1 已确认并实现（2026-09-18，dev1，L1–L7）**，实现记录见 §11：§10 五点用户同意；吸收一轮外部审阅的三处（§3 完整匹配、§4 占用检查与确认未发送回到闸门）。实施计划见 `../plans/2026-09-18-workflow-phase2-review-loop-cut1.md`
 > 上游：主 spec [`2026-07-17-workflow-engine-review-loop-design.md`](./2026-07-17-workflow-engine-review-loop-design.md) §3.2b / §6；
 > 前置（已实现）：[`2026-09-18-workflow-phase2-prereq-dispatch-identity-design.md`](./2026-09-18-workflow-phase2-prereq-dispatch-identity-design.md)。
 > 所有 file:line 以 dev1 @ 2d2a20fb 为准。
@@ -252,3 +252,35 @@ self-report；发起弹窗里同时勾了 blind 与循环时注明这一点。
    "简报落 run 行"一起放第二刀（§2、§5.3）。
 4. **上限默认 3、范围 1..10**；到顶后每次"再加一轮"只加 1。
 5. **source 那一轮失败 / 被 Stop 时循环静默停下**，不另做提示（§5.1）。
+
+
+---
+
+## 11. 实现记录（2026-09-18，dev1）
+
+L1–L6 已提交；后端 2719 / 前端 1230 个测试通过，两端 `tsc` 干净；`classify-diff` 无隧道契约变化
+（worker 可达代码有改动 → remote 的循环要生效需发 worker；旧 worker 退化为单程，弹窗有提示）。
+
+**与设计的差异 / 补充：**
+
+1. **远程 saga 的 durable intent 多一列 `loop_max_rounds`**（`remote_reviewer_creation_intents`）。
+   fresh reviewer 的远程创建走持久化意图 + 重放；不落这一列，首发没到 worker 的重放会把循环
+   静默建成单程 review。
+2. **§6 里“需实测”的那一点不需要额外工作**：hub 的 `resolveRemoteRun` 对未登记的 run id 会按
+   UUID 结构解析并校验“项目确实绑定到该 worker”，所以 worker 自发创建的闸门 run 无需预先登记
+   即可操作（`routes/workflow-run-routes.ts` `resolveRemoteRun`）。
+3. **`accept` 不限 verdict**：任何结论下用户都可以“接受并结束”；面板只在 `ship` 时把它放成主按钮。
+4. **闸门行的 `review_target` 为空**，确认复审时才抓取（与“复审时重取 source 最新 turn”同一理由）。
+5. **前端状态序**：`waiting_rereview` 与 `waiting_reviewer` 同级，否则“未发出 → 退回闸门”这一步
+   合法的后退会被当成过期帧丢掉（`hooks/preparing-reviews.ts`）。
+6. 新增存储读取 `workflowRuns.getLoopRound(loopId, round)`，闸门据此找上一轮的 reviewer。
+
+**真机 e2e（本地，`--data-dir` 一次性 server + 真实 claude CLI，上限设为 1）：**
+第 1 轮 `needs-changes` 被解析 → approve → source 完成后 4s 内出现第 2 轮闸门（未绑定 reviewer）→
+**闸门态下 `kill -9` 重启**，闸门原样保留 → 不带 `extend` 复审得 409“已达轮次上限” → 带 `extend`
+复审成功、上限变 2、走的是同一个 reviewer（重启后是 dormant 唤醒路径）→ 第 2 轮仍 `needs-changes`
+（source 对反馈提出异议、reviewer 坚持——正是该交给人的情形）→ 在闸门上**改稿**后 approve →
+第 3 轮闸门 → `extend` → `ship` → `accept`：run 完成、不发送任何东西、此后不再出现闸门。
+
+**未做**：双服务器（hub + worker）真机 e2e，理由同前置设计 §7；随 worker 发版跑
+`scripts/cross-version-e2e.mjs`。

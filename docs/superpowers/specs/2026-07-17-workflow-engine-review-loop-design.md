@@ -1,7 +1,10 @@
 # Workflow 引擎与 Design–Review Loop 设计
 
 > 状态（2026-09-18 对账，以 main 为准）：**Phase 1 / 1.5 及其后五波演进均已合入 main**；
-> **Phase 2（循环模板）尚未开始**，但其两项硬前置——投递幂等覆盖与投递身份
+> **Phase 2 第一刀（review 闭环：循环复审、verdict 三值解析、轮次上限）已于 2026-09-18 在 dev1 落地**
+> 并过真机 e2e（未合入 main，worker 侧需发版），见
+> `2026-09-18-workflow-phase2-review-loop-cut1-design.md`；第二刀（chip / `commands.kind` / 模板 /
+> 换新 reviewer）未开始。此前其两项硬前置——投递幂等覆盖与投递身份
 > （`workflow_run_steps`）——已于 2026-09-18 在 dev1 落地并过真机 e2e（未合入 main，
 > worker 侧需发版），见 `2026-09-18-workflow-phase2-prereq-dispatch-identity-design.md`；
 > Phase 3 仅有讨论记录。
@@ -231,7 +234,8 @@ UI 凭它渲染 Review 按钮，模型只读 content。
 ### 3.2 Ad-hoc review 状态机（现状，已实现）
 
 状态集：`preparing | waiting_reviewer | waiting_feedback | discussing |
-sending_feedback | completed | cancelled | failed`；前五个为活跃状态。
+sending_feedback | completed | cancelled | failed`；前五个为活跃状态
+（dev1 另有活跃态 `waiting_rereview`——循环的下一轮闸门，见 3.2b）。
 
 ```
 (none) ──create, fresh reviewer──▶ [preparing] ──activate (CAS)──▶ [waiting_reviewer]
@@ -269,7 +273,16 @@ completed / cancelled / failed：吸收态
   `send-failed` → 502，`spawn-failed` → 500。错误体是中文文案，**没有机器可读
   的 code 字段**（前端 `explainStale` 靠状态而非文案解释过期点击）。
 
-### 3.2b Design–Review Loop 状态机（Phase 2 草案，未实现）
+### 3.2b Design–Review Loop 状态机（第一刀已实现，形态与草案不同）
+
+**第一刀的实现形态（2026-09-18，dev1）**：不是草案里的“一个 run 跨多轮”，而是**一轮一个 run，
+下一轮的闸门就是下一轮的 run**。循环由发起时的 `loop: { maxRounds }` 显式开启；`workflow_runs`
+多出 `loop_id / round / max_rounds / verdict`，新增活跃态 `waiting_rereview`。source 完成反馈
+那一轮（feedback 步骤被领取）时，同一事务内创建下一轮的闸门 run——条件是该轮 verdict 不是
+`ship`，且 source 没有被用户期间另起的 review 占用。闸门动作 `rereview`（超上限需 `extend`）走
+现成的复用 reviewer 路径；“确认未发送”退回闸门而不是 `failRun`。`waiting_feedback` 多一个
+`accept` 动作（不发送，直接完成）。verdict 按**完整匹配**解析，解析不出与 `cannot-verify` 一样交给人。
+每一跳仍由用户确认。详见 cut 1 设计稿。以下保留 2026-07-17 的草案与当时列出的必改项，供第二刀参考。
 
 保留 2026-07-17 的草案作为 Phase 2 的起点，但以下几处必须按现状改写后再实施：
 
@@ -384,7 +397,7 @@ cannot-verify`，blocking 清单，non-blocking 备注。`FINAL_VERDICT_PROMPT`
 | 用户向 **reviewer** 发消息 | 不取消。CAS `waiting_feedback|waiting_reviewer → discussing`，gate 收起；无论 CAS 是否生效都重广播当前行（补丢帧）。用户点"生成终稿"才回到 `waiting_reviewer`。从 `waiting_reviewer` 切入时，该 run 的 reviewer 侧 open 步骤一并作废（在途那一轮的产出算讨论，不算结论；下一次终稿用新步骤新键）（dev1） |
 | 用户向 **source** 发消息 | **无任何动作**。review 针对启动时的快照独立进行；继续源对话不得隐式取消 review 或丢掉在途 verdict（原稿与讨论轮次 spec 的"source 消息取消 run"均已作废） |
 | 取消 | 只能显式：gate `cancel` 或 `/cancel`。`sending_feedback` 不可取消（409）；已终态幂等返回；从 `preparing` 取消会把预备中的 reviewer 打成墓碑 |
-| 输出无 verdict | 不解析，反馈直接呈给用户裁决（Phase 2 才解析；`cannot-verify` 归人工） |
+| 输出无 verdict / 无法完整匹配 | `verdict = null`，面板标“未识别”，由用户裁决；`cannot-verify` 同样归人工。只有完整等于三值之一才算数（`do not ship` 不是 ship）（dev1） |
 | 准备超时 | `preparing` 10 分钟未被激活（蒸馏方死亡）→ `failed` + `workflow_failed` 里程碑；重启后按 `created_at` 续算剩余窗口 |
 | 激活结果未知 | lifecycle 服务返回 `uncertain`（首条指令落库后、写 stdin 前崩溃）→ run 进 `waiting_reviewer` 并写 error，**绝不自动重发** |
 | 服务重启 | `init()` 先按步骤行对账（dev1：未送达 ⇒ 回滚可改稿；已完成 ⇒ 迟到归属；被打断 ⇒ 作废 + 提示），其余（无步骤行的旧 run、无法判定的）沿用：`sending_feedback` → `waiting_feedback` + "发送状态未知"；`waiting_reviewer` 保持 + "可能错过完成事件"提示；`preparing` 续超时；内存 `pendingActivations` 丢失则从 `prepared_context` 重建，两者皆无（旧行）才退化 scope=null；重建 participants 表 |
@@ -473,7 +486,8 @@ POST /api/workflow-runs/intent-brief        { projectId, sourceSessionId } → {
 GET  /api/workflow-runs/reviewer-candidate  ?projectId&sourceSessionId → { candidate|null }
 GET  /api/workflow-runs                     ?projectId&branch → { runs, reviewedSessionIds? }
 GET  /api/workflow-runs/:id                 → { run }
-POST /api/workflow-runs/:id/gate            { action: approve|cancel|finalize, editedPayload? }
+POST /api/workflow-runs/:id/gate            { action: approve|cancel|finalize|accept|rereview, editedPayload?, extend? }   # accept/rereview/extend：dev1
+                                            # 发起类路由的 body 另有 loop?: { maxRounds 1..10 }（dev1）
 POST /api/workflow-runs/:id/cancel
 ```
 
