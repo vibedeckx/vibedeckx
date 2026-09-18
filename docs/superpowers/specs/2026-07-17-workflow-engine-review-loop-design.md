@@ -381,17 +381,19 @@ cannot-verify`，blocking 清单，non-blocking 备注。`FINAL_VERDICT_PROMPT`
 
 | 情况 | 处理 |
 |---|---|
-| 用户向 **reviewer** 发消息 | 不取消。CAS `waiting_feedback|waiting_reviewer → discussing`，gate 收起；无论 CAS 是否生效都重广播当前行（补丢帧）。用户点"生成终稿"才回到 `waiting_reviewer` |
+| 用户向 **reviewer** 发消息 | 不取消。CAS `waiting_feedback|waiting_reviewer → discussing`，gate 收起；无论 CAS 是否生效都重广播当前行（补丢帧）。用户点"生成终稿"才回到 `waiting_reviewer`。从 `waiting_reviewer` 切入时，该 run 的 reviewer 侧 open 步骤一并作废（在途那一轮的产出算讨论，不算结论；下一次终稿用新步骤新键）（dev1） |
 | 用户向 **source** 发消息 | **无任何动作**。review 针对启动时的快照独立进行；继续源对话不得隐式取消 review 或丢掉在途 verdict（原稿与讨论轮次 spec 的"source 消息取消 run"均已作废） |
 | 取消 | 只能显式：gate `cancel` 或 `/cancel`。`sending_feedback` 不可取消（409）；已终态幂等返回；从 `preparing` 取消会把预备中的 reviewer 打成墓碑 |
 | 输出无 verdict | 不解析，反馈直接呈给用户裁决（Phase 2 才解析；`cannot-verify` 归人工） |
 | 准备超时 | `preparing` 10 分钟未被激活（蒸馏方死亡）→ `failed` + `workflow_failed` 里程碑；重启后按 `created_at` 续算剩余窗口 |
 | 激活结果未知 | lifecycle 服务返回 `uncertain`（首条指令落库后、写 stdin 前崩溃）→ run 进 `waiting_reviewer` 并写 error，**绝不自动重发** |
-| 服务重启 | `init()`：`sending_feedback` → `waiting_feedback` + "发送状态未知"；`waiting_reviewer` 保持 + "可能错过完成事件"提示；`preparing` 续超时；内存 `pendingActivations` 丢失则从 `prepared_context` 重建，两者皆无（旧行）才退化 scope=null；重建 participants 表 |
+| 服务重启 | `init()` 先按步骤行对账（dev1：未送达 ⇒ 回滚可改稿；已完成 ⇒ 迟到归属；被打断 ⇒ 作废 + 提示），其余（无步骤行的旧 run、无法判定的）沿用：`sending_feedback` → `waiting_feedback` + "发送状态未知"；`waiting_reviewer` 保持 + "可能错过完成事件"提示；`preparing` 续超时；内存 `pendingActivations` 丢失则从 `prepared_context` 重建，两者皆无（旧行）才退化 scope=null；重建 participants 表 |
 | 蒸馏失败 / 压缩溢出 / 旧 worker 无 brief-source | 静默降级到 Tier 2/3，不阻塞启动 |
 | hub 在蒸馏期间与 worker 断连 | 重放以单发方式激活，无简报（降级 Tier 2），已接受的代价 |
 | 快照抓取失败 | 非致命，scope unknown |
-| 同 branch 多 session 并发 | 归属按 participants 表（role=reviewer）+ `status === waiting_reviewer`；无关事件落回普通路径 |
+| 同 branch 多 session 并发 | 归属按派发步骤的 entry 索引（3.1）；无关事件落回普通路径 |
+| 派发目标正在运行（dev1） | 引擎只向空闲 session 派发：approve 时 source 在跑、终稿/复审时 reviewer 在跑 → 409 `session-busy`，不发送、run 不变。检查在 session 互斥锁内重做一次，用户消息抢先落地同样得到 409 |
+| 投递结果未知（dev1） | 步骤保持 dispatched，run 停在等待态（反馈侧退回 `waiting_feedback`），`run.error` 以“投递结果未知”开头；真实完成仍会被归属；重试复用同一步骤与键，改稿重试 → 409 `bad-state` |
 | 参与 session 已在其他活跃 run | 创建时 409 `session-busy` |
 | switch-mode / accept-plan 打到活跃 run 的参与者 | 409 "Session is participating in an active review"（仅本地 session；远程靠 worker 自查）。delete / branch / stop / restart **未**受保护 |
 
