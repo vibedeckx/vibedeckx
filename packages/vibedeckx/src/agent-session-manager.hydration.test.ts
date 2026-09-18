@@ -734,6 +734,95 @@ describe("unloading cannot strand the session's serial work queue", () => {
   });
 });
 
+// The workflow engine and the lifecycle service both infer "stdin was never
+// written" from "no entry index was recorded". That inference is only sound
+// while the evidence hook runs strictly between the durable user entry and the
+// stdin write — on the resident path and on the dormant-wake path alike.
+describe("evidence hook ordering: entry durable → hook → stdin", () => {
+  function spawnWithStdin(manager: AgentSessionManager, write: (data: string) => boolean) {
+    (manager as unknown as { wakeStdinDelayMs: number }).wakeStdinDelayMs = 20;
+    return vi.spyOn(manager as never, "spawnAgent" as never)
+      .mockImplementation((async (s: { process: unknown }) => {
+        s.process = { pid: 1, exitCode: null, stdin: { write } };
+      }) as never);
+  }
+
+  it("wake: the hook sees the persisted index with stdin untouched, and the send resolves only after the write", async () => {
+    const { manager, rows } = await restored();
+    const writes: string[] = [];
+    spawnWithStdin(manager, (d) => { writes.push(d); return true; });
+
+    const seen: Array<{ index: number; writes: number; persisted: boolean }> = [];
+    const accepted = await manager.sendUserMessage("s1", "dispatch", "/tmp/p1", "local", {
+      onUserEntryPersisted: async (index) => {
+        seen.push({
+          index, writes: writes.length,
+          persisted: rows.some((r) => r.entry_index === index && r.data.includes("dispatch")),
+        });
+      },
+    });
+
+    expect(seen).toEqual([{ index: 3, writes: 0, persisted: true }]);
+    expect(accepted).toBe(true);
+    // Resolved ⇒ already written: no fire-and-forget timer left behind.
+    expect(writes).toHaveLength(1);
+    expect(session(manager).status).toBe("running");
+  });
+
+  it("wake: a throwing hook aborts before stdin and leaves the session idle", async () => {
+    const { manager } = await restored();
+    const writes: string[] = [];
+    spawnWithStdin(manager, (d) => { writes.push(d); return true; });
+
+    await expect(manager.sendUserMessage("s1", "dispatch", "/tmp/p1", "local", {
+      onUserEntryPersisted: async () => { throw new Error("step row write failed"); },
+    })).rejects.toThrow("step row write failed");
+
+    await new Promise((r) => setTimeout(r, 40));
+    expect(writes).toHaveLength(0);
+    expect(session(manager).status).toBe("stopped");
+    expect(session(manager).turnOpenSince).toBeNull();
+  });
+
+  it("wake: a failed stdin write reports not-accepted instead of a premature true", async () => {
+    const { manager } = await restored();
+    spawnWithStdin(manager, () => { throw new Error("EPIPE"); });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    expect(await manager.sendUserMessage("s1", "dispatch", "/tmp/p1")).toBe(false);
+    expect(session(manager).status).toBe("stopped");
+    expect(session(manager).turnOpenSince).toBeNull();
+  });
+
+  it("resident: same ordering, and a throwing hook restores the idle status", async () => {
+    const { manager, rows } = await restored();
+    const s = session(manager);
+    await hydrate(manager);
+    const writes: string[] = [];
+    s.process = { pid: 1, exitCode: null, stdin: { write: (d: string) => { writes.push(d); return true; } } };
+    s.dormant = false;
+
+    let seenWrites = -1;
+    expect(await manager.sendUserMessage("s1", "first", undefined, "local", {
+      onUserEntryPersisted: async (index) => {
+        seenWrites = writes.length;
+        expect(rows.some((r) => r.entry_index === index && r.data.includes("first"))).toBe(true);
+      },
+    })).toBe(true);
+    expect(seenWrites).toBe(0);
+    expect(writes).toHaveLength(1);
+
+    // Close that turn, then abort the next send from inside the hook.
+    s.status = "stopped";
+    s.turnOpenSince = null;
+    await expect(manager.sendUserMessage("s1", "second", undefined, "local", {
+      onUserEntryPersisted: async () => { throw new Error("nope"); },
+    })).rejects.toThrow("nope");
+    expect(writes).toHaveLength(1);
+    expect(s.status).toBe("stopped");
+  });
+});
+
 // ---------- helpers ----------
 
 /**

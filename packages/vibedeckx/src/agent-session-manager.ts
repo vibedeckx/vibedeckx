@@ -432,7 +432,12 @@ export interface FirstSendOptions {
   notificationDisposition?: NotificationDisposition;
   /**
    * Called once the user entry is persisted and before the provider stdin
-   * write. Only the lifecycle service sets it (activation evidence, §8.2).
+   * write — on the resident path AND the dormant-wake path. Set by the
+   * lifecycle service (activation evidence, §8.2) and by the workflow engine
+   * (a dispatch step's `user_entry_index`). The ordering is load-bearing: a
+   * recorded index is written strictly before stdin, so "no index recorded"
+   * proves stdin was never written and the instruction can be re-sent. A
+   * throw aborts the send before stdin and restores the session's idle status.
    */
   onUserEntryPersisted?: (entryIndex: number) => Promise<void>;
 }
@@ -495,6 +500,12 @@ function describeImageToolOutput(output: string): string | null {
 
 export class AgentSessionManager {
   private sessions: Map<string, RunningSession> = new Map();
+  /**
+   * How long a freshly spawned process gets before the woken session's context
+   * is written to its stdin. The wake awaits this write (see
+   * wakeDormantSessionInner); tests shorten it.
+   */
+  private wakeStdinDelayMs = 500;
   private storage: Storage;
   private eventBus: EventBus | null = null;
   /**
@@ -2921,7 +2932,7 @@ export class AgentSessionManager {
         console.error(`[AgentSession] Cannot wake dormant session ${sessionId} without projectPath`);
         return false;
       }
-      return this.wakeDormantSession(session, projectPath, content, userId, opts?.origin, disposition);
+      return this.wakeDormantSession(session, projectPath, content, userId, disposition, opts);
     }
 
     // A resident CLI can survive after its worktree was removed. Revalidate
@@ -2945,7 +2956,8 @@ export class AgentSessionManager {
     // Start-of-turn: if the previous turn ended (status="stopped" but process
     // still alive in stream-json mode), flip back to "running" and broadcast
     // so subscribers see the transition.
-    if (session.status !== "running") {
+    const openedFromIdle = session.status !== "running";
+    if (openedFromIdle) {
       session.status = "running";
       if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "running");
       this.broadcastPatch(sessionId, ConversationPatch.updateStatus("running"));
@@ -2973,7 +2985,16 @@ export class AgentSessionManager {
     // Lifecycle activation records the evidence line here — after the entry
     // is durable, before the stdin write — so crash recovery can tell "no
     // side effect yet" from "delivery unprovable" (design §8.2/§8.3).
-    if (opts?.onUserEntryPersisted) await opts.onUserEntryPersisted(userEntryIndex);
+    if (opts?.onUserEntryPersisted) {
+      try {
+        await opts.onUserEntryPersisted(userEntryIndex);
+      } catch (error) {
+        // Aborted before stdin: no turn was opened, so a session this send
+        // flipped to "running" must not be left looking busy forever.
+        if (openedFromIdle) await this.revertToIdleAfterAbortedSend(session);
+        throw error;
+      }
+    }
 
     // Send to agent stdin via provider
     try {
@@ -4098,8 +4119,8 @@ export class AgentSessionManager {
     projectPath: string,
     userMessage: string | ContentPart[],
     userId: string = "local",
-    origin?: "workflow",
     notificationDisposition: NotificationDisposition = "result",
+    opts?: FirstSendOptions,
   ): Promise<boolean> {
     // Claimed synchronously, before every `await` below — see beginProcessStart.
     const release = this.beginProcessStart(session);
@@ -4110,10 +4131,9 @@ export class AgentSessionManager {
     console.log(`[AgentSession] Waking dormant session ${session.id}`);
 
     try {
-      await this.wakeDormantSessionInner(
-        session, projectPath, userMessage, userId, origin, notificationDisposition,
+      return await this.wakeDormantSessionInner(
+        session, projectPath, userMessage, userId, notificationDisposition, opts,
       );
-      return true;
     } finally {
       release();
       // Ordered after the release so the check sees this wake's own claim
@@ -4128,9 +4148,10 @@ export class AgentSessionManager {
     projectPath: string,
     userMessage: string | ContentPart[],
     userId: string,
-    origin: "workflow" | undefined,
     notificationDisposition: NotificationDisposition,
-  ): Promise<void> {
+    opts: FirstSendOptions | undefined,
+  ): Promise<boolean> {
+    const origin = opts?.origin;
     const absoluteWorktreePath = await this.resolveSessionWorktreePath(session, projectPath);
 
     // The transcript this wake is about to replay to the new process lives in
@@ -4161,30 +4182,65 @@ export class AgentSessionManager {
     // Spawn Claude Code process
     await this.spawnAgent(session, absoluteWorktreePath);
 
-    // Push user message to store (+ persist to DB)
-    await this.pushEntry(session.id, {
+    // Push user message to store (+ persist to DB). Same ordering contract as
+    // the resident path (sendUserMessageClaimed): entry durable → await the
+    // caller's evidence hook → only then stdin.
+    const userEntryIndex = await this.pushEntry(session.id, {
       type: "user",
       content: userMessage,
       timestamp: Date.now(),
       ...(origin ? { origin } : {}),
       notificationDisposition,
-    }, true, userId);
+    }, true, userId, { strictPersist: opts?.onUserEntryPersisted !== undefined });
+    if (opts?.onUserEntryPersisted) {
+      try {
+        await opts.onUserEntryPersisted(userEntryIndex);
+      } catch (error) {
+        // The process is up but was told nothing: leave it resident and idle.
+        await this.revertToIdleAfterAbortedSend(session);
+        throw error;
+      }
+    }
     session.turnOpenSince = Date.now();
     session.turnDisposition = notificationDisposition;
 
-    // After process ready: send full context + new message to stdin
-    setTimeout(() => {
-      const context = this.buildFullConversationContext(session.store.entries);
-      if (context) {
-        const provider = getProvider(session.agentType);
-        const formatted = provider.formatUserInput(context, session.id);
+    // After process ready: send full context + new message to stdin. Awaited,
+    // so `true` means the runtime accepted the write — a caller recording a
+    // delivery must not be told "sent" 500ms before anything was written.
+    const written = await new Promise<boolean>((resolve) => {
+      setTimeout(() => {
         try {
-          session.process?.stdin?.write(formatted);
+          const context = this.buildFullConversationContext(session.store.entries);
+          const stdin = session.process?.stdin;
+          if (!context || !stdin) return resolve(false);
+          stdin.write(getProvider(session.agentType).formatUserInput(context, session.id));
+          resolve(true);
         } catch (error) {
           console.error(`[AgentSession] Failed to send context to woken session:`, error);
+          resolve(false);
         }
-      }
-    }, 500);
+      }, this.wakeStdinDelayMs);
+    });
+    if (!written) {
+      session.turnOpenSince = null;
+      await this.revertToIdleAfterAbortedSend(session);
+    }
+    return written;
+  }
+
+  /**
+   * A send flipped the session to "running" and then aborted before stdin was
+   * written. Nothing is in flight, so put the status back — but only while the
+   * process is still ours and alive; an exit that landed meanwhile has already
+   * settled the status through its own handler.
+   */
+  private async revertToIdleAfterAbortedSend(session: RunningSession): Promise<void> {
+    if (session.status !== "running" || session.turnOpenSince !== null) return;
+    if (session.process && session.process.exitCode !== null) return;
+    session.status = "stopped";
+    if (!session.skipDb) await this.storage.agentSessions.updateStatusPreservingTimestamp(session.id, "stopped");
+    this.broadcastPatch(session.id, ConversationPatch.updateStatus("stopped"));
+    this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
   }
 
   /**
