@@ -68,6 +68,52 @@ describe("ReviewRunPanel discussing state", () => {
   });
 });
 
+describe("ReviewRunPanel unknown verdict delivery", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  async function renderWith(run: Omit<typeof runFixture, "error"> & { error: string | null }) {
+    resetWorkflowRunsInflightForTests();
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValueOnce({ runs: [run] } as never);
+    await act(async () => {
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
+    });
+  }
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  it("offers a retry instead of a spinner, and the retry is the finalize gate", async () => {
+    await renderWith({
+      ...runFixture, status: "waiting_reviewer",
+      error: "投递结果未知：终稿请求可能已送达 reviewer。若其完成，结果会自动归属；否则请重试投递（复用同一条指令）或结束本次 review。",
+    });
+    expect(container.textContent).not.toContain("reviewer session 正在工作");
+    const retry = [...container.querySelectorAll("button")].find((b) => b.textContent === "重试投递");
+    expect(retry).toBeDefined();
+    await act(async () => { retry!.click(); });
+    expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "finalize");
+  });
+
+  it("an ordinary waiting reviewer — even one carrying another note — gets no retry", async () => {
+    await renderWith({
+      ...runFixture, status: "waiting_reviewer",
+      error: "投递结果未知：复审任务可能已送达 reviewer。",
+    });
+    expect(container.textContent).toContain("reviewer session 正在工作");
+    expect([...container.querySelectorAll("button")].some((b) => b.textContent === "重试投递")).toBe(false);
+  });
+});
+
 describe("ReviewRunPanel WS reconnect reconciliation", () => {
   let container: HTMLDivElement;
   let root: Root;
