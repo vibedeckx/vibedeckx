@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
   api,
+  REVIEW_LOOP_DEFAULT_ROUNDS,
+  REVIEW_LOOP_MAX_ROUNDS,
   type AgentProviderInfo,
   type AgentType,
   type ReviewContextMode,
@@ -23,6 +25,14 @@ import {
   REVIEW_SHORTCUT_CODE, comboShortcutHint, isMacPlatform, matchComboShortcut,
 } from "@/lib/tab-shortcuts";
 import { Clock, Info, Loader2, Lock, SearchCheck, Send, TriangleAlert, X } from "lucide-react";
+import { toast } from "sonner";
+
+/** Typed text → a valid round cap (the server rejects anything outside 1..max). */
+function clampLoopRounds(raw: string): number {
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n)) return REVIEW_LOOP_DEFAULT_ROUNDS;
+  return Math.min(REVIEW_LOOP_MAX_ROUNDS, Math.max(1, n));
+}
 
 const noopSubscribe = () => () => {};
 
@@ -175,6 +185,10 @@ export function ReviewDialog({
   const [reviewerAgent, setReviewerAgent] = useState<AgentType>("claude-code");
   const [reviewSpan, setReviewSpan] = useState<ReviewSpan>("this_turn");
   const [contextMode, setContextMode] = useState<ReviewContextMode>("briefed");
+  // Review loop: off = today's single pass. Rounds is kept as typed text so a
+  // half-edited value doesn't snap while the user is still typing.
+  const [loopEnabled, setLoopEnabled] = useState(false);
+  const [loopRounds, setLoopRounds] = useState(String(REVIEW_LOOP_DEFAULT_ROUNDS));
   // Selection is DERIVED (default + explicit override), never stored outright:
   // the default depends on an answer that arrives after the first frame, and a
   // stored default would have to be corrected by the late callback — which is
@@ -478,9 +492,16 @@ export function ReviewDialog({
         reviewFocus: focus.trim() || undefined,
         reviewSpan,
         ...(blind ? { reviewContextMode: "blind" as const } : {}),
+        ...(loopEnabled ? { loop: { maxRounds: clampLoopRounds(loopRounds) } } : {}),
         ...reviewer,
         ...briefFields,
       });
+      // A worker that predates review loops ignores the parameter and runs a
+      // single pass; say so rather than let the user wait for a gate that
+      // will never come.
+      if (loopEnabled && !run.loop_id) {
+        toast.info("This machine's worker doesn't support review loops yet — started a single-pass review.");
+      }
       setDialogOpen(false);
       setFocus("");
       onStarted?.(run);
@@ -534,7 +555,9 @@ export function ReviewDialog({
     : reuseSelected
       ? { Icon: Info, text: "Reuses context — no re-distillation" }
       : contextMode === "blind"
-        ? { Icon: Info, text: "Blind review — no conversation context is sent" }
+        ? { Icon: Info, text: loopEnabled
+          ? "Blind applies to round 1 — later rounds see the author's replies"
+          : "Blind review — no conversation context is sent" }
         : briefReady
           ? { Icon: Clock, text: "Intent summary ready" }
           : { Icon: Clock, text: "Intent summary finishes in the background" };
@@ -725,6 +748,46 @@ export function ReviewDialog({
                     </button>
                   ))}
                 </div>
+              </div>
+
+              <div className="min-w-0 flex items-center gap-2.5">
+                <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Rounds</span>
+                <div className="min-w-0 flex h-8 flex-1 items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
+                  {([
+                    [false, "Single pass"],
+                    [true, "Loop"],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      key={label}
+                      type="button"
+                      aria-pressed={loopEnabled === value}
+                      onClick={() => setLoopEnabled(value)}
+                      className={cn(
+                        "h-full min-w-0 flex-1 rounded-md px-2 text-[11.5px] whitespace-nowrap transition-colors",
+                        loopEnabled === value
+                          ? "border bg-card font-medium text-foreground shadow-sm"
+                          : "border border-transparent text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {/* Always rendered so toggling the loop does not resize the row. */}
+                <label className={cn("flex shrink-0 items-center gap-1.5 text-[11.5px] text-muted-foreground", !loopEnabled && "opacity-45")}>
+                  up to
+                  <input
+                    type="number"
+                    min={1}
+                    max={REVIEW_LOOP_MAX_ROUNDS}
+                    aria-label="Maximum review rounds"
+                    disabled={!loopEnabled}
+                    value={loopRounds}
+                    onChange={(e) => setLoopRounds(e.target.value)}
+                    onBlur={() => setLoopRounds(String(clampLoopRounds(loopRounds)))}
+                    className="h-7 w-11 rounded-md border bg-card px-1.5 text-center text-[11.5px] text-foreground outline-none disabled:cursor-not-allowed"
+                  />
+                </label>
               </div>
             </div>
           </div>

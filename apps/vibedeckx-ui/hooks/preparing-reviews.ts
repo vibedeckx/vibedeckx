@@ -53,6 +53,10 @@ const STATUS_RANK: Record<WorkflowRun["status"], number> = {
   waiting_feedback: 2,
   discussing: 3,
   sending_feedback: 4,
+  // Loop gate. Ranked with waiting_reviewer on purpose: a re-review that could
+  // not be sent goes waiting_reviewer → waiting_rereview, and a lower rank
+  // would make that legitimate step back look like a stale frame.
+  waiting_rereview: 1,
   completed: 9,
   cancelled: 9,
   failed: 9,

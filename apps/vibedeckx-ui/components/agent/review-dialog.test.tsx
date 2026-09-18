@@ -25,6 +25,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
   };
 });
 
+const { toastInfo } = vi.hoisted(() => ({ toastInfo: vi.fn() }));
+vi.mock("sonner", () => ({ toast: { info: toastInfo } }));
+
 import { ReviewDialog } from "./review-dialog";
 import { fetchActiveWorkflowRuns, resetWorkflowRunsInflightForTests } from "@/lib/workflow-runs-fetch";
 
@@ -897,5 +900,50 @@ describe("ReviewDialog open shortcut", () => {
     await renderClosed("s-src", false);
     await pressR({ ctrlKey: true, altKey: true });
     expect(isOpen()).toBe(false);
+  });
+});
+
+describe("ReviewDialog review loop", () => {
+  const noCandidate = { available: false, sessionId: null, title: null, agentType: null, reason: "deleted" };
+  const clickStart = () => act(async () => {
+    startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const roundsInput = () =>
+    document.body.querySelector<HTMLInputElement>('input[aria-label="Maximum review rounds"]')!;
+
+  it("is a single pass by default: no loop field, and the rounds input is inert", async () => {
+    await renderAndOpen(noCandidate);
+    expect(roundsInput().disabled).toBe(true);
+    await clickStart();
+    expect(createWorkflowRun.mock.calls[0][0]).not.toHaveProperty("loop");
+    expect(toastInfo).not.toHaveBeenCalled();
+  });
+
+  it("sends the round cap when Loop is on, clamped to the server's range", async () => {
+    createWorkflowRun.mockResolvedValue({ loop_id: "r1" });
+    await renderAndOpen(noCandidate);
+    createWorkflowRun.mockResolvedValue({ loop_id: "r1" });
+    await act(async () => { button("Loop").dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    expect(roundsInput().disabled).toBe(false);
+    expect(roundsInput().value).toBe("3");
+
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    await act(async () => {
+      setValue.call(roundsInput(), "42");
+      roundsInput().dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await clickStart();
+    expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({ loop: { maxRounds: 10 } }));
+    expect(toastInfo).not.toHaveBeenCalled();
+  });
+
+  it("says so when the worker ignored the loop and started a single pass", async () => {
+    await renderAndOpen(noCandidate);
+    createWorkflowRun.mockResolvedValue({ id: "r1" }); // an older worker: no loop_id on the run
+    await act(async () => { button("Loop").dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await clickStart();
+    expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({ loop: { maxRounds: 3 } }));
+    expect(toastInfo).toHaveBeenCalledTimes(1);
   });
 });

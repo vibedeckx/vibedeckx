@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type WorkflowRun } from "@/lib/api";
+import { api, type WorkflowRun, type WorkflowVerdict } from "@/lib/api";
 import { fetchActiveWorkflowRunsAt } from "@/lib/workflow-runs-fetch";
 import { useNotificationInbox } from "@/hooks/notification-inbox-context";
 import { Button } from "@/components/ui/button";
@@ -9,9 +9,27 @@ import { Textarea } from "@/components/ui/textarea";
 import { MessageResponse } from "@/components/ai-elements/message";
 import { Eye, FileCheck, Loader2, Pencil, X } from "lucide-react";
 
-type GateAction = "approve" | "finalize" | "cancel";
+type GateAction = "approve" | "finalize" | "cancel" | "accept" | "rereview";
 
-const ACTIVE = new Set(["preparing", "waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback"]);
+const ACTIVE = new Set(["preparing", "waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback", "waiting_rereview"]);
+
+const VERDICT_LABEL: Record<WorkflowVerdict, { text: string; className: string }> = {
+  ship: { text: "ship", className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" },
+  "needs-changes": { text: "needs-changes", className: "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400" },
+  "cannot-verify": { text: "cannot-verify", className: "border-border bg-muted text-muted-foreground" },
+};
+
+/** Loop runs only; fields are absent from workers that predate loops. */
+function roundLabel(run: WorkflowRun): string | null {
+  if (!run.loop_id) return null;
+  const round = run.round ?? 1;
+  return run.max_rounds ? `第 ${round} / ${run.max_rounds} 轮` : `第 ${round} 轮`;
+}
+
+/** The gate run's round is the one about to start; past the cap it needs an explicit extension. */
+function isOverRoundCap(run: WorkflowRun): boolean {
+  return run.max_rounds != null && (run.round ?? 1) > run.max_rounds;
+}
 
 /**
  * 动作落空时,新状态本身往往就是最好的解释——把它写出来,而不是把后端的
@@ -38,6 +56,17 @@ function explainStale(action: GateAction, fresh: WorkflowRun | null): string | n
   if (action === "finalize") {
     if (fresh.status === "waiting_feedback") return "终稿已经出来了,直接发送反馈即可。";
     if (fresh.status === "waiting_reviewer") return "reviewer 正在出稿,稍候再试。";
+  }
+  if (action === "accept") {
+    if (fresh.status === "discussing") return "reviewer 已进入讨论:先点「生成终稿」拿到新的结论。";
+    if (fresh.status === "waiting_reviewer") return "reviewer 正在重新出稿,等它完成后再决定。";
+    if (fresh.status === "sending_feedback") return "反馈正在发送中。";
+  }
+  if (action === "rereview") {
+    // 仍在闸门上 = 复审没发出去(reviewer 忙 / 未送达),后端原文就是原因。
+    if (fresh.status === "waiting_rereview") return null;
+    if (fresh.status === "waiting_reviewer") return "复审已经发起,reviewer 正在审查。";
+    if (fresh.status === "waiting_feedback") return "这一轮复审已经出结论了。";
   }
   return null;
 }
@@ -193,7 +222,8 @@ export function ReviewRunPanel({
       // 所以连「点击之后才送达」的迟到通知一并收掉——run 状态是 WS 直推的,而
       // 通知要过 outbox drain,面板先于铃铛拿到结果完全可能。finalize 不同:它
       // 让 run 继续跑,下一轮的未读必须照常亮起来。
-      markReviewRunRead(runId, { runEnded: action !== "finalize" });
+      // `rereview` 同 finalize:run 继续跑,下一轮结论的未读要照常亮。
+      markReviewRunRead(runId, { runEnded: action !== "finalize" && action !== "rereview" });
       return;
     }
     let active: WorkflowRun[] | null = null;
@@ -254,7 +284,9 @@ export function ReviewRunPanel({
                 {run.status === "waiting_feedback" && "等你确认反馈"}
                 {run.status === "discussing" && "讨论中"}
                 {run.status === "sending_feedback" && "发送中…"}
+                {run.status === "waiting_rereview" && "等你确认复审"}
               </span>
+              {roundLabel(run) && <span className="ml-2 text-muted-foreground">{roundLabel(run)}</span>}
             </span>
             <Button variant="ghost" size="sm" disabled={busy === run.id}
               onClick={() => act(run.id, "cancel", () => api.cancelWorkflowRun(run.id))}>
@@ -289,8 +321,36 @@ export function ReviewRunPanel({
               </Button>
             </div>
           )}
+          {run.status === "waiting_rereview" && (
+            // Loop gate: the source finished the turn our feedback opened. Every
+            // hop stays confirmed — nothing is sent to the reviewer until here.
+            <>
+              <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+                {isOverRoundCap(run)
+                  ? `source 已按反馈完成修改。已达上限 ${run.max_rounds} 轮——要再加一轮吗？`
+                  : "source 已按反馈完成修改。由同一个 reviewer 复审这次修改？"}
+              </div>
+              <div className="flex gap-2">
+                <Button size="sm" disabled={busy === run.id}
+                  onClick={() => act(run.id, "rereview", () =>
+                    api.workflowRunGate(run.id, "rereview", undefined, { extend: isOverRoundCap(run) }))}>
+                  {isOverRoundCap(run) ? "再加一轮" : `发起第 ${run.round ?? 2} 轮复审`}
+                </Button>
+                <Button variant="outline" size="sm" disabled={busy === run.id}
+                  onClick={() => act(run.id, "cancel", () => api.cancelWorkflowRun(run.id))}>
+                  结束循环
+                </Button>
+              </div>
+            </>
+          )}
           {run.status === "waiting_feedback" && (
             <>
+              <div className="flex items-center gap-2" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+                <span className="text-muted-foreground">reviewer 结论</span>
+                {run.verdict
+                  ? <span className={`rounded border px-1.5 py-px font-mono ${VERDICT_LABEL[run.verdict].className}`}>{VERDICT_LABEL[run.verdict].text}</span>
+                  : <span className="rounded border border-dashed px-1.5 py-px text-muted-foreground">未识别，请自行判断</span>}
+              </div>
               {/* Rendered markdown by default; the textarea only appears while
                   editing. Both are max-h capped (the textarea auto-grows via
                   field-sizing-content) so a long review scrolls inside its box
@@ -311,9 +371,17 @@ export function ReviewRunPanel({
                 </div>
               )}
               <div className="flex gap-2">
-                <Button size="sm" disabled={busy === run.id}
+                {run.verdict === "ship" && (
+                  // Nothing blocking: taking the result is the natural exit, and
+                  // it sends nothing. Sending the notes anyway stays possible.
+                  <Button size="sm" disabled={busy === run.id}
+                    onClick={() => act(run.id, "accept", () => api.workflowRunGate(run.id, "accept"))}>
+                    接受并结束
+                  </Button>
+                )}
+                <Button size="sm" variant={run.verdict === "ship" ? "outline" : "default"} disabled={busy === run.id}
                   onClick={() => act(run.id, "approve", () => api.workflowRunGate(run.id, "approve", draft[run.id] ?? undefined))}>
-                  发送反馈给原 session
+                  {run.verdict === "ship" ? "仍发送反馈" : "发送反馈给原 session"}
                 </Button>
                 <Button variant="outline" size="sm" disabled={busy === run.id}
                   onClick={() => setEditing((e) => ({ ...e, [run.id]: !e[run.id] }))}>

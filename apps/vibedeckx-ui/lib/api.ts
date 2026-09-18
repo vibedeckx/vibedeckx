@@ -1747,11 +1747,30 @@ export interface WorkflowRun {
   review_focus: string | null;
   review_target: string | null;
   feedback_snapshot: string | null;
-  status: "preparing" | "waiting_reviewer" | "waiting_feedback" | "discussing" | "sending_feedback" | "completed" | "cancelled" | "failed";
+  /**
+   * `waiting_rereview` = review-loop gate: the source finished applying the
+   * feedback and the NEXT round's run waits for the user to confirm the
+   * re-review (no reviewer bound yet) or end the loop.
+   */
+  status: "preparing" | "waiting_reviewer" | "waiting_feedback" | "discussing" | "sending_feedback" | "waiting_rereview" | "completed" | "cancelled" | "failed";
   error: string | null;
+  /**
+   * Review loop fields — absent from workers that predate loops, so every
+   * reader must treat undefined like null / round 1 (a single-pass review).
+   */
+  loop_id?: string | null;
+  round?: number;
+  max_rounds?: number | null;
+  /** Reviewer's closing verdict, parsed by exact match; null/undefined = none or unrecognised. */
+  verdict?: WorkflowVerdict | null;
   created_at: string;
   updated_at: string;
 }
+
+export type WorkflowVerdict = "ship" | "needs-changes" | "cannot-verify";
+export type WorkflowGateAction = "approve" | "cancel" | "finalize" | "accept" | "rereview";
+export const REVIEW_LOOP_DEFAULT_ROUNDS = 3;
+export const REVIEW_LOOP_MAX_ROUNDS = 10;
 
 export interface ReviewerCandidate {
   available: boolean;
@@ -3347,6 +3366,12 @@ export const api = {
     reviewContextMode?: ReviewContextMode;
     /** Pre-generated tier-1 brief (see generateReviewIntentBrief); when present the server skips its own distillation. */
     intentBrief?: string;
+    /**
+     * Review loop: after the source applies the feedback, a gate for the next
+     * re-review round appears (every hop still confirmed). Absent = single pass.
+     * A worker that predates loops ignores it — check `run.loop_id` on the result.
+     */
+    loop?: { maxRounds: number };
   }): Promise<WorkflowRun> {
     const res = await authFetch(`${getApiBase()}/api/workflow-runs`, {
       method: "POST",
@@ -3424,11 +3449,16 @@ export const api = {
     return (await res.json()).run;
   },
 
-  async workflowRunGate(runId: string, action: "approve" | "cancel" | "finalize", editedPayload?: string): Promise<WorkflowRun> {
+  async workflowRunGate(
+    runId: string,
+    action: WorkflowGateAction,
+    editedPayload?: string,
+    opts?: { /** `rereview` past the round cap: confirm adding one more round. */ extend?: boolean },
+  ): Promise<WorkflowRun> {
     const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}/gate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action, editedPayload }),
+      body: JSON.stringify({ action, editedPayload, ...(opts?.extend ? { extend: true } : {}) }),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));

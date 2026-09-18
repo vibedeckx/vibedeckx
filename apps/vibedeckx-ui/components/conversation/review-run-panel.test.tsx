@@ -68,6 +68,97 @@ describe("ReviewRunPanel discussing state", () => {
   });
 });
 
+describe("ReviewRunPanel review loop", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  type Fixture = Omit<typeof runFixture, "error" | "status" | "reviewer_session_id"> & {
+    error: string | null; status: string; reviewer_session_id: string | null;
+    loop_id?: string | null; round?: number; max_rounds?: number | null; verdict?: string | null;
+  };
+
+  async function renderWith(run: Fixture) {
+    resetWorkflowRunsInflightForTests();
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValueOnce({ runs: [run] } as never);
+    await act(async () => {
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
+    });
+  }
+  const buttonNamed = (text: string) =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent === text);
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+    // Tests here swap the list mock's implementation; put the suite default back.
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [runFixture] } as never);
+  });
+
+  it("ship: accepting is the primary action and sends nothing; sending the notes stays possible", async () => {
+    await renderWith({ ...runFixture, status: "waiting_feedback", verdict: "ship", loop_id: "r1", round: 2, max_rounds: 3 });
+    expect(container.textContent).toContain("ship");
+    expect(container.textContent).toContain("第 2 / 3 轮");
+    expect(buttonNamed("仍发送反馈")).toBeDefined();
+    await act(async () => { buttonNamed("接受并结束")!.click(); });
+    expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "accept");
+  });
+
+  it("needs-changes keeps today's gate, with the verdict shown; a single-pass run shows no round", async () => {
+    await renderWith({ ...runFixture, status: "waiting_feedback", verdict: "needs-changes" });
+    expect(container.textContent).toContain("needs-changes");
+    expect(container.textContent).not.toContain("轮");
+    expect(buttonNamed("接受并结束")).toBeUndefined();
+    expect(buttonNamed("发送反馈给原 session")).toBeDefined();
+  });
+
+  it("an unrecognised verdict is labelled as the user's call — and a pre-loop worker's run renders the same", async () => {
+    await renderWith({ ...runFixture, status: "waiting_feedback", verdict: null });
+    expect(container.textContent).toContain("未识别");
+    act(() => root.unmount());
+    root = createRoot(container);
+    await renderWith({ ...runFixture, status: "waiting_feedback" }); // no verdict field at all
+    expect(container.textContent).toContain("未识别");
+    expect(buttonNamed("发送反馈给原 session")).toBeDefined();
+  });
+
+  it("the re-review gate confirms the next round or ends the loop", async () => {
+    const gate = { ...runFixture, status: "waiting_rereview", reviewer_session_id: null, loop_id: "r0", round: 2, max_rounds: 3 };
+    await renderWith(gate);
+    // Every action re-reads the list; keep serving the gate so both buttons can be exercised.
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [gate] } as never);
+    expect(container.textContent).toContain("等你确认复审");
+    await act(async () => { buttonNamed("发起第 2 轮复审")!.click(); });
+    expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "rereview", undefined, { extend: false });
+    await act(async () => { buttonNamed("结束循环")!.click(); });
+    expect(api.cancelWorkflowRun).toHaveBeenCalledWith("r1");
+  });
+
+  it("past the cap the gate asks for one more round explicitly", async () => {
+    await renderWith({ ...runFixture, status: "waiting_rereview", reviewer_session_id: null, loop_id: "r0", round: 4, max_rounds: 3 });
+    expect(container.textContent).toContain("已达上限 3 轮");
+    expect(buttonNamed("发起第 4 轮复审")).toBeUndefined();
+    await act(async () => { buttonNamed("再加一轮")!.click(); });
+    expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "rereview", undefined, { extend: true });
+  });
+
+  it("a re-review that could not be sent stays on the gate and shows the worker's reason", async () => {
+    const gate = { ...runFixture, status: "waiting_rereview", reviewer_session_id: null, loop_id: "r0", round: 2, max_rounds: 3 };
+    await renderWith(gate);
+    vi.mocked(api.workflowRunGate).mockRejectedValueOnce(new Error("reviewer 正在回复中，复审未发出。请等待其完成后重试。"));
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [gate] } as never);
+    await act(async () => { buttonNamed("发起第 2 轮复审")!.click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+    expect(container.textContent).toContain("复审未发出");
+    expect(buttonNamed("发起第 2 轮复审")).toBeDefined();
+  });
+});
+
 describe("ReviewRunPanel WS reconnect reconciliation", () => {
   let container: HTMLDivElement;
   let root: Root;
