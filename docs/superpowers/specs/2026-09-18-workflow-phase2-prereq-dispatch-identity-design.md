@@ -1,6 +1,6 @@
 # Phase 2 前置：投递幂等与投递身份（dispatch identity）
 
-> 日期：2026-09-18 · 分支：dev1 · 状态：**设计稿 v2.2，待用户确认后出实施计划**
+> 日期：2026-09-18 · 分支：dev1 · 状态：**v2.2 已确认（2026-09-18）**，实施计划见 `docs/superpowers/plans/2026-09-18-workflow-phase2-prereq-dispatch-identity.md`
 > v2 吸收了一轮外部审阅（Codex）：去掉“唯一 open 步骤”猜测、派发只对空闲 session、
 > 重试复用步骤与键、claim 与 run 迁移同事务、对账只认 `completed` 结局、claim 单一调用方、T7 暂缓。
 > v2.1（第二轮审阅）：结果未知时 run 不回滚、仍接收身份匹配的完成；空闲检查与发送在
