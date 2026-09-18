@@ -1348,6 +1348,7 @@ describe("WorkflowEngine", () => {
     const stepsOf = (runId: string) => storage.workflowRunSteps.listByRun(runId);
     /** Let the bus handler's async work finish when no state change is expected. */
     const settle = () => new Promise((r) => setTimeout(r, 60));
+    const outboxKinds = async () => (await storage.notificationOutbox.listAfter(0, 100)).map((r) => r.kind);
 
     async function toGate(run: { id: string }) {
       emitCompleted("s-rev", reviewerTurnEnd());
@@ -1576,6 +1577,132 @@ describe("WorkflowEngine", () => {
         const done = await engine.approveFeedback(run.id);
         expect(done.status).toBe("completed");
         expect((await stepsOf(run.id)).filter((st) => st.kind === "feedback")).toHaveLength(1);
+      });
+    });
+
+    // A crash emits no completion event, so init() decides every open step from evidence.
+    describe("restart reconciliation", () => {
+      async function restart() {
+        const engine2 = new WorkflowEngine(storage, agentOps);
+        engine2.setEventBus(bus);
+        await engine2.init();
+        return engine2;
+      }
+      const openStep = (runId: string, kind: "rereview_prompt" | "final_verdict" | "feedback", sessionId: string) =>
+        storage.workflowRunSteps.open({
+          id: `crashed-${kind}`, run_id: runId, role: kind === "feedback" ? "source" : "reviewer", kind,
+          session_id: sessionId, idempotency_key: `run:${runId}:step:crashed-${kind}`, payload_hash: "h",
+        });
+
+      it("feedback that never reached stdin: back to the gate, editable, sent exactly once", async () => {
+        const run = await start();
+        await toGate(run);
+        // Crashed between the run CAS and the evidence hook: step row, no index.
+        await storage.workflowRuns.transition(run.id, "waiting_feedback", "sending_feedback");
+        await openStep(run.id, "feedback", "s-src");
+
+        const engine2 = await restart();
+        const after = await storage.workflowRuns.getById(run.id);
+        expect(after?.status).toBe("waiting_feedback");
+        expect(after?.error).toContain("未送达");
+        expect(after?.error).not.toContain("发送状态未知");
+        expect((await storage.workflowRunSteps.getById("crashed-feedback"))?.status).toBe("abandoned");
+
+        // Proven undelivered ⇒ not an "unknown outcome": an edit is allowed.
+        const sendsBefore = agentOps.sendUserMessage.mock.calls.length;
+        const done = await engine2.approveFeedback(run.id, "edited after the crash");
+        expect(done.status).toBe("completed");
+        expect(agentOps.sendUserMessage.mock.calls.length).toBe(sendsBefore + 1);
+        expect(agentOps.sendUserMessage.mock.calls.at(-1)![1]).toContain("edited after the crash");
+      });
+
+      it("a final-verdict request that never left returns the run to discussing", async () => {
+        const run = await start();
+        await toGate(run);
+        await engine.handleExternalUserMessage("s-rev");
+        await storage.workflowRuns.transition(run.id, "discussing", "waiting_reviewer");
+        await openStep(run.id, "final_verdict", "s-rev");
+
+        await restart();
+        const after = await storage.workflowRuns.getById(run.id);
+        expect(after?.status).toBe("discussing");
+        expect(after?.error).toContain("未送达");
+      });
+
+      it("an undelivered re-review prompt fails the run, as a live send failure does", async () => {
+        await createReviewer();
+        const run = await storage.workflowRuns.create({
+          id: "rr", project_id: "p1", branch: "dev", source_session_id: "s-src",
+          source_turn_end_index: 4, review_focus: null, review_target: null,
+        });
+        await storage.workflowRuns.update(run.id, { reviewer_session_id: "s-rev" });
+        await openStep(run.id, "rereview_prompt", "s-rev");
+
+        await restart();
+        expect(await storage.workflowRuns.getById(run.id)).toMatchObject({ status: "failed" });
+        expect((await outboxKinds())).toContain("workflow_failed");
+      });
+
+      it("a fresh reviewer is undelivered only when BOTH index columns are empty", async () => {
+        // Evidence on the session row only (crashed before the engine copied it),
+        // and the reviewer finished while we were down: a late claim, not a failure.
+        agentOps.activateReviewer.mockImplementationOnce(async (input: { sessionId: string; instruction: string }) => {
+          const userEntryIndex = await acceptInstruction(input.sessionId, input.instruction);
+          const raw = new Database(path.join(dir, "t.sqlite"));
+          try {
+            raw.prepare("UPDATE agent_sessions SET activation_user_entry_index = ? WHERE id = ?").run(userEntryIndex, input.sessionId);
+          } finally { raw.close(); }
+          return { kind: "uncertain" as const, view: lifecycleView(input.sessionId, "active") };
+        });
+        const delivered = await start();
+        reviewerTurnEnd("Late verdict");
+        await restart();
+        expect(await storage.workflowRuns.getById(delivered.id))
+          .toMatchObject({ status: "waiting_feedback", feedback_snapshot: "Late verdict" });
+      });
+
+      it("a fresh reviewer with no evidence anywhere fails the run", async () => {
+        agentOps.activateReviewer.mockImplementationOnce(async (input: { sessionId: string }) =>
+          ({ kind: "uncertain" as const, view: lifecycleView(input.sessionId, "active") }));
+        const run = await start();
+        expect(await statusOf(run.id)).toBe("waiting_reviewer");
+        await restart();
+        const after = await storage.workflowRuns.getById(run.id);
+        expect(after?.status).toBe("failed");
+        expect(after?.error).toContain("未送达");
+      });
+
+      it("claims late when the turn completed while the server was down — one review_ready", async () => {
+        const run = await start();
+        const turnEnd = reviewerTurnEnd("Finished during the outage");
+        await restart();
+        expect(await storage.workflowRuns.getById(run.id))
+          .toMatchObject({ status: "waiting_feedback", feedback_snapshot: "Finished during the outage", error: null });
+        expect((await stepsOf(run.id))[0]).toMatchObject({ status: "claimed", turn_end_index: turnEnd });
+        const ready = (await storage.notificationOutbox.listAfter(0, 100)).filter((r) => r.kind === "review_ready");
+        expect(ready.map((r) => r.id)).toEqual([`workflow:${run.id}:turn:${turnEnd}:review-ready`]);
+      });
+
+      it("abandons a step whose turn was cut short by the restart, with an honest note", async () => {
+        const run = await start();
+        reviewerEntries.push({ type: "assistant", content: "half a thought", timestamp: 1 });
+        reviewerEntries.push({ type: "turn_end", timestamp: 2, outcome: "server_restart" } as AgentMessage);
+        await restart();
+        const after = await storage.workflowRuns.getById(run.id);
+        expect(after?.status).toBe("waiting_reviewer");
+        expect(after?.error).toContain("中断");
+        expect(after?.feedback_snapshot).toBeNull();
+        expect((await stepsOf(run.id))[0]).toMatchObject({ status: "abandoned", error: "turn ended: server_restart" });
+      });
+
+      it("leaves a step alone when its turn has no end yet", async () => {
+        const run = await start();
+        await restart();
+        expect((await stepsOf(run.id))[0].status).toBe("dispatched");
+        expect((await storage.workflowRuns.getById(run.id))?.error).toContain("可能错过 reviewer 完成事件");
+        // …and the completion is still attributed once it shows up.
+        emitCompleted("s-rev", reviewerTurnEnd());
+        await vi.waitFor(async () => expect(await statusOf(run.id)).toBe("waiting_feedback"));
       });
     });
 

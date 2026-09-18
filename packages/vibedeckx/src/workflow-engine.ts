@@ -588,9 +588,15 @@ export class WorkflowEngine {
 
   /** Boot recovery (spec §3.4). Call once after storage is ready. */
   async init(): Promise<void> {
+    // Steps first: they know, per dispatch, whether stdin was ever written.
+    // Runs they settle skip the blanket "something may have been missed"
+    // notes below, which remain for pre-step runs and undecidable cases.
+    const settled = await this.reconcileOpenSteps();
     const active = await this.storage.workflowRuns.getAllActive();
     for (const run of active) {
-      if (run.status === "sending_feedback") {
+      if (settled.has(run.id)) {
+        // nothing: reconciliation already wrote this run's state and note
+      } else if (run.status === "sending_feedback") {
         // Crash mid-send: honest at-most-once — never auto-resend.
         await this.storage.workflowRuns.update(run.id, {
           status: "waiting_feedback",
@@ -614,6 +620,102 @@ export class WorkflowEngine {
         this.armPrepareTimeout(run.id, PREPARE_TIMEOUT_MS - elapsed);
       }
       this.trackParticipants(run);
+    }
+  }
+
+  /**
+   * Restart reconciliation (design §2.7). A crash emits no completion event —
+   * crash repair writes `turn_end{server_restart}` silently — so every step
+   * still `dispatched` is decided here, from evidence:
+   *
+   *  - no entry index (for a fresh reviewer: neither on the step nor on the
+   *    session row) ⇒ stdin was never written ⇒ proven no side effect: abandon
+   *    and roll the run back exactly as a live send failure would. The user
+   *    gets the ordinary button back and may even edit before re-sending.
+   *  - an index, and the turn it opened completed ⇒ late claim, same
+   *    transaction as a live one.
+   *  - an index, and that turn ended any other way ⇒ abandon; whether the
+   *    instruction was acted on is unprovable, so the run keeps an honest note.
+   *  - an index and no turn_end after it ⇒ leave it; nothing to decide yet.
+   *
+   * Returns the ids of runs whose state this pass decided.
+   */
+  private async reconcileOpenSteps(): Promise<Set<string>> {
+    const settled = new Set<string>();
+    const steps = this.storage.workflowRunSteps;
+    for (const step of await steps.listAllOpen()) {
+      try {
+        const run = await this.storage.workflowRuns.getById(step.run_id);
+        if (!run) { await steps.abandon(step.id, "run no longer exists"); continue; }
+
+        const entryIndex = await this.effectiveEntryIndex(step);
+        if (entryIndex === null) {
+          await steps.abandon(step.id, "never delivered: no entry index was recorded before the restart");
+          if (await this.rollBackUndeliveredStep(run, step)) settled.add(run.id);
+          continue;
+        }
+
+        const entries = await this.agentOps.getRawMessages(step.session_id);
+        let turnEndIndex: number | null = null;
+        for (let i = entryIndex + 1; i < entries.length; i++) {
+          if (entries[i]?.type === "turn_end") { turnEndIndex = i; break; }
+        }
+        if (turnEndIndex === null) continue;
+
+        const turnEnd = entries[turnEndIndex] as Extract<AgentMessage, { type: "turn_end" }>;
+        // Entries written before outcomes existed only ever marked completions.
+        const outcome = turnEnd.outcome ?? "completed";
+        const completed = outcome === "completed" || outcome === "completed_with_pending_tasks";
+        if (completed && findTurnOpeningUserEntryIndex(entries, turnEndIndex) === entryIndex) {
+          await this.claimStep(step, entries, turnEndIndex);
+          settled.add(run.id);
+          continue;
+        }
+
+        await steps.abandon(step.id, `turn ended: ${outcome}`);
+        if (TERMINAL_STATUSES.has(run.status)) continue;
+        if (step.kind === "feedback") {
+          await this.storage.workflowRuns.transition(run.id, "sending_feedback", "waiting_feedback", {
+            error: "发送状态未知：服务在发送反馈期间重启。请检查 source session 是否已收到反馈，再决定重发或结束。",
+          });
+        } else if (run.status === "waiting_reviewer") {
+          await this.storage.workflowRuns.update(run.id, {
+            error: "reviewer 的这一轮因服务重启而中断，没有产出可用的结论。可在其窗口中继续对话后重新生成终稿，或结束本次 review。",
+          });
+        }
+        settled.add(run.id);
+      } catch (err) {
+        console.error(`[WorkflowEngine] reconciling step ${step.id} failed; left dispatched:`, err);
+      }
+    }
+    return settled;
+  }
+
+  /** The run-side half of "this dispatch provably never reached stdin". */
+  private async rollBackUndeliveredStep(run: WorkflowRun, step: WorkflowRunStep): Promise<boolean> {
+    if (TERMINAL_STATUSES.has(run.status)) return false;
+    const note = "上次投递因服务重启未送达（目标 session 没有收到任何内容），可直接重新操作。";
+    switch (step.kind) {
+      case "feedback":
+        // From sending_feedback (crashed mid-send) — or already back at the
+        // gate with an "unknown" note that this evidence now resolves.
+        if (!(await this.storage.workflowRuns.transition(run.id, "sending_feedback", "waiting_feedback", { error: note }))
+            && run.status === "waiting_feedback") {
+          await this.storage.workflowRuns.update(run.id, { error: note });
+        }
+        return true;
+      case "final_verdict":
+        return this.storage.workflowRuns.transition(run.id, "waiting_reviewer", "discussing", { error: note });
+      case "rereview_prompt":
+        await this.failRun(run, "复审任务因服务重启未送达 reviewer。请重新发起 review。");
+        return true;
+      case "reviewer_prompt":
+        // Still `preparing`: the activation may be replayed (a hub distilling
+        // for a remote review survives a worker restart); it re-opens a step.
+        // Past `preparing` the run was waiting on a prompt that never left.
+        if (run.status === "preparing") return false;
+        await this.failRun(run, "reviewer 的首条指令因服务重启未送达。请重新发起 review。");
+        return true;
     }
   }
 
@@ -1427,6 +1529,15 @@ export class WorkflowEngine {
       return;
     }
 
+    await this.claimStep(step, entries, boundary);
+  }
+
+  /**
+   * Attribute the turn ending at `boundary` to `step`. Shared by the live
+   * completion event and restart reconciliation, so a late claim goes through
+   * exactly the transaction a live one does.
+   */
+  private async claimStep(step: WorkflowRunStep, entries: AgentMessage[], boundary: number): Promise<void> {
     const output = extractLastAssistantInTurn(entries, boundary);
     if (step.kind === "feedback") {
       // The source finished the turn our feedback opened. The run completed
@@ -1455,7 +1566,7 @@ export class WorkflowEngine {
         // `error: null` also clears a "delivery outcome unknown" note: the
         // completion just answered it.
         patch: { feedback_snapshot: feedback, error: driftNote },
-        outbox: this.reviewReadyOutbox(run, event.sessionId, boundary),
+        outbox: this.reviewReadyOutbox(run, step.session_id, boundary),
       },
     });
     if (!ok) return;
