@@ -481,18 +481,60 @@ describe("WorkflowEngine", () => {
     activationKey: null, activationAttempt: 0, activatedAt: null, activationErrorCode: null, userEntryIndex: null,
     expiredReason: null, expiredAt: null, pendingExpiresAt: null,
   });
+  // The source transcript, per test: feedback dispatches append to it.
+  const sourceEntries: AgentMessage[] = [];
+  const transcriptOf = (sessionId: string) => (sessionId === "s-rev" ? reviewerEntries : sourceEntries);
+  type SendOpts = { origin?: "workflow"; notificationDisposition?: string; onUserEntryPersisted?: (i: number) => Promise<void> };
+  /**
+   * Stand-in runtime with the real send contract: the user entry is appended
+   * (it opens a turn), the evidence hook runs with its index, and only then is
+   * the instruction "accepted". Attribution is by that index, so a mock that
+   * merely returned `true` would leave every completion unattributable.
+   */
+  const acceptInstruction = async (sessionId: string, content: string, opts?: SendOpts) => {
+    const list = transcriptOf(sessionId);
+    const index = list.length;
+    list[index] = { type: "user", content, timestamp: Date.now(), origin: "workflow" };
+    await opts?.onUserEntryPersisted?.(index);
+    return index;
+  };
   const agentOps = {
-    prepareReviewer: vi.fn(async (input: { sessionId?: string }) =>
-      ({ kind: "prepared" as const, view: lifecycleView(input.sessionId ?? "s-rev") })),
-    activateReviewer: vi.fn(async (input: { sessionId: string }) =>
-      ({ kind: "activated" as const, view: lifecycleView(input.sessionId, "active") })),
+    prepareReviewer: vi.fn(async (input: { sessionId?: string; projectId?: string; branch?: string | null }) => {
+      // Lifecycle `prepare` creates the session row; the keyed delivery ledger
+      // has a foreign key on it.
+      const id = input.sessionId ?? "s-rev";
+      if (!(await storage.agentSessions.getById(id))) {
+        await storage.agentSessions.create({ id, project_id: input.projectId ?? "p1", branch: input.branch ?? "dev", permission_mode: "plan" });
+        await storage.agentSessions.updateStatus(id, "stopped");
+      }
+      return { kind: "prepared" as const, view: lifecycleView(id) };
+    }),
+    activateReviewer: vi.fn(async (input: { sessionId: string; instruction: string }) => {
+      const userEntryIndex = await acceptInstruction(input.sessionId, input.instruction);
+      return { kind: "activated" as const, view: { ...lifecycleView(input.sessionId, "active"), userEntryIndex } };
+    }),
     cancelReviewer: vi.fn(async () => ({ kind: "not_found" as const })),
-    sendUserMessage: vi.fn(async () => true),
+    sendUserMessage: vi.fn(async (sessionId: string, content: string, _projectPath?: string, _userId?: string, opts?: SendOpts) => {
+      await acceptInstruction(sessionId, content, opts);
+      return true;
+    }),
     switchMode: vi.fn(async () => true),
     setFinalSessionTitle: vi.fn(async () => undefined),
-    getRawMessages: vi.fn((sessionId: string) => (sessionId === "s-rev" ? reviewerEntries : entries)),
+    getRawMessages: vi.fn((sessionId: string) => transcriptOf(sessionId)),
     broadcastRawToSession: vi.fn(),
   };
+  /**
+   * Close the reviewer's open turn (with `reply`, unless the test already wrote
+   * one) and return the turn_end index a taskCompleted event carries.
+   */
+  function reviewerTurnEnd(reply = "Feedback: rename X; add test for Y"): number {
+    const last = reviewerEntries[reviewerEntries.length - 1];
+    if (last?.type !== "turn_end") {
+      if (last?.type !== "assistant") reviewerEntries.push({ type: "assistant", content: reply, timestamp: Date.now() });
+      reviewerEntries.push({ type: "turn_end", timestamp: Date.now() });
+    }
+    return reviewerEntries.length - 1;
+  }
   const project = { id: "p1", path: "/tmp/does-not-exist-vdx" }; // non-git → null review target, still fine
 
   beforeEach(async () => {
@@ -509,8 +551,8 @@ describe("WorkflowEngine", () => {
     engine.setEventBus(bus);
     await engine.init();
     reviewerEntries.length = 0;
-    reviewerEntries[0] = { type: "assistant", content: "Feedback: rename X; add test for Y", timestamp: 1 };
-    reviewerEntries[1] = { type: "turn_end", timestamp: 2 };
+    sourceEntries.length = 0;
+    sourceEntries.push(...entries);
     vi.clearAllMocks();
   });
 
@@ -912,7 +954,7 @@ describe("WorkflowEngine", () => {
       project.path,
       undefined,
       // A reused reviewer is still a reviewer: the run owns its milestone.
-      { origin: "workflow", notificationDisposition: "milestone-managed" },
+      expect.objectContaining({ origin: "workflow", notificationDisposition: "milestone-managed" }),
     );
     const prompt = agentOps.sendUserMessage.mock.calls.at(-1)?.[1] as string;
     expect(prompt).toContain("please fix the bug");
@@ -1074,7 +1116,7 @@ describe("WorkflowEngine", () => {
     const run = await start();
     expect(engine.shouldSuppressAgentEvent("s-rev")).toBe(true);
     expect(engine.shouldSuppressAgentEvent("s-src")).toBe(false);
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
     await vi.waitFor(async () => {
       expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
     });
@@ -1084,7 +1126,7 @@ describe("WorkflowEngine", () => {
 
   it("approveFeedback CAS-sends edited payload back to source and completes", async () => {
     const run = await start();
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
     await vi.waitFor(async () => {
       expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
     });
@@ -1095,13 +1137,13 @@ describe("WorkflowEngine", () => {
     expect(sent[1]).toContain("edited feedback");
     // Workflow-authored, but disposition "result": the source's modification is
     // its own attention milestone, separate from the review-ready one.
-    expect(sent[4]).toEqual({ origin: "workflow", notificationDisposition: "result" });
+    expect(sent[4]).toMatchObject({ origin: "workflow", notificationDisposition: "result" });
     expect(engine.isSessionInActiveRun("s-src")).toBe(false);
   });
 
   it("failed send returns run to waiting_feedback with error, no auto-retry", async () => {
     const run = await start();
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
     await vi.waitFor(async () => {
       expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
     });
@@ -1114,7 +1156,7 @@ describe("WorkflowEngine", () => {
 
   it("cancelRun cancels a run in waiting_feedback", async () => {
     const run = await start();
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
     await vi.waitFor(async () => {
       expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
     });
@@ -1126,7 +1168,7 @@ describe("WorkflowEngine", () => {
 
   it("cancelRun is a CAS: rejects with bad-state while a send is in flight (sending_feedback)", async () => {
     const run = await start();
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
     await vi.waitFor(async () => {
       expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
     });
@@ -1146,7 +1188,7 @@ describe("WorkflowEngine", () => {
     expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_reviewer");
     expect(engine.shouldSuppressAgentEvent("s-rev")).toBe(true);
 
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
     await vi.waitFor(async () => {
       expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
     });
@@ -1160,7 +1202,7 @@ describe("WorkflowEngine", () => {
 
   it("a user message to the reviewer moves waiting_feedback → discussing instead of cancelling", async () => {
     const run = await start();
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
     await vi.waitFor(async () => {
       expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
     });
@@ -1179,7 +1221,7 @@ describe("WorkflowEngine", () => {
   it("reviewer taskCompleted during discussing neither reopens the gate nor creates a milestone", async () => {
     const run = await start();
     await engine.handleExternalUserMessage("s-rev"); // → discussing
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
     await new Promise((r) => setTimeout(r, 20));
     expect((await storage.workflowRuns.getById(run.id))?.status).toBe("discussing");
     expect(await storage.notificationOutbox.listAfter(0, 10)).toHaveLength(0);
@@ -1195,7 +1237,7 @@ describe("WorkflowEngine", () => {
 
   async function startDiscussion() {
     const run = await start();
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
     await vi.waitFor(async () => {
       expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
     });
@@ -1211,22 +1253,23 @@ describe("WorkflowEngine", () => {
     expect(sent[0]).toBe("s-rev");
     expect(sent[1]).toBe(FINAL_VERDICT_PROMPT);
     // 终稿 turn 与初审/复审同处置:run 拥有注意力事件,不另发通用会话通知。
-    expect(sent[4]).toEqual({ origin: "workflow", notificationDisposition: "milestone-managed" });
+    expect(sent[4]).toMatchObject({ origin: "workflow", notificationDisposition: "milestone-managed" });
   });
 
   it("full loop: v1 gate → discussion → final verdict → v2 gate, distinct milestone ids", async () => {
     const run = await startDiscussion();
     await engine.requestFinalVerdict(run.id);
-    reviewerEntries[2] = { type: "assistant", content: "Final: only rename X", timestamp: 3 };
-    reviewerEntries[3] = { type: "turn_end", timestamp: 4 };
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 3 });
+    // Transcript: [0] review prompt, [1] v1, [2] turn_end, [3] verdict prompt, then the verdict turn.
+    const verdictTurnEnd = reviewerTurnEnd("Final: only rename X");
+    expect(verdictTurnEnd).toBe(5);
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: verdictTurnEnd });
     await vi.waitFor(async () => {
       expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
     });
     expect((await storage.workflowRuns.getById(run.id))?.feedback_snapshot).toBe("Final: only rename X");
     const ids = (await storage.notificationOutbox.listAfter(0, 100)).map((r) => r.id);
-    expect(ids).toContain(`workflow:${run.id}:turn:1:review-ready`);
-    expect(ids).toContain(`workflow:${run.id}:turn:3:review-ready`);
+    expect(ids).toContain(`workflow:${run.id}:turn:2:review-ready`);
+    expect(ids).toContain(`workflow:${run.id}:turn:5:review-ready`);
   });
 
   it("requestFinalVerdict send failure rolls back to discussing with an error", async () => {
@@ -1264,7 +1307,7 @@ describe("WorkflowEngine", () => {
 
   it("a reviewer message leaves a mid-send run unchanged", async () => {
     const run = await start();
-    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
     await vi.waitFor(async () => {
       expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
     });
@@ -1295,11 +1338,267 @@ describe("WorkflowEngine", () => {
    * "review is ready" event, and it is written in the same transaction as the
    * waiting_reviewer → waiting_feedback transition that proves it.
    */
+  // Phase 2 prerequisite (docs/superpowers/specs/2026-09-18-…-dispatch-identity-design.md):
+  // a completion is attributed to the DISPATCH that opened its turn, never to
+  // "this session is a reviewer and its run is waiting".
+  describe("dispatch identity", () => {
+    const emitCompleted = (sessionId: string, turnEndEntryIndex: number) =>
+      bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId, turnEndEntryIndex });
+    const statusOf = async (runId: string) => (await storage.workflowRuns.getById(runId))?.status;
+    const stepsOf = (runId: string) => storage.workflowRunSteps.listByRun(runId);
+    /** Let the bus handler's async work finish when no state change is expected. */
+    const settle = () => new Promise((r) => setTimeout(r, 60));
+
+    async function toGate(run: { id: string }) {
+      emitCompleted("s-rev", reviewerTurnEnd());
+      await vi.waitFor(async () => expect(await statusOf(run.id)).toBe("waiting_feedback"));
+    }
+
+    it("records one step per dispatch, keyed and tied to the entry it wrote", async () => {
+      const run = await start();
+      await toGate(run);
+      await engine.handleExternalUserMessage("s-rev");
+      await engine.requestFinalVerdict(run.id);
+      emitCompleted("s-rev", reviewerTurnEnd("Final verdict: ship"));
+      await vi.waitFor(async () => expect(await statusOf(run.id)).toBe("waiting_feedback"));
+      await engine.approveFeedback(run.id);
+
+      const steps = await stepsOf(run.id);
+      expect(steps.map((st) => [st.kind, st.round, st.role, st.session_id, st.status, st.user_entry_index])).toEqual([
+        ["reviewer_prompt", 1, "reviewer", "s-rev", "claimed", 0],
+        ["final_verdict", 2, "reviewer", "s-rev", "claimed", 3],
+        ["feedback", 2, "source", "s-src", "dispatched", sourceEntries.length - 1],
+      ]);
+      // A fresh reviewer rides the lifecycle's activation key; everything else gets its own.
+      expect(steps[0].idempotency_key).toBe(`review:${run.id}`);
+      expect(steps[1].idempotency_key).toBe(`run:${run.id}:step:${steps[1].id}`);
+      expect(steps[1]).toMatchObject({ turn_end_index: 5, output_snapshot: "Final verdict: ship" });
+    });
+
+    it("claims the feedback step when the source finishes the turn it opened, without touching the run", async () => {
+      const run = await start();
+      await toGate(run);
+      await engine.approveFeedback(run.id);
+      sourceEntries.push({ type: "assistant", content: "Applied the rename.", timestamp: 1 });
+      sourceEntries.push({ type: "turn_end", timestamp: 2 });
+      emitCompleted("s-src", sourceEntries.length - 1);
+      await vi.waitFor(async () => {
+        expect((await stepsOf(run.id)).find((st) => st.kind === "feedback"))
+          .toMatchObject({ status: "claimed", output_snapshot: "Applied the rename." });
+      });
+      expect(await statusOf(run.id)).toBe("completed");
+    });
+
+    it("does not accept a completion whose turn was opened by something else", async () => {
+      const run = await start();
+      await toGate(run);
+      await engine.handleExternalUserMessage("s-rev");
+      await engine.requestFinalVerdict(run.id);
+      // A stale event for the FIRST review's turn arrives while the verdict is pending.
+      emitCompleted("s-rev", 2);
+      await settle();
+      const after = await storage.workflowRuns.getById(run.id);
+      expect(after?.status).toBe("waiting_reviewer");
+      expect(after?.feedback_snapshot).toBe("Feedback: rename X; add test for Y");
+      expect(after?.error).toContain("无法确认它对应本次派发");
+      // The real verdict turn is still accepted afterwards.
+      emitCompleted("s-rev", reviewerTurnEnd("Final verdict: ship"));
+      await vi.waitFor(async () => expect(await statusOf(run.id)).toBe("waiting_feedback"));
+      expect((await storage.workflowRuns.getById(run.id))?.feedback_snapshot).toBe("Final verdict: ship");
+    });
+
+    it("still attributes the turn when the user steers it mid-flight: the opener is the dispatch", async () => {
+      const run = await start();
+      reviewerEntries.push({ type: "user", content: "also check the migration", timestamp: 1 });
+      await toGate(run);
+      expect((await stepsOf(run.id))[0]).toMatchObject({ status: "claimed", turn_end_index: 3 });
+    });
+
+    it("ignores a branched copy of the reviewer: same entries, same index, no step rows", async () => {
+      const run = await start();
+      reviewerTurnEnd();
+      agentOps.getRawMessages.mockImplementation((sessionId: string) =>
+        (sessionId === "s-rev" || sessionId === "s-rev-branch" ? reviewerEntries : sourceEntries));
+      emitCompleted("s-rev-branch", 2);
+      await settle();
+      expect(await statusOf(run.id)).toBe("waiting_reviewer");
+    });
+
+    it("attributes an activation whose index only reached the session row (completion beat the copy)", async () => {
+      agentOps.activateReviewer.mockImplementationOnce(async (input: { sessionId: string; instruction: string }) => {
+        const userEntryIndex = await acceptInstruction(input.sessionId, input.instruction);
+        const raw = new Database(path.join(dir, "t.sqlite"));
+        try {
+          raw.prepare("UPDATE agent_sessions SET activation_user_entry_index = ? WHERE id = ?").run(userEntryIndex, input.sessionId);
+        } finally { raw.close(); }
+        // `uncertain` with no index in the view: the engine has nothing to copy.
+        return { kind: "uncertain" as const, view: lifecycleView(input.sessionId, "active") };
+      });
+      const run = await start();
+      expect((await stepsOf(run.id))[0]).toMatchObject({ status: "dispatched", user_entry_index: null });
+      await toGate(run);
+      expect((await stepsOf(run.id))[0].status).toBe("claimed");
+    });
+
+    it("abandons the open step when the user cuts in, ignores that turn's completion, and finalizes with a fresh key", async () => {
+      const run = await start();
+      await engine.handleExternalUserMessage("s-rev");
+      expect(await statusOf(run.id)).toBe("discussing");
+      expect((await stepsOf(run.id))[0]).toMatchObject({ kind: "reviewer_prompt", status: "abandoned" });
+      emitCompleted("s-rev", reviewerTurnEnd());
+      await settle();
+      expect(await statusOf(run.id)).toBe("discussing");
+
+      await engine.requestFinalVerdict(run.id);
+      const steps = await stepsOf(run.id);
+      expect(steps.map((st) => [st.kind, st.status])).toEqual([["reviewer_prompt", "abandoned"], ["final_verdict", "dispatched"]]);
+      // The abandoned round never happened: the verdict is round 1, under its own key.
+      expect(steps[1].round).toBe(1);
+      expect(steps[1].idempotency_key).not.toBe(steps[0].idempotency_key);
+    });
+
+    it("cancel and failure abandon whatever is still open", async () => {
+      const cancelled = await start();
+      await engine.cancelRun(cancelled.id);
+      expect((await stepsOf(cancelled.id)).map((st) => st.status)).toEqual(["abandoned"]);
+      const failed = await start();
+      await engine.failRunForTest(failed.id, "boom");
+      expect((await stepsOf(failed.id)).map((st) => st.status)).toEqual(["abandoned"]);
+    });
+
+    it("refuses feedback while the source is mid-turn — before touching the run", async () => {
+      const run = await start();
+      await toGate(run);
+      await storage.agentSessions.updateStatus("s-src", "running");
+      await expect(engine.approveFeedback(run.id, "edited")).rejects.toMatchObject({ code: "session-busy" });
+      const after = await storage.workflowRuns.getById(run.id);
+      expect(after).toMatchObject({ status: "waiting_feedback", feedback_snapshot: "Feedback: rename X; add test for Y" });
+      expect((await stepsOf(run.id)).some((st) => st.kind === "feedback")).toBe(false);
+    });
+
+    it("re-checks idleness under the session lock: a user message that wins the race blocks the send", async () => {
+      const run = await start();
+      await toGate(run);
+      const realGetById = storage.agentSessions.getById.bind(storage.agentSessions);
+      let sourceReads = 0;
+      const spy = vi.spyOn(storage.agentSessions, "getById").mockImplementation(async (id: string, ...rest: never[]) => {
+        const row = await realGetById(id, ...rest);
+        // First read = approveFeedback's fast pre-check; the next is the locked re-check.
+        if (id === "s-src" && row && ++sourceReads >= 2) return { ...row, status: "running" as const };
+        return row;
+      });
+      const sendsBefore = agentOps.sendUserMessage.mock.calls.length;
+      await expect(engine.approveFeedback(run.id)).rejects.toMatchObject({ code: "session-busy" });
+      spy.mockRestore();
+      expect(agentOps.sendUserMessage.mock.calls.length).toBe(sendsBefore);
+      expect(await statusOf(run.id)).toBe("waiting_feedback");
+      expect((await stepsOf(run.id)).find((st) => st.kind === "feedback")).toMatchObject({ status: "abandoned" });
+    });
+
+    it("aborts a send whose step was abandoned underneath it: nothing reaches stdin", async () => {
+      const run = await start();
+      await toGate(run);
+      await engine.handleExternalUserMessage("s-rev");
+      let reachedStdin = false;
+      agentOps.sendUserMessage.mockImplementationOnce(async (sessionId: string, content: string, _p?: string, _u?: string, opts?: SendOpts) => {
+        await storage.workflowRunSteps.abandonOpenByRun(run.id, "cancelled mid-send");
+        await acceptInstruction(sessionId, content, opts); // the evidence hook throws here
+        reachedStdin = true;
+        return true;
+      });
+      await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "send-failed" });
+      expect(reachedStdin).toBe(false);
+      expect(await statusOf(run.id)).toBe("discussing");
+    });
+
+    describe("unknown delivery outcome", () => {
+      /** Another live claim holds the key: we sent nothing, but someone may be sending. */
+      const nextClaimIsBusy = () =>
+        vi.spyOn(storage.agentInstructionDeliveries, "claim").mockResolvedValueOnce("busy");
+
+      it("keeps a final-verdict run waiting, so the real completion is still accepted", async () => {
+        const run = await start();
+        await toGate(run);
+        await engine.handleExternalUserMessage("s-rev");
+        nextClaimIsBusy();
+        await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "send-failed" });
+        const unknown = await storage.workflowRuns.getById(run.id);
+        expect(unknown?.status).toBe("waiting_reviewer");
+        expect(unknown?.error).toMatch(/^投递结果未知/);
+
+        // The other sender did deliver it: write the entry the way it would have.
+        const step = (await stepsOf(run.id)).find((st) => st.kind === "final_verdict")!;
+        const index = reviewerEntries.length;
+        reviewerEntries[index] = { type: "user", content: FINAL_VERDICT_PROMPT, timestamp: 1, origin: "workflow" };
+        await storage.workflowRunSteps.setUserEntryIndex(step.id, index);
+        emitCompleted("s-rev", reviewerTurnEnd("Final verdict: needs-changes"));
+        await vi.waitFor(async () => expect(await statusOf(run.id)).toBe("waiting_feedback"));
+        const done = await storage.workflowRuns.getById(run.id);
+        expect(done?.feedback_snapshot).toBe("Final verdict: needs-changes");
+        expect(done?.error).toBeNull();
+      });
+
+      it("retry re-uses the same step, key and payload", async () => {
+        const run = await start();
+        await toGate(run);
+        await engine.handleExternalUserMessage("s-rev");
+        nextClaimIsBusy();
+        await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "send-failed" });
+        const before = (await stepsOf(run.id)).filter((st) => st.kind === "final_verdict");
+
+        const retried = await engine.requestFinalVerdict(run.id);
+        expect(retried).toMatchObject({ status: "waiting_reviewer", error: null });
+        const after = (await stepsOf(run.id)).filter((st) => st.kind === "final_verdict");
+        expect(after).toHaveLength(1);
+        expect(after[0]).toMatchObject({ id: before[0].id, idempotency_key: before[0].idempotency_key, status: "dispatched", error: null });
+        expect(after[0].user_entry_index).toBe(reviewerEntries.length - 1);
+      });
+
+      it("a waiting_reviewer run with nothing unknown is not a retry entry", async () => {
+        const run = await start();
+        await expect(engine.requestFinalVerdict(run.id)).rejects.toMatchObject({ code: "bad-state" });
+      });
+
+      it("returns feedback to the gate, replays the original on re-approve, and refuses an edit", async () => {
+        const run = await start();
+        await toGate(run);
+        nextClaimIsBusy();
+        await expect(engine.approveFeedback(run.id)).rejects.toMatchObject({ code: "send-failed" });
+        const unknown = await storage.workflowRuns.getById(run.id);
+        expect(unknown?.status).toBe("waiting_feedback");
+        expect(unknown?.error).toMatch(/^投递结果未知/);
+
+        // Editing now would either smuggle new content under the old key or
+        // silently drop the edit: neither is acceptable.
+        await expect(engine.approveFeedback(run.id, "something else entirely")).rejects.toMatchObject({ code: "bad-state" });
+        expect((await storage.workflowRuns.getById(run.id))?.feedback_snapshot).toBe("Feedback: rename X; add test for Y");
+
+        const done = await engine.approveFeedback(run.id);
+        expect(done.status).toBe("completed");
+        expect((await stepsOf(run.id)).filter((st) => st.kind === "feedback")).toHaveLength(1);
+      });
+    });
+
+    it("legacy: a run created before step rows existed keeps the whole-session rule", async () => {
+      await createReviewer();
+      const legacy = await storage.workflowRuns.create({
+        id: "legacy-run", project_id: "p1", branch: "dev", source_session_id: "s-src",
+        source_turn_end_index: 4, review_focus: null, review_target: null,
+      });
+      await storage.workflowRuns.update(legacy.id, { reviewer_session_id: "s-rev" });
+      await engine.init(); // tracks participants, as a restart would
+      reviewerEntries.push({ type: "assistant", content: "Legacy feedback", timestamp: 1 }, { type: "turn_end", timestamp: 2 });
+      emitCompleted("s-rev", 1);
+      await vi.waitFor(async () => expect(await statusOf(legacy.id)).toBe("waiting_feedback"));
+      expect((await storage.workflowRuns.getById(legacy.id))?.feedback_snapshot).toBe("Legacy feedback");
+    });
+  });
+
   describe("workflow milestones", () => {
     const outboxRows = () => storage.notificationOutbox.listAfter(0, 100);
 
     async function completeReview(run: { id: string }) {
-      bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+      bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
       await vi.waitFor(async () => {
         expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback");
       });
@@ -1311,7 +1610,7 @@ describe("WorkflowEngine", () => {
 
       const rows = await outboxRows();
       expect(rows).toHaveLength(1);
-      expect(rows[0].id).toBe(`workflow:${run.id}:turn:1:review-ready`);
+      expect(rows[0].id).toBe(`workflow:${run.id}:turn:2:review-ready`);
       expect(rows[0].kind).toBe("review_ready");
       // The reviewer session is where the review controls live.
       expect(rows[0].session_id).toBe("s-rev");
@@ -1324,7 +1623,7 @@ describe("WorkflowEngine", () => {
       const run = await start();
       await completeReview(run);
       // Replay: the second event finds the run already past waiting_reviewer.
-      bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: 1 });
+      bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "s-rev", turnEndEntryIndex: reviewerTurnEnd() });
       await new Promise((r) => setTimeout(r, 20));
       expect(await outboxRows()).toHaveLength(1);
     });
@@ -1402,16 +1701,14 @@ describe("WorkflowEngine", () => {
       // Second review of the SAME reviewer session — its history still holds the
       // first review's turn_end.
       await storage.agentSessions.updateStatus("s-rev", "stopped");
-      reviewerEntries[2] = { type: "assistant", content: "Second round feedback", timestamp: 3 };
-      reviewerEntries[3] = { type: "turn_end", timestamp: 4 };
       const second = await reuse();
       await completeReview(second);
 
       const reviewReady = (await outboxRows()).filter((r) => r.kind === "review_ready");
       expect(reviewReady).toHaveLength(2);
       expect(reviewReady.map((r) => r.id)).toEqual([
-        `workflow:${first.id}:turn:1:review-ready`,
-        `workflow:${second.id}:turn:1:review-ready`,
+        `workflow:${first.id}:turn:2:review-ready`,
+        `workflow:${second.id}:turn:5:review-ready`,
       ]);
       expect(second.id).not.toBe(first.id);
     });

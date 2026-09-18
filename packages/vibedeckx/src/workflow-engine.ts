@@ -1,8 +1,9 @@
 import { randomUUID } from "crypto";
-import type { ReviewSpan, Storage, WorkflowRun } from "./storage/types.js";
+import type { ReviewSpan, Storage, WorkflowRun, WorkflowRunStep, WorkflowRunStepKind } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { AgentMessage, AgentType, NotificationDisposition, TextPart } from "./agent-types.js";
-import { reviewReadyId, workflowFailedId } from "./notification-milestones.js";
+import { findTurnOpeningUserEntryIndex, reviewReadyId, workflowFailedId } from "./notification-milestones.js";
+import { deliverInstruction, instructionContentHash, serializeSessionMutation } from "./instruction-delivery.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
 import { captureSnapshot, computeScope, resolveStartSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
 import { snippetTitle } from "./utils/session-title.js";
@@ -34,7 +35,16 @@ export interface AgentOps {
     content: string,
     projectPath?: string,
     userId?: string,
-    opts?: { origin?: "workflow"; notificationDisposition?: NotificationDisposition },
+    opts?: {
+      origin?: "workflow";
+      notificationDisposition?: NotificationDisposition;
+      /**
+       * Runs after the user entry is durable and strictly BEFORE stdin. The
+       * engine records a dispatch step's `user_entry_index` here; a throw
+       * aborts the send with stdin untouched.
+       */
+      onUserEntryPersisted?: (entryIndex: number) => Promise<void>;
+    },
   ): Promise<boolean>;
   /** Write a final title and claim the one-shot slot (AI titling never fires). */
   setFinalSessionTitle(sessionId: string, title: string): Promise<void>;
@@ -56,6 +66,29 @@ export class WorkflowError extends Error {
 
 /** Statuses a run can never leave — see failRun / cancelRun. */
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "cancelled", "failed"]);
+
+/**
+ * Prefix of `run.error` while a dispatch's outcome is unknown: the run stays in
+ * its waiting state (a real completion is still attributed), and the panel
+ * offers "retry delivery" — which re-uses the same step, key and payload.
+ */
+export const DELIVERY_UNKNOWN_PREFIX = "投递结果未知";
+
+/** The engine's own abort: the step was abandoned (cancel/takeover) while the send was in flight. */
+class DispatchSupersededError extends Error {}
+
+/**
+ * Outcome of one dispatch (Phase 2 prerequisite design §2.4).
+ * `accepted`: the runtime took it; the step waits to be claimed.
+ * `no_side_effect`: provably nothing reached stdin; the step is abandoned and
+ *   the caller rolls the run back. `busy` = the target was mid-turn.
+ * `unknown`: we cannot tell; the step stays dispatched and the run stays in
+ *   its waiting state so a real completion is still accepted.
+ */
+type DispatchOutcome =
+  | { kind: "accepted"; step: WorkflowRunStep }
+  | { kind: "no_side_effect"; busy: boolean; reason: string }
+  | { kind: "unknown"; step: WorkflowRunStep; reason: string };
 
 // ---------- notification dispositions for workflow-authored turns ----------
 
@@ -664,6 +697,130 @@ export class WorkflowEngine {
    * when one exists, otherwise the source session (a run can fail before its
    * reviewer is ever created).
    */
+  // ---------- dispatch identity (Phase 2 prerequisite design §2) ----------
+
+  /**
+   * The user-entry index a step's dispatch was written at. The send path's
+   * evidence hook stores it strictly before stdin, so `null` means stdin was
+   * never written. A fresh reviewer's first instruction goes through the
+   * lifecycle service, which records the same evidence on the session row; the
+   * engine copies it over after activation returns, and this read covers the
+   * gap (a completion or a crash can land first).
+   */
+  private async effectiveEntryIndex(step: WorkflowRunStep): Promise<number | null> {
+    if (step.user_entry_index !== null) return step.user_entry_index;
+    if (step.kind !== "reviewer_prompt") return null;
+    const row = await this.storage.agentSessions.getLifecycleById(step.session_id);
+    return row?.activation_user_entry_index ?? null;
+  }
+
+  /**
+   * A retry must be the SAME instruction. If this run already has an open
+   * step of this kind (its outcome is unknown, or it is still in flight) and
+   * the payload differs, refuse: re-using the key with new content is a ledger
+   * conflict, and silently sending the old content would ignore the edit.
+   * Call BEFORE any run CAS so a refusal leaves the run untouched.
+   */
+  private async assertRetryIsSameInstruction(runId: string, kind: WorkflowRunStepKind, payload: string): Promise<void> {
+    const open = (await this.storage.workflowRunSteps.listByRun(runId))
+      .find((st) => st.kind === kind && st.status === "dispatched");
+    if (open && open.payload_hash !== instructionContentHash(payload)) {
+      throw new WorkflowError("bad-state", "上一次投递结果未知：请先按原文重试，或结束本次 review 后重新发起。");
+    }
+  }
+
+  /**
+   * One keyed dispatch to an ALREADY-ACTIVE session (everything except a
+   * fresh reviewer's activation). Only idle sessions are dispatched to, and
+   * the idle check shares the per-session mutex with the user's `/message`
+   * route: a dispatch that lands mid-turn would be queued or injected by the
+   * CLI and could no longer be told apart from the turn it rode in on. An idle
+   * dispatch always opens its own turn, which is what lets attribution be the
+   * single rule "the turn's opening entry is the step's entry".
+   */
+  private async dispatchStep(opts: {
+    run: WorkflowRun;
+    kind: Exclude<WorkflowRunStepKind, "reviewer_prompt">;
+    role: WorkflowRunStep["role"];
+    sessionId: string;
+    payload: string;
+    projectPath: string | undefined;
+    turn: typeof REVIEWER_TURN | typeof FEEDBACK_TURN;
+  }): Promise<DispatchOutcome> {
+    const steps = this.storage.workflowRunSteps;
+    const stepId = randomUUID();
+    const { step, reused } = await steps.open({
+      id: stepId, run_id: opts.run.id, role: opts.role, kind: opts.kind, session_id: opts.sessionId,
+      idempotency_key: `run:${opts.run.id}:step:${stepId}`,
+      payload_hash: instructionContentHash(opts.payload),
+    });
+
+    return serializeSessionMutation(opts.sessionId, async (): Promise<DispatchOutcome> => {
+      // Lenient on a missing row, like the pre-checks: only a positively
+      // running session blocks.
+      const target = await this.storage.agentSessions.getById(opts.sessionId);
+      if (target?.status === "running") {
+        // A brand-new step never left; a reused one may be the very turn that
+        // is running — leave it for its completion to claim.
+        if (!reused) await steps.abandon(step.id, "target session busy");
+        return { kind: "no_side_effect", busy: true, reason: "target session is mid-turn" };
+      }
+
+      let runtimeAccepted = false;
+      try {
+        const result = await deliverInstruction({
+          storage: this.storage, sessionId: opts.sessionId,
+          idempotencyKey: step.idempotency_key, rawContent: opts.payload,
+          deliver: async () => {
+            runtimeAccepted = await this.agentOps.sendUserMessage(
+              opts.sessionId, opts.payload, opts.projectPath, undefined,
+              {
+                ...opts.turn,
+                onUserEntryPersisted: async (entryIndex) => {
+                  // Last gate before stdin: if the step was abandoned while
+                  // we were sending (cancel, user takeover), abort the send.
+                  if (!(await steps.setUserEntryIndex(step.id, entryIndex))) throw new DispatchSupersededError();
+                },
+              },
+            );
+            return runtimeAccepted;
+          },
+        });
+        switch (result) {
+          case "delivered":
+          case "replayed":
+            await steps.setError(step.id, null);
+            return { kind: "accepted", step };
+          case "unconfirmed":
+          case "ownership_lost_after_send":
+            // The runtime took it; only the ledger's `sent` mark is missing.
+            console.warn(`[WorkflowEngine] step ${step.id}: delivered but ledger result was ${result}`);
+            return { kind: "accepted", step };
+          case "not_running":
+          case "conflict":
+          case "ownership_lost_before_send":
+            await steps.abandon(step.id, `not delivered: ${result}`);
+            return { kind: "no_side_effect", busy: false, reason: result };
+          case "busy":
+            // Another live claim on this key (a previous process's lease has
+            // not expired): someone may be sending it right now.
+            await steps.setError(step.id, DELIVERY_UNKNOWN_PREFIX);
+            return { kind: "unknown", step, reason: result };
+        }
+      } catch (err) {
+        if (runtimeAccepted) {
+          // Thrown after the send returned (ledger bookkeeping): it was delivered.
+          console.warn(`[WorkflowEngine] step ${step.id}: delivered, then ledger threw:`, err);
+          return { kind: "accepted", step };
+        }
+        // Every throw on the send path happens before stdin (checkout
+        // resolution, spawn, strict entry persist, the evidence hook).
+        await steps.abandon(step.id, `not delivered: ${err instanceof Error ? err.message : String(err)}`);
+        return { kind: "no_side_effect", busy: false, reason: "send threw before stdin" };
+      }
+    });
+  }
+
   private async failRun(run: WorkflowRun, error: string): Promise<void> {
     // A run that already resolved is not failing now. Without this guard the
     // CAS below would trivially succeed (from === the terminal status it is
@@ -687,6 +844,7 @@ export class WorkflowEngine {
       },
     );
     if (!ok) return;
+    await this.storage.workflowRunSteps.abandonOpenByRun(run.id, "run failed");
     const failed = await this.storage.workflowRuns.getById(run.id);
     if (failed) {
       this.untrackRun(failed);
@@ -966,15 +1124,24 @@ export class WorkflowEngine {
           reviewFocus: opts.reviewFocus ?? null,
           target,
         });
-        const sent = await this.agentOps
-          .sendUserMessage(opts.reviewerSessionId, prompt, opts.project.path, undefined, REVIEWER_TURN)
-          .catch(() => false);
-        if (!sent) {
-          await this.failRun(run, "向上次 reviewer 投递复审任务失败");
-          throw new WorkflowError("send-failed", "向上次 reviewer 投递复审任务失败");
+        const outcome = await this.dispatchStep({
+          run, kind: "rereview_prompt", role: "reviewer", sessionId: opts.reviewerSessionId,
+          payload: prompt, projectPath: opts.project.path, turn: REVIEWER_TURN,
+        });
+        if (outcome.kind === "no_side_effect") {
+          const message = outcome.busy
+            ? "上次 reviewer 正在运行，无法投递复审任务"
+            : "向上次 reviewer 投递复审任务失败";
+          await this.failRun(run, message);
+          throw new WorkflowError(outcome.busy ? "session-busy" : "send-failed", message);
         }
-        this.emitRunUpdated(run);
-        return run;
+        const started = outcome.kind === "unknown"
+          ? await this.storage.workflowRuns.update(run.id, {
+            error: `${DELIVERY_UNKNOWN_PREFIX}：复审任务可能已送达 reviewer。若其完成，结果会自动归属；否则请结束本次 review 后重新发起。`,
+          }) ?? run
+          : run;
+        this.emitRunUpdated(started);
+        return started;
       }
 
       let scope: { changedFiles: string[]; startHead: string } | null = null;
@@ -1127,6 +1294,7 @@ export class WorkflowEngine {
     // failRun's untrackRun).
     const pending = this.pendingActivations.get(runId) ?? parsePreparedContext(run.prepared_context);
     let outcome: ActivationResult;
+    let step: WorkflowRunStep;
     try {
       // Last-resort fallback for legacy rows prepared before the context was
       // persisted: recompute from the stored cutoff. Scope is unrecoverable
@@ -1149,6 +1317,16 @@ export class WorkflowEngine {
       // Lifecycle `activate` (§10.4): hydrate + spawn + first instruction
       // under a run-scoped key, so a replayed activation returns the same
       // outcome instead of prompting the reviewer twice.
+      // The step rides the lifecycle's own activation key — no second claim
+      // set next to it (lifecycle design §6.2). A replayed activation re-uses
+      // the open step; the payload hash is informational here, because the
+      // lifecycle service owns content-conflict detection for its key.
+      step = (await this.storage.workflowRunSteps.open({
+        id: randomUUID(), run_id: run.id, role: "reviewer", kind: "reviewer_prompt",
+        session_id: run.reviewer_session_id,
+        idempotency_key: reviewerActivationKey(run.id),
+        payload_hash: instructionContentHash(prompt),
+      })).step;
       outcome = await this.agentOps.activateReviewer({
         sessionId: run.reviewer_session_id,
         activationKey: reviewerActivationKey(run.id),
@@ -1156,8 +1334,16 @@ export class WorkflowEngine {
         ...REVIEWER_TURN,
       });
     } catch (err) {
+      // failRun abandons the step.
       await this.failRun(run, `激活 reviewer 失败：${err instanceof Error ? err.message : String(err)}`);
       throw new WorkflowError("spawn-failed", "激活 reviewer session 失败");
+    }
+    // The lifecycle service recorded the entry index on the session row
+    // before stdin; copy it onto the step. Until this lands — and if it never
+    // does — effectiveEntryIndex reads the session row instead.
+    if ((outcome.kind === "activated" || outcome.kind === "replayed" || outcome.kind === "uncertain")
+        && outcome.view.userEntryIndex !== null) {
+      await this.storage.workflowRunSteps.setUserEntryIndex(step.id, outcome.view.userEntryIndex);
     }
     switch (outcome.kind) {
       case "activated":
@@ -1171,6 +1357,8 @@ export class WorkflowEngine {
         // The prompt is durable but stdin acceptance is unprovable (§5.2).
         // Never re-send: move on with an honest note so a reviewer that did
         // start can still complete the run, and the user can end it if not.
+        // The step stays dispatched: if the reviewer did start, its completion
+        // is still attributed (via the session row's evidence index).
         const claimed = await this.storage.workflowRuns.transition(runId, "preparing", "waiting_reviewer", {
           error: "reviewer 首次指令投递结果未知：服务在投递期间中断。若 reviewer 没有开始工作，请结束本次 review 后重新发起。",
         });
@@ -1199,17 +1387,84 @@ export class WorkflowEngine {
     return updated;
   }
 
+  /**
+   * Attribute a turn completion. One rule (design §2.5): the index of the user
+   * entry that OPENED the completed turn equals the entry index recorded on a
+   * `dispatched` step of this session. Nothing is inferred from "this session
+   * is a reviewer and its run is waiting" — a session is re-used across rounds
+   * and the user talks to it in between.
+   *
+   * The engine is the only claimant. Runs created before steps existed have no
+   * step rows at all and keep the old whole-session rule for one release.
+   */
   private async handleTaskCompleted(event: Extract<GlobalEvent, { type: "session:taskCompleted" }>): Promise<void> {
-    const p = this.participants.get(event.sessionId);
-    if (!p || p.role !== "reviewer") return;
-    const run = await this.storage.workflowRuns.getById(p.runId);
-    if (!run || run.status !== "waiting_reviewer") return;
+    const open = await this.storage.workflowRunSteps.getOpenBySession(event.sessionId);
+    if (open.length === 0) {
+      await this.handleLegacyReviewerCompletion(event);
+      return;
+    }
 
     const entries = await this.agentOps.getRawMessages(event.sessionId);
     const boundary = event.turnEndEntryIndex ?? extractLatestTurnEndIndex(entries) ?? entries.length;
-    const feedback = extractLastAssistantInTurn(entries, boundary) ?? "(reviewer 没有输出可用的反馈文本)";
+    const openingIndex = findTurnOpeningUserEntryIndex(entries, boundary);
+    let step: WorkflowRunStep | undefined;
+    if (openingIndex !== null) {
+      for (const candidate of open) {
+        if ((await this.effectiveEntryIndex(candidate)) === openingIndex) { step = candidate; break; }
+      }
+    }
+    if (!step) {
+      // Better unclaimed than misattributed — but say so where the user looks.
+      for (const candidate of open) {
+        if (candidate.role !== "reviewer") continue;
+        const waiting = await this.storage.workflowRuns.getById(candidate.run_id);
+        if (waiting?.status !== "waiting_reviewer") continue;
+        const noted = await this.storage.workflowRuns.update(waiting.id, {
+          error: "收到 reviewer 的完成事件，但无法确认它对应本次派发。请打开其窗口查看，或结束本次 review。",
+        });
+        if (noted) this.emitRunUpdated(noted);
+      }
+      return;
+    }
 
-    let driftNote: string | null = null;
+    const output = extractLastAssistantInTurn(entries, boundary);
+    if (step.kind === "feedback") {
+      // The source finished the turn our feedback opened. The run completed
+      // when the feedback was sent, so only the step records it; Phase 2 hangs
+      // the next hop here. Deliberately NOT a commander suppression: a source
+      // completion is a user-facing event today.
+      await this.storage.workflowRuns.claimStepAndTransition({
+        stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
+      });
+      return;
+    }
+
+    const run = await this.storage.workflowRuns.getById(step.run_id);
+    if (!run || run.status !== "waiting_reviewer") return;
+    const feedback = output ?? "(reviewer 没有输出可用的反馈文本)";
+    const driftNote = await this.computeDriftNote(run);
+
+    // Step claim, run transition and the attention milestone are one
+    // transaction: a claimed step whose run never advanced would be lost for
+    // good, since restart only reconciles `dispatched` steps. One transition
+    // ⇒ one review_ready, guaranteed by the CASes plus the deterministic id.
+    const ok = await this.storage.workflowRuns.claimStepAndTransition({
+      stepId: step.id, turnEndIndex: boundary, outputSnapshot: feedback,
+      run: {
+        id: run.id, from: "waiting_reviewer", to: "waiting_feedback",
+        // `error: null` also clears a "delivery outcome unknown" note: the
+        // completion just answered it.
+        patch: { feedback_snapshot: feedback, error: driftNote },
+        outbox: this.reviewReadyOutbox(run, event.sessionId, boundary),
+      },
+    });
+    if (!ok) return;
+    this.onMilestoneCreated?.();
+    const updated = await this.storage.workflowRuns.getById(run.id);
+    if (updated) this.emitRunUpdated(updated);
+  }
+
+  private async computeDriftNote(run: WorkflowRun): Promise<string | null> {
     try {
       const target = run.review_target ? (JSON.parse(run.review_target) as ReviewTarget) : null;
       const project = await this.storage.projects.getById(run.project_id);
@@ -1217,32 +1472,54 @@ export class WorkflowEngine {
       const worktreePath = sourceProjection?.worktreePath
         ?? (project ? resolveWorktreePath(project.path ?? "", run.branch) : null);
       if (target && worktreePath && hasDrifted(worktreePath, target)) {
-        driftNote = "注意：workspace 在 review 期间发生了变化，部分反馈可能针对的不是被审工作。";
+        return "注意：workspace 在 review 期间发生了变化，部分反馈可能针对的不是被审工作。";
       }
     } catch { /* drift check is best-effort */ }
+    return null;
+  }
+
+  private reviewReadyOutbox(run: WorkflowRun, reviewerSessionId: string, boundary: number) {
+    return {
+      id: reviewReadyId(run.id, boundary),
+      kind: "review_ready" as const,
+      project_id: run.project_id,
+      branch: run.branch,
+      // Target the reviewer: that's where the feedback and the
+      // approve/discard controls are.
+      session_id: reviewerSessionId,
+      workflow_run_id: run.id,
+      created_at: Date.now(),
+    };
+  }
+
+  /**
+   * Pre-step runs only (created before `workflow_run_steps` existed): the old
+   * whole-session rule. A run that HAS step rows never comes through here — a
+   * completion it cannot attribute is not accepted. Remove after one release.
+   */
+  private async handleLegacyReviewerCompletion(event: Extract<GlobalEvent, { type: "session:taskCompleted" }>): Promise<void> {
+    const p = this.participants.get(event.sessionId);
+    if (!p || p.role !== "reviewer") return;
+    const run = await this.storage.workflowRuns.getById(p.runId);
+    if (!run || run.status !== "waiting_reviewer") return;
+    if (await this.storage.workflowRunSteps.hasAny(run.id)) return;
+
+    const entries = await this.agentOps.getRawMessages(event.sessionId);
+    const boundary = event.turnEndEntryIndex ?? extractLatestTurnEndIndex(entries) ?? entries.length;
+    const feedback = extractLastAssistantInTurn(entries, boundary) ?? "(reviewer 没有输出可用的反馈文本)";
+    const driftNote = await this.computeDriftNote(run);
 
     // The attention milestone rides the state transition, NOT this event: the
     // reviewer's raw completion is not itself "review feedback is ready", and
     // deriving the notification from the event would ding even when the CAS
-    // loses (run already advanced or cancelled). One transition ⇒ one
-    // review_ready, guaranteed by the CAS plus the deterministic id.
+    // loses (run already advanced or cancelled).
     const ok = await this.storage.workflowRuns.transitionWithOutbox(
       run.id, "waiting_reviewer", "waiting_feedback",
       {
         feedback_snapshot: feedback,
         ...(driftNote ? { error: driftNote } : {}),
       },
-      {
-        id: reviewReadyId(run.id, boundary),
-        kind: "review_ready",
-        project_id: run.project_id,
-        branch: run.branch,
-        // Target the reviewer: that's where the feedback and the
-        // approve/discard controls are.
-        session_id: event.sessionId,
-        workflow_run_id: run.id,
-        created_at: Date.now(),
-      },
+      this.reviewReadyOutbox(run, event.sessionId, boundary),
     );
     if (!ok) return;
     this.onMilestoneCreated?.();
@@ -1255,23 +1532,45 @@ export class WorkflowEngine {
     if (!run || run.status !== "waiting_feedback") {
       throw new WorkflowError("bad-state", "run 不在等待反馈确认的状态");
     }
+    const feedback = editedPayload ?? run.feedback_snapshot ?? "";
+    const payload = buildFeedbackMessage(feedback);
+    // Before the CAS, so a refusal leaves the run (and its snapshot) untouched.
+    await this.assertRetryIsSameInstruction(runId, "feedback", payload);
+    // Dispatch only to an idle source: feedback that lands mid-turn is steered
+    // into (or queued behind) a turn that is not about it. Fast-fail here; the
+    // authoritative re-check happens under the session mutex in dispatchStep.
+    const sourceSession = await this.storage.agentSessions.getById(run.source_session_id);
+    if (sourceSession?.status === "running") {
+      throw new WorkflowError("session-busy", "source session 正在运行，请等待其完成后再发送反馈");
+    }
     const claimed = await this.storage.workflowRuns.transition(runId, "waiting_feedback", "sending_feedback", {
       ...(editedPayload !== undefined ? { feedback_snapshot: editedPayload } : {}),
       error: null, // clear stale warnings (error column is nullable)
     });
     if (!claimed) throw new WorkflowError("bad-state", "run 状态已变化（可能已被处理）");
 
-    const feedback = editedPayload ?? run.feedback_snapshot ?? "";
     const project = await this.storage.projects.getById(run.project_id);
-    const ok = await this.agentOps
-      .sendUserMessage(run.source_session_id, buildFeedbackMessage(feedback), project?.path ?? undefined, undefined, FEEDBACK_TURN)
-      .catch(() => false);
+    const outcome = await this.dispatchStep({
+      run, kind: "feedback", role: "source", sessionId: run.source_session_id,
+      payload, projectPath: project?.path ?? undefined, turn: FEEDBACK_TURN,
+    });
 
-    if (!ok) {
-      await this.storage.workflowRuns.transition(runId, "sending_feedback", "waiting_feedback", {
-        error: "发送失败：目标 session 可能未运行。请在其窗口中唤醒后重试，或结束本次 review。",
-      });
-      throw new WorkflowError("send-failed", "发送反馈失败");
+    if (outcome.kind !== "accepted") {
+      // `completed` must rest on a confirmed send, so an unknown outcome also
+      // returns to the gate — but keeps its step, so "approve" again re-uses
+      // the same key (replay if it did land) instead of sending a second copy.
+      const error = outcome.kind === "unknown"
+        ? `${DELIVERY_UNKNOWN_PREFIX}：反馈可能已送达 source session。请检查其窗口；再次确认会按原文重试（已送达则不会重复发送）。`
+        : outcome.busy
+          ? "source session 正在运行，请等待其完成后再发送反馈。"
+          : "发送失败：目标 session 可能未运行。请在其窗口中唤醒后重试，或结束本次 review。";
+      await this.storage.workflowRuns.transition(runId, "sending_feedback", "waiting_feedback", { error });
+      const rolled = await this.storage.workflowRuns.getById(runId);
+      if (rolled) this.emitRunUpdated(rolled);
+      if (outcome.kind === "no_side_effect" && outcome.busy) {
+        throw new WorkflowError("session-busy", "source session 正在运行，请等待其完成后再发送反馈");
+      }
+      throw new WorkflowError("send-failed", outcome.kind === "unknown" ? "反馈投递结果未知" : "发送反馈失败");
     }
     const completedOk = await this.storage.workflowRuns.transition(runId, "sending_feedback", "completed");
     if (!completedOk) {
@@ -1296,7 +1595,14 @@ export class WorkflowEngine {
    */
   async requestFinalVerdict(runId: string): Promise<WorkflowRun> {
     const run = await this.storage.workflowRuns.getById(runId);
-    if (!run || run.status !== "discussing" || !run.reviewer_session_id) {
+    if (!run || !run.reviewer_session_id) throw new WorkflowError("bad-state", "run 不在讨论状态");
+    // Retry entry: the run is already back on the reviewer track and its
+    // final-verdict dispatch is still open with an unknown outcome. Re-running
+    // re-uses that step's key and payload — a replay if it did land.
+    const retrying = run.status === "waiting_reviewer"
+      && (await this.storage.workflowRunSteps.listByRun(runId))
+        .some((st) => st.kind === "final_verdict" && st.status === "dispatched" && st.error !== null);
+    if (run.status !== "discussing" && !retrying) {
       throw new WorkflowError("bad-state", "run 不在讨论状态");
     }
     // Closes the realistic race: finalize clicked while the reviewer still has
@@ -1313,16 +1619,31 @@ export class WorkflowEngine {
     if (reviewerSession && reviewerSession.status === "running") {
       throw new WorkflowError("session-busy", "reviewer 正在回复中，请等待其完成后再生成终稿");
     }
-    const claimed = await this.storage.workflowRuns.transition(runId, "discussing", "waiting_reviewer", { error: null });
-    if (!claimed) throw new WorkflowError("bad-state", "run 状态已变化（可能已被处理）");
+    if (!retrying) {
+      const claimed = await this.storage.workflowRuns.transition(runId, "discussing", "waiting_reviewer", { error: null });
+      if (!claimed) throw new WorkflowError("bad-state", "run 状态已变化（可能已被处理）");
+    }
 
     const project = await this.storage.projects.getById(run.project_id);
-    const sent = await this.agentOps
-      .sendUserMessage(run.reviewer_session_id, FINAL_VERDICT_PROMPT, project?.path ?? undefined, undefined, REVIEWER_TURN)
-      .catch(() => false);
-    if (!sent) {
+    const outcome = await this.dispatchStep({
+      run, kind: "final_verdict", role: "reviewer", sessionId: run.reviewer_session_id,
+      payload: FINAL_VERDICT_PROMPT, projectPath: project?.path ?? undefined, turn: REVIEWER_TURN,
+    });
+    if (outcome.kind === "unknown" || (outcome.kind === "no_side_effect" && outcome.busy && retrying)) {
+      // Do NOT roll back: if the prompt did land, the verdict turn's completion
+      // must still find the run waiting for it.
+      const noted = await this.storage.workflowRuns.update(runId, {
+        error: `${DELIVERY_UNKNOWN_PREFIX}：终稿请求可能已送达 reviewer。若其完成，结果会自动归属；否则请重试投递（复用同一条指令）或结束本次 review。`,
+      });
+      if (noted) this.emitRunUpdated(noted);
+      throw new WorkflowError(outcome.kind === "unknown" ? "send-failed" : "session-busy",
+        outcome.kind === "unknown" ? "终稿请求投递结果未知" : "reviewer 正在回复中，请等待其完成");
+    }
+    if (outcome.kind === "no_side_effect") {
       const rolledBack = await this.storage.workflowRuns.transition(runId, "waiting_reviewer", "discussing", {
-        error: "发送失败：reviewer session 可能未运行。请在其窗口中唤醒后重试，或结束本次 review。",
+        error: outcome.busy
+          ? "reviewer 正在回复中，请等待其完成后再生成终稿。"
+          : "发送失败：reviewer session 可能未运行。请在其窗口中唤醒后重试，或结束本次 review。",
       });
       if (!rolledBack) {
         console.warn(
@@ -1331,8 +1652,10 @@ export class WorkflowEngine {
       }
       const rolled = await this.storage.workflowRuns.getById(runId);
       if (rolled) this.emitRunUpdated(rolled);
+      if (outcome.busy) throw new WorkflowError("session-busy", "reviewer 正在回复中，请等待其完成后再生成终稿");
       throw new WorkflowError("send-failed", "向 reviewer 发送终稿请求失败");
     }
+    if (retrying) await this.storage.workflowRuns.update(runId, { error: null });
     const updated = (await this.storage.workflowRuns.getById(runId))!;
     this.emitRunUpdated(updated);
     return updated;
@@ -1364,6 +1687,7 @@ export class WorkflowEngine {
       return current;
     }
 
+    await this.storage.workflowRunSteps.abandonOpenByRun(runId, "run cancelled");
     const updated = await this.storage.workflowRuns.getById(runId);
     if (updated) {
       this.untrackRun(updated);
@@ -1398,8 +1722,14 @@ export class WorkflowEngine {
       // 下一轮终稿会重新计算。整段包 try/catch:never-throws 契约覆盖 storage
       // 异常本身,不止 CAS 落败——异常冒出会阻断 /message 路由的消息投递。
       try {
-        await this.storage.workflowRuns.transition(p.runId, "waiting_feedback", "discussing", { error: null })
-          || await this.storage.workflowRuns.transition(p.runId, "waiting_reviewer", "discussing", { error: null });
+        const fromGate = await this.storage.workflowRuns.transition(p.runId, "waiting_feedback", "discussing", { error: null });
+        if (!fromGate && await this.storage.workflowRuns.transition(p.runId, "waiting_reviewer", "discussing", { error: null })) {
+          // The user cut into a review that was still being produced. Whatever
+          // that turn ends up saying is part of the discussion now, not a
+          // verdict: its step must never be claimed, and a later finalize must
+          // open a fresh step (a re-used key would replay instead of sending).
+          await this.storage.workflowRunSteps.abandonOpenByRun(p.runId, "user started a discussion", "reviewer");
+        }
         // Broadcast regardless of whether the CAS moved anything. The run is
         // already `discussing` on every message after the first one, and
         // gating the frame on the transition left that case with no frame at

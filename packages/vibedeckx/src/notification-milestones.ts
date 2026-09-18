@@ -45,12 +45,25 @@ export function findTurnOpeningUserEntry(
   entries: Array<AgentMessage | undefined>,
   beforeIndex: number,
 ): AgentMessage | undefined {
-  let opening: AgentMessage | undefined;
+  const index = findTurnOpeningUserEntryIndex(entries, beforeIndex);
+  return index === null ? undefined : entries[index];
+}
+
+/**
+ * Same scan as findTurnOpeningUserEntry, returning the opener's entry index —
+ * the identity the workflow engine attributes a turn completion by (a dispatch
+ * step records the index of the user entry it wrote).
+ */
+export function findTurnOpeningUserEntryIndex(
+  entries: Array<AgentMessage | undefined>,
+  beforeIndex: number,
+): number | null {
+  let opening: number | null = null;
   for (let i = Math.min(beforeIndex, entries.length) - 1; i >= 0; i--) {
     const entry = entries[i];
     if (!entry) continue;
     if (entry.type === "turn_end") break;
-    if (entry.type === "user") opening = entry;
+    if (entry.type === "user") opening = i;
   }
   return opening;
 }
