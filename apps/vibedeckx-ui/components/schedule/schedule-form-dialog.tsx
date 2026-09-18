@@ -96,6 +96,7 @@ export function ScheduleFormDialog({
   initial,
   worktrees,
   projectId,
+  hasLocal = true,
   onOpenRun,
   onDelete,
 }: {
@@ -106,6 +107,9 @@ export function ScheduleFormDialog({
   initial?: Schedule | null;
   worktrees: Worktree[];
   projectId?: string;
+  /** Whether the project has a local path. SaaS projects are remote-only, so
+   *  "Local" is not offered and a new task defaults to the first remote. */
+  hasLocal?: boolean;
   /** Edit mode: "Open run" on the last-run strip. The dialog closes itself first. */
   onOpenRun?: (run: ScheduleRun) => void;
   /** Edit mode: "Delete task" in the footer. The dialog closes itself first. */
@@ -136,7 +140,8 @@ export function ScheduleFormDialog({
     setName(initial?.name ?? "");
     setCronExpr(initial?.cron_expr ?? "0 9 * * *");
     setTimezone(initial?.timezone ?? browserTimezone());
-    setTarget(initial?.target ?? "local");
+    // "" = no target yet: a remote-only project waits for its remotes to load.
+    setTarget(initial?.target ?? (hasLocal ? "local" : ""));
     setRunType(initial?.run_type ?? "command");
     setPromptProvider(initial?.prompt_provider ?? "claude");
     setContent(initial?.content ?? "");
@@ -144,7 +149,7 @@ export function ScheduleFormDialog({
     setBranch(initial?.branch ?? MAIN);
     setDirectory(initial?.directory ?? "");
     setTimeoutMinutes(String(Math.round((initial?.timeout_seconds ?? 1800) / 60)));
-  }, [open, initial]);
+  }, [open, initial, hasLocal]);
 
   useEffect(() => {
     if (target === "local") setTargetWorktrees(worktrees);
@@ -161,11 +166,15 @@ export function ScheduleFormDialog({
     return () => { cancelled = true; };
   }, [open, projectId]);
 
+  useEffect(() => {
+    if (open && !target && remotes.length > 0) setTarget(remotes[0].remote_server_id);
+  }, [open, target, remotes]);
+
   // Load workspace choices for the selected execution target. Local worktrees
   // are already supplied by the page; remote targets need a target-scoped fetch.
   useEffect(() => {
     let cancelled = false;
-    if (!open || !projectId || target === "local") return;
+    if (!open || !projectId || !target || target === "local") return;
     setTargetLoading(true);
     api.getProjectWorktrees(projectId, target)
       .then((items) => { if (!cancelled) setTargetWorktrees(items); })
@@ -179,7 +188,7 @@ export function ScheduleFormDialog({
 
   const preview = useMemo(() => previewCron(cronExpr, timezone || "UTC"), [cronExpr, timezone]);
 
-  const submitDisabled = loading || !name.trim() || !content.trim() || !preview.ok;
+  const submitDisabled = loading || !target || !name.trim() || !content.trim() || !preview.ok;
 
   const handleSubmit = async () => {
     if (!name.trim() || !content.trim()) {
@@ -225,7 +234,7 @@ export function ScheduleFormDialog({
 
   const editing = Boolean(initial);
   const lastRun = initial?.last_run ?? null;
-  const remoteName = target === "local"
+  const remoteName = !target || target === "local"
     ? null
     : (remotes.find((r) => r.remote_server_id === target)?.server_name ?? target);
   const submitLabel = editing ? "Save" : "Create";
@@ -359,13 +368,18 @@ export function ScheduleFormDialog({
             <div className="grid min-w-0 grid-cols-2 gap-2.5">
               <Select value={target} onValueChange={(v) => { setTarget(v); setBranch(MAIN); }} disabled={loading}>
                 <SelectTrigger size="sm" aria-label="Target" className={CONTROL_TRIGGER}>
-                  <SelectValue placeholder="Local" />
+                  <SelectValue placeholder="Select target" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="local">
-                    <Monitor className="size-3 text-muted-foreground/70" />
-                    Local
-                  </SelectItem>
+                  {/* Remote-only (SaaS) projects have nowhere local to run. A
+                      legacy task already targeting local keeps the item so the
+                      value still renders and can be moved to a remote. */}
+                  {(hasLocal || target === "local") && (
+                    <SelectItem value="local">
+                      <Monitor className="size-3 text-muted-foreground/70" />
+                      Local
+                    </SelectItem>
+                  )}
                   {remotes.map((r) => (
                     <SelectItem key={r.remote_server_id} value={r.remote_server_id}>
                       <Server className="size-3 text-muted-foreground/70" />
@@ -376,7 +390,7 @@ export function ScheduleFormDialog({
               </Select>
 
               {cwdMode === "branch" ? (
-                targetLoading ? (
+                targetLoading || !target ? (
                   <ControlBox disabled className="cursor-default px-2.5">
                     <Loader2 className="animate-spin" />
                     <span className="truncate">Loading workspaces…</span>

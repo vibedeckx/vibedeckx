@@ -58,6 +58,7 @@ function fmtDuration(run: ScheduleRun): string {
 
 export function SchedulesView({
   projectId,
+  hasLocal = true,
   schedules,
   loading,
   selectedId,
@@ -73,6 +74,8 @@ export function SchedulesView({
   onOpenRunHandled,
 }: {
   projectId: string;
+  /** Whether the project has a local path; SaaS projects are remote-only. */
+  hasLocal?: boolean;
   schedules: Schedule[];
   loading: boolean;
   selectedId: string | null;
@@ -227,7 +230,7 @@ export function SchedulesView({
         <Button size="sm" onClick={() => onCreateOpenChange(true)}>
           New Scheduled Task
         </Button>
-        <ScheduleFormDialog open={createOpen} onOpenChange={onCreateOpenChange} onSubmit={async (input) => { await onCreate(input); }} worktrees={worktrees} projectId={projectId} />
+        <ScheduleFormDialog open={createOpen} onOpenChange={onCreateOpenChange} onSubmit={async (input) => { await onCreate(input); }} worktrees={worktrees} projectId={projectId} hasLocal={hasLocal} />
       </div>
     );
   }
@@ -399,6 +402,7 @@ export function SchedulesView({
             }}
             worktrees={worktrees}
             projectId={projectId}
+            hasLocal={hasLocal}
             onOpenRun={openRun}
             onDelete={setPendingDelete}
           />

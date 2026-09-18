@@ -129,3 +129,29 @@ describe("ScheduleFormDialog timing", () => {
     expect(document.body.querySelector("[role='alert']")?.textContent).toContain("Fix the cron expression before saving.");
   });
 });
+
+describe("ScheduleFormDialog target", () => {
+  it("defaults a remote-only project to its first remote with no Local option", async () => {
+    api.getProjectRemotes.mockResolvedValueOnce([
+      { remote_server_id: "srv-1", server_name: "worker-1" },
+      { remote_server_id: "srv-2", server_name: "worker-2" },
+    ] as never);
+    await act(async () => {
+      root.render(
+        <ScheduleFormDialog
+          open
+          onOpenChange={vi.fn()}
+          onSubmit={vi.fn()}
+          worktrees={[]}
+          projectId="project-1"
+          hasLocal={false}
+        />,
+      );
+    });
+
+    const trigger = document.body.querySelector<HTMLElement>("[aria-label='Target']");
+    expect(trigger?.textContent).toContain("worker-1");
+    expect(trigger?.textContent).not.toContain("Local");
+    expect(api.getProjectWorktrees).toHaveBeenCalledWith("project-1", "srv-1");
+  });
+});

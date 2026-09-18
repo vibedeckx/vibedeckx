@@ -1312,6 +1312,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             <div className="flex-1 overflow-hidden">
               <SchedulesView
                 projectId={currentProject?.id ?? ""}
+                hasLocal={!!currentProject?.path}
                 schedules={schedules}
                 loading={schedulesLoading}
                 selectedId={selectedScheduleId}
