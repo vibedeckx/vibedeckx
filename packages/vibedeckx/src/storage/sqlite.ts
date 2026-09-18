@@ -25,6 +25,7 @@ import { createMergeTargetsRepo } from "./repositories/merge-targets.js";
 import { createSearchCacheRepos } from "./repositories/search-cache.js";
 import { createWorkflowRunRepos } from "./repositories/workflow-runs.js";
 import { createTurnSnapshotRepos } from "./repositories/turn-snapshots.js";
+import { createWorkflowRunStepRepos } from "./repositories/workflow-run-steps.js";
 import { createNotificationRepos } from "./repositories/notifications.js";
 import { createProjectChatRepos } from "./repositories/project-chat.js";
 import { createWorkspaceRegistryRepo } from "./repositories/workspace-registry.js";
@@ -1904,6 +1905,35 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     CREATE INDEX IF NOT EXISTS idx_workflow_runs_project_branch_status
       ON workflow_runs(project_id, branch, status);
 
+    -- One row per logical dispatch from the workflow engine to a session: the
+    -- identity a turn completion is attributed to. Growth: a handful of rows
+    -- per run (one per reviewer prompt / final-verdict request / feedback
+    -- send), deleted with the run. No FK on session_id: like workflow_runs and
+    -- notification_outbox, a step must outlive deletion of its session.
+    CREATE TABLE IF NOT EXISTS workflow_run_steps (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      round INTEGER NOT NULL,
+      role TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'dispatched',
+      user_entry_index INTEGER,
+      turn_end_index INTEGER,
+      output_snapshot TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_run_steps_open ON workflow_run_steps(session_id, status);
+    CREATE INDEX IF NOT EXISTS idx_workflow_run_steps_run ON workflow_run_steps(run_id, round);
+    -- At most one open dispatch per (run, kind): a retry reuses it.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_run_steps_one_open
+      ON workflow_run_steps(run_id, kind) WHERE status = 'dispatched';
+
     CREATE TABLE IF NOT EXISTS turn_snapshots (
       session_id TEXT NOT NULL,
       turn_end_index INTEGER NOT NULL,
@@ -2280,6 +2310,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createSearchCacheRepos(kdb, h),
     ...createWorkflowRunRepos(kdb),
     ...createTurnSnapshotRepos(kdb),
+    ...createWorkflowRunStepRepos(kdb),
     ...createNotificationRepos(kdb),
     ...createProjectChatRepos(kdb),
 

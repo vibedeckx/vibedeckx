@@ -604,6 +604,24 @@ export interface WorkflowRunsTable {
   updated_at: Generated<string>;
 }
 
+export interface WorkflowRunStepsTable {
+  id: string;
+  run_id: string;
+  round: number;
+  role: string;
+  kind: string;
+  session_id: string;
+  idempotency_key: string;
+  payload_hash: string;
+  status: string;
+  user_entry_index: number | null;
+  turn_end_index: number | null;
+  output_snapshot: string | null;
+  error: string | null;
+  created_at: Generated<string>;
+  updated_at: Generated<string>;
+}
+
 export interface TurnSnapshotsTable {
   session_id: string;
   turn_end_index: number;
@@ -669,4 +687,5 @@ export interface DB {
   cross_remote_audit: CrossRemoteAuditTable;
   workflow_runs: WorkflowRunsTable;
   turn_snapshots: TurnSnapshotsTable;
+  workflow_run_steps: WorkflowRunStepsTable;
 }

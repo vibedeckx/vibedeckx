@@ -426,6 +426,45 @@ export type WorkflowRunStatus =
 
 export type ReviewSpan = "this_turn" | "session_start";
 
+/** What an engine dispatch asks its target session to do. */
+export type WorkflowRunStepKind = "reviewer_prompt" | "rereview_prompt" | "final_verdict" | "feedback";
+/**
+ * `dispatched`: sent (or being sent) and not yet attributed to a completed
+ * turn. `claimed`: a turn completion was attributed to it. `abandoned`: it
+ * will never be attributed — proven undelivered, the turn ended without a
+ * usable result, or the run left the state that was waiting for it.
+ */
+export type WorkflowRunStepStatus = "dispatched" | "claimed" | "abandoned";
+
+/**
+ * One logical dispatch from the workflow engine to a session — the identity a
+ * turn completion is attributed to (Phase 2 prerequisite design §2). The only
+ * link to the transcript is `user_entry_index`.
+ */
+export interface WorkflowRunStep {
+  id: string;
+  run_id: string;
+  round: number;
+  role: "source" | "reviewer";
+  kind: WorkflowRunStepKind;
+  session_id: string;
+  idempotency_key: string;
+  payload_hash: string;
+  status: WorkflowRunStepStatus;
+  /**
+   * Written by the send path's evidence hook strictly BEFORE stdin. `null`
+   * therefore means stdin was never written — except for `reviewer_prompt`,
+   * whose index lives on the session row (`activation_user_entry_index`) until
+   * the engine copies it here.
+   */
+  user_entry_index: number | null;
+  turn_end_index: number | null;
+  output_snapshot: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface WorkflowRun {
   id: string;
   project_id: string;
@@ -2049,6 +2088,61 @@ export interface Storage {
       patch: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error">> | undefined,
       outbox: Omit<NotificationOutboxEvent, "seq">,
     ): Promise<boolean>;
+    /**
+     * Attribute a turn completion to a step and advance the run — atomically.
+     * Claiming first and transitioning second would let a crash between the
+     * two lose the completion for good (restart only reconciles `dispatched`
+     * steps). Every guard must hold or nothing is written: the step CAS
+     * (`dispatched` → `claimed`), and — when `run` is given — the run CAS,
+     * with the outbox row conditioned on both. `run` is omitted for steps whose
+     * completion does not move the run (a `feedback` step today).
+     */
+    claimStepAndTransition(opts: {
+      stepId: string;
+      turnEndIndex: number;
+      outputSnapshot: string | null;
+      run?: {
+        id: string;
+        from: WorkflowRunStatus;
+        to: WorkflowRunStatus;
+        patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error">>;
+        outbox?: Omit<NotificationOutboxEvent, "seq">;
+      };
+    }): Promise<boolean>;
+  };
+  workflowRunSteps: {
+    /**
+     * Open the dispatch step for `(run, kind)`: returns the run's existing
+     * `dispatched` step of that kind (`reused: true` — a retry must reuse its
+     * id, key and payload), otherwise inserts a new one. A new reviewer-side
+     * step takes the next round; a `feedback` step shares the round of the
+     * review it answers. `id` / `idempotency_key` are used only on insert.
+     */
+    open(opts: {
+      id: string;
+      run_id: string;
+      role: WorkflowRunStep["role"];
+      kind: WorkflowRunStepKind;
+      session_id: string;
+      idempotency_key: string;
+      payload_hash: string;
+    }): Promise<{ step: WorkflowRunStep; reused: boolean }>;
+    getById(id: string): Promise<WorkflowRunStep | undefined>;
+    /** `dispatched` steps targeting this session, oldest first. */
+    getOpenBySession(sessionId: string): Promise<WorkflowRunStep[]>;
+    /** Every `dispatched` step — restart reconciliation. */
+    listAllOpen(): Promise<WorkflowRunStep[]>;
+    listByRun(runId: string): Promise<WorkflowRunStep[]>;
+    /** Whether the run has any step row at all (a pre-upgrade run has none). */
+    hasAny(runId: string): Promise<boolean>;
+    /** CAS on `dispatched`. Overwrites: a same-key re-send lands a new entry. */
+    setUserEntryIndex(id: string, entryIndex: number): Promise<boolean>;
+    /** CAS `dispatched` → `abandoned`. */
+    abandon(id: string, error: string): Promise<boolean>;
+    /** Abandon every `dispatched` step of a run (optionally one role's). Returns the count. */
+    abandonOpenByRun(runId: string, error: string, role?: WorkflowRunStep["role"]): Promise<number>;
+    /** Record a non-terminal note (e.g. "delivery outcome unknown") on a dispatched step. */
+    setError(id: string, error: string | null): Promise<void>;
   };
   turnSnapshots: {
     create(opts: {

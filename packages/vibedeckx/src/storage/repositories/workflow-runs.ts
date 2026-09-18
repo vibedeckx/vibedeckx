@@ -115,5 +115,42 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         return true;
       });
     },
+
+    // Step CAS, run CAS and the outbox row in ONE transaction. A guard that
+    // fails throws to roll the whole thing back — a claimed step with an
+    // un-advanced run would be unrecoverable after a restart.
+    claimStepAndTransition: async ({ stepId, turnEndIndex, outputSnapshot, run }) => {
+      const LOST = Symbol("cas-lost");
+      try {
+        await kdb.transaction().execute(async (trx) => {
+          const step = await trx.updateTable("workflow_run_steps")
+            .set({
+              status: "claimed", turn_end_index: turnEndIndex, output_snapshot: outputSnapshot,
+              error: null, updated_at: sql`datetime('now')`,
+            })
+            .where("id", "=", stepId)
+            .where("status", "=", "dispatched")
+            .executeTakeFirst();
+          if ((step.numUpdatedRows ?? 0n) === 0n) throw LOST;
+          if (!run) return;
+          const moved = await trx.updateTable("workflow_runs")
+            .set({ ...(run.patch ?? {}), status: run.to, updated_at: sql`datetime('now')` })
+            .where("id", "=", run.id)
+            .where("status", "=", run.from)
+            .executeTakeFirst();
+          if ((moved.numUpdatedRows ?? 0n) === 0n) throw LOST;
+          if (run.outbox) {
+            await trx.insertInto("notification_outbox")
+              .values(run.outbox)
+              .onConflict((oc) => oc.column("id").doNothing())
+              .execute();
+          }
+        });
+        return true;
+      } catch (err) {
+        if (err === LOST) return false;
+        throw err;
+      }
+    },
   },
 });
