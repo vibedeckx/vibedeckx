@@ -1,6 +1,6 @@
 # Phase 2 前置：投递幂等与投递身份（dispatch identity）
 
-> 日期：2026-09-18 · 分支：dev1 · 状态：**v2.2 已确认（2026-09-18）**，实施计划见 `docs/superpowers/plans/2026-09-18-workflow-phase2-prereq-dispatch-identity.md`
+> 日期：2026-09-18 · 分支：dev1 · 状态：**v2.2 已确认并实现（2026-09-18，dev1，T1–T6 + T8；T7 暂缓）**；实现与设计的差异见 §7，实施计划见 `docs/superpowers/plans/2026-09-18-workflow-phase2-prereq-dispatch-identity.md`
 > v2 吸收了一轮外部审阅（Codex）：去掉“唯一 open 步骤”猜测、派发只对空闲 session、
 > 重试复用步骤与键、claim 与 run 迁移同事务、对账只认 `completed` 结局、claim 单一调用方、T7 暂缓。
 > v2.1（第二轮审阅）：结果未知时 run 不回滚、仍接收身份匹配的完成；空闲检查与发送在
@@ -430,3 +430,45 @@ entry JSON 无新字段，patch 缓存与 hub 侧零感知。
 | T8 | 真机 e2e + 主 spec §3.1/§3.2/§6 同步 | — |
 
 T1–T6 是 Phase 2 的硬前置；T7 暂缓。
+
+
+---
+
+## 7. 实现记录（2026-09-18，dev1）
+
+T1–T6 已提交，全量后端 / 前端测试与两端 `tsc` 通过，`classify-diff` 无隧道契约变化
+（worker 可达代码有改动 → remote review 要生效需发 worker）。
+
+**与设计的差异（均为实现时发现、向更严的方向收紧）：**
+
+1. **步骤唯一性**：不是 `UNIQUE(run_id, kind, round)`，而是部分唯一索引
+   `(run_id, kind) WHERE status='dispatched'`。abandoned 行保留作历史且**不计入轮次**；
+   “证明无副作用”后的重试是**新行 + 新键**，“结果未知”的重试才复用原行原键。
+2. **用户接管时作废 open 步骤**：`waiting_reviewer → discussing`（用户给 reviewer 发消息）
+   时，该 run 的 reviewer 侧 open 步骤一律 abandon。否则下一次终稿请求会复用旧步骤的键、
+   被账本判成 replay 而**什么都不发**。`cancelRun` / `failRun` 同样作废全部 open 步骤。
+3. **发送中被作废 ⇒ 中止发送**：回调里 `setUserEntryIndex` 的 CAS 落空（步骤已被
+   取消/接管作废）即抛错，发送在 stdin 之前中止——与 lifecycle 的 lease-lost 同构。
+4. **“结果未知”类在实时路径上几乎为空**：发送路径上所有抛错都发生在 stdin 之前
+   （checkout 解析、spawn、严格持久化、回调），故归入“证明无副作用”；`deliver()` 已返回
+   `true` 之后的账本失败（`unconfirmed`、`ownership_lost_after_send`、`markSent` 抛错）
+   归入**已接受**（运行时确实收下了）。只剩账本 `busy`（另一活租约持有该键）与 lifecycle
+   `uncertain` 是真未知。`deliverInstruction` 为此把 `ownership_lost` 拆成 before/after 两个结果。
+5. **状态复原放在管理器里**而非引擎包装里：回调抛错或唤醒路径 stdin 写失败时，
+   `AgentSessionManager` 自己把被翻成 `running` 的 session 复原为 `stopped`，lifecycle 路径同样受益。
+6. **重试入口更窄**：`requestFinalVerdict` 只在“`waiting_reviewer` 且存在带未知标记的
+   dispatched `final_verdict` 步骤”时接受重试；`rereview_prompt` 结果未知不给重试入口
+   （结束后重新发起）。前端按 `run.error` 前缀 `投递结果未知：终稿请求` 显示“重试投递”。
+7. **claim 时清 `run.error`**：归属成功即把“投递结果未知”之类的提示清掉（有 drift 则写 drift 提示）。
+
+**真机 e2e（本地，`--data-dir` 一次性 server + 真实 claude CLI）：**
+fresh review → 步骤 `reviewer_prompt` 索引 0、turn_end 5 被领；用户与 reviewer 讨论一轮
+（该 turn 未被领，run 保持 discussing；讨论 turn 进行中点终稿 → 409）；终稿 →
+`final_verdict` round 2 被领；approve → `feedback` 步骤在 source 完成后被领。
+复用 reviewer 的复审在 reviewer turn 进行中 `kill -9` server：重启后步骤
+`abandoned: turn ended: server_restart`、run 留在 `waiting_reviewer` 并给出中断提示；
+随后经“讨论 → 终稿 → approve”完整恢复（新 `final_verdict` 步骤、新键）。
+dormant 唤醒路径在真机上记录到了索引（重启后的 reviewer 即走该路径）。
+
+**未做**：双服务器（hub + worker）真机 e2e——引擎与全部派发都在 worker 本地，hub 侧
+只有 `/message` 路由的等价重构；合入前随 worker 发版一起跑 `scripts/cross-version-e2e.mjs`。

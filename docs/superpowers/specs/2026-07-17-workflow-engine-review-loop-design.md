@@ -1,7 +1,10 @@
 # Workflow 引擎与 Design–Review Loop 设计
 
 > 状态（2026-09-18 对账，以 main 为准）：**Phase 1 / 1.5 及其后五波演进均已合入 main**；
-> **Phase 2（循环模板）尚未开始**；Phase 3 仅有讨论记录。
+> **Phase 2（循环模板）尚未开始**，但其两项硬前置——投递幂等覆盖与投递身份
+> （`workflow_run_steps`）——已于 2026-09-18 在 dev1 落地并过真机 e2e（未合入 main，
+> worker 侧需发版），见 `2026-09-18-workflow-phase2-prereq-dispatch-identity-design.md`；
+> Phase 3 仅有讨论记录。
 > 本文在 2026-09-18 按代码实况重写了 §2.3、§3、§4、§5、§6——原 2026-07-17 版
 > 只描述 Phase 1 的一次性单程 review，随后两个月里 review 从"一次性"长成
 > "可准备、可讨论、可复用、有作用域、有上下文阶梯"的形态，主 spec 未同步。
@@ -139,11 +142,18 @@ DDL 见 `storage/sqlite.ts`（`CREATE TABLE workflow_runs`），行类型
 - hub 侧 `remote_reviewer_creation_intents`：远程 reviewer 创建 saga 的持久意图
   （预分配的 run id / reviewer id、span、context mode、agent type、brief）。
 
+**`workflow_run_steps`（投递身份，2026-09-18 dev1 已实现）**：引擎每次逻辑派发一行——
+`id`（= dispatch id）/ `run_id`（级联删除）/ `round` / `role` / `kind`
+（`reviewer_prompt | rereview_prompt | final_verdict | feedback`）/ `session_id`（无 FK）/
+`idempotency_key` / `payload_hash` / `status`（`dispatched | claimed | abandoned`）/
+`user_entry_index` / `turn_end_index` / `output_snapshot` / `error`。
+部分唯一索引保证同一 run 同一 kind 至多一条 `dispatched`（重试复用它）；abandoned 行保留
+作历史、不计入轮次。与 transcript 的连接点只有 `user_entry_index`——**entry 上不加任何字段**。
+
 **Phase 2 预留（未实现）**：`command_id` / `template` / `params_snapshot` /
-`task_text` / `round` / `step` / `pending_gate`（`gateType`:
+`task_text` / `step` / `pending_gate`（`gateType`:
 `relay_to_reviewer | relay_to_implementer | accept_result |
-max_rounds_escalation`），以及 `workflow_run_steps`（`dispatch_id` +
-`output_snapshot`）。今天没有轮次计数、没有 verdict 列、没有投递身份。
+max_rounds_escalation`）。run 行上今天没有轮次计数、没有 verdict 列（轮次目前只存在于步骤行）。
 
 **并发约束（session 级锁，按角色记账）**：
 - 引擎内存里有 `participants: Map<sessionId, { runId, role: source|reviewer }>`，
@@ -175,18 +185,28 @@ max_rounds_escalation`），以及 `workflow_run_steps`（`dispatch_id` +
 task_text（该 turn 的 user message）、完整反馈（turn 内最后一条 assistant 消息）、
 branch cutoff。
 
-**归属判定**：
+**归属判定（2026-09-18 起按派发身份，dev1）**：
 
 ```
 session:taskCompleted
-  → participants.get(event.sessionId) 存在 且 role === reviewer
-    且 run.status === waiting_reviewer
-      命中：feedback = extractLastAssistantInTurn(entries, turnEndEntryIndex)
-            → CAS waiting_reviewer→waiting_feedback（同事务写 review_ready 里程碑）
+  → open = workflow_run_steps 中 session_id = 该 session 且 status = dispatched 的行
+  → openingIndex = 开这个 turn 的 user entry 的索引（上一个 turn_end 之后最早的 user entry）
+  → step = open 中 有效 entry 索引 === openingIndex 的那一条
+      有效索引 = step.user_entry_index ?? （reviewer_prompt 时）session 行的 activation_user_entry_index
+      命中 reviewer 侧 kind 且 run.status === waiting_reviewer：
+            feedback = extractLastAssistantInTurn(entries, turnEndEntryIndex)
+            → 单事务：步骤 dispatched→claimed + run waiting_reviewer→waiting_feedback + review_ready 里程碑
             → **不唤醒指挥官模型**
-      未命中（discussing 中的闲聊 turn / 已取消 / 无关 session / 迟到）：丢弃或
-        交 ChatSessionManager 现有路径
+      命中 feedback：只 claim 步骤（run 已 completed；Phase 2 在此接循环），不抑制指挥官
+      有 open 步骤但无一匹配：不接收；run 在 waiting_reviewer 时写 run.error 提示
+  → 无 open 步骤：仅当该 run **没有任何步骤行**（升级前创建）才走旧规则
+      participants role === reviewer 且 run.status === waiting_reviewer（保留一个发布周期）
 ```
+
+规则成立的前提：**引擎只向空闲 session 派发**，且空闲检查与发送在与 `/message` 路由
+共用的每 session 互斥锁内完成——空闲时的派发必然自己开一个 turn。发送路径保证
+“entry 持久化 → await 回调写索引 → 才写 stdin”（普通、dormant 唤醒、激活三条路径一致），
+所以“索引为空”即“stdin 从未写过”。`WorkflowEngine` 是唯一领取方。
 
 `shouldSuppressAgentEvent(sessionId)` = "该 session 是某活跃 run 的 reviewer"。
 两处消费：ChatSessionManager 在唤醒模型前调用；AgentSessionManager 把结果盖成
@@ -296,11 +316,15 @@ on gate approved（所有 gateType 通用）:
   → 明确失败 → 退回 waiting_gate，允许用户重试
 ```
 
-**投递语义是诚实的 at-most-once + 人工重试**（现有 `sending_feedback` 同此）：
-发送与状态更新之间崩溃时，恢复后**不自动重投**；`init()` 把 `sending_feedback`
-退回 `waiting_feedback` 并写 "发送状态未知"。exactly-once 需要 agent 消息入口
-支持 idempotency key——现有的 `activationKey`（首条指令）与 `durableReviewFlights`
-（同进程去重）只覆盖创建/激活，不覆盖后续每一跳；Phase 2 做自动派发前先补。
+**投递语义是诚实的 at-least-once + 永不把未发的报成已发**（2026-09-18 起，dev1）：
+引擎每次派发带稳定键 `run:<runId>:step:<stepId>`（fresh reviewer 沿用 lifecycle 的
+`review:<runId>`），经 `deliverInstruction` 走 `/message` 路由同一本账本
+`agent_instruction_deliveries`——HTTP/进程级重试不再重复投递；stdin 层没有带 ID 的
+ACK，重复消灭不了。结果分三类：已接受 / 证明无副作用（作废步骤 + 回滚 run）/
+结果未知（步骤保持 dispatched、run 停在等待态，真实完成仍被接收，面板给“重试投递”，
+复用同一步骤与键；改稿重试 → 409）。崩溃后**不自动重投**：`init()` 按步骤行对账——
+两列索引皆空 ⇒ 未送达 ⇒ 回滚到派发前状态（可改稿）；turn 已完成 ⇒ 迟到归属；
+turn 被重启打断 ⇒ 作废 + 诚实提示。无步骤行的旧 run 仍是“发送状态未知”。
 
 ### 3.3 Payload 原则：传指针 + 客观作用域 + 上下文阶梯
 
@@ -597,11 +621,13 @@ JSON + Design–Review Loop 模板（3.2b 状态机、verdict 三值解析、max
 身份 + 输入框 chip/斜杠选择器 + 模板参数表单（含 Edit as JSON）。
 引擎位置已由 Phase 1.5 定死——Phase 2 落地即同时覆盖本地与 remote。
 
-Phase 2 的**前置**（独立于模板设计，建议先做）：
-- agent 消息入口 idempotency key（3.2b 投递语义；自动派发没有它只能继续
-  "发送状态未知 + 人工重试"）；
-- `dispatchId` / `workflow_run_steps`（现有归属判定 `participants role=reviewer +
-  waiting_reviewer` 只对"一个 reviewer 一次 turn"成立，session 跨轮复用后不够）；
+Phase 2 的**前置**（独立于模板设计）：
+- ✅ agent 消息入口 idempotency key 的**覆盖**（原语 2026-07-31 已在 main；2026-09-18 dev1
+  补齐：共享 `deliverInstruction`、引擎四个发送点带键、dormant 唤醒路径等 stdin 写完再返回、
+  project-chat 本地目标不再丢键）；
+- ✅ 投递身份 `workflow_run_steps`（2026-09-18 dev1；§2.3 / §3.1）；
+- ⏸ hub 远程分支记录自身投递结果（传输歧义时今天什么都不记）——暂缓单独立项：
+  账本 FK 指向本地 `agent_sessions`，`remote-` id 没有行；对循环不是硬依赖；
 - 把意图简报 / context mode / reviewer agent 类型落到 run 行（2.3），否则按轮
   回放与统计无据可依；
 - 主 spec 对账（本次）。
