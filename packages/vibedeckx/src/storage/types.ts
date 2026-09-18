@@ -630,6 +630,8 @@ export interface RemoteReviewerCreationIntent {
   source_turn_end_index: number | null;
   review_span: ReviewSpan;
   review_context_mode: "briefed" | "blind" | null;
+  /** Review loop cap the run must be created with; null = single-pass. Survives a replay. */
+  loop_max_rounds: number | null;
   agent_type: string;
   intent_brief: string | null;
   user_id: string | null;
@@ -1588,6 +1590,7 @@ export interface Storage {
       sourceTurnEndIndex?: number | null;
       reviewSpan: ReviewSpan;
       reviewContextMode?: "briefed" | "blind" | null;
+      loopMaxRounds?: number | null;
       agentType: string;
       intentBrief?: string | null;
       userId?: string | null;

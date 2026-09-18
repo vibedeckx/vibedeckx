@@ -600,6 +600,7 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       source_turn_end_index INTEGER,
       review_span TEXT NOT NULL CHECK (review_span IN ('this_turn', 'session_start')),
       review_context_mode TEXT CHECK (review_context_mode IN ('briefed', 'blind')),
+      loop_max_rounds INTEGER,
       agent_type TEXT NOT NULL,
       intent_brief TEXT,
       user_id TEXT,
@@ -2118,6 +2119,11 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
   const reviewerIntentsInfo = db.prepare("PRAGMA table_info(remote_reviewer_creation_intents)").all() as { name: string }[];
   if (!reviewerIntentsInfo.some((col) => col.name === "review_context_mode")) {
     db.exec("ALTER TABLE remote_reviewer_creation_intents ADD COLUMN review_context_mode TEXT CHECK (review_context_mode IN ('briefed', 'blind'))");
+  }
+  // Review loop: a replayed creation must create the run as the loop the user
+  // asked for, not silently as a single-pass review. Null = single-pass.
+  if (!reviewerIntentsInfo.some((col) => col.name === "loop_max_rounds")) {
+    db.exec("ALTER TABLE remote_reviewer_creation_intents ADD COLUMN loop_max_rounds INTEGER");
   }
 
   db.exec(`

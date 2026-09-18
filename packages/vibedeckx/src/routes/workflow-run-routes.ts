@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { requireAuth as requireRawAuth } from "../server.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
-import { REVIEWER_AGENT_TYPES, WorkflowError } from "../workflow-engine.js";
+import { LOOP_MAX_ROUNDS_DEFAULT, LOOP_MAX_ROUNDS_LIMIT, REVIEWER_AGENT_TYPES, WorkflowError } from "../workflow-engine.js";
 import { generateIntentBrief } from "../utils/review-brief.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import type { AgentMessage } from "../agent-types.js";
@@ -19,6 +19,21 @@ function parseReviewerAgentType(raw: unknown): AgentType | undefined | null {
 }
 
 /** undefined → this_turn (back-compat); a valid span passes; anything else → null (reject with 400). */
+/**
+ * `loop` start parameter (review loop, Phase 2 cut 1). `undefined` = absent =
+ * single-pass review; `null` = present but invalid.
+ */
+export function parseLoop(raw: unknown): { maxRounds: number } | undefined | null {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object") return null;
+  const maxRounds = (raw as { maxRounds?: unknown }).maxRounds;
+  if (maxRounds === undefined) return { maxRounds: LOOP_MAX_ROUNDS_DEFAULT };
+  if (typeof maxRounds !== "number" || !Number.isInteger(maxRounds)
+      || maxRounds < 1 || maxRounds > LOOP_MAX_ROUNDS_LIMIT) return null;
+  return { maxRounds };
+}
+const LOOP_ERROR = `loop.maxRounds must be an integer between 1 and ${LOOP_MAX_ROUNDS_LIMIT}`;
+
 export function parseReviewSpan(raw: unknown): ReviewSpan | null {
   if (raw === undefined) return "this_turn";
   return raw === "this_turn" || raw === "session_start" ? raw : null;
@@ -404,7 +419,7 @@ async function routes(fastify: FastifyInstance) {
   };
 
   fastify.post<{
-    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string; reviewContextMode?: string };
+    Body: { projectId: string; branch?: string | null; sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string; reviewContextMode?: string; loop?: { maxRounds?: number } };
   }>("/api/workflow-runs", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -414,6 +429,8 @@ async function routes(fastify: FastifyInstance) {
     if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
     const reviewSpan = parseReviewSpan(req.body?.reviewSpan);
     if (reviewSpan === null) return reply.code(400).send({ error: "reviewSpan must be one of: this_turn, session_start" });
+    const loop = parseLoop(req.body?.loop);
+    if (loop === null) return reply.code(400).send({ error: LOOP_ERROR });
     const reviewerSessionIdRaw = req.body?.reviewerSessionId;
     if (reviewerSessionIdRaw !== undefined &&
         (typeof reviewerSessionIdRaw !== "string" || reviewerSessionIdRaw.trim() === "")) {
@@ -493,6 +510,9 @@ async function routes(fastify: FastifyInstance) {
           reviewSpan,
           reviewerSessionId: bareReviewerSessionId,
           intentBrief: clientBrief,
+          // Additive tunnel field: a worker that predates review loops ignores
+          // it and runs a single-pass review (the run comes back without loop_id).
+          loop,
         });
         if (!result.ok) return sendProxyFailure(reply, result);
         bareRun = (result.data as { run: WorkflowRun }).run;
@@ -536,6 +556,7 @@ async function routes(fastify: FastifyInstance) {
           reviewContextMode,
           reviewerAgentType: reviewerAgentType ?? "claude-code",
           intentBrief,
+          loopMaxRounds: loop?.maxRounds,
           userId,
           ...(twoPhase ? { phase: "prepare" as const } : {}),
         });
@@ -623,6 +644,7 @@ async function routes(fastify: FastifyInstance) {
           sourceTurnEndIndex,
           reviewSpan,
           reviewerAgentType,
+          loop,
         });
       } catch (err) {
         const status = errStatus(err);
@@ -653,6 +675,7 @@ async function routes(fastify: FastifyInstance) {
         reviewerSessionId,
         intentBrief: clientBrief,
         blind,
+        loop,
       });
       return reply.code(201).send({ run });
     } catch (err) {
@@ -836,7 +859,7 @@ async function routes(fastify: FastifyInstance) {
     return reply.send({ run });
   });
 
-  fastify.post<{ Params: { id: string }; Body: { action: "approve" | "cancel" | "finalize"; editedPayload?: string } }>(
+  fastify.post<{ Params: { id: string }; Body: { action: "approve" | "cancel" | "finalize" | "accept" | "rereview"; editedPayload?: string; extend?: boolean } }>(
     "/api/workflow-runs/:id/gate", async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
@@ -868,7 +891,15 @@ async function routes(fastify: FastifyInstance) {
           const run = await fastify.workflowEngine.requestFinalVerdict(req.params.id);
           return reply.send({ run });
         }
-        return reply.code(400).send({ error: "action must be approve, cancel or finalize" });
+        if (action === "accept") {
+          const run = await fastify.workflowEngine.acceptResult(req.params.id);
+          return reply.send({ run });
+        }
+        if (action === "rereview") {
+          const run = await fastify.workflowEngine.approveRereview(req.params.id, { extend: req.body?.extend === true });
+          return reply.send({ run });
+        }
+        return reply.code(400).send({ error: "action must be approve, cancel, finalize, accept or rereview" });
       } catch (err) {
         const status = errStatus(err);
         if (status) return reply.code(status).send({ error: (err as Error).message });
@@ -911,7 +942,7 @@ async function routes(fastify: FastifyInstance) {
   // get-by-id need no mirrors (bare run ids work on the normal routes).
 
   fastify.post<{
-    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string; reviewContextMode?: string; runId?: string; newReviewerSessionId?: string };
+    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewerSessionId?: string; intentBrief?: string; reviewSpan?: string; reviewContextMode?: string; runId?: string; newReviewerSessionId?: string; loop?: { maxRounds?: number } };
   }>("/api/path/workflow-runs", async (req, reply) => {
     const userId = requireRawAuth(req, reply);
     if (userId === null) return;
@@ -919,6 +950,8 @@ async function routes(fastify: FastifyInstance) {
     if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
     const reviewSpan = parseReviewSpan(req.body?.reviewSpan);
     if (reviewSpan === null) return reply.code(400).send({ error: "reviewSpan must be one of: this_turn, session_start" });
+    const loop = parseLoop(req.body?.loop);
+    if (loop === null) return reply.code(400).send({ error: LOOP_ERROR });
     const reviewContextMode = parseReviewContextMode(req.body?.reviewContextMode);
     if (reviewContextMode === null) return reply.code(400).send({ error: "reviewContextMode must be one of: briefed, blind" });
     const blind = reviewContextMode === "blind";
@@ -968,6 +1001,7 @@ async function routes(fastify: FastifyInstance) {
           reviewerSessionId,
           intentBrief,
           blind,
+          loop,
           runId: runId || undefined,
           newReviewerSessionId: newReviewerSessionId || undefined,
         });
@@ -1003,7 +1037,7 @@ async function routes(fastify: FastifyInstance) {
    * a replay lands on.
    */
   fastify.post<{
-    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewSpan?: string; runId?: string; newReviewerSessionId?: string };
+    Body: { sourceSessionId: string; reviewFocus?: string; sourceTurnEndIndex?: number; reviewerAgentType?: string; reviewSpan?: string; runId?: string; newReviewerSessionId?: string; loop?: { maxRounds?: number } };
   }>("/api/path/workflow-runs/prepare", async (req, reply) => {
     const userId = requireRawAuth(req, reply);
     if (userId === null) return;
@@ -1011,6 +1045,8 @@ async function routes(fastify: FastifyInstance) {
     if (!sourceSessionId) return reply.code(400).send({ error: "sourceSessionId is required" });
     const reviewSpan = parseReviewSpan(req.body?.reviewSpan);
     if (reviewSpan === null) return reply.code(400).send({ error: "reviewSpan must be one of: this_turn, session_start" });
+    const loop = parseLoop(req.body?.loop);
+    if (loop === null) return reply.code(400).send({ error: LOOP_ERROR });
     const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
     if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
     const runId = typeof req.body?.runId === "string" ? req.body.runId.trim() : "";
@@ -1038,6 +1074,7 @@ async function routes(fastify: FastifyInstance) {
           sourceTurnEndIndex,
           reviewSpan,
           reviewerAgentType,
+          loop,
           runId,
           newReviewerSessionId,
         });

@@ -663,6 +663,51 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(proxyMock.mock.calls[1][3]).toMatchObject({ action: "finalize" });
   });
 
+  it("forwards the review loop cap to the worker on both start paths", async () => {
+    const { remoteSessionMap } = makeApp();
+    remoteSessionMap.set("remote-srv1-p1-rev1", { remoteServerId: "srv1", remoteSessionId: "rev1", branch: "dev" });
+    await app.register(workflowRunRoutes);
+
+    // Reuse: straight to the worker's path mirror.
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: bareRun } });
+    const reuse = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, reviewerSessionId: "remote-srv1-p1-rev1", loop: { maxRounds: 2 } },
+    });
+    expect(reuse.statusCode).toBe(201);
+    expect(proxyMock.mock.calls[0][3]).toMatchObject({ reviewerSessionId: "rev1", loop: { maxRounds: 2 } });
+
+    // Fresh: through the durable reviewer-creation saga.
+    const fresh = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, loop: { maxRounds: 5 } },
+    });
+    expect(fresh.statusCode).toBe(201);
+    expect(reviewerCreateMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ loopMaxRounds: 5 }));
+
+    const bad = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: SRC, loop: { maxRounds: 0 } },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("gate forwards a rereview (with extend) to the worker verbatim", async () => {
+    makeApp();
+    await app.register(workflowRunRoutes);
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { runs: [{ ...bareRun, status: "waiting_rereview" }] } });
+    await app.inject({ method: "GET", url: "/api/workflow-runs?projectId=p1&branch=dev" });
+
+    proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { run: { ...bareRun, status: "waiting_reviewer" } } });
+    const gate = await app.inject({
+      method: "POST", url: "/api/workflow-runs/remote-srv1-p1-run1/gate",
+      payload: { action: "rereview", extend: true },
+    });
+    expect(gate.statusCode).toBe(200);
+    expect(gate.json().run.status).toBe("waiting_reviewer");
+    expect(proxyMock.mock.calls[1][3]).toEqual({ action: "rereview", extend: true });
+  });
+
   it("gate 404s an unknown remote run id (empty remoteRunMap)", async () => {
     makeApp();
     await app.register(workflowRunRoutes);

@@ -443,6 +443,7 @@ export interface RemoteReviewerCreationIntentsTable {
   source_turn_end_index: number | null;
   review_span: string;
   review_context_mode: string | null;
+  loop_max_rounds: number | null;
   agent_type: string;
   intent_brief: string | null;
   user_id: string | null;

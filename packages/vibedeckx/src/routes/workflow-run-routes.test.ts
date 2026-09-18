@@ -383,6 +383,68 @@ describe("workflow-run-routes", () => {
     expect(res.statusCode).toBe(409);
   });
 
+  it("POST passes the loop cap to the engine on both start paths, and rejects a bad one", async () => {
+    const startAdhocReview = vi.fn(async () => run);
+    const prepareAdhocReview = vi.fn(async () => preparingRun);
+    const app = makeApp({ engine: { startAdhocReview, prepareAdhocReview } });
+    await app.register(workflowRunRoutes);
+
+    const fresh = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src", loop: { maxRounds: 4 } },
+    });
+    expect(fresh.statusCode).toBe(201);
+    expect(prepareAdhocReview).toHaveBeenCalledWith(expect.objectContaining({ loop: { maxRounds: 4 } }));
+
+    const reuse = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src", reviewerSessionId: "s-rev", loop: {} },
+    });
+    expect(reuse.statusCode).toBe(201);
+    expect(startAdhocReview).toHaveBeenCalledWith(expect.objectContaining({ loop: { maxRounds: 3 } }));
+
+    const single = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src", reviewerSessionId: "s-rev" },
+    });
+    expect(single.statusCode).toBe(201);
+    expect(startAdhocReview.mock.calls.at(-1)![0].loop).toBeUndefined();
+
+    const bad = await app.inject({
+      method: "POST", url: "/api/workflow-runs",
+      payload: { projectId: "p1", sourceSessionId: "s-src", loop: { maxRounds: 99 } },
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  it("gate accept and rereview reach their engine actions; rereview forwards extend", async () => {
+    const acceptResult = vi.fn(async () => ({ ...run, status: "completed" }));
+    const approveRereview = vi.fn(async () => ({ ...run, status: "waiting_reviewer" }));
+    const app = makeApp({ engine: { acceptResult, approveRereview } });
+    await app.register(workflowRunRoutes);
+
+    const accepted = await app.inject({ method: "POST", url: "/api/workflow-runs/r1/gate", payload: { action: "accept" } });
+    expect(accepted.statusCode).toBe(200);
+    expect(acceptResult).toHaveBeenCalledWith("r1");
+
+    await app.inject({ method: "POST", url: "/api/workflow-runs/r1/gate", payload: { action: "rereview" } });
+    expect(approveRereview).toHaveBeenLastCalledWith("r1", { extend: false });
+    await app.inject({ method: "POST", url: "/api/workflow-runs/r1/gate", payload: { action: "rereview", extend: true } });
+    expect(approveRereview).toHaveBeenLastCalledWith("r1", { extend: true });
+
+    const unknown = await app.inject({ method: "POST", url: "/api/workflow-runs/r1/gate", payload: { action: "nope" } });
+    expect(unknown.statusCode).toBe(400);
+  });
+
+  it("a busy reviewer at the rereview gate is a 409, not a failure", async () => {
+    const app = makeApp({
+      engine: { approveRereview: vi.fn(async () => { throw new WorkflowError("session-busy", "reviewer 正在回复中"); }) },
+    });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({ method: "POST", url: "/api/workflow-runs/r1/gate", payload: { action: "rereview" } });
+    expect(res.statusCode).toBe(409);
+  });
+
   it("gate finalize calls requestFinalVerdict and returns the run", async () => {
     const requestFinalVerdict = vi.fn(async () => ({ ...run, status: "waiting_reviewer" }));
     const app = makeApp({ engine: { requestFinalVerdict } });

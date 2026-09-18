@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseReviewContextMode, parseReviewSpan } from "./workflow-run-routes.js";
+import { parseLoop, parseReviewContextMode, parseReviewSpan } from "./workflow-run-routes.js";
 
 describe("parseReviewSpan", () => {
   it("accepts the two valid spans, defaults undefined to this_turn, rejects junk", () => {
@@ -18,5 +18,20 @@ describe("parseReviewContextMode", () => {
     expect(parseReviewContextMode(undefined)).toBe("briefed");
     expect(parseReviewContextMode("nonsense")).toBeNull();
     expect(parseReviewContextMode(5)).toBeNull();
+  });
+});
+
+describe("parseLoop", () => {
+  it("absent = single-pass; an object without a cap takes the default; the cap is a bounded integer", () => {
+    expect(parseLoop(undefined)).toBeUndefined();
+    expect(parseLoop(null)).toBeUndefined();
+    expect(parseLoop({})).toEqual({ maxRounds: 3 });
+    expect(parseLoop({ maxRounds: 1 })).toEqual({ maxRounds: 1 });
+    expect(parseLoop({ maxRounds: 10 })).toEqual({ maxRounds: 10 });
+    expect(parseLoop({ maxRounds: 0 })).toBeNull();
+    expect(parseLoop({ maxRounds: 11 })).toBeNull();
+    expect(parseLoop({ maxRounds: 2.5 })).toBeNull();
+    expect(parseLoop({ maxRounds: "3" })).toBeNull();
+    expect(parseLoop(true)).toBeNull();
   });
 });

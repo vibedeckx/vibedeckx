@@ -55,6 +55,8 @@ export interface CreateRemoteWorkflowReviewerParams {
   reviewContextMode?: "briefed" | "blind";
   reviewerAgentType: string;
   intentBrief?: string;
+  /** Review loop cap; absent = single-pass. Rides both phases: the run row is created in the first. */
+  loopMaxRounds?: number;
   userId: string | undefined;
   remoteRunId?: string;
   remoteReviewerSessionId?: string;
@@ -448,6 +450,7 @@ export async function createRemoteWorkflowReviewer(
     reviewContextMode: params.reviewContextMode ?? null,
     agentType: params.reviewerAgentType,
     intentBrief: params.intentBrief ?? null,
+    loopMaxRounds: params.loopMaxRounds ?? null,
     userId: params.userId ?? null,
   });
 
@@ -461,6 +464,8 @@ export async function createRemoteWorkflowReviewer(
       reviewerAgentType: params.reviewerAgentType,
       runId: remoteRunId,
       newReviewerSessionId: remoteReviewerSessionId,
+      // Additive tunnel field; an older worker ignores it (single-pass review).
+      ...(params.loopMaxRounds !== undefined ? { loop: { maxRounds: params.loopMaxRounds } } : {}),
     };
     const proxyOpts = { reverseConnectManager: deps.reverseConnectManager ?? undefined };
     const result = params.phase === "prepare"
@@ -736,6 +741,7 @@ function recoverPendingRemoteReviewerOnce(
         reviewContextMode: intent.review_context_mode ?? undefined,
         reviewerAgentType: intent.agent_type,
         intentBrief: intent.intent_brief ?? undefined,
+        loopMaxRounds: intent.loop_max_rounds ?? undefined,
         userId: intent.user_id ?? undefined,
         remoteRunId: intent.remote_run_id,
         remoteReviewerSessionId: intent.remote_reviewer_session_id,
