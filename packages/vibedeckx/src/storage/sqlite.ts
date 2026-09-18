@@ -1894,6 +1894,10 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       status TEXT NOT NULL DEFAULT 'waiting_reviewer',
       error TEXT,
       prepared_context TEXT,
+      loop_id TEXT,
+      round INTEGER NOT NULL DEFAULT 1,
+      max_rounds INTEGER,
+      verdict TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -2094,6 +2098,18 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
   // source conversation that kept moving.
   if (!workflowRunsInfo.some((col) => col.name === "prepared_context")) {
     db.exec("ALTER TABLE workflow_runs ADD COLUMN prepared_context TEXT");
+  }
+  // Review loop (Phase 2 cut 1): loop identity, round, cap and the parsed
+  // verdict. Existing rows are single-pass reviews: loop_id NULL, round 1.
+  for (const [name, ddl] of [
+    ["loop_id", "loop_id TEXT"],
+    ["round", "round INTEGER NOT NULL DEFAULT 1"],
+    ["max_rounds", "max_rounds INTEGER"],
+    ["verdict", "verdict TEXT"],
+  ] as const) {
+    if (!workflowRunsInfo.some((col) => col.name === name)) {
+      db.exec(`ALTER TABLE workflow_runs ADD COLUMN ${ddl}`);
+    }
   }
 
   // Migration: add review_context_mode to the reviewer-creation durable

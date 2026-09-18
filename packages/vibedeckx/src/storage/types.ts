@@ -420,11 +420,26 @@ export type WorkflowRunStatus =
   | "waiting_feedback"
   | "discussing"
   | "sending_feedback"
+  /**
+   * Loop gate: the source finished the turn our feedback opened, and the run
+   * for the NEXT round exists but has dispatched nothing yet — it waits for the
+   * user to confirm the re-review (or end the loop). No reviewer is bound and
+   * only the source is a participant. Leaves via `rereview` (→
+   * waiting_reviewer, the reuse-reviewer path) or cancel.
+   */
+  | "waiting_rereview"
   | "completed"
   | "cancelled"
   | "failed";
 
 export type ReviewSpan = "this_turn" | "session_start";
+
+/**
+ * The reviewer's closing verdict, parsed by exact match (utils/review-verdict.ts).
+ * `null` on a run means "no verdict yet" or "could not be recognised" — both
+ * are the human's call, exactly like `cannot-verify`.
+ */
+export type WorkflowVerdict = "ship" | "needs-changes" | "cannot-verify";
 
 /** What an engine dispatch asks its target session to do. */
 export type WorkflowRunStepKind = "reviewer_prompt" | "rereview_prompt" | "final_verdict" | "feedback";
@@ -480,9 +495,24 @@ export interface WorkflowRun {
   error: string | null;
   /** JSON prompt inputs captured at prepare; null for reuse runs and legacy rows. */
   prepared_context: string | null;
+  /**
+   * Review loop identity = the id of the loop's round-1 run. `null` = a
+   * single-pass review (no next-round gate is ever created).
+   */
+  loop_id: string | null;
+  /** Loop round, from 1. NOT `workflow_run_steps.round` (dispatch rounds inside one run). */
+  round: number;
+  /** Round cap; only loop runs carry one. */
+  max_rounds: number | null;
+  verdict: WorkflowVerdict | null;
   created_at: string;
   updated_at: string;
 }
+
+/** A next-round gate run, created in the same transaction that claims the feedback step. */
+export type WorkflowNextRunInput = Pick<WorkflowRun,
+  "id" | "project_id" | "branch" | "source_session_id" | "source_turn_end_index"
+  | "review_focus" | "review_target" | "loop_id" | "round" | "max_rounds">;
 
 /**
  * Attention milestones the notification bell surfaces. Deliberately narrower
@@ -2047,6 +2077,9 @@ export interface Storage {
       review_span?: ReviewSpan;
       /** Initial status; defaults to "waiting_reviewer" (single-shot start). */
       status?: Extract<WorkflowRunStatus, "preparing" | "waiting_reviewer">;
+      loop_id?: string | null;
+      round?: number;
+      max_rounds?: number | null;
     }): Promise<WorkflowRun>;
     getById(id: string): Promise<WorkflowRun | undefined>;
     getActive(projectId: string, branch: string | null): Promise<WorkflowRun[]>;
@@ -2067,13 +2100,13 @@ export interface Storage {
     listReviewedSourceSessions(projectId: string, branch: string | null): Promise<string[]>;
     update(
       id: string,
-      patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error" | "prepared_context">>,
+      patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error" | "prepared_context" | "source_turn_end_index" | "max_rounds">>,
     ): Promise<WorkflowRun | undefined>;
     transition(
       id: string,
       from: WorkflowRunStatus,
       to: WorkflowRunStatus,
-      patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error">>,
+      patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error" | "reviewer_session_id">>,
     ): Promise<boolean>;
     /**
      * `transition` plus an attention milestone, in one transaction. The outbox
@@ -2105,9 +2138,18 @@ export interface Storage {
         id: string;
         from: WorkflowRunStatus;
         to: WorkflowRunStatus;
-        patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error">>;
+        patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error" | "verdict">>;
         outbox?: Omit<NotificationOutboxEvent, "seq">;
       };
+      /**
+       * Loop continuation: insert this `waiting_rereview` gate run in the same
+       * transaction — but only if its source is not part of ANY active run
+       * (same rule as the start entry point). The source was released when the
+       * feedback was sent, and this claim is asynchronous; a review the user
+       * started in between wins, and the old loop simply does not continue.
+       * A skipped insert does not fail the claim: read the id back to tell.
+       */
+      nextRun?: WorkflowNextRunInput;
     }): Promise<boolean>;
   };
   workflowRunSteps: {

@@ -115,6 +115,84 @@ describe("workflowRunSteps repository", () => {
     expect(await storage.workflowRunSteps.hasAny("nope")).toBe(false);
   });
 
+  describe("next-round gate run (review loop)", () => {
+    const nextRun = {
+      id: "r2", project_id: "p1", branch: "dev", source_session_id: "s-src", source_turn_end_index: 9,
+      review_focus: "tests", review_target: null, loop_id: "r1", round: 2, max_rounds: 3,
+    };
+    // The round that sent the feedback is over by the time its step is claimed.
+    const finishRound = () => storage.workflowRuns.update("r1", { status: "completed" });
+
+    it("is inserted in the claiming transaction, as a waiting_rereview run with no reviewer bound", async () => {
+      await open("a", "feedback");
+      await finishRound();
+      expect(await storage.workflowRuns.claimStepAndTransition({ stepId: "a", turnEndIndex: 9, outputSnapshot: "done", nextRun })).toBe(true);
+      expect(await storage.workflowRuns.getById("r2")).toMatchObject({
+        status: "waiting_rereview", loop_id: "r1", round: 2, max_rounds: 3, reviewer_session_id: null,
+        source_session_id: "s-src", source_turn_end_index: 9, review_focus: "tests", review_span: "this_turn", verdict: null,
+      });
+      expect((await storage.workflowRuns.getActiveBySession("s-src"))?.id).toBe("r2");
+    });
+
+    it("counts the run being completed in the same transaction as already released", async () => {
+      await storage.workflowRuns.update("r1", { status: "sending_feedback" });
+      await open("a", "feedback");
+      expect(await storage.workflowRuns.claimStepAndTransition({
+        stepId: "a", turnEndIndex: 9, outputSnapshot: "done",
+        run: { id: "r1", from: "sending_feedback", to: "completed" }, nextRun,
+      })).toBe(true);
+      expect((await storage.workflowRuns.getById("r2"))?.status).toBe("waiting_rereview");
+    });
+
+    it("is skipped — while the step is still claimed — when the source already joined another active run", async () => {
+      await open("a", "feedback");
+      await finishRound();
+      await storage.workflowRuns.create({
+        id: "other", project_id: "p1", branch: "dev", source_session_id: "s-src",
+        source_turn_end_index: 9, review_focus: null, review_target: null,
+      });
+      expect(await storage.workflowRuns.claimStepAndTransition({ stepId: "a", turnEndIndex: 9, outputSnapshot: "done", nextRun })).toBe(true);
+      expect((await storage.workflowRunSteps.getById("a"))?.status).toBe("claimed");
+      expect(await storage.workflowRuns.getById("r2")).toBeUndefined();
+    });
+
+    it("also yields to a run that uses the source AS a reviewer", async () => {
+      await open("a", "feedback");
+      await finishRound();
+      const other = await storage.workflowRuns.create({
+        id: "other", project_id: "p1", branch: "dev", source_session_id: "s-else",
+        source_turn_end_index: 1, review_focus: null, review_target: null,
+      });
+      await storage.workflowRuns.update(other.id, { reviewer_session_id: "s-src" });
+      await storage.workflowRuns.claimStepAndTransition({ stepId: "a", turnEndIndex: 9, outputSnapshot: "done", nextRun });
+      expect(await storage.workflowRuns.getById("r2")).toBeUndefined();
+    });
+
+    it("is not inserted when the step CAS loses", async () => {
+      await open("a", "feedback");
+      await finishRound();
+      await storage.workflowRunSteps.abandon("a", "x");
+      expect(await storage.workflowRuns.claimStepAndTransition({ stepId: "a", turnEndIndex: 9, outputSnapshot: "done", nextRun })).toBe(false);
+      expect(await storage.workflowRuns.getById("r2")).toBeUndefined();
+    });
+  });
+
+  it("stores loop identity on create and the verdict with the claim", async () => {
+    const looped = await storage.workflowRuns.create({
+      id: "loop1", project_id: "p1", branch: "dev", source_session_id: "s-loop",
+      source_turn_end_index: 4, review_focus: null, review_target: null, loop_id: "loop1", max_rounds: 3,
+    });
+    expect(looped).toMatchObject({ loop_id: "loop1", round: 1, max_rounds: 3, verdict: null });
+    expect(await storage.workflowRuns.getById("r1")).toMatchObject({ loop_id: null, round: 1, max_rounds: null });
+
+    await open("a", "reviewer_prompt");
+    await storage.workflowRuns.claimStepAndTransition({
+      stepId: "a", turnEndIndex: 5, outputSnapshot: "x",
+      run: { id: "r1", from: "waiting_reviewer", to: "waiting_feedback", patch: { feedback_snapshot: "x", verdict: "needs-changes" } },
+    });
+    expect((await storage.workflowRuns.getById("r1"))?.verdict).toBe("needs-changes");
+  });
+
   it("deletes steps with their run", async () => {
     await open("a", "reviewer_prompt");
     await storage.projects.delete("p1");

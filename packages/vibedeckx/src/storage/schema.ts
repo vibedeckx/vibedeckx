@@ -600,6 +600,10 @@ export interface WorkflowRunsTable {
    * recomputing from a source that may have moved on (lifecycle design §10.4).
    */
   prepared_context: string | null;
+  loop_id: string | null;
+  round: Generated<number>;
+  max_rounds: number | null;
+  verdict: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

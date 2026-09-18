@@ -17,6 +17,9 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         reviewer_session_id: opts.reviewer_session_id ?? null,
         review_span: opts.review_span ?? "this_turn",
         status: opts.status ?? "waiting_reviewer",
+        loop_id: opts.loop_id ?? null,
+        round: opts.round ?? 1,
+        max_rounds: opts.max_rounds ?? null,
       }).execute();
       const row = await kdb
         .selectFrom("workflow_runs").selectAll().where("id", "=", opts.id)
@@ -119,7 +122,7 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
     // Step CAS, run CAS and the outbox row in ONE transaction. A guard that
     // fails throws to roll the whole thing back — a claimed step with an
     // un-advanced run would be unrecoverable after a restart.
-    claimStepAndTransition: async ({ stepId, turnEndIndex, outputSnapshot, run }) => {
+    claimStepAndTransition: async ({ stepId, turnEndIndex, outputSnapshot, run, nextRun }) => {
       const LOST = Symbol("cas-lost");
       try {
         await kdb.transaction().execute(async (trx) => {
@@ -132,18 +135,37 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
             .where("status", "=", "dispatched")
             .executeTakeFirst();
           if ((step.numUpdatedRows ?? 0n) === 0n) throw LOST;
-          if (!run) return;
-          const moved = await trx.updateTable("workflow_runs")
-            .set({ ...(run.patch ?? {}), status: run.to, updated_at: sql`datetime('now')` })
-            .where("id", "=", run.id)
-            .where("status", "=", run.from)
-            .executeTakeFirst();
-          if ((moved.numUpdatedRows ?? 0n) === 0n) throw LOST;
-          if (run.outbox) {
-            await trx.insertInto("notification_outbox")
-              .values(run.outbox)
-              .onConflict((oc) => oc.column("id").doNothing())
-              .execute();
+          if (run) {
+            const moved = await trx.updateTable("workflow_runs")
+              .set({ ...(run.patch ?? {}), status: run.to, updated_at: sql`datetime('now')` })
+              .where("id", "=", run.id)
+              .where("status", "=", run.from)
+              .executeTakeFirst();
+            if ((moved.numUpdatedRows ?? 0n) === 0n) throw LOST;
+            if (run.outbox) {
+              await trx.insertInto("notification_outbox")
+                .values(run.outbox)
+                .onConflict((oc) => oc.column("id").doNothing())
+                .execute();
+            }
+          }
+          if (nextRun) {
+            // After the run CAS on purpose: the run being completed in this
+            // same transaction must not count as occupying its own source.
+            await sql`
+              INSERT INTO workflow_runs
+                (id, project_id, branch, source_session_id, source_turn_end_index, reviewer_session_id,
+                 review_focus, review_target, review_span, status, loop_id, round, max_rounds)
+              SELECT ${nextRun.id}, ${nextRun.project_id}, ${nextRun.branch}, ${nextRun.source_session_id},
+                     ${nextRun.source_turn_end_index}, NULL, ${nextRun.review_focus}, ${nextRun.review_target},
+                     'this_turn', 'waiting_rereview', ${nextRun.loop_id}, ${nextRun.round}, ${nextRun.max_rounds}
+              WHERE NOT EXISTS (
+                SELECT 1 FROM workflow_runs
+                WHERE status IN (${sql.join(ACTIVE)})
+                  AND (source_session_id = ${nextRun.source_session_id}
+                    OR reviewer_session_id = ${nextRun.source_session_id})
+              )
+            `.execute(trx);
           }
         });
         return true;
@@ -151,6 +173,7 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         if (err === LOST) return false;
         throw err;
       }
+
     },
   },
 });
