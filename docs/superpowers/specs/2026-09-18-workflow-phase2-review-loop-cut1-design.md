@@ -52,9 +52,11 @@ verdict     TEXT                  -- 'ship' | 'needs-changes' | 'cannot-verify' 
 ```
 
 新状态 `waiting_rereview` 加入 `WorkflowRunStatus` 与 `WORKFLOW_ACTIVE_STATUSES`
-（`storage/workflow-run-status.ts:13`）。它是活跃态，所以 source 与 reviewer 在闸门期间
-仍是该 run 的参与者（同一 source 不能再另起一次 review，须先结束循环——与"一个 session
-同时只在一个活跃 run 里"的现有约束一致）。
+（`storage/workflow-run-status.ts:13`）。它是活跃态，所以 source 在闸门期间仍是该 run 的参与者（同一 source 不能再另起一次
+review，须先结束循环——与"一个 session 同时只在一个活跃 run 里"的现有约束一致）。
+闸门行的 `reviewer_session_id` 为空（§4），reviewer 在闸门期间**不是**参与者：可以照常
+和它对话，其完成事件也不被抑制；它只会被同一 source 的复审再次占用，而那条路已被上面的
+约束挡住。
 
 迁移按 `storage/sqlite.ts:2056-2067` 的 `PRAGMA table_info` 幂等模式。旧行 `loop_id` 为空，
 行为不变。
@@ -150,7 +152,7 @@ waiting_rereview 的闸门：
 | 情况 | 处理 |
 |---|---|
 | 用户给 source 发消息 | 无动作（同今天）；`rereview` 时取最新 turn |
-| 用户给 reviewer 发消息 | 无动作：`handleExternalUserMessage` 只处理 `waiting_feedback / waiting_reviewer`。副作用：reviewer 是活跃 run 的参与者，其完成事件对指挥官仍被抑制（现有的整 session 抑制，前置设计保留未改） |
+| 用户给 reviewer 发消息 | 无动作：闸门期间 reviewer 不是参与者（§2）。若此时 reviewer 正在回复，`rereview` 得到 409 `session-busy`，等它完成再点 |
 | 对 source 另起一次 review | 409 `session-busy`，须先结束循环 |
 | 重启 | `waiting_rereview` 无在途派发，`init()` 只需重建参与者 |
 
@@ -163,11 +165,10 @@ unsupported-agent / running / busy / unavailable`）在闸门上原样展示。`
 
 ### 5.4 blind 模式
 
-blind 只对 fresh reviewer 有意义（现有约束：blind 不能复用）。循环第 1 轮可以是 blind，
-后续轮次走复用路径——reviewer 已经看过代码与自己的上一轮结论，但仍然没有 author 叙述之外
-的新信息来源：`buildRereviewerPrompt` 会带 author self-report。**决定**：blind 循环的后续轮次
-照常带 self-report（它是对反馈逐条交代的义务，复审需要它）；在发起弹窗里注明"blind 只作用于
-第 1 轮"。
+blind 只对 fresh reviewer 有意义（现有约束：blind 不能与复用同用）。循环的第 1 轮可以是
+blind；后续轮次走复用路径，而 `buildRereviewerPrompt` 会带上 author self-report——那正是
+source 对反馈逐条交代的内容，复审需要它。**决定**：blind 只作用于第 1 轮，后续轮次照常带
+self-report；发起弹窗里同时勾了 blind 与循环时注明这一点。
 
 ## 6. API（加法）
 
