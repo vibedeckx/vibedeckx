@@ -55,7 +55,7 @@ interface ExecutorOutputProps {
   focusHandle?: Ref<TerminalFocusHandle>;
   // Debug/identification metadata for the process this window is rendering.
   // Surfaced via the info button so the processId can be matched against the
-  // `[diag:mux]` / SSE console logs and the `/api/executor-logs/stream` frames.
+  // SSE console logs and the `/api/executor-logs/stream` frames.
   processId?: string | null;
   executorId?: string;
   target?: string;

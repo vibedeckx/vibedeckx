@@ -146,7 +146,6 @@ export function attachRemoteProcessStream(
       onTerminal();
       return;
     }
-    console.log(`[diag:remote-stop] ${new Date().toISOString()} attach processId=${processId} executorId=${info.executorId} server=${info.remoteServerId} transport=reverse-connect remoteProcessId=${info.remoteProcessId}`);
 
     const channelId = randomUUID();
     const wsPath = `/api/executor-processes/${info.remoteProcessId}/logs`;
@@ -186,9 +185,6 @@ export function attachRemoteProcessStream(
         send(parsed);
 
         if (parsed.type === "finished" || parsed.type === "error") terminalSignalSent = true;
-        if (parsed.type === "finished" || parsed.type === "error") {
-          console.log(`[diag:remote-stop] ${new Date().toISOString()} REAL ${parsed.type} from remote processId=${processId} exitCode=${parsed.type === "finished" ? parsed.exitCode : "n/a"} — remote reported this itself`);
-        }
         if (parsed.type === "finished") {
           const live = fastify.remoteExecutorMap.get(processId);
           if (live && !live.stoppedEmitted) {
@@ -222,7 +218,6 @@ export function attachRemoteProcessStream(
     remoteWs.on("error", (error: unknown) => {
       clearInterval(pingInterval);
       console.error(`[ExecutorStream] Remote connection error:`, error);
-      console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream ERROR processId=${processId} terminalSignalSent=${terminalSignalSent} — ${terminalSignalSent ? "no fabricated signal" : "will send error (non-terminal for isRunning)"}`);
       if (!terminalSignalSent) {
         // Also transport, not process: the virtual channel broke mid-stream.
         // Re-subscribing opens a fresh channel and replays from the worker's
@@ -248,15 +243,11 @@ export function attachRemoteProcessStream(
           console.error(`[ExecutorStream] Failed to fetch process row on close:`, error);
         }
         if (row && row.status !== "running") {
-          console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream CLOSE without real finished, row already terminal processId=${processId} dbStatus=${row.status} dbExitCode=${row.exit_code ?? "null"}`);
           send({ type: "finished", exitCode: row.exit_code ?? 0 });
         } else {
-          console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream CLOSE without real finished processId=${processId} executorId=${info.executorId} dbStatus=${row?.status ?? "missing"} — sending retryable error, process state unchanged`);
           send({ type: "error", message: "Remote connection lost", retryable: true });
         }
         terminalSignalSent = true;
-      } else {
-        console.log(`[diag:remote-stop] ${new Date().toISOString()} upstream CLOSE after terminal signal already sent processId=${processId} (benign)`);
       }
       onTerminal();
     });

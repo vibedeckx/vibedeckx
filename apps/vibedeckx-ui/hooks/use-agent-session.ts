@@ -1124,10 +1124,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       syncParams.set("epoch", String(history.historyEpoch));
     }
     const suffix = syncParams.size > 0 ? `?${syncParams}` : "";
-    const wsUrl = getWebSocketUrl(`/api/agent-sessions/${sessionId}/stream${suffix}`);
-    console.log("[AgentSession] Connecting to WebSocket:", wsUrl);
+    // Log the path, not the URL: getWebSocketUrl appends the auth token.
+    const wsPath = `/api/agent-sessions/${sessionId}/stream${suffix}`;
+    console.log("[AgentSession] Connecting to WebSocket:", wsPath);
 
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(getWebSocketUrl(wsPath));
     wsRef.current = ws;
     wsSessionIdRef.current = sessionId;
 

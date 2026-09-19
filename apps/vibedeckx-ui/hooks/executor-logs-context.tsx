@@ -143,15 +143,6 @@ export function ExecutorLogsProvider({
     // now detaches the subscription before tearing down; this covers frames
     // already in flight, and older hubs.
     if (!desiredRef.current.has(processId)) return;
-    // [diag:mux] 临时诊断：打印每条收到的 mux 帧（init/输出/history_end/finished/error）
-    const detail =
-      m.type === "error" ? m.message
-      : m.type === "finished" ? `exitCode=${m.exitCode}`
-      : m.type === "init" ? `isPty=${m.isPty}`
-      : m.type === "history_end" ? ""
-      : `${m.data.length}b`;
-    // console.log("[diag:mux] recv", m.type, processId, detail);
-    void detail;
     if (m.type === "init") {
       // The stream attached — any retry cycle for this process is over.
       cancelResubscribe(processId);
@@ -159,10 +150,8 @@ export function ExecutorLogsProvider({
     } else if (m.type === "history_end") {
       update(processId, { replayingHistory: false });
     } else if (m.type === "finished") {
-      console.log(`[diag:remote-stop] ${new Date().toISOString()} mux received FINISHED processId=${processId} exitCode=${m.exitCode} — will trigger markProcessFinished → button flips to Start`);
       update(processId, { exitCode: m.exitCode, status: "closed" });
     } else if (m.type === "error") {
-      console.log(`[diag:remote-stop] ${new Date().toISOString()} mux received ERROR processId=${processId} retryable=${!!m.retryable} — does NOT flip isRunning`);
       if (m.retryable) {
         scheduleResubscribe(processId);
       } else {
@@ -197,8 +186,6 @@ export function ExecutorLogsProvider({
       ws.onopen = () => {
         if (cancelled) return;
         reconnectAttemptRef.current = 0;
-        // [diag:mux] WS 新连接/重连建立 —— 若“空”发生在这之后，是 WS 重连；若没有这条，则是旧连接上的重订阅
-        console.log("[diag:mux] WS open, resubscribing", [...desiredRef.current]);
         // 重连后重新订阅所有期望进程。这一轮 subscribe 覆盖了所有 pending 的
         // 重试，把退避计数清零 —— 否则一次 WS 重连会白白吃掉几次重试额度。
         for (const pid of desiredRef.current) {
@@ -218,7 +205,6 @@ export function ExecutorLogsProvider({
 
       ws.onclose = () => {
         wsRef.current = null;
-        console.log("[diag:mux] WS close, reconnectAttempt=", reconnectAttemptRef.current, "cancelled=", cancelled);
         if (cancelled) return;
         // 已终止的进程（closed/error）不因连接断开而被改写状态
         const isTerminal = (pid: string) => {
@@ -278,14 +264,12 @@ export function ExecutorLogsProvider({
       // 新订阅前重置该进程状态
       statesRef.current.set(processId, { ...EMPTY_STATE });
       notify(processId);
-      console.log("[diag:mux] send subscribe", processId, "(state reset to EMPTY)");
       sendRaw({ type: "subscribe", processId });
     },
     unsubscribeProcess: (processId) => {
       if (!desiredRef.current.has(processId)) return;
       desiredRef.current.delete(processId);
       cancelResubscribe(processId);
-      console.log("[diag:mux] send unsubscribe", processId);
       sendRaw({ type: "unsubscribe", processId });
       // 保留 state（收起/展开不丢历史），只停止接收
     },

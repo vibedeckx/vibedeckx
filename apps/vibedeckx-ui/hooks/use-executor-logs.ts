@@ -87,9 +87,10 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
 
       setStatus("connecting");
 
-      const wsUrl = getWebSocketUrl(`/api/executor-processes/${processId}/logs`);
-      console.log(`[useExecutorLogs] Connecting to WebSocket: ${wsUrl}`);
-      const ws = new WebSocket(wsUrl);
+      // Log the path, not the URL: getWebSocketUrl appends the auth token.
+      const wsPath = `/api/executor-processes/${processId}/logs`;
+      console.log(`[useExecutorLogs] Connecting to WebSocket: ${wsPath}`);
+      const ws = new WebSocket(getWebSocketUrl(wsPath));
       wsRef.current = ws;
 
       // Per-connection liveness tracking. We only reset the reconnect attempt
