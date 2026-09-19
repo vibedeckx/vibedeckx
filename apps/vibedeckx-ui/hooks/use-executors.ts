@@ -75,6 +75,8 @@ export function pruneLastStartedProcess(
   return next;
 }
 
+const NO_EXECUTORS: Executor[] = [];
+
 export interface ExecutorWithProcess extends Executor {
   currentProcessId: string | null;
   isRunning: boolean;
@@ -96,7 +98,37 @@ export function useExecutors(
   // Executors belong to a workspace; the main workspace's branch is the ""
   // sentinel, which is what a null/absent selection resolves to.
   const branch = selectedBranch ?? "";
-  const [executors, setExecutors] = useState<Executor[]>([]);
+  // Lists are held per workspace, keyed by the (projectId, branch) they were
+  // fetched for. With a single list, switching workspaces kept rendering the
+  // previous workspace's executors until the new fetch landed. Keyed, the
+  // switch renders the target's own list (cached, or "Loading") in the same
+  // frame, and a late response or create/reorder can only land in the
+  // workspace it was made for.
+  const workspaceKey = projectId ? `${projectId}::${branch}` : null;
+  const [lists, setLists] = useState<ReadonlyMap<string, Executor[]>>(() => new Map());
+  const executors = (workspaceKey !== null ? lists.get(workspaceKey) : undefined) ?? NO_EXECUTORS;
+  const loading = workspaceKey !== null && !lists.has(workspaceKey);
+
+  const setList = useCallback((key: string, list: Executor[]) => {
+    setLists((prev) => new Map(prev).set(key, list));
+  }, []);
+  // Executors created per workspace while its list request is in flight. The
+  // list may have been read before they existed, so its answer is merged with
+  // them rather than replacing them (same contract as useTerminals).
+  const createdWhileFetchingRef = useRef(new Map<string, Executor[]>());
+  // Id-addressed edits (update/delete/last-run) go to whichever list holds
+  // the executor, so they stay correct if the workspace changed mid-request.
+  // Pending creations get the same edit, or the merge would bring back a
+  // deleted executor or its pre-edit values.
+  const updateEveryList = useCallback((update: (prev: Executor[]) => Executor[]) => {
+    const pending = createdWhileFetchingRef.current;
+    for (const [key, created] of pending) pending.set(key, update(created));
+    setLists((prev) => {
+      const next = new Map<string, Executor[]>();
+      for (const [key, list] of prev) next.set(key, update(list));
+      return next;
+    });
+  }, []);
   const [runningProcesses, setRunningProcesses] = useState<Map<string, RunningProcessEntry[]>>(
     new Map()
   ); // executorId -> [{ processId, target }]
@@ -107,25 +139,26 @@ export function useExecutors(
   const [lastStartedProcess, setLastStartedProcess] = useState<Map<string, RunningProcessEntry>>(
     new Map()
   );
-  const [loading, setLoading] = useState(true);
 
   // Fetch executors scoped to the selected workspace
   const fetchExecutors = useCallback(async () => {
-    if (!projectId) {
-      setExecutors([]);
-      setLoading(false);
-      return;
-    }
+    if (!projectId || workspaceKey === null) return;
+    const pending = createdWhileFetchingRef.current;
+    pending.set(workspaceKey, []);
 
     try {
       const data = await api.getExecutors(projectId, branch);
-      setExecutors(data);
+      const created = pending.get(workspaceKey) ?? [];
+      pending.delete(workspaceKey);
+      setList(workspaceKey, [...data, ...created.filter((one) => !data.some((e) => e.id === one.id))]);
     } catch (error) {
       console.error("Failed to fetch executors:", error);
-    } finally {
-      setLoading(false);
+      pending.delete(workspaceKey);
+      // Leave a known list as is (it already holds anything created since);
+      // a first load settles on empty rather than "Loading" forever.
+      setLists((prev) => (prev.has(workspaceKey) ? prev : new Map(prev).set(workspaceKey, [])));
     }
-  }, [projectId, branch]);
+  }, [projectId, branch, workspaceKey, setList]);
 
   // Fetch running processes
   const fetchRunningProcesses = useCallback(async () => {
@@ -230,7 +263,7 @@ export function useExecutors(
       // Optimistically refresh "Last run" for this target so the hover
       // label updates immediately instead of waiting for the next
       // executor-list refetch (which only happens on workspace switch).
-      setExecutors((prev) =>
+      updateEveryList((prev) =>
         prev.map((e) => {
           if (e.id !== data.executorId) return e;
           const targetKey = data.target ?? "local";
@@ -273,18 +306,20 @@ export function useExecutors(
   // Create executor in the active workspace
   const createExecutor = useCallback(
     async (opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => {
-      if (!projectId) return null;
+      if (!projectId || workspaceKey === null) return null;
 
       try {
         const executor = await api.createExecutor(projectId, { ...opts, branch });
-        setExecutors((prev) => [...prev, executor]);
+        createdWhileFetchingRef.current.get(workspaceKey)?.push(executor);
+        // Shown at once, even before the workspace's first list has landed.
+        setLists((prev) => new Map(prev).set(workspaceKey, [...(prev.get(workspaceKey) ?? []), executor]));
         return executor;
       } catch (error) {
         console.error("Failed to create executor:", error);
         return null;
       }
     },
-    [projectId, branch]
+    [projectId, branch, workspaceKey]
   );
 
   // Update executor
@@ -295,7 +330,7 @@ export function useExecutors(
     ) => {
       try {
         const executor = await api.updateExecutor(id, opts);
-        setExecutors((prev) =>
+        updateEveryList((prev) =>
           prev.map((e) => (e.id === id ? executor : e))
         );
         return executor;
@@ -307,18 +342,18 @@ export function useExecutors(
         return null;
       }
     },
-    []
+    [updateEveryList]
   );
 
   // Delete executor
   const deleteExecutor = useCallback(async (id: string) => {
     try {
       await api.deleteExecutor(id);
-      setExecutors((prev) => prev.filter((e) => e.id !== id));
+      updateEveryList((prev) => prev.filter((e) => e.id !== id));
     } catch (error) {
       console.error("Failed to delete executor:", error);
     }
-  }, []);
+  }, [updateEveryList]);
 
   // Start executor
   const startExecutor = useCallback(async (executorId: string) => {
@@ -343,7 +378,7 @@ export function useExecutors(
       // Mirror the SSE handler's optimistic "Last run" update so locally
       // initiated starts also refresh the hover label without waiting for
       // the next executor-list refetch.
-      setExecutors((prev) =>
+      updateEveryList((prev) =>
         prev.map((e) => {
           if (e.id !== executorId) return e;
           return {
@@ -373,7 +408,7 @@ export function useExecutors(
       }
       return null;
     }
-  }, [executorMode]);
+  }, [executorMode, updateEveryList]);
 
   // Stop executor
   const stopExecutor = useCallback(async (executorId: string, processId?: string) => {
@@ -457,24 +492,24 @@ export function useExecutors(
   // Reorder executors with optimistic update
   const reorderExecutors = useCallback(
     async (orderedIds: string[]) => {
-      if (!projectId) return;
+      if (!projectId || workspaceKey === null) return;
 
       // Optimistic update: reorder local state immediately
       const previousExecutors = executors;
       const reorderedExecutors = orderedIds
         .map((id) => executors.find((e) => e.id === id))
         .filter((e): e is Executor => e !== undefined);
-      setExecutors(reorderedExecutors);
+      setList(workspaceKey, reorderedExecutors);
 
       try {
         await api.reorderExecutors(projectId, orderedIds, branch);
       } catch (error) {
         // Revert on error
         console.error("Failed to reorder executors:", error);
-        setExecutors(previousExecutors);
+        setList(workspaceKey, previousExecutors);
       }
     },
-    [projectId, branch, executors]
+    [projectId, branch, workspaceKey, executors, setList]
   );
 
   // Get executor with process info, filtered by current executor mode.

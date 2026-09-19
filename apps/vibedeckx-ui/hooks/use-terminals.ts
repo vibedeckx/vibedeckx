@@ -12,6 +12,8 @@ export interface UseTerminalsResult {
   removeTerminal: (id: string) => void;
 }
 
+const NO_TERMINALS: TerminalSession[] = [];
+
 export function useTerminals(
   projectId: string | null,
   branch?: string | null
@@ -29,6 +31,11 @@ export function useTerminals(
   const scopeRef = useRef(scope);
   // Terminals created for this scope since its list was asked for.
   const createdWhileLoadingRef = useRef<TerminalSession[]>([]);
+  // The scope whose list `terminals` holds. Until the new scope's list lands,
+  // the hook reports nothing rather than the previous workspace's shells —
+  // the effect below only runs after paint, too late to clear them in time.
+  const [loadedScope, setLoadedScope] = useState<string | null>(null);
+  const loadedScopeRef = useRef<string | null>(null);
 
   // Fetch existing terminals when projectId or branch changes
   useEffect(() => {
@@ -49,6 +56,8 @@ export function useTerminals(
         ? list
         : [...list.filter((existing) => !created.some((one) => one.id === existing.id)), ...created];
       setTerminals(merged);
+      loadedScopeRef.current = scope;
+      setLoadedScope(scope);
       setActiveTerminalId(created.length > 0
         ? created[created.length - 1].id
         : (merged.length > 0 ? merged[0].id : null));
@@ -64,7 +73,13 @@ export function useTerminals(
       // is no longer on screen, and must not be shown under this one.
       if (scopeRef.current !== requestedFor) return;
       createdWhileLoadingRef.current = [...createdWhileLoadingRef.current, terminal];
-      setTerminals((prev) => [...prev, terminal]);
+      // Shown at once even if this workspace's list is still in flight — but
+      // then on its own, not appended to the previous workspace's shells.
+      const created = createdWhileLoadingRef.current;
+      const listLoaded = loadedScopeRef.current === requestedFor;
+      setTerminals((prev) => (listLoaded ? [...prev, terminal] : created));
+      loadedScopeRef.current = requestedFor;
+      setLoadedScope(requestedFor);
       setActiveTerminalId(terminal.id);
     } catch (error) {
       console.error("[useTerminals] Failed to create terminal:", error);
@@ -110,9 +125,11 @@ export function useTerminals(
     });
   }, [forget]);
 
+  const loaded = projectId !== null && loadedScope === scope;
+
   return {
-    terminals,
-    activeTerminalId,
+    terminals: loaded ? terminals : NO_TERMINALS,
+    activeTerminalId: loaded ? activeTerminalId : null,
     createTerminal,
     closeTerminal,
     setActiveTerminal,
