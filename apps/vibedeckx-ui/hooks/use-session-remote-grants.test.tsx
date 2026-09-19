@@ -114,6 +114,33 @@ describe("useSessionRemoteGrants", () => {
     expect(seen.slice(from).map((s) => s.granted.length)).not.toContain(0);
   });
 
+  it("recovers the chips when the hand-off comes after the new id rendered", async () => {
+    // Too late to prevent the blink, but the chips must come back: an empty
+    // composer would make the second message revoke what the first granted.
+    await render(null);
+    await act(async () => { latest.toggle(ubuntu, true); });
+
+    await render("s1");
+    expect(latest.granted).toEqual([]);
+    await act(async () => { latest.adoptInto("s1"); });
+    expect(latest.granted).toEqual([ubuntu]);
+    expect(latest.selectedIds).toEqual(["srv-a"]);
+  });
+
+  it("does not paint a late hand-off over a workspace the user moved to", async () => {
+    await render(null, "p1::main");
+    await act(async () => { latest.toggle(ubuntu, true); });
+    const adoptFromMain = latest.adoptInto;
+
+    await render(null, "p1::feature");
+    await act(async () => { adoptFromMain("s1"); });
+    expect(latest.granted).toEqual([]);
+
+    // The declaration still reached the conversation it was made for.
+    await render("s1", "p1::main");
+    expect(latest.granted).toEqual([ubuntu]);
+  });
+
   it("does not let an old conversation walk off with the draft's declaration", async () => {
     // Opening an existing conversation in the same workspace is not the same
     // as creating one from this draft: the declaration must stay where it was.

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { SessionRemoteGrant } from "@/lib/api";
 import {
   adoptDeclaration, declarationKey, readDeclaration, writeDeclaration,
@@ -22,9 +22,9 @@ export interface SessionRemoteGrantsState {
    *
    * Called by the sender, never inferred from a session id appearing: opening
    * an OLD conversation in the same workspace would otherwise walk off with
-   * the declaration meant for the new one being composed. It must run before
-   * the new id is rendered (pass it as the first send's `onCreated`), or the
-   * effect reads the new id's still-empty slot and the chips blink out.
+   * the declaration meant for the new one being composed. Pass it as the
+   * first send's `onCreated` so it runs before the new id is rendered; called
+   * any later, the chips blink out until it lands.
    */
   adoptInto: (sessionId: string) => void;
 }
@@ -51,8 +51,11 @@ export function useSessionRemoteGrants(
   enabled = true,
 ): SessionRemoteGrantsState {
   const [granted, setGranted] = useState<SessionRemoteGrant[]>([]);
+  // The conversation the chips on screen were last read for.
+  const shownSessionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    shownSessionIdRef.current = sessionId;
     if (!enabled) {
       setGranted([]);
       return;
@@ -73,11 +76,15 @@ export function useSessionRemoteGrants(
 
   const adoptInto = useCallback((createdSessionId: string) => {
     if (!enabled) return;
-    // No setGranted: the effect re-reads once the new id renders, and until
-    // then the draft's chips — the same list — are still on screen. Setting
-    // it here would paint this session's chips over whatever workspace the
-    // user has moved on to while the send was in flight.
     adoptDeclaration(workspaceKey, createdSessionId);
+    // On time, the new id has not rendered yet: the effect reads it when it
+    // does, and the draft's chips — the same list — are on screen until then.
+    // Late, the effect has already read the id's empty slot and will not run
+    // again, so re-read here — only for the conversation on screen, never
+    // over a workspace the user has moved on to while the send was in flight.
+    if (shownSessionIdRef.current === createdSessionId) {
+      setGranted(readDeclaration(declarationKey(createdSessionId, workspaceKey)));
+    }
   }, [workspaceKey, enabled]);
 
   return { granted, selectedIds: enabled ? granted.map((g) => g.id) : undefined, toggle, adoptInto };
