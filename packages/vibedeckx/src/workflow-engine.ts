@@ -233,8 +233,10 @@ function selfReportSection(report: string | null): string | null {
  * Shared ending for first review and re-review. Three-way verdict rather than
  * ship/no-ship: "cannot-verify" gives a reviewer with thin evidence an honest
  * exit instead of an overconfident ship. Blocking and non-blocking findings are
- * separated so polish notes cannot dilute blockers. Nothing downstream parses
- * this wording — the review loop relays through a human approval gate.
+ * separated so polish notes cannot dilute blockers. The verdict line IS parsed
+ * (utils/review-verdict.ts, exact match on the three values) to pick the
+ * gate's primary action — change its label or values there in lockstep. The
+ * rest is relayed verbatim through the human approval gate, never parsed.
  *
  * The blocking bar is stated before the list because "blocking" is otherwise
  * read as "anything I would have done differently": reviewers with no cost
