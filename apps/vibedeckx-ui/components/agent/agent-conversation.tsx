@@ -848,8 +848,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         // No persisted session yet (placeholder): one `start` under a stable
         // key creates, spawns and delivers; the session exists only once it
         // has the message (prepared-session lifecycle, §10.1).
-        const started = await startConversation(content, permissionMode, pendingModel, remoteGrants.selectedIds);
-        if (started) remoteGrants.adoptInto(started.session.id);
+        const started = await startConversation(
+          content, permissionMode, pendingModel, remoteGrants.selectedIds, remoteGrants.adoptInto,
+        );
         // Arm the title-pending loader the moment the session is real so the
         // dropdown goes straight from "New Session" to the skeleton.
         if (started && isOriginDisplayed(started.origin)) {
@@ -1234,13 +1235,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       const draftGrantIds = remoteGrants.selectedIds;
       // First send: the session becomes real (cached, connected, selected)
       // only when the server has accepted the instruction.
+      // The chips move to the new conversation inside the hook, before it
+      // renders the new id; after this await would be frames too late.
       const started = prepared
-        ? await activateConversation(prepared, content, draftGrantIds)
-        : await startConversation(content, permissionMode, pendingModel, draftGrantIds);
+        ? await activateConversation(prepared, content, draftGrantIds, remoteGrants.adoptInto)
+        : await startConversation(content, permissionMode, pendingModel, draftGrantIds, remoteGrants.adoptInto);
       if (started) {
         releaseDetached();
-        // The conversation this composer's chips were declared for now exists.
-        remoteGrants.adoptInto(started.session.id);
         console.log(`[AgentConversation] handleSubmit: started session ${started.session.id}`);
         // Arm the title-pending loader now that the session exists so the
         // dropdown trigger goes straight from "New Session" to skeleton.

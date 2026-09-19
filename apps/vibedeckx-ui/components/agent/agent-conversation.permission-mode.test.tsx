@@ -232,7 +232,7 @@ describe("AgentConversation permissionMode", () => {
     await act(async () => {
       await ref.current!.submitMessage("hi");
     });
-    expect(startConversation).toHaveBeenCalledWith("hi", "edit", null, undefined);
+    expect(startConversation).toHaveBeenCalledWith("hi", "edit", null, undefined, expect.any(Function));
   });
 
   it("re-syncs when a plan session is swapped for another plan session without a null in between", async () => {
@@ -264,7 +264,7 @@ describe("AgentConversation permissionMode", () => {
     await act(async () => {
       await ref.current!.submitMessage("plan this");
     });
-    expect(startConversation).toHaveBeenCalledWith("plan this", "plan", null, undefined);
+    expect(startConversation).toHaveBeenCalledWith("plan this", "plan", null, undefined, expect.any(Function));
   });
 
   it("delivers imperative first-sends as one start under the current mode", async () => {
@@ -286,6 +286,6 @@ describe("AgentConversation permissionMode", () => {
     });
 
     expect(startConversation).toHaveBeenCalledTimes(1);
-    expect(startConversation).toHaveBeenCalledWith("start task", "edit", null, undefined);
+    expect(startConversation).toHaveBeenCalledWith("start task", "edit", null, undefined, expect.any(Function));
   });
 });

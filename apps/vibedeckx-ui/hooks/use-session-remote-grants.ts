@@ -22,7 +22,9 @@ export interface SessionRemoteGrantsState {
    *
    * Called by the sender, never inferred from a session id appearing: opening
    * an OLD conversation in the same workspace would otherwise walk off with
-   * the declaration meant for the new one being composed.
+   * the declaration meant for the new one being composed. It must run before
+   * the new id is rendered (pass it as the first send's `onCreated`), or the
+   * effect reads the new id's still-empty slot and the chips blink out.
    */
   adoptInto: (sessionId: string) => void;
 }
@@ -71,10 +73,11 @@ export function useSessionRemoteGrants(
 
   const adoptInto = useCallback((createdSessionId: string) => {
     if (!enabled) return;
+    // No setGranted: the effect re-reads once the new id renders, and until
+    // then the draft's chips — the same list — are still on screen. Setting
+    // it here would paint this session's chips over whatever workspace the
+    // user has moved on to while the send was in flight.
     adoptDeclaration(workspaceKey, createdSessionId);
-    // The effect re-reads on the id change too; setting it here means the
-    // chips never blink through empty while that lands.
-    setGranted(readDeclaration(declarationKey(createdSessionId, workspaceKey)));
   }, [workspaceKey, enabled]);
 
   return { granted, selectedIds: enabled ? granted.map((g) => g.id) : undefined, toggle, adoptInto };

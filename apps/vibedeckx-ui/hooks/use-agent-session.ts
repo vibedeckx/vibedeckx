@@ -109,6 +109,13 @@ export interface EnsuredAgentSession {
 }
 
 /**
+ * The sender's hook into the moment its first send created a session. Runs
+ * synchronously before the session is set as state, so it lands ahead of the
+ * first render that shows the new id — unlike code after the sender's await.
+ */
+export type FirstSendCreatedCallback = (sessionId: string) => void;
+
+/**
  * A prepared (not yet activated) first send: an identity the server holds
  * invisibly — no process, no list presence — so pastes can be uploaded
  * against it before the first instruction activates it (design §10.1).
@@ -2169,6 +2176,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   const adoptActivatedSession = useCallback((
     data: LifecycleResponse,
     origin: AgentWorkspaceIdentity,
+    onCreated?: FirstSendCreatedCallback,
   ): EnsuredAgentSession => {
     const summary = data.session!;
     const newSession: AgentSession = {
@@ -2186,6 +2194,14 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     const originKey = workspaceKey(origin.projectId, origin.branch, origin.agentMode);
     removePlaceholder(originKey);
     latestCreatedSessionByWorkspaceRef.current.set(originKey, newSession.id);
+    // Before setSession: whatever the sender keys by session id (the composer's
+    // chips) must already sit under the new id when React first renders it,
+    // or the chips blink out for the frames until the sender's await resumes.
+    try {
+      onCreated?.(newSession.id);
+    } catch (callbackError) {
+      console.error(`[AgentSession] onCreated failed for ${newSession.id}:`, callbackError);
+    }
 
     const currentIdentity = workspaceIdentityRef.current;
     const adopted = currentIdentity !== null && sameAgentWorkspace(origin, currentIdentity);
@@ -2236,6 +2252,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     generation: number,
     pending: PendingSubmission,
     call: (force: boolean) => Promise<LifecycleResponse>,
+    onCreated?: FirstSendCreatedCallback,
   ): Promise<EnsuredAgentSession | null> => {
     let force = false;
     let waits = 0;
@@ -2257,7 +2274,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       }
       if (lifecycleSessionReady(data.kind) && data.session) {
         clearPendingSubmission(current.workspaceKey, current.operationId);
-        return adoptActivatedSession(data, origin);
+        return adoptActivatedSession(data, origin, onCreated);
       }
       if (sessionGenerationRef.current !== generation) return null;
       // A refusal that still created the identity (resident_limit, in_progress)
@@ -2323,6 +2340,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     model?: string | null,
     /** Composer draft grants; they land inside `start`'s prepare, before the instruction is delivered. */
     grantedRemoteIds?: string[],
+    onCreated?: FirstSendCreatedCallback,
   ): Promise<EnsuredAgentSession | null> => {
     const ctx = currentOrigin();
     if (!ctx) return Promise.resolve(null);
@@ -2368,7 +2386,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
             operationId: pending.operationId, branch: origin.branch, permissionMode: pending.permissionMode ?? permissionMode,
             agentType, model: pending.model ?? model, instruction: content, force,
             grantedRemoteIds: pending.grantedRemoteIds ?? grantedRemoteIds,
-          }));
+          }), onCreated);
       } finally {
         if (firstSendInFlightRef.current.get(key) === promise) firstSendInFlightRef.current.delete(key);
         if (sessionGenerationRef.current === generation) setIsLoading(false);
@@ -2443,6 +2461,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     content: string | ContentPart[],
     /** The composer's declaration as of the send — the identity was prepared earlier. */
     grantedRemoteIds?: string[],
+    onCreated?: FirstSendCreatedCallback,
   ): Promise<EnsuredAgentSession | null> => {
     const key = workspaceKey(prepared.origin.projectId, prepared.origin.branch, prepared.origin.agentMode);
     const generation = sessionGenerationRef.current;
@@ -2466,7 +2485,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         return await runFirstSend(prepared.origin, generation, pending, (force) =>
           activateAgentSession(prepared.sessionId, {
             activationKey: prepared.operationId, instruction: content, force, grantedRemoteIds,
-          }));
+          }), onCreated);
       } finally {
         if (firstSendInFlightRef.current.get(key) === promise) firstSendInFlightRef.current.delete(key);
         if (sessionGenerationRef.current === generation) setIsLoading(false);

@@ -737,7 +737,7 @@ describe("AgentConversation pendingModel", () => {
 
       // Text-only: one start under a stable key; the submission stays pending
       // so resending retries the same operation. Nothing to discard.
-      expect(startConversation).toHaveBeenCalledWith("retry me", "edit", null, undefined);
+      expect(startConversation).toHaveBeenCalledWith("retry me", "edit", null, undefined, expect.any(Function));
       expect(cancelPreparedConversation).not.toHaveBeenCalled();
       expect(draftState.set).toHaveBeenLastCalledWith("retry me");
     });
@@ -751,7 +751,7 @@ describe("AgentConversation pendingModel", () => {
       });
 
       expect(prepareConversation).toHaveBeenCalledWith("edit", null, undefined);
-      expect(activateConversation).toHaveBeenCalledWith(prepared, '<vpaste path="/tmp/paste" size="2001" />', undefined);
+      expect(activateConversation).toHaveBeenCalledWith(prepared, '<vpaste path="/tmp/paste" size="2001" />', undefined, expect.any(Function));
       expect(startConversation).not.toHaveBeenCalled();
       expect(cancelPreparedConversation).not.toHaveBeenCalled();
     });
@@ -799,7 +799,7 @@ describe("AgentConversation pendingModel", () => {
       expect(activateConversation).toHaveBeenCalledWith(
         prepared,
         'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
-        undefined,
+        undefined, expect.any(Function),
       );
     });
 
@@ -821,7 +821,7 @@ describe("AgentConversation pendingModel", () => {
         await promptState.submit!({ text: "plain", files: [] });
       });
       expect(activateConversation).not.toHaveBeenCalled();
-      expect(startConversation).toHaveBeenCalledWith("plain", "edit", null, undefined);
+      expect(startConversation).toHaveBeenCalledWith("plain", "edit", null, undefined, expect.any(Function));
     });
 
     it("does not cancel another workspace's identity when an old submission fails", async () => {
@@ -897,7 +897,7 @@ describe("AgentConversation pendingModel", () => {
       expect(activateConversation).toHaveBeenCalledWith(
         preparedForOpus,
         '<vpaste path="/tmp/paste" size="2001" />\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
-        undefined,
+        undefined, expect.any(Function),
       );
     });
 
@@ -925,7 +925,7 @@ describe("AgentConversation pendingModel", () => {
       expect(uploadAttachment).toHaveBeenCalledTimes(1);
       expect(startConversation).toHaveBeenCalledWith(
         'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
-        "edit", null, undefined,
+        "edit", null, undefined, expect.any(Function),
       );
     });
 
@@ -950,7 +950,7 @@ describe("AgentConversation pendingModel", () => {
       expect(uploadAttachment).toHaveBeenCalledTimes(1);
       expect(startConversation).toHaveBeenCalledWith(
         'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
-        "edit", null, undefined,
+        "edit", null, undefined, expect.any(Function),
       );
     });
 
@@ -1113,7 +1113,7 @@ describe("AgentConversation pendingModel", () => {
       expect(activateConversation).toHaveBeenCalledWith(
         prepared,
         'read this\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />',
-        undefined,
+        undefined, expect.any(Function),
       );
       expect(startConversation).not.toHaveBeenCalled();
     });
@@ -1130,7 +1130,7 @@ describe("AgentConversation pendingModel", () => {
       expect(activateConversation).toHaveBeenCalledWith(prepared, [
         { type: "text", text: 'both\n<vfile path="/tmp/att/spec.pdf" name="spec.pdf" size="5" />' },
         { type: "image", mediaType: "image/png", data: "iVBORw0KGgo=" },
-      ], undefined);
+      ], undefined, expect.any(Function));
     });
 
     it("inlines a mislabeled image with the media type its bytes actually are", async () => {
@@ -1147,7 +1147,7 @@ describe("AgentConversation pendingModel", () => {
       // No upload needed → no prepare; single-shot start with the image part.
       expect(startConversation).toHaveBeenCalledWith(
         [{ type: "text", text: "look" }, { type: "image", mediaType: "image/jpeg", data: "/9j/4AAQ" }],
-        "edit", null, undefined,
+        "edit", null, undefined, expect.any(Function),
       );
     });
 
@@ -1167,7 +1167,7 @@ describe("AgentConversation pendingModel", () => {
 
       expect(uploadAttachment).toHaveBeenCalledTimes(1);
       expect(uploadAttachment.mock.calls[0][0].name).toBe("huge.png");
-      expect(activateConversation).toHaveBeenCalledWith(prepared, `big\n<vfile path="/tmp/att/huge.png" name="huge.png" size="${rawBytes}" />`, undefined);
+      expect(activateConversation).toHaveBeenCalledWith(prepared, `big\n<vfile path="/tmp/att/huge.png" name="huge.png" size="${rawBytes}" />`, undefined, expect.any(Function));
     });
 
     it("caps attachments at the server limit at pick time and names the refused files", async () => {
@@ -1198,7 +1198,7 @@ describe("AgentConversation pendingModel", () => {
         "s-new",
         expect.any(Function),
       );
-      expect(activateConversation).toHaveBeenCalledWith(prepared, 'hm\n<vfile path="/tmp/att/fake.png" name="fake.png" size="11" />', undefined);
+      expect(activateConversation).toHaveBeenCalledWith(prepared, 'hm\n<vfile path="/tmp/att/fake.png" name="fake.png" size="11" />', undefined, expect.any(Function));
     });
 
     it("sends an image type the model cannot see (SVG) as a file, not inline", async () => {
@@ -1219,7 +1219,7 @@ describe("AgentConversation pendingModel", () => {
       expect(activateConversation).toHaveBeenCalledWith(
         prepared,
         'use this\n<vfile path="/tmp/att/logo.svg" name="logo.svg" size="5" />',
-        undefined,
+        undefined, expect.any(Function),
       );
     });
 

@@ -94,6 +94,26 @@ describe("useSessionRemoteGrants", () => {
     expect(latest.granted).toEqual([]);
   });
 
+  it("keeps the chips on screen through the hand-off", async () => {
+    // The first send adopts before the new id renders; no render in between
+    // may show the chips empty (the composer visibly jumps if one does).
+    const seen: SessionRemoteGrantsState[] = [];
+    function Watch({ id }: { id: string | null }) {
+      seen.push(useSessionRemoteGrants(id, WS));
+      return null;
+    }
+    await act(async () => { root.render(<Watch id={null} />); });
+    await act(async () => { seen.at(-1)!.toggle(ubuntu, true); });
+
+    const from = seen.length;
+    await act(async () => {
+      seen.at(-1)!.adoptInto("s1");
+      root.render(<Watch id="s1" />);
+    });
+    expect(seen.at(-1)!.granted).toEqual([ubuntu]);
+    expect(seen.slice(from).map((s) => s.granted.length)).not.toContain(0);
+  });
+
   it("does not let an old conversation walk off with the draft's declaration", async () => {
     // Opening an existing conversation in the same workspace is not the same
     // as creating one from this draft: the declaration must stay where it was.

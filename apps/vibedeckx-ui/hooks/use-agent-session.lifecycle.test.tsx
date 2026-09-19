@@ -53,9 +53,12 @@ vi.stubGlobal("WebSocket", FakeWebSocket);
 
 type HookApi = ReturnType<typeof useAgentSession>;
 let latest: HookApi | null = null;
+/** Every session id the hook has rendered, in order. */
+let renderedSessionIds: (string | null)[] = [];
 
 function Probe({ projectId, branch }: { projectId: string; branch: string }) {
   const hook = useAgentSession(projectId, branch);
+  renderedSessionIds.push(hook.session?.id ?? null);
   useEffect(() => { latest = hook; });
   return null;
 }
@@ -83,6 +86,7 @@ const activated = (sessionId = "s-new", kind: LifecycleResponse["kind"] = "activ
 const limit = (): LifecycleResponse => ({ status: 409, kind: "resident_limit", lifecycle: view("s-new", "pending_first_turn"), maxResidentAgentProcesses: 3, runningSessions: [] });
 
 beforeEach(() => {
+  renderedSessionIds = [];
   window.sessionStorage.clear();
   for (const branch of ["main", "a", "b"]) removePlaceholder(workspaceKey("p1", branch, null));
   start.mockReset(); prepare.mockReset(); activate.mockReset(); cancel.mockReset();
@@ -243,6 +247,20 @@ describe("startConversation", () => {
     expect(JSON.parse(String((messageCalls[0][1] as RequestInit).body))).toEqual({ content: "second" });
   });
 
+  it("hands the sender the new id before the session is ever rendered", async () => {
+    // The composer re-keys its chips by session id: told any later — after its
+    // await resumes — the first render of the new id reads an empty slot and
+    // the chips blink out.
+    await render("main");
+    start.mockResolvedValueOnce(activated());
+    const seenAtCreate: boolean[] = [];
+    const onCreated = vi.fn(() => { seenAtCreate.push(renderedSessionIds.includes("s-new")); });
+    await act(async () => { await latest!.startConversation("hello", "edit", null, [], onCreated); });
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith("s-new");
+    expect(seenAtCreate).toEqual([false]);
+    expect(latest!.session?.id).toBe("s-new");
+  });
+
   it("does not adopt into a workspace the user has left, but still records the session for its origin", async () => {
     await render("a");
     let settle!: (value: LifecycleResponse) => void;
@@ -353,9 +371,14 @@ describe("prepare → activate", () => {
     expect(readPendingSubmission(KEY)).toMatchObject({ operationId: prepared.operationId, sessionId: "s-prep", content: null });
 
     activate.mockResolvedValueOnce(activated("s-prep"));
-    await act(async () => { await latest!.activateConversation(prepared, "<vpaste path=x />"); });
+    const seenAtCreate: boolean[] = [];
+    const onCreated = vi.fn(() => { seenAtCreate.push(renderedSessionIds.includes("s-prep")); });
+    await act(async () => { await latest!.activateConversation(prepared, "<vpaste path=x />", undefined, onCreated); });
     expect(activate).toHaveBeenCalledWith("s-prep", { activationKey: prepared.operationId, instruction: "<vpaste path=x />", force: false });
     expect(latest!.session?.id).toBe("s-prep");
+    // Before the first render of the new id, same as a plain start.
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith("s-prep");
+    expect(seenAtCreate).toEqual([false]);
     expect(readPendingSubmission(KEY)).toBeNull();
   });
 
