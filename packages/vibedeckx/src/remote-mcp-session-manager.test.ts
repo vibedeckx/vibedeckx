@@ -8,16 +8,17 @@ import {
   RemoteMcpSessionManager,
   RemoteMcpSessionNotFoundError,
 } from "./remote-mcp-session-manager.js";
+import { MAX_MCP_INSTRUCTIONS_CHARS } from "./protocol/mcp/client.js";
 import { startFakeHttpMcpServer, type FakeHttpMcpServer } from "./protocol/mcp/__fixtures__/fake-http-mcp-server.js";
 
-const STDIO_SERVER = `
+const stdioServer = (instructions?: string) => `
   import readline from "node:readline";
   let calls = 0;
   const rl = readline.createInterface({ input: process.stdin });
   const send = (x) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...x }) + "\\n");
   rl.on("line", (line) => {
     const m = JSON.parse(line);
-    if (m.method === "initialize") send({ id: m.id, result: { protocolVersion: "2025-03-26", serverInfo: { name: "fake-stdio" }, capabilities: {} } });
+    if (m.method === "initialize") send({ id: m.id, result: { protocolVersion: "2025-03-26", serverInfo: { name: "fake-stdio" }, capabilities: {}${instructions ? `, instructions: ${JSON.stringify(instructions)}` : ""} } });
     else if (m.method === "tools/list") send({ id: m.id, result: { tools: [{ name: "count" }] } });
     else if (m.method === "tools/call") send({ id: m.id, result: { content: [{ type: "text", text: String(++calls) }] } });
     else if (m.method === "ping") send({ id: m.id, result: {} });
@@ -41,11 +42,11 @@ describe("RemoteMcpSessionManager", () => {
     return server;
   };
 
-  const stdioSpec = () => {
+  const stdioSpec = (instructions?: string) => {
     const dir = mkdtempSync(path.join(tmpdir(), "vdx-mcp-mgr-"));
     dirs.push(dir);
     const file = path.join(dir, "server.mjs");
-    writeFileSync(file, STDIO_SERVER);
+    writeFileSync(file, stdioServer(instructions));
     return { type: "stdio", command: process.execPath, args: [file], cwd: dir } as const;
   };
 
@@ -75,6 +76,22 @@ describe("RemoteMcpSessionManager", () => {
     expect(await sessions.call(web.workerHandle, "echo", {})).toMatchObject({ content: [{ text: "call-1" }] });
     await sessions.ping(web.workerHandle);
     expect((await sessions.listTools(web.workerHandle)).map((tool) => tool.name)).toEqual(["echo"]);
+  });
+
+  it("returns downstream instructions for both transports, capped, and omits them when absent", async () => {
+    const sessions = manager();
+    const long = "x".repeat(MAX_MCP_INSTRUCTIONS_CHARS + 100);
+    const http = await httpServer({ instructions: long });
+
+    const stdio = await sessions.open(stdioSpec("Use count to increment."));
+    const web = await sessions.open({ type: "streamable-http", url: http.url });
+    const bare = await sessions.open(stdioSpec());
+
+    expect(stdio.instructions).toBe("Use count to increment.");
+    expect(web.instructions?.startsWith("x".repeat(MAX_MCP_INSTRUCTIONS_CHARS))).toBe(true);
+    expect(web.instructions).toContain("[instructions truncated");
+    expect(web.instructions?.length).toBeLessThan(long.length);
+    expect("instructions" in bare).toBe(false);
   });
 
   it("rejects an invalid transport before touching the host", async () => {

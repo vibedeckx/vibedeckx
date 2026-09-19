@@ -180,7 +180,7 @@ describe("cross-remote MCP gateway", () => {
 
   it("opens a broker session, signs its handle, and reuses it for a tool call", async () => {
     proxyToRemoteAuto
-      .mockResolvedValueOnce({ ok: true, status: 200, data: { workerHandle: "worker-1", serverInfo: { name: "fake" }, tools: [{ name: "echo" }] } })
+      .mockResolvedValueOnce({ ok: true, status: 200, data: { workerHandle: "worker-1", serverInfo: { name: "fake" }, instructions: "Call echo first.", tools: [{ name: "echo" }] } })
       .mockResolvedValueOnce({ ok: true, status: 200, data: { result: { content: [{ type: "text", text: "ok" }] } } });
 
     const opened = await call(tokenFor(), "remote_mcp_open", {
@@ -192,6 +192,8 @@ describe("cross-remote MCP gateway", () => {
     const openData = JSON.parse(opened.json().result.content[0].text);
     expect(openData.handle).toMatch(/^mcp\./);
     expect(openData.workerHandle).toBeUndefined();
+    // Downstream server instructions ride through the hub untouched.
+    expect(openData.instructions).toBe("Call echo first.");
     expect(proxyToRemoteAuto).toHaveBeenNthCalledWith(
       1,
       targetId,

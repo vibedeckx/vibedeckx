@@ -2,7 +2,14 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { FetchLike } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { McpClientError, McpSessionExpiredError, McpTimeoutError, type McpTool, type RemoteMcpClient } from "./client.js";
+import {
+  McpClientError,
+  McpSessionExpiredError,
+  McpTimeoutError,
+  normalizeMcpInstructions,
+  type McpTool,
+  type RemoteMcpClient,
+} from "./client.js";
 import { isAllowedMcpProtocol, type McpStreamableHttpTransport } from "./transport.js";
 
 const MAX_REDIRECTS = 5;
@@ -31,7 +38,7 @@ export class McpStreamableHttpClient implements RemoteMcpClient {
   static async connect(
     spec: McpStreamableHttpTransport,
     timeoutMs = 20_000,
-  ): Promise<{ client: McpStreamableHttpClient; serverInfo: unknown }> {
+  ): Promise<{ client: McpStreamableHttpClient; serverInfo: unknown; instructions: string | undefined }> {
     // reconnectionOptions is deliberately left at the SDK default. Its retries are stream
     // *resumption* — a GET carrying `last-event-id`, only after the server sent a priming
     // event and before a result arrived — so an interrupted response is picked up where it
@@ -45,7 +52,11 @@ export class McpStreamableHttpClient implements RemoteMcpClient {
     try {
       await sdkClient.connect(transport, { timeout: timeoutMs });
       client.initialized = true;
-      return { client, serverInfo: sdkClient.getServerVersion() };
+      return {
+        client,
+        serverInfo: sdkClient.getServerVersion(),
+        instructions: normalizeMcpInstructions(sdkClient.getInstructions()),
+      };
     } catch (error) {
       await client.close();
       throw client.translate(error);

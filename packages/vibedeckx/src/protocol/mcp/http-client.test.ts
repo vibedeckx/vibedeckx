@@ -14,12 +14,12 @@ describe("McpStreamableHttpClient", () => {
   };
 
   const connect = async (url: string, headers?: Record<string, string>, timeoutMs?: number) => {
-    const { client, serverInfo } = await McpStreamableHttpClient.connect(
+    const { client, serverInfo, instructions } = await McpStreamableHttpClient.connect(
       { type: "streamable-http", url, ...(headers ? { headers } : {}) },
       timeoutMs,
     );
     clients.push(client);
-    return { client, serverInfo };
+    return { client, serverInfo, instructions };
   };
 
   afterEach(async () => {
@@ -43,6 +43,14 @@ describe("McpStreamableHttpClient", () => {
     expect(rpcMethods).toEqual(["initialize", "notifications/initialized", "tools/list", "tools/call", "ping"]);
     // The negotiated version rides every post-initialize request.
     expect(server.requests.find((r) => r.rpcMethod === "tools/list")?.protocolVersion).toBeTruthy();
+  });
+
+  it("surfaces server-level instructions from initialize, and none when the server sends none", async () => {
+    const withInstructions = await start({ instructions: "  Call echo before anything else.  " });
+    expect((await connect(withInstructions.url)).instructions).toBe("Call echo before anything else.");
+
+    const without = await start();
+    expect((await connect(without.url)).instructions).toBeUndefined();
   });
 
   it("carries the session id and the caller's headers on every request, over SSE", async () => {

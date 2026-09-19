@@ -20,6 +20,8 @@ export interface FakeHttpMcpOptions {
   listToolsDelayMs?: number;
   /** Redirect every POST with this status instead of serving it. */
   redirect?: { status: number; location: string };
+  /** Server-level `instructions` to return from initialize. */
+  instructions?: string;
 }
 
 export interface RecordedRequest {
@@ -44,7 +46,7 @@ export interface FakeHttpMcpServer {
 export async function startFakeHttpMcpServer(options: FakeHttpMcpOptions = {}): Promise<FakeHttpMcpServer> {
   const {
     stateful = false, sse = false, deleteStatus = 200,
-    firstToolDelayMs = 0, listToolsDelayMs = 0, redirect,
+    firstToolDelayMs = 0, listToolsDelayMs = 0, redirect, instructions,
   } = options;
   const requests: RecordedRequest[] = [];
   let sessionId: string | undefined;
@@ -111,6 +113,7 @@ export async function startFakeHttpMcpServer(options: FakeHttpMcpOptions = {}): 
             protocolVersion: msg.params?.protocolVersion ?? "2025-06-18",
             capabilities: { tools: {} },
             serverInfo: { name: "fake-http-mcp", version: "9.9.9" },
+            ...(instructions !== undefined ? { instructions } : {}),
           });
           return;
         case "tools/list":

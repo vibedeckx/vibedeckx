@@ -43,7 +43,14 @@ export class RemoteMcpSessionManager {
   async open(
     transport: RemoteMcpTransport,
     timeoutMs = 20_000,
-  ): Promise<{ workerHandle: string; transport: RemoteMcpTransport["type"]; serverInfo: unknown; tools: McpTool[] }> {
+  ): Promise<{
+    workerHandle: string;
+    transport: RemoteMcpTransport["type"];
+    serverInfo: unknown;
+    /** Server-level usage guidance from `initialize`; omitted when the server sent none. */
+    instructions?: string;
+    tools: McpTool[];
+  }> {
     // Re-validated here rather than trusted from the hub: this is the side that spawns a
     // process or dials a URL, and the manager is also reachable from tests and future
     // callers that never went through the gateway.
@@ -61,7 +68,7 @@ export class RemoteMcpSessionManager {
 
     try {
       const spec = parsed.transport;
-      const { client, serverInfo } = spec.type === "stdio"
+      const { client, serverInfo, instructions } = spec.type === "stdio"
         ? await McpStdioClient.connect(spec, clampTimeout(timeoutMs))
         : await McpStreamableHttpClient.connect(spec, clampTimeout(timeoutMs));
       try {
@@ -72,7 +79,7 @@ export class RemoteMcpSessionManager {
         if (generation !== this.generation) throw new McpClientError("MCP broker was reset while opening");
         const workerHandle = randomUUID();
         this.sessions.set(workerHandle, { client, transport: spec.type, serverInfo, tools, lastUsedAt: Date.now() });
-        return { workerHandle, transport: spec.type, serverInfo, tools };
+        return { workerHandle, transport: spec.type, serverInfo, ...(instructions ? { instructions } : {}), tools };
       } catch (error) {
         await client.close();
         throw error;

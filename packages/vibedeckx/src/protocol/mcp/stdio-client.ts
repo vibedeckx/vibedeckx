@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import { mcpLine, parseMcpLine } from "./codec.js";
-import { McpClientError, McpTimeoutError, type McpTool, type RemoteMcpClient } from "./client.js";
+import { McpClientError, McpTimeoutError, normalizeMcpInstructions, type McpTool, type RemoteMcpClient } from "./client.js";
 
 export interface McpServerSpec { command: string; args?: string[]; cwd?: string }
 export { McpClientError, McpTimeoutError, type McpTool };
@@ -44,6 +44,7 @@ export class McpStdioClient implements RemoteMcpClient {
   static async connect(spec: McpServerSpec, timeoutMs = 20_000): Promise<{
     client: McpStdioClient;
     serverInfo: unknown;
+    instructions: string | undefined;
   }> {
     const child = spawn(spec.command, spec.args ?? [], {
       cwd: spec.cwd,
@@ -59,9 +60,13 @@ export class McpStdioClient implements RemoteMcpClient {
         protocolVersion: "2025-03-26",
         capabilities: {},
         clientInfo: { name: "vibedeckx-remote-mcp-broker", version: "1.0.0" },
-      }, timeoutMs) as { serverInfo?: unknown };
+      }, timeoutMs) as { serverInfo?: unknown; instructions?: unknown };
       client.notify("notifications/initialized", {});
-      return { client, serverInfo: initialized?.serverInfo };
+      return {
+        client,
+        serverInfo: initialized?.serverInfo,
+        instructions: normalizeMcpInstructions(initialized?.instructions),
+      };
     } catch (error) {
       await client.close();
       throw error;

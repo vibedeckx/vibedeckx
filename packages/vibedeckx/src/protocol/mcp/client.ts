@@ -17,3 +17,19 @@ export interface RemoteMcpClient {
   ping(timeoutMs?: number): Promise<void>;
   close(): Promise<void>;
 }
+
+/** Bound on server-level instructions forwarded to the agent; they land in its context. */
+export const MAX_MCP_INSTRUCTIONS_CHARS = 8192;
+
+/**
+ * Normalizes the optional `instructions` string from an `initialize` result. It is
+ * downstream-authored text headed for the agent's context, so it is capped; absent,
+ * non-string or blank values collapse to undefined so the open response omits the field.
+ */
+export function normalizeMcpInstructions(raw: unknown): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const text = raw.trim();
+  if (!text) return undefined;
+  if (text.length <= MAX_MCP_INSTRUCTIONS_CHARS) return text;
+  return `${text.slice(0, MAX_MCP_INSTRUCTIONS_CHARS)}\n[instructions truncated at ${MAX_MCP_INSTRUCTIONS_CHARS} characters]`;
+}
