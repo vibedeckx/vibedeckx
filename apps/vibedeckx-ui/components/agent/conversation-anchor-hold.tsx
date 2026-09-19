@@ -70,9 +70,8 @@ export interface ViewportPinInput {
 // always has. Deliberate: holding THEIR pixels still would need to know where
 // they were before the change, which this callback cannot see — `scrollTop` is
 // read after layout, which has already pulled anyone below a grown viewport's
-// new maximum up onto it. Pinning survives that blind spot because a wrong
-// answer here does nothing (re-pinning an already-clamped reader is a no-op)
-// rather than moving the transcript by a wrong amount.
+// new maximum up onto it. That blind spot is why the hold only asks this for a
+// SHRINKING viewport; a growing one is answered from the library's isAtBottom.
 export function wasPinnedBeforeViewportChange({
   scrollTop,
   scrollHeight,
@@ -119,7 +118,7 @@ export function ConversationAnchorHold({
   turnInFlight: boolean;
   sessionId: string | null;
 }) {
-  const { scrollToBottom, scrollRef, contentRef } = useStickToBottomContext();
+  const { scrollToBottom, scrollRef, contentRef, state: stickState } = useStickToBottomContext();
   const { index } = useFileNavigation();
   const version = index?.version ?? null;
 
@@ -258,12 +257,24 @@ export function ConversationAnchorHold({
       // content growth, synchronously inside the callback so the displaced
       // position is never painted.
       if (viewportResized && !contentChanged) {
-        const pinned = wasPinnedBeforeViewportChange({
-          scrollTop: scroller.scrollTop,
-          scrollHeight: next,
-          prevClientHeight: prevClient,
-        });
-        if (pinned) scroller.scrollTop = next; // clamps to max
+        // A GROWING viewport (the composer shrinking back to one line after a
+        // multi-line send, a banner going away) has already had the browser
+        // clamp a pinned reader's scrollTop down onto the new bottom, and that
+        // clamp arrives as a scroll event the library reads as the user
+        // scrolling up — it escapes the lock and stops following new output.
+        // Geometry can't see "was pinned" any more after the clamp, but the
+        // library's own isAtBottom hasn't processed that event yet. Writing
+        // through the library's setter records the position as its own
+        // (ignoreScrollToTop), so the clamp's scroll event is discarded.
+        const grew = client > prevClient;
+        const pinned = grew
+          ? stickState.isAtBottom
+          : wasPinnedBeforeViewportChange({
+              scrollTop: scroller.scrollTop,
+              scrollHeight: next,
+              prevClientHeight: prevClient,
+            });
+        if (pinned) stickState.scrollTop = next; // clamps to max
         diag("viewport-resize", {
           prevClient,
           client,
@@ -311,7 +322,7 @@ export function ConversationAnchorHold({
       ro.disconnect();
       scroller.removeEventListener("scroll", refreshAnchor);
     };
-  }, [scrollRef, contentRef]);
+  }, [scrollRef, contentRef, stickState]);
 
   return null;
 }

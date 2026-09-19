@@ -20,11 +20,25 @@ const scroller = {
     this._top = Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight));
   },
 };
+// The library's mutable state object: its scrollTop setter writes through to
+// the scroller and records the landed position as its own scroll.
+const stickState = {
+  isAtBottom: true,
+  ignoreScrollToTop: undefined as number | undefined,
+  get scrollTop() {
+    return stickCtx.scrollRef.current.scrollTop;
+  },
+  set scrollTop(v: number) {
+    stickCtx.scrollRef.current.scrollTop = v;
+    this.ignoreScrollToTop = stickCtx.scrollRef.current.scrollTop;
+  },
+};
 const stickCtx = {
   scrollToBottom,
   isAtBottom: true,
   scrollRef: { current: scroller },
   contentRef: { current: null },
+  state: stickState,
 };
 vi.mock("use-stick-to-bottom", () => ({
   useStickToBottomContext: () => stickCtx,
@@ -262,6 +276,8 @@ describe("ConversationAnchorHold — viewport-shift wiring", () => {
     });
     domScroller.getBoundingClientRect = () => ({ top: geom.viewportTop }) as DOMRect;
 
+    stickState.isAtBottom = true;
+    stickState.ignoreScrollToTop = undefined;
     stickCtx.scrollRef.current = domScroller as unknown as typeof scroller;
     stickCtx.contentRef.current = document.createElement("div") as never;
 
@@ -329,6 +345,34 @@ describe("ConversationAnchorHold — viewport-shift wiring", () => {
     act(() => ro!.fire());
 
     expect(domScroller.scrollTop).toBe(geom.scrollHeight - geom.clientHeight);
+  });
+
+  // The composer shrinking back to one line after a multi-line send grows the
+  // viewport; the browser clamps the pinned reader down, and the library read
+  // that clamp's scroll event as the user scrolling up — following stopped.
+  it("claims the clamp as the library's own scroll when the composer shrinks back", async () => {
+    await mount();
+    domScroller.scrollTop = geom.scrollHeight;
+    geom.clientHeight -= 80; // multi-line draft
+    act(() => ro!.fire());
+
+    geom.clientHeight += 80; // sent: composer back to one line, browser clamps
+    act(() => ro!.fire());
+
+    const bottom = geom.scrollHeight - geom.clientHeight;
+    expect(domScroller.scrollTop).toBe(bottom);
+    expect(stickState.ignoreScrollToTop).toBe(bottom);
+  });
+
+  it("leaves a reader who scrolled up alone when the viewport grows", async () => {
+    await mount();
+    domScroller.scrollTop = 4000;
+    stickState.isAtBottom = false;
+    geom.clientHeight += 80;
+    act(() => ro!.fire());
+
+    expect(domScroller.scrollTop).toBe(4000);
+    expect(stickState.ignoreScrollToTop).toBeUndefined();
   });
 
   it("ignores an unchanged box (the observer's initial callback)", async () => {
