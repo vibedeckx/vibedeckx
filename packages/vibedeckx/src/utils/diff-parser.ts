@@ -18,6 +18,8 @@ export interface DiffFile {
   status: 'modified' | 'added' | 'deleted' | 'renamed';
   oldPath?: string;
   hunks: DiffHunk[];
+  /** git judged the file binary (a NUL byte in its head) and printed no hunks. */
+  binary?: true;
 }
 
 export function parseDiffOutput(diffOutput: string): DiffFile[] {
@@ -59,6 +61,9 @@ export function parseDiffOutput(diffOutput: string): DiffFile[] {
         break;
       }
     }
+
+    // git's stand-in for the hunks of a file it treats as binary
+    const binary = lines.some((line) => /^Binary files .* differ$/.test(line));
 
     // Parse hunks
     const hunks: DiffHunk[] = [];
@@ -123,6 +128,7 @@ export function parseDiffOutput(diffOutput: string): DiffFile[] {
       status,
       ...(finalOldPath && { oldPath: finalOldPath }),
       hunks,
+      ...(binary && { binary: true as const }),
     });
   }
 

@@ -981,6 +981,8 @@ export interface FileDiff {
   status: 'modified' | 'added' | 'deleted' | 'renamed';
   oldPath?: string;
   hunks: DiffHunk[];
+  /** git treated the file as binary, so there are no hunks. Absent from older workers. */
+  binary?: true;
 }
 
 export interface DiffResponse {

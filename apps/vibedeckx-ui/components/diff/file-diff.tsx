@@ -73,6 +73,11 @@ export function FileDiff({ file, defaultOpen = true }: FileDiffProps) {
       </CollapsibleTrigger>
       <CollapsibleContent>
         <div>
+          {file.binary && (
+            <div className="px-4 py-2 text-[11.5px] text-muted-foreground">
+              Binary file — contents not shown
+            </div>
+          )}
           {file.hunks.map((hunk, hunkIndex) => (
             <div key={hunkIndex}>
               <div className="px-4 py-0.5 bg-accent text-accent-foreground text-[11px] font-mono font-medium sticky top-0">
