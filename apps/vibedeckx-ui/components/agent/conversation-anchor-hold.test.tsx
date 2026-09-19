@@ -20,19 +20,8 @@ const scroller = {
     this._top = Math.max(0, Math.min(v, this.scrollHeight - this.clientHeight));
   },
 };
-// The library's mutable state object: its scrollTop setter writes through to
-// the scroller and records the landed position as its own scroll.
-const stickState = {
-  isAtBottom: true,
-  ignoreScrollToTop: undefined as number | undefined,
-  get scrollTop() {
-    return stickCtx.scrollRef.current.scrollTop;
-  },
-  set scrollTop(v: number) {
-    stickCtx.scrollRef.current.scrollTop = v;
-    this.ignoreScrollToTop = stickCtx.scrollRef.current.scrollTop;
-  },
-};
+// The library's mutable state; only lastScrollTop is touched by the hold.
+const stickState: { lastScrollTop?: number } = {};
 const stickCtx = {
   scrollToBottom,
   isAtBottom: true,
@@ -44,7 +33,12 @@ vi.mock("use-stick-to-bottom", () => ({
   useStickToBottomContext: () => stickCtx,
 }));
 
-import { ConversationAnchorHold, shouldHoldBottom, wasPinnedBeforeViewportChange } from "./conversation-anchor-hold";
+import {
+  ConversationAnchorHold,
+  clampedLastScrollTop,
+  shouldHoldBottom,
+  wasPinnedBeforeViewportChange,
+} from "./conversation-anchor-hold";
 import { FileNavigationProvider } from "./file-navigation-context";
 
 function fakeIndex(version: string): FileRefIndex {
@@ -243,6 +237,28 @@ describe("wasPinnedBeforeViewportChange — the scroller's own box changing", ()
   });
 });
 
+describe("clampedLastScrollTop — a clamp is not a scroll-up", () => {
+  it("discounts the clamp when the viewport grows under a pinned reader", () => {
+    // 1000 → new max 920, browser lands on 920: no movement.
+    expect(clampedLastScrollTop({ lastScrollTop: 1000, scrollTop: 920, maxScrollTop: 920 })).toBe(920);
+  });
+
+  it("still sees a scroll-up beyond the clamp", () => {
+    const last = clampedLastScrollTop({ lastScrollTop: 1000, scrollTop: 850, maxScrollTop: 920 });
+    expect(last).toBe(920);
+    expect(850).toBeLessThan(last!);
+  });
+
+  it("treats a sub-pixel landing on the new maximum as the clamp itself", () => {
+    expect(clampedLastScrollTop({ lastScrollTop: 1000, scrollTop: 919.5, maxScrollTop: 920 })).toBe(919.5);
+  });
+
+  it("leaves in-range positions and the first event alone", () => {
+    expect(clampedLastScrollTop({ lastScrollTop: 800, scrollTop: 700, maxScrollTop: 920 })).toBe(800);
+    expect(clampedLastScrollTop({ lastScrollTop: undefined, scrollTop: 700, maxScrollTop: 920 })).toBeUndefined();
+  });
+});
+
 describe("ConversationAnchorHold — viewport-shift wiring", () => {
   // The bug this covers: use-stick-to-bottom observes the content element
   // only, so a banner appearing above the transcript produced no resize event
@@ -252,6 +268,7 @@ describe("ConversationAnchorHold — viewport-shift wiring", () => {
   let localContainer: HTMLDivElement;
   let localRoot: Root;
   let domScroller: HTMLDivElement;
+  let scrollerParent: HTMLDivElement;
 
   beforeEach(() => {
     geom.scrollHeight = 13867;
@@ -275,9 +292,10 @@ describe("ConversationAnchorHold — viewport-shift wiring", () => {
       },
     });
     domScroller.getBoundingClientRect = () => ({ top: geom.viewportTop }) as DOMRect;
+    scrollerParent = document.createElement("div");
+    scrollerParent.appendChild(domScroller);
+    delete stickState.lastScrollTop;
 
-    stickState.isAtBottom = true;
-    stickState.ignoreScrollToTop = undefined;
     stickCtx.scrollRef.current = domScroller as unknown as typeof scroller;
     stickCtx.contentRef.current = document.createElement("div") as never;
 
@@ -347,72 +365,30 @@ describe("ConversationAnchorHold — viewport-shift wiring", () => {
     expect(domScroller.scrollTop).toBe(geom.scrollHeight - geom.clientHeight);
   });
 
-  // The composer shrinking back to one line after a multi-line send grows the
-  // viewport; the browser clamps the pinned reader down, and the library read
-  // that clamp's scroll event as the user scrolling up — following stopped.
-  it("claims the clamp as the library's own scroll when the composer shrinks back", async () => {
+  // The composer shrinking back after a multi-line send (or the background-task
+  // bar going away): the clamp's scroll event must reach the library with the
+  // previous position already limited to the new range, whichever of it and
+  // the resize callback runs first.
+  it("clamps the library's previous position before it sees the clamp's scroll event", async () => {
     await mount();
+    const seenByLibrary: Array<number | undefined> = [];
+    domScroller.addEventListener("scroll", () => seenByLibrary.push(stickState.lastScrollTop));
     domScroller.scrollTop = geom.scrollHeight;
-    geom.clientHeight -= 80; // multi-line draft
-    act(() => ro!.fire());
+    stickState.lastScrollTop = domScroller.scrollTop; // 12817
 
-    geom.clientHeight += 80; // sent: composer back to one line, browser clamps
-    act(() => ro!.fire());
+    geom.clientHeight += 80; // browser clamps to 12737
+    domScroller.dispatchEvent(new Event("scroll"));
 
-    const bottom = geom.scrollHeight - geom.clientHeight;
-    expect(domScroller.scrollTop).toBe(bottom);
-    expect(stickState.ignoreScrollToTop).toBe(bottom);
+    expect(seenByLibrary).toEqual([geom.scrollHeight - geom.clientHeight]);
   });
 
-  // Seen live when the background-task bar disappears: layout was forced
-  // earlier, so the clamp's scroll event ran before the observer and the
-  // library escapes in its 1ms timeout regardless of the ignore value.
-  it("re-pins after the library escapes on a clamp it saw before the observer", async () => {
-    vi.useFakeTimers();
-    try {
-      await mount();
-      domScroller.scrollTop = geom.scrollHeight;
-      geom.clientHeight += 42; // bar gone, browser clamps
-      act(() => ro!.fire());
-      stickState.isAtBottom = false; // the library's already-scheduled escape
-      scrollToBottom.mockClear();
-
-      vi.advanceTimersByTime(2);
-
-      expect(scrollToBottom).toHaveBeenCalledWith({ animation: "instant" });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("does not re-pin if the reader scrolled up in that window", async () => {
-    vi.useFakeTimers();
-    try {
-      await mount();
-      domScroller.scrollTop = geom.scrollHeight;
-      geom.clientHeight += 42;
-      act(() => ro!.fire());
-      stickState.isAtBottom = false;
-      domScroller.scrollTop = 4000; // a real scroll-up
-      scrollToBottom.mockClear();
-
-      vi.advanceTimersByTime(2);
-
-      expect(scrollToBottom).not.toHaveBeenCalled();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("leaves a reader who scrolled up alone when the viewport grows", async () => {
+  it("stops listening on unmount", async () => {
     await mount();
-    domScroller.scrollTop = 4000;
-    stickState.isAtBottom = false;
-    geom.clientHeight += 80;
-    act(() => ro!.fire());
-
-    expect(domScroller.scrollTop).toBe(4000);
-    expect(stickState.ignoreScrollToTop).toBeUndefined();
+    act(() => localRoot.unmount());
+    stickState.lastScrollTop = 99999;
+    domScroller.dispatchEvent(new Event("scroll"));
+    expect(stickState.lastScrollTop).toBe(99999);
+    localRoot = createRoot(localContainer); // afterEach unmounts again
   });
 
   it("ignores an unchanged box (the observer's initial callback)", async () => {

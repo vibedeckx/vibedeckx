@@ -70,8 +70,9 @@ export interface ViewportPinInput {
 // always has. Deliberate: holding THEIR pixels still would need to know where
 // they were before the change, which this callback cannot see — `scrollTop` is
 // read after layout, which has already pulled anyone below a grown viewport's
-// new maximum up onto it. That blind spot is why the hold only asks this for a
-// SHRINKING viewport; a growing one is answered from the library's isAtBottom.
+// new maximum up onto it. Pinning survives that blind spot because a wrong
+// answer here does nothing (re-pinning an already-clamped reader is a no-op)
+// rather than moving the transcript by a wrong amount.
 export function wasPinnedBeforeViewportChange({
   scrollTop,
   scrollHeight,
@@ -80,6 +81,30 @@ export function wasPinnedBeforeViewportChange({
   // Content height is unchanged on this path, so the pre-change bottom is
   // measured against the pre-change viewport height.
   return scrollTop + prevClientHeight >= scrollHeight - 6;
+}
+
+// Exported for unit tests: the library's previous scroll position, limited to
+// the scrollable range as it stands now. use-stick-to-bottom decides "the user
+// scrolled up" by comparing each scroll event's position with the previous
+// one. When the scroller's box grows (the composer shrinking back to one line
+// after a multi-line send, the background-task bar going away) the browser
+// clamps a bottom-pinned reader down to the new maximum, and that clamp alone
+// reads as a scroll-up: the library escapes the lock and stops following new
+// output. Measuring from the clamped previous position discounts only the
+// distance the clamp forced; any further upward movement is still a scroll-up.
+export function clampedLastScrollTop({
+  lastScrollTop,
+  scrollTop,
+  maxScrollTop,
+}: {
+  lastScrollTop: number | undefined;
+  scrollTop: number;
+  maxScrollTop: number;
+}): number | undefined {
+  if (lastScrollTop === undefined || lastScrollTop <= maxScrollTop) return lastScrollTop;
+  // Sitting on the new maximum (sub-pixel scrollTop included) is the clamp
+  // itself: no movement at all.
+  return scrollTop >= maxScrollTop - 1 ? scrollTop : maxScrollTop;
 }
 
 /**
@@ -222,6 +247,21 @@ export function ConversationAnchorHold({
     refreshAnchor();
     scroller.addEventListener("scroll", refreshAnchor, { passive: true });
 
+    // Runs before the library's own scroll handler: capture on an ancestor
+    // precedes listeners on the target, whatever the order of registration —
+    // so this holds even when a forced layout dispatches the clamp's scroll
+    // event before any resize callback has run.
+    const clampLast = (e: Event) => {
+      if (e.target !== scroller) return;
+      stickState.lastScrollTop = clampedLastScrollTop({
+        lastScrollTop: stickState.lastScrollTop,
+        scrollTop: scroller.scrollTop,
+        maxScrollTop: scroller.scrollHeight - scroller.clientHeight,
+      });
+    };
+    const scrollerParent = scroller.parentElement;
+    scrollerParent?.addEventListener("scroll", clampLast, { capture: true, passive: true });
+
     // Per-message height cache so the diagnostics can name which entries grew.
     const msgHeights = new Map<string, number>();
     const diffMessageHeights = () => {
@@ -237,7 +277,6 @@ export function ConversationAnchorHold({
       return changed.slice(0, 4);
     };
 
-    let reassertTimer: ReturnType<typeof setTimeout> | undefined;
     const ro = new ResizeObserver(() => {
       const s = stateRef.current;
       const prev = s.prevScrollHeight;
@@ -258,39 +297,12 @@ export function ConversationAnchorHold({
       // content growth, synchronously inside the callback so the displaced
       // position is never painted.
       if (viewportResized && !contentChanged) {
-        // A GROWING viewport (the composer shrinking back to one line after a
-        // multi-line send, a banner going away) has already had the browser
-        // clamp a pinned reader's scrollTop down onto the new bottom, and that
-        // clamp arrives as a scroll event the library reads as the user
-        // scrolling up — it escapes the lock and stops following new output.
-        // Geometry can't see "was pinned" any more after the clamp, but the
-        // library's own isAtBottom hasn't processed that event yet. Writing
-        // through the library's setter records the position as its own
-        // (ignoreScrollToTop), so the clamp's scroll event is discarded.
-        //
-        // That only works when this callback runs first. When something forced
-        // layout earlier (any offsetHeight read after the commit), the clamp's
-        // scroll event is dispatched ahead of this callback in the same frame;
-        // the library's handler has then already captured its ignore value and
-        // will escape in its 1ms timeout. So re-assert after that timeout —
-        // only if the reader is still sitting on the bottom, which a real
-        // scroll-up in that window would not be.
-        const grew = client > prevClient;
-        const pinned = grew
-          ? stickState.isAtBottom
-          : wasPinnedBeforeViewportChange({
-              scrollTop: scroller.scrollTop,
-              scrollHeight: next,
-              prevClientHeight: prevClient,
-            });
-        if (pinned) stickState.scrollTop = next; // clamps to max
-        if (pinned && grew) {
-          clearTimeout(reassertTimer);
-          reassertTimer = setTimeout(() => {
-            const atMax = scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 2;
-            if (!stickState.isAtBottom && atMax) scrollToBottom({ animation: "instant" });
-          }, 1);
-        }
+        const pinned = wasPinnedBeforeViewportChange({
+          scrollTop: scroller.scrollTop,
+          scrollHeight: next,
+          prevClientHeight: prevClient,
+        });
+        if (pinned) scroller.scrollTop = next; // clamps to max
         diag("viewport-resize", {
           prevClient,
           client,
@@ -336,10 +348,10 @@ export function ConversationAnchorHold({
     ro.observe(scroller);
     return () => {
       ro.disconnect();
-      clearTimeout(reassertTimer);
       scroller.removeEventListener("scroll", refreshAnchor);
+      scrollerParent?.removeEventListener("scroll", clampLast, { capture: true });
     };
-  }, [scrollRef, contentRef, stickState, scrollToBottom]);
+  }, [scrollRef, contentRef, stickState]);
 
   return null;
 }
