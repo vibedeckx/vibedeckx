@@ -364,6 +364,46 @@ describe("ConversationAnchorHold — viewport-shift wiring", () => {
     expect(stickState.ignoreScrollToTop).toBe(bottom);
   });
 
+  // Seen live when the background-task bar disappears: layout was forced
+  // earlier, so the clamp's scroll event ran before the observer and the
+  // library escapes in its 1ms timeout regardless of the ignore value.
+  it("re-pins after the library escapes on a clamp it saw before the observer", async () => {
+    vi.useFakeTimers();
+    try {
+      await mount();
+      domScroller.scrollTop = geom.scrollHeight;
+      geom.clientHeight += 42; // bar gone, browser clamps
+      act(() => ro!.fire());
+      stickState.isAtBottom = false; // the library's already-scheduled escape
+      scrollToBottom.mockClear();
+
+      vi.advanceTimersByTime(2);
+
+      expect(scrollToBottom).toHaveBeenCalledWith({ animation: "instant" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not re-pin if the reader scrolled up in that window", async () => {
+    vi.useFakeTimers();
+    try {
+      await mount();
+      domScroller.scrollTop = geom.scrollHeight;
+      geom.clientHeight += 42;
+      act(() => ro!.fire());
+      stickState.isAtBottom = false;
+      domScroller.scrollTop = 4000; // a real scroll-up
+      scrollToBottom.mockClear();
+
+      vi.advanceTimersByTime(2);
+
+      expect(scrollToBottom).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("leaves a reader who scrolled up alone when the viewport grows", async () => {
     await mount();
     domScroller.scrollTop = 4000;

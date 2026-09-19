@@ -237,6 +237,7 @@ export function ConversationAnchorHold({
       return changed.slice(0, 4);
     };
 
+    let reassertTimer: ReturnType<typeof setTimeout> | undefined;
     const ro = new ResizeObserver(() => {
       const s = stateRef.current;
       const prev = s.prevScrollHeight;
@@ -266,6 +267,14 @@ export function ConversationAnchorHold({
         // library's own isAtBottom hasn't processed that event yet. Writing
         // through the library's setter records the position as its own
         // (ignoreScrollToTop), so the clamp's scroll event is discarded.
+        //
+        // That only works when this callback runs first. When something forced
+        // layout earlier (any offsetHeight read after the commit), the clamp's
+        // scroll event is dispatched ahead of this callback in the same frame;
+        // the library's handler has then already captured its ignore value and
+        // will escape in its 1ms timeout. So re-assert after that timeout —
+        // only if the reader is still sitting on the bottom, which a real
+        // scroll-up in that window would not be.
         const grew = client > prevClient;
         const pinned = grew
           ? stickState.isAtBottom
@@ -275,6 +284,13 @@ export function ConversationAnchorHold({
               prevClientHeight: prevClient,
             });
         if (pinned) stickState.scrollTop = next; // clamps to max
+        if (pinned && grew) {
+          clearTimeout(reassertTimer);
+          reassertTimer = setTimeout(() => {
+            const atMax = scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 2;
+            if (!stickState.isAtBottom && atMax) scrollToBottom({ animation: "instant" });
+          }, 1);
+        }
         diag("viewport-resize", {
           prevClient,
           client,
@@ -320,9 +336,10 @@ export function ConversationAnchorHold({
     ro.observe(scroller);
     return () => {
       ro.disconnect();
+      clearTimeout(reassertTimer);
       scroller.removeEventListener("scroll", refreshAnchor);
     };
-  }, [scrollRef, contentRef, stickState]);
+  }, [scrollRef, contentRef, stickState, scrollToBottom]);
 
   return null;
 }
