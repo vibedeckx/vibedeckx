@@ -99,6 +99,9 @@ export interface RepeatLoopHost {
   runCheckCommand?: (command: string, cwd: string) => Promise<{ ok: boolean; output: string }>;
 }
 
+/** Re-resolutions of "the loop's active run" before a user action gives up. */
+const CANCEL_ATTEMPTS = 5;
+
 const ITERATION_TURN = { origin: "workflow", notificationDisposition: "milestone-managed" } as const;
 
 export function parseRepeatParams(run: Pick<WorkflowRun, "params">): RepeatLoopParams | null {
@@ -133,7 +136,7 @@ export class RepeatLoopRunner {
   async start(opts: StartRepeatLoopOptions): Promise<WorkflowRun> {
     if (opts.runId) {
       const existing = await this.storage.workflowRuns.getById(opts.runId);
-      if (existing) return existing;
+      if (existing) return this.replayedStart(existing, opts);
     }
     if (!opts.project.path) throw new RepeatLoopError("bad-state", "项目没有本地路径，无法运行循环");
     const active = await this.storage.workflowRuns.getActive(opts.project.id, opts.branch);
@@ -154,16 +157,40 @@ export class RepeatLoopRunner {
       startedAt: Date.now(),
       anchorSessionId: sessionId,
     };
-    const run = await this.storage.workflowRuns.create({
-      id, project_id: opts.project.id, branch: opts.branch,
-      source_session_id: sessionId, source_turn_end_index: -1,
-      review_focus: null, review_target: null,
-      status: "preparing", kind: "repeat", params: JSON.stringify(params),
-      loop_id: id, round: 1, max_rounds: maxIterations,
-    });
+    let run: WorkflowRun;
+    try {
+      run = await this.storage.workflowRuns.create({
+        id, project_id: opts.project.id, branch: opts.branch,
+        source_session_id: sessionId, source_turn_end_index: -1,
+        review_focus: null, review_target: null,
+        status: "preparing", kind: "repeat", params: JSON.stringify(params),
+        loop_id: id, round: 1, max_rounds: maxIterations,
+      });
+    } catch (err) {
+      // The check above and this insert are separate statements; what makes
+      // "one loop per workspace" hold under concurrent starts is the partial
+      // unique index (idx_workflow_runs_one_repeat_loop), not the check.
+      if (!(err instanceof Error && err.message.includes("UNIQUE constraint failed"))) throw err;
+      const replay = opts.runId ? await this.storage.workflowRuns.getById(opts.runId) : undefined;
+      if (replay) return this.replayedStart(replay, opts);
+      throw new RepeatLoopError("session-busy", "这个 workspace 已有一个进行中的循环，请先结束它");
+    }
     this.host.track(run);
     this.host.emitRunUpdated(run);
     return this.dispatchIteration(run.id);
+  }
+
+  /**
+   * A start replayed with a known `runId` returns that loop — but only if it
+   * IS that loop. The id comes from the request; without this check, anyone
+   * who may start a loop in one project could read another project's run
+   * (prompt included) by guessing or learning its id.
+   */
+  private replayedStart(existing: WorkflowRun, opts: StartRepeatLoopOptions): WorkflowRun {
+    const same = existing.kind === "repeat" && existing.project_id === opts.project.id
+      && existing.branch === opts.branch && parseRepeatParams(existing)?.prompt === opts.prompt;
+    if (!same) throw new RepeatLoopError("bad-state", "runId 已被另一个 run 占用");
+    return existing;
   }
 
   // ---------- dispatch ----------
@@ -232,7 +259,14 @@ export class RepeatLoopRunner {
         return this.toGateInPlace(run, `无法启动迭代 session：${outcome.kind}`);
     }
     const started = await this.storage.workflowRuns.transition(run.id, "preparing", "running_task", { error: note });
-    if (!started) { await this.tearDown(run); return (await this.storage.workflowRuns.getById(run.id))!; }
+    if (!started) {
+      const now = (await this.storage.workflowRuns.getById(run.id))!;
+      // Cancelled under us → tear the session down. Anything else means the
+      // turn already ended and was settled straight out of `preparing`
+      // (onTaskTurnCompleted / endIteration): the session is theirs to keep or stop.
+      if (now.status === "cancelled") await this.tearDown(run);
+      return now;
+    }
     const updated = (await this.storage.workflowRuns.getById(run.id))!;
     this.host.emitRunUpdated(updated);
     return updated;
@@ -274,12 +308,18 @@ export class RepeatLoopRunner {
    */
   async onTaskTurnCompleted(step: WorkflowRunStep, entries: AgentMessage[], boundary: number, output: string | null): Promise<void> {
     const run = await this.storage.workflowRuns.getById(step.run_id);
-    const params = run ? parseRepeatParams(run) : null;
-    if (!run || !params || run.status !== "running_task") {
+    let params = run ? parseRepeatParams(run) : null;
+    // `preparing` counts: the step was attributed by the entry its dispatch
+    // wrote, so the instruction WAS delivered and its turn DID complete — the
+    // run merely never recorded `running_task` (a crash, or a very fast turn,
+    // between activation and that CAS). Treating it as "cancelled" would claim
+    // the step and strand the run.
+    if (!run || !params || (run.status !== "running_task" && run.status !== "preparing")) {
       // Cancelled (or otherwise gone) while the turn ran: keep the evidence, move nothing.
       await this.storage.workflowRuns.claimStepAndTransition({ stepId: step.id, turnEndIndex: boundary, outputSnapshot: output });
       return;
     }
+    const from = run.status;
 
     let status: WorkflowTaskStatus | null = parseTaskStatus(output);
     const item = parseClosingLine(output, "Item");
@@ -297,6 +337,9 @@ export class RepeatLoopRunner {
       if (!check.ok) checkFailure = `检查命令未通过：${check.output || "(no output)"}`;
     }
 
+    // The check command can run for minutes; a soft stop requested meanwhile
+    // was written to the row, not to the copy read above.
+    params = parseRepeatParams((await this.storage.workflowRuns.getById(run.id)) ?? run) ?? params;
     const settlement = this.settle(run, params, status, item, checkFailure);
     const nextParams: RepeatLoopParams = {
       ...params, prevSessionId: run.source_session_id, prevItem: item, remaining, stopAfterCurrent: false,
@@ -317,7 +360,7 @@ export class RepeatLoopRunner {
     const settled = await this.storage.workflowRuns.claimStepAndTransition({
       stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
       run: {
-        id: run.id, from: "running_task", to: "completed",
+        id: run.id, from, to: "completed",
         patch: { outcome_status: status, feedback_snapshot: output, error: checkFailure },
         outbox,
       },
@@ -394,11 +437,6 @@ export class RepeatLoopRunner {
 
   /** Also the restart path: `outcome` is then `server_restart`. */
   async abnormalEnd(step: WorkflowRunStep, outcome: string): Promise<void> {
-    const run = await this.storage.workflowRuns.getById(step.run_id);
-    const params = run ? parseRepeatParams(run) : null;
-    await this.storage.workflowRunSteps.abandon(step.id, `turn ended: ${outcome}`);
-    if (!run || !params || run.status !== "running_task") return;
-
     const byUser = outcome === "stopped";
     const reason = byUser
       ? "这次迭代已由你停止。可以继续循环，或结束它。"
@@ -406,27 +444,75 @@ export class RepeatLoopRunner {
         ? "这次迭代因服务重启而中断。那一项可能处理到一半——确认后再继续。"
         : `这次迭代异常结束（${outcome}）。`;
     // A stop by the user rings no bell: they are right there.
-    const moved = byUser
-      ? await this.storage.workflowRuns.transition(run.id, "running_task", "cancelled", { error: reason })
-      : await this.storage.workflowRuns.transitionWithOutbox(
-        run.id, "running_task", "failed", { error: reason },
-        this.outbox(run, params.anchorSessionId, "workflow_failed", outcome),
-      );
-    if (!moved) return;
-    const ended = (await this.storage.workflowRuns.getById(run.id))!;
-    this.host.untrack(ended);
-    this.host.emitRunUpdated(ended);
-    if (!byUser) this.host.milestoneCreated();
+    await this.endIteration(step, `turn ended: ${outcome}`, byUser ? "cancelled" : "failed", reason, byUser ? null : outcome);
+  }
 
-    const gate = await this.storage.workflowRuns.create({
+  /**
+   * End an iteration that will never settle normally — ONE transaction, like
+   * a normal settlement: step abandoned + run ended (+ bell) + resume gate
+   * inserted. Done as three writes, a crash after the first would leave a
+   * `running_task` run with no open step: restart reconciliation walks open
+   * steps, so nothing would ever look at it again.
+   */
+  private async endIteration(
+    step: WorkflowRunStep, stepReason: string, to: "cancelled" | "failed", reason: string, milestone: string | null,
+  ): Promise<boolean> {
+    const run = await this.storage.workflowRuns.getById(step.run_id);
+    const params = run ? parseRepeatParams(run) : null;
+    // `preparing` too: see onTaskTurnCompleted — a delivered instruction whose
+    // run never recorded `running_task`.
+    if (!run || !params || (run.status !== "running_task" && run.status !== "preparing")) {
+      await this.storage.workflowRunSteps.abandon(step.id, stepReason);
+      return false;
+    }
+    const gate: WorkflowRepeatRunInput = {
       id: randomUUID(), project_id: run.project_id, branch: run.branch,
-      source_session_id: randomUUID(), source_turn_end_index: -1, review_focus: null, review_target: null,
-      status: "waiting_resume", error: reason, kind: "repeat",
+      source_session_id: randomUUID(), loop_id: run.loop_id, round: run.round + 1, max_rounds: run.max_rounds,
       params: JSON.stringify({ ...params, prevSessionId: run.source_session_id, stopAfterCurrent: false } satisfies RepeatLoopParams),
-      loop_id: run.loop_id, round: run.round + 1, max_rounds: run.max_rounds,
+      status: "waiting_resume", error: reason,
+    };
+    const ended = await this.storage.workflowRuns.claimStepAndTransition({
+      stepId: step.id, turnEndIndex: null, outputSnapshot: null, abandonStep: stepReason,
+      run: {
+        id: run.id, from: run.status, to, patch: { error: reason },
+        outbox: milestone ? this.outbox(run, params.anchorSessionId, "workflow_failed", milestone) : undefined,
+      },
+      insertRun: gate,
     });
-    this.host.track(gate);
-    this.host.emitRunUpdated(gate);
+    if (!ended) return false; // cancelled or settled under us; whoever won owns the step
+    const done = (await this.storage.workflowRuns.getById(run.id))!;
+    this.host.untrack(done);
+    this.host.emitRunUpdated(done);
+    if (milestone) this.host.milestoneCreated();
+    const inserted = (await this.storage.workflowRuns.getById(gate.id))!;
+    this.host.track(inserted);
+    this.host.emitRunUpdated(inserted);
+    return true;
+  }
+
+  // ---------- the dead-man's switch ----------
+
+  /**
+   * The time cap has to hold for an iteration that never ends — an agent
+   * stuck in a retry loop, a hung tool. settle() only looks at the clock when
+   * a turn completes, which is exactly what such an iteration never does. The
+   * engine calls this on an interval (and tests call it with a clock).
+   */
+  async checkDeadlines(now: number): Promise<void> {
+    for (const run of await this.storage.workflowRuns.getAllActive()) {
+      if (run.kind !== "repeat" || run.status !== "running_task") continue;
+      const params = parseRepeatParams(run);
+      if (!params || now - params.startedAt <= params.maxMinutes * 60_000) continue;
+      const step = (await this.storage.workflowRunSteps.listByRun(run.id))
+        .find((st) => st.kind === "task_prompt" && st.status === "dispatched");
+      if (!step) { console.warn(`[RepeatLoop] run ${run.id} is over its time cap but has no open step`); continue; }
+      const reason = `已达时长上限（${params.maxMinutes} 分钟），这次迭代已被停止——那一项可能处理到一半。继续将重新计时。`;
+      // The run first, the session second: once the step is settled, the stop
+      // below cannot be mistaken for "stopped by the user".
+      if (await this.endIteration(step, "time cap reached", "failed", reason, "max-minutes")) {
+        await this.stop(run.source_session_id);
+      }
+    }
   }
 
   private async entryIndexOf(step: WorkflowRunStep): Promise<number | null> {
@@ -448,36 +534,52 @@ export class RepeatLoopRunner {
 
   /** Hard stop — the ctrl-c. Ends the loop; no gate. */
   async cancel(run: WorkflowRun, reason?: string): Promise<WorkflowRun> {
-    const active = await this.activeOf(run);
-    if (!active) return run;
     const patch = { error: reason ?? "循环已由你结束。" };
     const from = (["preparing", "running_task", "waiting_resume"] as const);
-    let was: (typeof from)[number] | null = null;
-    for (const status of from) {
-      if (await this.storage.workflowRuns.transition(active.id, status, "cancelled", patch)) { was = status; break; }
+    // The loop's active run can change between reading it and the CAS: the
+    // iteration settles and the next one is inserted (one transaction, so
+    // there is always exactly one to find). A lost CAS therefore means "look
+    // again", never "nothing to do" — returning there would report a stop
+    // while the loop keeps running.
+    for (let attempt = 0; attempt < CANCEL_ATTEMPTS; attempt++) {
+      const active = await this.activeOf(run);
+      if (!active) return (await this.storage.workflowRuns.getById(run.id)) ?? run;
+      let was: (typeof from)[number] | null = null;
+      for (const status of from) {
+        if (await this.storage.workflowRuns.transition(active.id, status, "cancelled", patch)) { was = status; break; }
+      }
+      if (!was) continue;
+      await this.storage.workflowRunSteps.abandonOpenByRun(active.id, "loop cancelled");
+      const cancelled = (await this.storage.workflowRuns.getById(active.id))!;
+      this.host.untrack(cancelled);
+      if (was !== "waiting_resume") {
+        await this.ops.cancelReviewer({ sessionId: active.source_session_id, reason: "cancelled" }).catch(() => undefined);
+        await this.stop(active.source_session_id);
+      }
+      this.host.emitRunUpdated(cancelled);
+      return cancelled;
     }
-    if (!was) return (await this.storage.workflowRuns.getById(active.id)) ?? active;
-    await this.storage.workflowRunSteps.abandonOpenByRun(active.id, "loop cancelled");
-    const cancelled = (await this.storage.workflowRuns.getById(active.id))!;
-    this.host.untrack(cancelled);
-    if (was !== "waiting_resume") {
-      await this.ops.cancelReviewer({ sessionId: active.source_session_id, reason: "cancelled" }).catch(() => undefined);
-      await this.stop(active.source_session_id);
-    }
-    this.host.emitRunUpdated(cancelled);
-    return cancelled;
+    throw new RepeatLoopError("bad-state", "循环状态变化太快，没能停下，请再试一次");
   }
 
   /** Soft stop: let the current item finish, then put up a gate. */
   async pause(run: WorkflowRun): Promise<WorkflowRun> {
-    const active = await this.activeOf(run);
-    if (!active) throw new RepeatLoopError("bad-state", "循环已经结束");
-    if (active.status === "waiting_resume") return active;
-    const params = parseRepeatParams(active);
-    if (!params) throw new RepeatLoopError("bad-state", "循环参数损坏");
-    const updated = await this.storage.workflowRuns.update(active.id, { params: JSON.stringify({ ...params, stopAfterCurrent: true }) });
-    if (updated) this.host.emitRunUpdated(updated);
-    return updated ?? active;
+    // Same race as cancel: if the iteration settles around our write, the
+    // flag landed on a finished row — put it on the run that replaced it.
+    for (let attempt = 0; attempt < CANCEL_ATTEMPTS; attempt++) {
+      const active = await this.activeOf(run);
+      if (!active) throw new RepeatLoopError("bad-state", "循环已经结束");
+      if (active.status === "waiting_resume") return active;
+      const params = parseRepeatParams(active);
+      if (!params) throw new RepeatLoopError("bad-state", "循环参数损坏");
+      await this.storage.workflowRuns.update(active.id, { params: JSON.stringify({ ...params, stopAfterCurrent: true }) });
+      const after = await this.storage.workflowRuns.getById(active.id);
+      if (after && (after.status === "preparing" || after.status === "running_task")) {
+        this.host.emitRunUpdated(after);
+        return after;
+      }
+    }
+    throw new RepeatLoopError("bad-state", "循环状态变化太快，请再试一次");
   }
 
   async resume(run: WorkflowRun): Promise<WorkflowRun> {

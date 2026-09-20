@@ -2119,6 +2119,17 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       db.exec(`ALTER TABLE workflow_runs ADD COLUMN ${ddl}`);
     }
   }
+  // One repeat loop per workspace, enforced where a check-then-insert cannot
+  // race: two loops would put two edit-mode sessions in one worktree. A loop
+  // has exactly one active run at any time (settling N and inserting N+1 is
+  // one transaction, the UPDATE first), so "one active repeat run per
+  // (project, branch)" is the same statement. Created here, after the ALTERs:
+  // the index names `kind`.
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_runs_one_repeat_loop
+    ON workflow_runs(project_id, ifnull(branch, ''))
+    WHERE kind = 'repeat' AND status IN ('preparing', 'running_task', 'waiting_resume')
+  `);
 
   // Migration: add review_context_mode to the reviewer-creation durable
   // intents — blind review must survive a replay as blind, not silently

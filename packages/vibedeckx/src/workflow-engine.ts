@@ -68,6 +68,8 @@ export class WorkflowError extends Error {
   }
 }
 
+const LOOP_DEADLINE_CHECK_MS = 60_000;
+
 /** Statuses a run can never leave — see failRun / cancelRun. */
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "cancelled", "failed"]);
 
@@ -631,6 +633,17 @@ export class WorkflowEngine {
     return this.mapRepeatErrors(() => this.repeat.start(opts));
   }
 
+  private loopDeadlineTimer?: NodeJS.Timeout;
+
+  shutdown(): void {
+    if (this.loopDeadlineTimer) clearInterval(this.loopDeadlineTimer);
+  }
+
+  /** Repeat loops' time cap for iterations that never end. `now` is a test seam. */
+  checkLoopDeadlines(now: number = Date.now()): Promise<void> {
+    return this.repeat.checkDeadlines(now);
+  }
+
   /** `pause` = finish the current item, then stop at a gate. */
   async pauseLoop(runId: string): Promise<WorkflowRun> {
     const run = await this.requireRepeatRun(runId);
@@ -664,6 +677,12 @@ export class WorkflowEngine {
     // notes below, which remain for pre-step runs and undecidable cases.
     const settled = await this.reconcileOpenSteps();
     const active = await this.storage.workflowRuns.getAllActive();
+    // Dead-man's switch for repeat loops. An interval rather than a timer per
+    // run: nothing to re-arm after a restart or a resume.
+    this.loopDeadlineTimer = setInterval(() => {
+      void this.checkLoopDeadlines().catch((err) => console.warn("[WorkflowEngine] loop deadline check failed:", err));
+    }, LOOP_DEADLINE_CHECK_MS);
+    this.loopDeadlineTimer.unref();
     for (const run of active) {
       if (settled.has(run.id)) {
         // nothing: reconciliation already wrote this run's state and note

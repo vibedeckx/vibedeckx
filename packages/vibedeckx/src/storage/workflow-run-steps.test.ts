@@ -209,6 +209,43 @@ describe("workflowRunSteps repository", () => {
       expect(await createIteration()).toMatchObject({ kind: "repeat", params: '{"prompt":"p"}', status: "preparing", round: 1 });
     });
 
+    it("an abnormal end abandons the step, ends the run and inserts the gate together — or does none of it", async () => {
+      await createIteration();
+      await openTask();
+      const end = (from: "running_task" | "preparing") => storage.workflowRuns.claimStepAndTransition({
+        stepId: "t1", turnEndIndex: null, outputSnapshot: null, abandonStep: "turn ended: failed",
+        run: { id: "it1", from, to: "failed", patch: { error: "boom" } },
+        insertRun: {
+          id: "gate", project_id: "p1", branch: "dev", source_session_id: "s-gate", loop_id: "it1", round: 2,
+          max_rounds: 20, params: "{}", status: "waiting_resume", error: "boom",
+        },
+      });
+      // Run CAS loses → the step stays dispatched and no gate appears.
+      expect(await end("running_task")).toBe(false);
+      expect((await storage.workflowRunSteps.getById("t1"))?.status).toBe("dispatched");
+      expect(await storage.workflowRuns.getById("gate")).toBeUndefined();
+
+      expect(await end("preparing")).toBe(true);
+      expect(await storage.workflowRunSteps.getById("t1")).toMatchObject({ status: "abandoned", error: "turn ended: failed", turn_end_index: null });
+      expect((await storage.workflowRuns.getById("it1"))?.status).toBe("failed");
+      expect((await storage.workflowRuns.getById("gate"))?.status).toBe("waiting_resume");
+    });
+
+    it("the database refuses a second active loop on a workspace; an ended one frees it", async () => {
+      await createIteration();
+      const second = () => storage.workflowRuns.create({
+        id: "other", project_id: "p1", branch: "dev", source_session_id: "s-o", source_turn_end_index: -1,
+        review_focus: null, review_target: null, status: "preparing", kind: "repeat", params: "{}", loop_id: "other", round: 1, max_rounds: 5,
+      });
+      await expect(second()).rejects.toThrow(/UNIQUE constraint failed/);
+      // A review on the same workspace is not a loop.
+      await storage.workflowRuns.create({
+        id: "rv", project_id: "p1", branch: "dev", source_session_id: "s-x", source_turn_end_index: 1, review_focus: null, review_target: "{}",
+      });
+      await storage.workflowRuns.update("it1", { status: "cancelled" });
+      expect((await second()).id).toBe("other");
+    });
+
     it("settles an iteration and inserts the next one — or its resume gate — in one transaction", async () => {
       await createIteration();
       await openTask();

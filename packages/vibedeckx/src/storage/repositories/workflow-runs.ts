@@ -138,14 +138,15 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
     // Step CAS, run CAS and the outbox row in ONE transaction. A guard that
     // fails throws to roll the whole thing back — a claimed step with an
     // un-advanced run would be unrecoverable after a restart.
-    claimStepAndTransition: async ({ stepId, turnEndIndex, outputSnapshot, run, nextRun, insertRun }) => {
+    claimStepAndTransition: async ({ stepId, turnEndIndex, outputSnapshot, abandonStep, run, nextRun, insertRun }) => {
       const LOST = Symbol("cas-lost");
       try {
         await kdb.transaction().execute(async (trx) => {
           const step = await trx.updateTable("workflow_run_steps")
             .set({
-              status: "claimed", turn_end_index: turnEndIndex, output_snapshot: outputSnapshot,
-              error: null, updated_at: sql`datetime('now')`,
+              status: abandonStep === undefined ? "claimed" : "abandoned",
+              turn_end_index: turnEndIndex, output_snapshot: outputSnapshot,
+              error: abandonStep ?? null, updated_at: sql`datetime('now')`,
             })
             .where("id", "=", stepId)
             .where("status", "=", "dispatched")

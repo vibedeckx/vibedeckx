@@ -582,6 +582,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     await sessionRetention.close();
     await remoteSessionReconciler.close();
     scheduler.shutdown();
+    workflowEngine.shutdown();
     notificationService.shutdown();
     remoteNotificationSync.shutdown();
     agentSessionManager.shutdown();

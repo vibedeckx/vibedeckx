@@ -299,7 +299,26 @@ R1–R7 已提交。后端与前端全量测试通过，两端 `tsc` 干净。`c
   后续迭代的 session 被 hub 逐个学到。**闸门期间 `kill -9` hub 并重启**：闸门仍可见，用过期 id 经 hub `resume`
   成功，循环跑完，`loop_done` 在重启后的 hub 收件箱里出现；通知 → run → 应打开的 session 可读（200）。
 
-**未做 / 已知限制：**
+**Review 后的七处修正（同日，外部审阅，逐条在代码上复现后修）：**
+
+9. **“结束”必须真的停住。** `cancel` 读到活跃 run 与 CAS 之间，迭代可能被结算、下一迭代被插入；丢 CAS 曾直接返回，
+   循环继续跑。现在丢 CAS = 重新定位再试（结算是一个事务，任何时刻恰有一个活跃 run 可找）；`pause` 同理——
+   标志若落在刚结算的行上，就补到接替它的 run 上。
+10. **异常结束与正常结束同等原子。** “作废步骤 + run 结束（+ 铃）+ 插入闸门”改为一个事务
+    （`claimStepAndTransition` 的 `abandonStep`）。三次写之间崩溃会留下没有 open 步骤的 `running_task`，而重启对账只
+    遍历 open 步骤，永远没人再看它。
+11. **`preparing` 也可以被结算。** 指令已送达、`preparing → running_task` 没落库（崩溃，或极快的 turn）时，按步骤的
+    entry 索引归属的完成 / 中断就是证据：完成 → 正常结算，中断 → 闸门。此前会只领步骤，随后 boot 重放激活，
+    把 run 推到一个永远等不到完成事件的 `running_task`。派发路径丢 CAS 时只有“已取消”才拆 session。
+12. **单 workspace 单循环由数据库保证。** 部分唯一索引 `idx_workflow_runs_one_repeat_loop`
+    （`project_id, ifnull(branch,'')`，`kind='repeat'` 且活跃态）；先查后插挡不住并发发起。
+13. **`runId` 重放要核对归属**（project、branch、kind、prompt），否则能用发起接口读到别的项目的 run。
+14. **时长上限是真正的死手开关。** 原先只在收到 `continue` 时看钟，挂住的迭代永远不触发。引擎每 60s 扫一次
+    `running_task` 的循环：超时 → 同一个原子“结束迭代”（`failed` + 闸门 + 铃）→ 再停 session（先结算后停，
+    这次停不会被读成“用户停止”）。用间隔而非每 run 定时器：重启、resume 后无需重新上弦。
+15. **检查命令运行期间的软停不再丢。** 结算前重读 params。
+
+
 - `scripts/cross-version-e2e.mjs` 没有循环的 smoke 步骤（它的桩 CLI 只会回固定字符串，跑不了"按约定收尾"的循环）；
   新 capability 登记在 `COVERED_BY`，指向路由测试。
 - 面板卡片不提供 session 跳转链接（review 卡片同样没有），靠侧栏里的 `<name> #N`。

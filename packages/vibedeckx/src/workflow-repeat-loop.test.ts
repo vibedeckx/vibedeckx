@@ -76,6 +76,7 @@ describe("repeat-until-done loop", () => {
   });
 
   afterEach(async () => {
+    engine.shutdown();
     await storage.close();
     rmSync(dir, { recursive: true, force: true });
   });
@@ -328,6 +329,142 @@ describe("repeat-until-done loop", () => {
       await restart();
       await vi.waitFor(async () => expect(await onlyActive()).toMatchObject({ round: 2, status: "running_task" }));
       expect((await storage.workflowRuns.getById(first.id))?.outcome_status).toBe("continue");
+    });
+  });
+
+  // Review round 1 (2026-09-20): stopping, concurrency and crash windows.
+  describe("stop / concurrency / crash windows", () => {
+    async function restart() {
+      engine = newEngine();
+      await engine.init();
+    }
+    const noActiveLoop = () => vi.waitFor(async () => expect(await active()).toHaveLength(0));
+
+    it("cancel that races the iteration being settled still ends the loop", async () => {
+      const first = await startLoop();
+      const real = storage.workflowRuns.getActiveInLoop.bind(storage.workflowRuns);
+      // The iteration settles (and the next one is inserted) between cancel's
+      // read of "the active run" and its CAS.
+      vi.spyOn(storage.workflowRuns, "getActiveInLoop").mockImplementationOnce(async (loopId) => {
+        const stale = await real(loopId);
+        await finishAndAdvance(first, "Status: continue\nItem: a");
+        return stale;
+      });
+      await engine.cancelRun(first.id);
+      await noActiveLoop();
+      const runs = await storage.workflowRuns.getActive("p1", "dev");
+      expect(runs).toHaveLength(0);
+      // The session of the iteration that slipped in is stopped too.
+      const second = (await storage.workflowRuns.getLoopRound(first.id, 2))!;
+      expect(second.status).toBe("cancelled");
+      expect(stopped).toContain(second.source_session_id);
+    });
+
+    it("an abnormal end is one transaction: a crash inside it cannot strand the run in running_task", async () => {
+      const first = await startLoop();
+      const realAbandon = storage.workflowRunSteps.abandon.bind(storage.workflowRunSteps);
+      // Old shape: abandon step → end run → create gate, three writes. Die after the first.
+      vi.spyOn(storage.workflowRunSteps, "abandon").mockImplementationOnce(async (id, reason) => {
+        await realAbandon(id, reason);
+        throw new Error("crash");
+      });
+      const list = transcripts.get(first.source_session_id)!;
+      list.push({ type: "turn_end", timestamp: 2, outcome: "failed" } as AgentMessage);
+      await storage.agentSessions.updateStatus(first.source_session_id, "stopped");
+      bus.emit({ type: "session:status", projectId: "p1", branch: "dev", sessionId: first.source_session_id, status: "stopped" });
+      await new Promise((r) => setTimeout(r, 80));
+      await restart();
+      await vi.waitFor(async () => expect((await storage.workflowRuns.getById(first.id))?.status).toBe("failed"));
+      expect(await onlyActive()).toMatchObject({ status: "waiting_resume", round: 2 });
+      expect(await outbox()).toEqual([expect.objectContaining({ kind: "workflow_failed" })]);
+    });
+
+    describe("crash after the instruction was delivered, before the run reached running_task", () => {
+      async function startAndCrashBeforeRunningTask() {
+        const realTransition = storage.workflowRuns.transition.bind(storage.workflowRuns);
+        vi.spyOn(storage.workflowRuns, "transition").mockImplementationOnce(async (id, from, to, patch) => {
+          if (from === "preparing" && to === "running_task") throw new Error("crash");
+          return realTransition(id, from, to, patch);
+        });
+        await startLoop().catch(() => undefined);
+        const run = await onlyActive();
+        expect(run.status).toBe("preparing");
+        return run;
+      }
+
+      it("the turn completed meanwhile → settled from the evidence, and the loop goes on", async () => {
+        const first = await startAndCrashBeforeRunningTask();
+        transcripts.get(first.source_session_id)!.push(
+          { type: "assistant", content: "Status: done", timestamp: 1 },
+          { type: "turn_end", timestamp: 2, outcome: "completed" } as AgentMessage,
+        );
+        await restart();
+        await vi.waitFor(async () => expect((await storage.workflowRuns.getById(first.id))?.status).toBe("completed"));
+        expect(await active()).toHaveLength(0);
+        expect(await outbox()).toEqual([expect.objectContaining({ kind: "loop_done" })]);
+        expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
+      });
+
+      it("the turn was interrupted → gate + bell, never a silent re-dispatch", async () => {
+        const first = await startAndCrashBeforeRunningTask();
+        transcripts.get(first.source_session_id)!.push({ type: "turn_end", timestamp: 2, outcome: "server_restart" } as AgentMessage);
+        await restart();
+        expect((await storage.workflowRuns.getById(first.id))?.status).toBe("failed");
+        expect(await onlyActive()).toMatchObject({ status: "waiting_resume", round: 2 });
+        expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it("two concurrent starts on one workspace: exactly one loop", async () => {
+      const results = await Promise.allSettled([startLoop(), startLoop()]);
+      expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+      const rejected = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+      expect(rejected.reason).toMatchObject({ code: "session-busy" });
+      expect(await active()).toHaveLength(1);
+      expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
+    });
+
+    it("a replayed runId returns the same loop only for the same workspace and instruction", async () => {
+      await storage.projects.create({ id: "p2", name: "q", path: "/tmp/q" });
+      const first = await startLoop({ runId: "fixed-run-id" });
+      expect((await startLoop({ runId: "fixed-run-id" })).id).toBe(first.id);
+      expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
+
+      const other = { id: "p2", name: "q", path: "/tmp/q" } as never;
+      await expect(engine.startRepeatLoop({ project: other, branch: "dev", prompt: "Process the next unhandled order.", runId: "fixed-run-id" }))
+        .rejects.toMatchObject({ code: "bad-state" });
+      await expect(startLoop({ runId: "fixed-run-id", prompt: "something else" })).rejects.toMatchObject({ code: "bad-state" });
+    });
+
+    it("the time cap stops an iteration that never finishes: session stopped, gate + bell", async () => {
+      const first = await startLoop({ maxMinutes: 1 });
+      await engine.checkLoopDeadlines(Date.now() + 30_000);
+      expect((await storage.workflowRuns.getById(first.id))?.status).toBe("running_task");
+
+      await engine.checkLoopDeadlines(Date.now() + 2 * 60_000);
+      expect((await storage.workflowRuns.getById(first.id))?.status).toBe("failed");
+      expect(stopped).toEqual([first.source_session_id]);
+      const gate = await onlyActive();
+      expect(gate).toMatchObject({ status: "waiting_resume", round: 2 });
+      expect(gate.error).toContain("时长上限");
+      expect(await outbox()).toEqual([expect.objectContaining({ kind: "workflow_failed", session_id: first.source_session_id })]);
+      // The stop we issued must not be read as "stopped by the user".
+      bus.emit({ type: "session:status", projectId: "p1", branch: "dev", sessionId: first.source_session_id, status: "stopped" });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await active()).toHaveLength(1);
+    });
+
+    it("a soft stop requested while the check command runs is honoured", async () => {
+      const first = await startLoop({ checkCommand: "npm test" });
+      check.mockImplementationOnce(async () => {
+        await engine.pauseLoop(first.id);
+        return { ok: true, output: "" };
+      });
+      await finish(first, "Status: continue\nItem: a");
+      const gate = await vi.waitFor(async () => { const r = await onlyActive(); expect(r.round).toBe(2); return r; });
+      expect(gate.status).toBe("waiting_resume");
+      expect(gate.error).toContain("暂停");
+      expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
     });
   });
 });

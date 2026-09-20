@@ -2174,8 +2174,16 @@ export interface Storage {
      */
     claimStepAndTransition(opts: {
       stepId: string;
-      turnEndIndex: number;
+      turnEndIndex: number | null;
       outputSnapshot: string | null;
+      /**
+       * Settle the step as `abandoned` (with this reason) instead of `claimed`:
+       * a repeat-loop iteration that ended abnormally. Same guards, same
+       * transaction — an abnormal end needs the atomicity a normal one has,
+       * or a crash between "step abandoned" and "run ended + gate inserted"
+       * strands the run with nothing left for restart reconciliation to find.
+       */
+      abandonStep?: string;
       run?: {
         id: string;
         from: WorkflowRunStatus;
