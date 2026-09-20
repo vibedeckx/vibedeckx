@@ -166,10 +166,19 @@ run → `failed`、发终止里程碑。`completed` 系则什么都不做（`tas
   maxMinutes?, checkCommand?, confirmDone?, name?`），不需要 `sourceSessionId`。`/api/path/workflow-runs` 同步。
   gate 增加 `resume`。**不新增路由** → 隧道契约无 registry 变化，只有 body 字段加法。
 - **远程**：引擎在 worker 上，hub 代理（Phase 1.5 形态不变）。与 review 不同的是 hub 不需要预先知道任何
-  session：迭代 session 全由 worker 创建。hub 要做的是**把 worker 自建的 session 发布到 front**
-  （`remoteSessionMap` + mapping + resident stream）——今天只有 reviewer 创建 saga 会做这件事，且是 hub 发起的。
-  这里需要一条新路径：hub 从 `workflowRunUpdated` 帧里看到未知的 `source_session_id` 时按需发布
-  （`publishRemoteReviewer` 的 hub-learned 变体）。**这是本设计里工作量最不确定的一块，实施时先做本地，远程单独一刀。**
+  session：第 2 个迭代起的 session 全由 worker 上的引擎创建，请求不经过 hub。
+  **已有的一半**：hub 的发现机制（侧栏 alive-sessions 与分支会话列表，`routes/agent-session-routes.ts:733, 895`）
+  会把 worker 上不认识的 session 登记进 `remoteSessionMap` 并持久化 mapping（`from_now` 通知基线）——
+  所以迭代 session 会出现在侧栏、能点开。
+  **缺的一半（实时部分）**：(a) 常驻流只在 hub 创建 session 或用户点开时打开，没人点开的迭代 session 的
+  `workflowRunUpdated` 帧 hub 收不到（面板有 5s 轮询兜底，状态点与轮次刷新会滞后）；(b) 通知拉取窗口靠
+  创建 / 发消息 / 流上活动来开，终止里程碑挂在最后一个迭代 session 上，hub 若从没为它开过窗口，
+  **铃可能不响**——无人值守场景里最不能出的问题；(c) worker 建 session 到 hub 下次轮询之间，面板的跳转
+  链接指向 hub 还不认识的 id。
+  **倾向的做法**：run 更新帧镜像在参与 session 的流上，而前一个迭代的 session 此时还连着；hub 在帧里看到
+  未知的 `source_session_id` 时按需发布（map + mapping + `ensureRemoteAgentStream` + `extendWatch`，
+  即 `publishRemoteReviewer` 的 hub-learned 变体）。不需要新传输通道；不确定的是它与重启恢复、通知基线的
+  配合。**实施时先做本地，远程单独一刀。**
   旧 worker：不认识 `kind` → 会把请求当成缺 `sourceSessionId` 的 review，返回 400。hub 用 worker 版本门控
   （`remote-executor-starts.ts` 的先例），低于门槛直接提示"该机器的 worker 不支持"。
 - **前端**：
