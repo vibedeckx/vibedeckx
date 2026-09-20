@@ -153,11 +153,14 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
             .executeTakeFirst();
           if ((step.numUpdatedRows ?? 0n) === 0n) throw LOST;
           if (run) {
-            const moved = await trx.updateTable("workflow_runs")
+            let cas = trx.updateTable("workflow_runs")
               .set({ ...(run.patch ?? {}), status: run.to, updated_at: sql`datetime('now')` })
               .where("id", "=", run.id)
-              .where("status", "=", run.from)
-              .executeTakeFirst();
+              .where("status", "in", typeof run.from === "string" ? [run.from] : [...run.from]);
+            if (run.expectParams !== undefined) {
+              cas = run.expectParams === null ? cas.where("params", "is", null) : cas.where("params", "=", run.expectParams);
+            }
+            const moved = await cas.executeTakeFirst();
             if ((moved.numUpdatedRows ?? 0n) === 0n) throw LOST;
             if (run.outbox) {
               await trx.insertInto("notification_outbox")

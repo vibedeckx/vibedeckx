@@ -99,6 +99,12 @@ export interface RepeatLoopHost {
   runCheckCommand?: (command: string, cwd: string) => Promise<{ ok: boolean; output: string }>;
 }
 
+/** Statuses in which an iteration's dispatched instruction can still be settled. */
+const LIVE_STATUSES = ["preparing", "running_task"] as const;
+const isLive = (run: Pick<WorkflowRun, "status">): boolean => (LIVE_STATUSES as readonly string[]).includes(run.status);
+/** Re-decisions of a settlement whose run row changed between the read and the commit. */
+const SETTLE_ATTEMPTS = 5;
+
 /** Re-resolutions of "the loop's active run" before a user action gives up. */
 const CANCEL_ATTEMPTS = 5;
 
@@ -308,18 +314,17 @@ export class RepeatLoopRunner {
    */
   async onTaskTurnCompleted(step: WorkflowRunStep, entries: AgentMessage[], boundary: number, output: string | null): Promise<void> {
     const run = await this.storage.workflowRuns.getById(step.run_id);
-    let params = run ? parseRepeatParams(run) : null;
+    const params = run ? parseRepeatParams(run) : null;
     // `preparing` counts: the step was attributed by the entry its dispatch
     // wrote, so the instruction WAS delivered and its turn DID complete — the
     // run merely never recorded `running_task` (a crash, or a very fast turn,
     // between activation and that CAS). Treating it as "cancelled" would claim
     // the step and strand the run.
-    if (!run || !params || (run.status !== "running_task" && run.status !== "preparing")) {
+    if (!run || !params || !isLive(run)) {
       // Cancelled (or otherwise gone) while the turn ran: keep the evidence, move nothing.
       await this.storage.workflowRuns.claimStepAndTransition({ stepId: step.id, turnEndIndex: boundary, outputSnapshot: output });
       return;
     }
-    const from = run.status;
 
     let status: WorkflowTaskStatus | null = parseTaskStatus(output);
     const item = parseClosingLine(output, "Item");
@@ -337,36 +342,55 @@ export class RepeatLoopRunner {
       if (!check.ok) checkFailure = `检查命令未通过：${check.output || "(no output)"}`;
     }
 
-    // The check command can run for minutes; a soft stop requested meanwhile
-    // was written to the row, not to the copy read above.
-    params = parseRepeatParams((await this.storage.workflowRuns.getById(run.id)) ?? run) ?? params;
-    const settlement = this.settle(run, params, status, item, checkFailure);
-    const nextParams: RepeatLoopParams = {
-      ...params, prevSessionId: run.source_session_id, prevItem: item, remaining, stopAfterCurrent: false,
-    };
-    const insertRun: WorkflowRepeatRunInput | undefined = settlement.next === "finished" ? undefined : {
-      id: randomUUID(), project_id: run.project_id, branch: run.branch,
-      source_session_id: randomUUID(), loop_id: run.loop_id, round: run.round + 1, max_rounds: run.max_rounds,
-      params: JSON.stringify(nextParams),
-      status: settlement.next === "iterate" ? "preparing" : "waiting_resume",
-      error: settlement.next === "gate" ? settlement.reason : null,
-    };
-    const outbox = settlement.next === "finished"
-      ? this.outbox(run, params.anchorSessionId, "loop_done", "done")
-      : settlement.next === "gate" && settlement.milestone
-        ? this.outbox(run, params.anchorSessionId, "workflow_failed", settlement.milestone)
-        : undefined;
-
-    const settled = await this.storage.workflowRuns.claimStepAndTransition({
-      stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
-      run: {
-        id: run.id, from, to: "completed",
-        patch: { outcome_status: status, feedback_snapshot: output, error: checkFailure },
-        outbox,
-      },
-      insertRun,
-    });
-    if (!settled) return;
+    // Everything above is about the TURN and is computed once. What follows is
+    // decided from the RUN row, which two legitimate writers can still move
+    // under us: the dispatch path (`preparing → running_task`) and a soft stop
+    // (a flag inside `params`; the check command above can run for minutes).
+    // So the commit accepts either live status, requires the params it
+    // decided from to be unchanged — and on a lost guard re-reads and decides
+    // again. A plain re-read before the commit only narrows that window.
+    let committed: { settlement: Settlement; insertRun?: WorkflowRepeatRunInput; outbox?: Omit<NotificationOutboxEvent, "seq"> } | null = null;
+    for (let attempt = 0; attempt < SETTLE_ATTEMPTS && !committed; attempt++) {
+      const fresh = await this.storage.workflowRuns.getById(run.id);
+      const freshParams = fresh ? parseRepeatParams(fresh) : null;
+      if (!fresh || !freshParams || !isLive(fresh)) {
+        await this.storage.workflowRuns.claimStepAndTransition({ stepId: step.id, turnEndIndex: boundary, outputSnapshot: output });
+        return;
+      }
+      const settlement = this.settle(fresh, freshParams, status, item, checkFailure);
+      const nextParams: RepeatLoopParams = {
+        ...freshParams, prevSessionId: fresh.source_session_id, prevItem: item, remaining, stopAfterCurrent: false,
+      };
+      const insertRun: WorkflowRepeatRunInput | undefined = settlement.next === "finished" ? undefined : {
+        id: randomUUID(), project_id: fresh.project_id, branch: fresh.branch,
+        source_session_id: randomUUID(), loop_id: fresh.loop_id, round: fresh.round + 1, max_rounds: fresh.max_rounds,
+        params: JSON.stringify(nextParams),
+        status: settlement.next === "iterate" ? "preparing" : "waiting_resume",
+        error: settlement.next === "gate" ? settlement.reason : null,
+      };
+      const outbox = settlement.next === "finished"
+        ? this.outbox(fresh, freshParams.anchorSessionId, "loop_done", "done")
+        : settlement.next === "gate" && settlement.milestone
+          ? this.outbox(fresh, freshParams.anchorSessionId, "workflow_failed", settlement.milestone)
+          : undefined;
+      const settled = await this.storage.workflowRuns.claimStepAndTransition({
+        stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
+        run: {
+          id: fresh.id, from: LIVE_STATUSES, to: "completed", expectParams: fresh.params,
+          patch: { outcome_status: status, feedback_snapshot: output, error: checkFailure },
+          outbox,
+        },
+        insertRun,
+      });
+      if (settled) { committed = { settlement, insertRun, outbox }; break; }
+      // Lost. If the step is no longer ours to claim, someone else settled it.
+      if ((await this.storage.workflowRunSteps.getById(step.id))?.status !== "dispatched") return;
+    }
+    if (!committed) {
+      console.error(`[RepeatLoop] could not settle run ${run.id}: the row kept changing; step ${step.id} left dispatched`);
+      return;
+    }
+    const { settlement, insertRun, outbox } = committed;
 
     const done = (await this.storage.workflowRuns.getById(run.id))!;
     this.host.untrack(done);
@@ -461,7 +485,7 @@ export class RepeatLoopRunner {
     const params = run ? parseRepeatParams(run) : null;
     // `preparing` too: see onTaskTurnCompleted — a delivered instruction whose
     // run never recorded `running_task`.
-    if (!run || !params || (run.status !== "running_task" && run.status !== "preparing")) {
+    if (!run || !params || !isLive(run)) {
       await this.storage.workflowRunSteps.abandon(step.id, stepReason);
       return false;
     }
@@ -474,7 +498,8 @@ export class RepeatLoopRunner {
     const ended = await this.storage.workflowRuns.claimStepAndTransition({
       stepId: step.id, turnEndIndex: null, outputSnapshot: null, abandonStep: stepReason,
       run: {
-        id: run.id, from: run.status, to, patch: { error: reason },
+        // Any live status: the dispatch path may record `running_task` between the read above and this commit.
+        id: run.id, from: LIVE_STATUSES, to, patch: { error: reason },
         outbox: milestone ? this.outbox(run, params.anchorSessionId, "workflow_failed", milestone) : undefined,
       },
       insertRun: gate,

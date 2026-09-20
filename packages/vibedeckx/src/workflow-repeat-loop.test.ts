@@ -415,6 +415,45 @@ describe("repeat-until-done loop", () => {
       });
     });
 
+    // Review round 2: the settlement's view of the run is a snapshot, and two
+    // legitimate writers can move the row between that snapshot and the commit.
+    it("a completion read at `preparing` still settles after the dispatch path records running_task", async () => {
+      const realTransition = storage.workflowRuns.transition.bind(storage.workflowRuns);
+      let held: (() => Promise<boolean>) | null = null;
+      // Hold the dispatch path's `preparing → running_task` back…
+      vi.spyOn(storage.workflowRuns, "transition").mockImplementationOnce(async (id, from, to, patch) => {
+        held = () => realTransition(id, from, to, patch);
+        throw new Error("held");
+      });
+      await startLoop({ checkCommand: "npm test" }).catch(() => undefined);
+      const first = await onlyActive();
+      expect(first.status).toBe("preparing");
+      // …and let it land while the settlement (which already read `preparing`) awaits the check.
+      check.mockImplementationOnce(async () => { expect(await held!()).toBe(true); return { ok: true, output: "" }; });
+
+      const list = transcripts.get(first.source_session_id)!;
+      list.push({ type: "assistant", content: "Status: done", timestamp: 1 }, { type: "turn_end", timestamp: 2, outcome: "completed" } as AgentMessage);
+      bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: first.source_session_id, turnEndEntryIndex: list.length - 1 });
+      await vi.waitFor(async () => expect((await storage.workflowRuns.getById(first.id))?.status).toBe("completed"));
+      expect(await outbox()).toEqual([expect.objectContaining({ kind: "loop_done" })]);
+    });
+
+    it("a soft stop that lands after the settlement's last read of params is still honoured", async () => {
+      const first = await startLoop();
+      const realClaim = storage.workflowRuns.claimStepAndTransition.bind(storage.workflowRuns);
+      let paused: WorkflowRun | undefined;
+      vi.spyOn(storage.workflowRuns, "claimStepAndTransition").mockImplementationOnce(async (input) => {
+        paused = await engine.pauseLoop(first.id); // returns success: the run is still active
+        return realClaim(input);
+      });
+      await finish(first, "Status: continue\nItem: a");
+      expect(paused?.status).toBe("running_task");
+      const gate = await vi.waitFor(async () => { const r = await onlyActive(); expect(r.round).toBe(2); return r; });
+      expect(gate.status).toBe("waiting_resume");
+      expect(gate.error).toContain("暂停");
+      expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
+    });
+
     it("two concurrent starts on one workspace: exactly one loop", async () => {
       const results = await Promise.allSettled([startLoop(), startLoop()]);
       expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);

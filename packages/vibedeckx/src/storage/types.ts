@@ -2186,8 +2186,20 @@ export interface Storage {
       abandonStep?: string;
       run?: {
         id: string;
-        from: WorkflowRunStatus;
+        /**
+         * One status, or any of several: a repeat-loop iteration may legitimately
+         * move `preparing → running_task` while its settlement is being computed,
+         * and that must not make the settlement lose its CAS.
+         */
+        from: WorkflowRunStatus | readonly WorkflowRunStatus[];
         to: WorkflowRunStatus;
+        /**
+         * Optimistic guard: the run's `params` must still be exactly this. The
+         * caller decided the next hop from a snapshot (a soft-stop flag lives in
+         * there); if someone wrote since, nothing is committed and the caller
+         * re-reads and decides again.
+         */
+        expectParams?: string | null;
         patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error" | "verdict" | "outcome_status">>;
         outbox?: Omit<NotificationOutboxEvent, "seq">;
       };
