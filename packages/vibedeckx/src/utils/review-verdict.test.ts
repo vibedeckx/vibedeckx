@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseVerdict } from "./review-verdict.js";
+import { parseClosingLine, parseTaskStatus, parseVerdict } from "./review-verdict.js";
 
 describe("parseVerdict", () => {
   it("reads the shapes real reviewers produced (2026-09-18 live runs)", () => {
@@ -46,5 +46,37 @@ describe("parseVerdict", () => {
     expect(parseVerdict("Looks fine to me, ship it!")).toBeNull();
     expect(parseVerdict("")).toBeNull();
     expect(parseVerdict(null)).toBeNull();
+  });
+});
+
+
+describe("parseTaskStatus", () => {
+  it("reads the three values off a closing Status line, tolerating list marks and emphasis", () => {
+    expect(parseTaskStatus("Processed order 17.\n\nStatus: continue\nItem: order 17\nRemaining: 4")).toBe("continue");
+    expect(parseTaskStatus("- **Status:** done")).toBe("done");
+    expect(parseTaskStatus("Status： blocked.")).toBe("blocked");
+    expect(parseTaskStatus("status: <continue>")).toBe("continue");
+  });
+
+  it("is an exact match: anything else is null, never a guess", () => {
+    expect(parseTaskStatus("Status: not done yet")).toBeNull();
+    expect(parseTaskStatus("Status: done (mostly)")).toBeNull();
+    expect(parseTaskStatus("Status: continue / done / blocked")).toBeNull();
+    expect(parseTaskStatus("All done!")).toBeNull();
+    expect(parseTaskStatus("")).toBeNull();
+    expect(parseTaskStatus(null)).toBeNull();
+  });
+
+  it("ignores the word in prose; only a line that opens with the label counts, and the last one wins", () => {
+    expect(parseTaskStatus("The API returned status: done for item 3.\nStatus: continue")).toBe("continue");
+    expect(parseTaskStatus("The API returned HTTP status 200 and everything is done.")).toBeNull();
+    expect(parseTaskStatus("Status: continue\nActually I hit an error.\nStatus: blocked")).toBe("blocked");
+  });
+});
+
+describe("parseClosingLine", () => {
+  it("returns the raw value of the last labelled line", () => {
+    expect(parseClosingLine("Status: continue\nItem: `order 17` — refund\nRemaining: 4", "Item")).toBe("order 17 — refund");
+    expect(parseClosingLine("Status: done", "Item")).toBeNull();
   });
 });
