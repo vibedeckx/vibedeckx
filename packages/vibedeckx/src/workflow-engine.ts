@@ -8,6 +8,7 @@ import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/revi
 import { captureSnapshot, computeScope, resolveStartSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
 import { snippetTitle } from "./utils/session-title.js";
 import { parseVerdict } from "./utils/review-verdict.js";
+import { parseRepeatParams, RepeatLoopError, RepeatLoopRunner, type RepeatLoopHost, type StartRepeatLoopOptions } from "./workflow-repeat-loop.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 import type {
   ActivateAgentSessionInput,
@@ -57,6 +58,8 @@ export interface AgentOps {
   getRawMessages(sessionId: string): Promise<AgentMessage[]>;
   /** Optional: push a raw WS frame to a session's stream subscribers. */
   broadcastRawToSession?(sessionId: string, payload: Record<string, unknown>): void;
+  /** Stop a session's process (repeat loop: one item per session). Optional for review-only hosts. */
+  stopSession?(sessionId: string): Promise<unknown>;
 }
 
 export class WorkflowError extends Error {
@@ -439,7 +442,8 @@ export const FINAL_VERDICT_PROMPT = [
 
 interface Participant {
   runId: string;
-  role: "source" | "reviewer";
+  /** `task` = a repeat-loop iteration's session: engine-created, engine-driven. */
+  role: "source" | "reviewer" | "task";
 }
 
 export type ReviewerCandidateUnavailableReason =
@@ -586,6 +590,8 @@ export class WorkflowEngine {
   constructor(
     private storage: Storage,
     private agentOps: AgentOps,
+    /** Test seams only. */
+    private testHooks?: { runCheckCommand?: RepeatLoopHost["runCheckCommand"] },
   ) {}
 
   setEventBus(bus: EventBus): void {
@@ -595,8 +601,60 @@ export class WorkflowEngine {
         void this.handleTaskCompleted(event).catch((err) =>
           console.error("[WorkflowEngine] handleTaskCompleted failed:", err),
         );
+      } else if (event.type === "session:status" && event.status !== "running"
+          && this.participants.get(event.sessionId)?.role === "task") {
+        // A turn that did NOT complete emits no taskCompleted at all; for an
+        // unattended loop that would be a silent stall.
+        void this.repeat.onSessionIdle(event.sessionId).catch((err) =>
+          console.error("[WorkflowEngine] repeat-loop idle check failed:", err),
+        );
       }
     });
+  }
+
+  // ---------- repeat-until-done loops (workflow-repeat-loop.ts) ----------
+
+  private repeatRunner?: RepeatLoopRunner;
+  private get repeat(): RepeatLoopRunner {
+    return this.repeatRunner ??= new RepeatLoopRunner({
+      storage: this.storage,
+      agentOps: this.agentOps,
+      emitRunUpdated: (run) => this.emitRunUpdated(run),
+      track: (run) => this.trackParticipants(run),
+      untrack: (run) => this.untrackRun(run),
+      milestoneCreated: () => this.onMilestoneCreated?.(),
+      runCheckCommand: this.testHooks?.runCheckCommand,
+    });
+  }
+
+  startRepeatLoop(opts: StartRepeatLoopOptions): Promise<WorkflowRun> {
+    return this.mapRepeatErrors(() => this.repeat.start(opts));
+  }
+
+  /** `pause` = finish the current item, then stop at a gate. */
+  async pauseLoop(runId: string): Promise<WorkflowRun> {
+    const run = await this.requireRepeatRun(runId);
+    return this.mapRepeatErrors(() => this.repeat.pause(run));
+  }
+
+  async resumeLoop(runId: string): Promise<WorkflowRun> {
+    const run = await this.requireRepeatRun(runId);
+    return this.mapRepeatErrors(() => this.repeat.resume(run));
+  }
+
+  private async requireRepeatRun(runId: string): Promise<WorkflowRun> {
+    const run = await this.storage.workflowRuns.getById(runId);
+    if (!run || run.kind !== "repeat") throw new WorkflowError("bad-state", "这不是一个循环");
+    return run;
+  }
+
+  private async mapRepeatErrors<T>(effect: () => Promise<T>): Promise<T> {
+    try {
+      return await effect();
+    } catch (err) {
+      if (err instanceof RepeatLoopError) throw new WorkflowError(err.code, err.message);
+      throw err;
+    }
   }
 
   /** Boot recovery (spec §3.4). Call once after storage is ready. */
@@ -609,6 +667,8 @@ export class WorkflowEngine {
     for (const run of active) {
       if (settled.has(run.id)) {
         // nothing: reconciliation already wrote this run's state and note
+      } else if (run.kind === "repeat") {
+        await this.repeat.recover(run);
       } else if (run.status === "sending_feedback") {
         // Crash mid-send: honest at-most-once — never auto-resend.
         await this.storage.workflowRuns.update(run.id, {
@@ -662,6 +722,13 @@ export class WorkflowEngine {
         if (!run) { await steps.abandon(step.id, "run no longer exists"); continue; }
 
         const entryIndex = await this.effectiveEntryIndex(step);
+        if (step.kind === "task_prompt" && entryIndex === null) {
+          // Never reached stdin. A run still `preparing` is simply dispatched
+          // again by recover(); one already past it has lost its iteration.
+          if (run.status === "running_task") { await this.repeat.abnormalEnd(step, "server_restart"); settled.add(run.id); }
+          else await steps.abandon(step.id, "never delivered: no entry index was recorded before the restart");
+          continue;
+        }
         if (entryIndex === null) {
           await steps.abandon(step.id, "never delivered: no entry index was recorded before the restart");
           if (await this.rollBackUndeliveredStep(run, step)) settled.add(run.id);
@@ -685,6 +752,13 @@ export class WorkflowEngine {
           continue;
         }
 
+        if (step.kind === "task_prompt") {
+          // Interrupted mid-item: never re-run on its own — whether the item's
+          // side effects happened is not ours to know. A gate, and the bell.
+          await this.repeat.abnormalEnd(step, outcome);
+          settled.add(run.id);
+          continue;
+        }
         await steps.abandon(step.id, `turn ended: ${outcome}`);
         if (TERMINAL_STATUSES.has(run.status)) continue;
         if (step.kind === "feedback") {
@@ -748,6 +822,11 @@ export class WorkflowEngine {
   }
 
   private trackParticipants(run: WorkflowRun): void {
+    if (run.kind === "repeat") {
+      // A gate's session id is only reserved — nothing exists under it yet.
+      if (run.status !== "waiting_resume") this.participants.set(run.source_session_id, { runId: run.id, role: "task" });
+      return;
+    }
     this.participants.set(run.source_session_id, { runId: run.id, role: "source" });
     if (run.reviewer_session_id) {
       this.participants.set(run.reviewer_session_id, { runId: run.id, role: "reviewer" });
@@ -1247,7 +1326,11 @@ export class WorkflowEngine {
 
   /** Sync check used by ChatSessionManager before waking the commander model. */
   shouldSuppressAgentEvent(sessionId: string): boolean {
-    return this.participants.get(sessionId)?.role === "reviewer";
+    // A repeat-loop iteration is the engine's own dispatch, like a reviewer:
+    // fifty iterations must not wake the commander fifty times. The loop
+    // reports through its milestones instead.
+    const role = this.participants.get(sessionId)?.role;
+    return role === "reviewer" || role === "task";
   }
 
   isSessionInActiveRun(sessionId: string): boolean {
@@ -1774,6 +1857,10 @@ export class WorkflowEngine {
    */
   private async claimStep(step: WorkflowRunStep, entries: AgentMessage[], boundary: number): Promise<void> {
     const output = extractLastAssistantInTurn(entries, boundary);
+    if (step.kind === "task_prompt") {
+      await this.repeat.onTaskTurnCompleted(step, entries, boundary, output);
+      return;
+    }
     if (step.kind === "feedback") {
       // The source finished the turn our feedback opened; Phase 2 hangs the
       // next hop here. Deliberately NOT a commander suppression: a source
@@ -2033,6 +2120,9 @@ export class WorkflowEngine {
   async cancelRun(runId: string, reason?: string): Promise<WorkflowRun | undefined> {
     const run = await this.storage.workflowRuns.getById(runId);
     if (!run) return undefined;
+    // A loop is addressed as a whole: the id in hand may be an iteration that
+    // was settled a moment ago, while its successor is the one to stop.
+    if (run.kind === "repeat") return this.repeat.cancel(run, reason);
     if (TERMINAL_STATUSES.has(run.status)) return run;
 
     // CAS instead of an unconditional status write: `sending_feedback` is the
@@ -2130,7 +2220,11 @@ export class WorkflowEngine {
     // subscribed to either participant sees run transitions live without a
     // dedicated cross-machine event channel. Duplicate delivery (both streams
     // subscribed) is harmless — the front-side panel refresh is idempotent.
-    for (const sid of [run.source_session_id, run.reviewer_session_id]) {
+    const streams = new Set<string | null>([run.source_session_id, run.reviewer_session_id]);
+    // Repeat loop: also the loop's first session — the one stream a hub has
+    // held since the loop started, since later sessions are created here.
+    if (run.kind === "repeat") streams.add(parseRepeatParams(run)?.anchorSessionId ?? null);
+    for (const sid of streams) {
       if (sid) this.agentOps.broadcastRawToSession?.(sid, { workflowRunUpdated: run });
     }
   }

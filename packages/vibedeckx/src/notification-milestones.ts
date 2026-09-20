@@ -174,3 +174,11 @@ export function sessionMilestoneForTurnEnd(opts: {
   }
   return undefined;
 }
+
+/**
+ * A repeat loop's milestones (finished / needs a human). Keyed by loop, round
+ * and reason: one loop can need attention many times, while a replayed
+ * settlement of the same round collapses onto one id.
+ */
+export const loopMilestoneId = (loopId: string, round: number, reason: string): string =>
+  `workflow:${loopId}:round:${round}:${reason}`;

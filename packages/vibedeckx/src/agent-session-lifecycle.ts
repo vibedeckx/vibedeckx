@@ -330,6 +330,7 @@ const DEFAULT_PENDING_TTL_MS: Record<SessionPurpose, number> = {
   commander: 10 * 60_000,
   project_chat: 10 * 60_000,
   workflow_review: 15 * 60_000,
+  workflow_task: 10 * 60_000,
 };
 const DEFAULT_LEASE_MS = 30_000;
 const DEFAULT_REPLAY_WINDOW_MS = 24 * 60 * 60_000;

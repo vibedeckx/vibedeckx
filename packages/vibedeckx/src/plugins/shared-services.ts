@@ -476,6 +476,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     switchMode: (sessionId, projectPath, mode) => agentSessionManager.switchMode(sessionId, projectPath, mode),
     getRawMessages: (sessionId) => agentSessionManager.loadRawMessages(sessionId),
     broadcastRawToSession: (sessionId, payload) => agentSessionManager.broadcastRawToSession(sessionId, payload),
+    stopSession: (sessionId) => agentSessionManager.stopSession(sessionId),
   };
   const workflowEngine = new WorkflowEngine(opts.storage, reviewAgentOps);
   workflowEngine.setEventBus(eventBus);   // subscribe BEFORE chatSessionManager so ordering is explicit

@@ -166,7 +166,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     if (value === undefined) return "interactive";
     return isSessionPurpose(value) && allowed.includes(value) ? value : null;
   };
-  const ALL_PURPOSES: readonly SessionPurpose[] = ["interactive", "interactive_upload", "commander", "project_chat", "workflow_review"];
+  const ALL_PURPOSES: readonly SessionPurpose[] = ["interactive", "interactive_upload", "commander", "project_chat", "workflow_review", "workflow_task"];
   const CLIENT_PURPOSES: readonly SessionPurpose[] = ["interactive", "interactive_upload"];
 
   /** The composer's draft grant list, checked by the shared rule before it reaches the lifecycle. */

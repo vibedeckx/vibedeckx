@@ -18,10 +18,12 @@ export type SessionPurpose =
   | "interactive_upload"
   | "commander"
   | "project_chat"
-  | "workflow_review";
+  | "workflow_review"
+  /** One iteration of a repeat-until-done loop: engine-created, edit mode, stopped when its item is done. */
+  | "workflow_task";
 
 export const SESSION_PURPOSES: readonly SessionPurpose[] = [
-  "interactive", "interactive_upload", "commander", "project_chat", "workflow_review",
+  "interactive", "interactive_upload", "commander", "project_chat", "workflow_review", "workflow_task",
 ];
 
 export function isSessionPurpose(value: unknown): value is SessionPurpose {

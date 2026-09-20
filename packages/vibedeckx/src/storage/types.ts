@@ -2111,7 +2111,8 @@ export interface Storage {
       reviewer_session_id?: string | null;
       review_span?: ReviewSpan;
       /** Initial status; defaults to "waiting_reviewer" (single-shot start). */
-      status?: Extract<WorkflowRunStatus, "preparing" | "waiting_reviewer">;
+      status?: Extract<WorkflowRunStatus, "preparing" | "waiting_reviewer" | "waiting_resume">;
+      error?: string | null;
       loop_id?: string | null;
       round?: number;
       max_rounds?: number | null;
@@ -2147,7 +2148,7 @@ export interface Storage {
       id: string,
       from: WorkflowRunStatus,
       to: WorkflowRunStatus,
-      patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error" | "reviewer_session_id">>,
+      patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error" | "reviewer_session_id" | "source_session_id" | "params" | "max_rounds">>,
     ): Promise<boolean>;
     /**
      * `transition` plus an attention milestone, in one transaction. The outbox
