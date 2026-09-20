@@ -7,6 +7,8 @@
 > 换新 reviewer）未开始。此前其两项硬前置——投递幂等覆盖与投递身份
 > （`workflow_run_steps`）——已于 2026-09-18 在 dev1 落地并过真机 e2e（未合入 main，
 > worker 侧需发版），见 `2026-09-18-workflow-phase2-prereq-dispatch-identity-design.md`；
+> **模板二 repeat-until-done（Ralph loop）**已于 2026-09-20 在 dev1 实现并过双服务器真机 e2e（未合入 main，
+> remote 需发 worker ≥0.3.42），见 `2026-09-20-workflow-repeat-until-done-design.md`。
 > Phase 3 仅有讨论记录。
 > 本文在 2026-09-18 按代码实况重写了 §2.3、§3、§4、§5、§6——原 2026-07-17 版
 > 只描述 Phase 1 的一次性单程 review，随后两个月里 review 从"一次性"长成

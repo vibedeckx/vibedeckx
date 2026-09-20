@@ -69,6 +69,10 @@ const COVERED_BY = {
   "http:GET /api/path/workflow-runs/reviewer-candidate": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: "reviewer-candidate" },
   "http:POST /api/workflow-runs/:param/gate": { file: "packages/vibedeckx/src/routes/workflow-run-remote-routes.test.ts", marker: "/gate" },
   "http:POST /api/workflow-runs/:param/cancel": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: "cancel" },
+  // A loop needs a real agent that follows the closing-status contract across several
+  // fresh sessions; the stub CLI here replies with a fixed string. The hub side (capability
+  // gate, proxy body, publishing worker-created sessions) is pinned by the route test.
+  "http:POST /api/path/workflow-loops": { file: "packages/vibedeckx/src/routes/workflow-run-remote-routes.test.ts", marker: "/api/path/workflow-loops" },
   "http:GET /api/executor-processes/running": { file: "packages/vibedeckx/src/routes/process-routes.auth.test.ts", marker: "/api/executor-processes/running" },
   // Registered by "anchor main workspace to its current branch" without a
   // coverage entry here, which left this list unsatisfiable. Local route test.

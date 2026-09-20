@@ -1,6 +1,6 @@
 # Workflow 模板二：Repeat-until-done（Ralph loop）
 
-> 日期：2026-09-20 · 分支：dev1 · 状态：**v1.1 已确认（2026-09-20）**——引擎留在 worker（团队自己干、干完上报；谁推进流程谁必须有可靠的完成信号）；
+> 日期：2026-09-20 · 分支：dev1 · 状态：**v1.1 已确认并实现（2026-09-20，dev1，R1–R7）**，实现记录见 §11；原：v1.1 已确认——引擎留在 worker（团队自己干、干完上报；谁推进流程谁必须有可靠的完成信号）；
 > **remote worker 是主要目标，不是后补的一刀**；§9 其余各点按推荐。实施计划：`../plans/2026-09-20-workflow-repeat-until-done.md`
 > 上游：主 spec [`2026-07-17-workflow-engine-review-loop-design.md`](./2026-07-17-workflow-engine-review-loop-design.md)；
 > 底座（已在 main、worker v0.3.41）：投递身份 [`2026-09-18-workflow-phase2-prereq-dispatch-identity-design.md`](./2026-09-18-workflow-phase2-prereq-dispatch-identity-design.md)、
@@ -257,3 +257,51 @@ session（review 的"准备期间被取消"同款处理）。
 | R5 | 路由：本地 + `/api/path` 镜像 + hub 代理（按项目绑定的 worker）；版本门控；hub 发布（锚点长窗口 + 见到就发布） |
 | R6 | 前端：New loop 弹窗、面板卡片（软停 / 结束 / 继续）、状态序、通知按 run 跳转 |
 | R7 | 真机 e2e：单机（引擎）→ 双服务器 hub + worker（主要目标），含 kill -9、blocked、上限、软停、Stop 按钮 |
+
+
+---
+
+## 11. 实现记录（2026-09-20，dev1）
+
+R1–R7 已提交。后端与前端全量测试通过，两端 `tsc` 干净。`classify-diff`：**隧道契约有加法变化**
+（新路由 `POST /api/path/workflow-loops`，注册表 `since: 0.3.42`）→ hub 可单独发，但功能要在 remote 上可用
+**必须发 worker**；旧 worker 由 hub 按 capability 门控，返回 409 `worker_unsupported`，不探测。
+
+**与设计稿的差异：**
+
+1. **发起走新路由，不复用 `POST /api/workflow-runs`。** `POST /api/workflow-loops`（hub / 单机）+
+   `POST /api/path/workflow-loops`（worker 镜像）。理由：新路由能进 capability 注册表，hub 用握手上报的
+   capability 门控（与两段式 review 同一做法），比设计稿里的版本号常量更准；`pause / resume` 仍是既有 gate 路由
+   的新 `action` 值。§7 的"不新增路由"以此为准作废。
+2. **session id 预分配。** `workflow_runs.source_session_id` 非空，`repeat` run 创建时就带一个预分配的 uuid，
+   lifecycle `prepare` 用它建 session；闸门 run 的 id 只是占位，`resume` 时换成新的（旧的可能是派发失败留下的
+   tombstone）。activation key = `task:<runId>:<sessionId>`。
+3. **派发不起来 ⇒ 同一行原地变闸门**（`preparing → waiting_resume` + 铃），不另建 run——它什么都没派出去，
+   没有可结算的东西。
+4. **`Status` 行必须以标签开头。** verdict 的"含 verdict 的最后一行"规则不适用：`status`、`item` 是日常词汇
+   （"HTTP status 200"），散文里提到不算。`parseVerdict` 因此没有重构，两个解析器只共享纪律，不共享内核。
+5. **hub 的"见到就发布"挂在 hub 总线上**（`workflow:run-updated` 订阅，`remote-loop-sessions.ts`），不改流处理
+   函数：映射后的帧、发起 / gate 路由自己的 emit 都经过总线；run 列表与单 run 读取两处直接调用。
+6. **检查命令的工作目录**优先取 session 实际 checkout 的路径（与 review target 抓取同一偏好）。
+7. 迭代结束后的 `stopSession` 会让 session 转 idle 并再触发一次"非正常结束"检查——此时步骤已领取，检查为空操作；
+   `cancel` 同理先 abandon 步骤再停 session。
+8. `confirmDone` 未做（按 §9 第 2 点），参数位也未预留——需要时再加。
+
+**真机 e2e（真实 claude CLI，一次性 `--data-dir`，按 PID 清理，未运行 `connect stop`）：**
+
+- **单机**：3 项 todo.json → 4 个 session（`Todo #1..#4`，edit 模式，purpose `workflow_task`），逐个 `continue`、最后
+  一个 `done`，每个 session 完成即停，`loop_done` 写在锚点 outbox，全程 43s。另测：同 workspace 第二个循环 409；
+  blocked 项 → 闸门 + 铃，人工处理后**用过期的第 1 迭代 id** `resume` 成功；软停 → 做完当前项后闸门、无铃；
+  对迭代 session 点 Stop → 该迭代 `cancelled` + 闸门、无铃；`resume` 越过上限自动追加；迭代途中 `kill -9` →
+  重启后该迭代 `failed` + 闸门 + 铃，**没有自动重跑**；再 `resume` → 上限闸门；用过期 id `cancel` → 循环终结。
+- **双服务器（hub + reverse-connect worker，主要目标）**：经 hub 发起 → 201，run / session / params 内的 id 全部是
+  hub 空间；blocked 闸门与 `workflow_failed` 通知到达 hub 收件箱；锚点 mapping 的通知窗口 = 时长上限 + 30 分钟，
+  后续迭代的 session 被 hub 逐个学到。**闸门期间 `kill -9` hub 并重启**：闸门仍可见，用过期 id 经 hub `resume`
+  成功，循环跑完，`loop_done` 在重启后的 hub 收件箱里出现；通知 → run → 应打开的 session 可读（200）。
+
+**未做 / 已知限制：**
+- `scripts/cross-version-e2e.mjs` 没有循环的 smoke 步骤（它的桩 CLI 只会回固定字符串，跑不了"按约定收尾"的循环）；
+  新 capability 登记在 `COVERED_BY`，指向路由测试。
+- 面板卡片不提供 session 跳转链接（review 卡片同样没有），靠侧栏里的 `<name> #N`。
+- 迭代 session 在侧栏不分组；几十个已停 session 的噪音靠 retention 消化。
+- 被 hub 学到的迭代 session 只有默认 30 分钟通知窗口——无妨，循环的里程碑全在锚点上。
