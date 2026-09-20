@@ -17,4 +17,6 @@ export const WORKFLOW_ACTIVE_STATUSES: readonly WorkflowRunStatus[] = [
   "discussing",
   "sending_feedback",
   "waiting_rereview",
+  "running_task",
+  "waiting_resume",
 ];

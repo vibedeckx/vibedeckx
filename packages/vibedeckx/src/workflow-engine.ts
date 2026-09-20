@@ -740,6 +740,10 @@ export class WorkflowEngine {
         if (run.status === "preparing") return false;
         await this.failRun(run, "reviewer 的首条指令因服务重启未送达。请重新发起 review。");
         return true;
+      case "task_prompt":
+        // Repeat-loop steps never get here: reconcileOpenSteps hands them to
+        // the repeat-loop runner, which owns that run kind's recovery.
+        return false;
     }
   }
 

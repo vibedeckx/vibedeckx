@@ -20,6 +20,8 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         loop_id: opts.loop_id ?? null,
         round: opts.round ?? 1,
         max_rounds: opts.max_rounds ?? null,
+        kind: opts.kind ?? "review",
+        params: opts.params ?? null,
       }).execute();
       const row = await kdb
         .selectFrom("workflow_runs").selectAll().where("id", "=", opts.id)
@@ -66,6 +68,13 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         .where("reviewer_session_id", "is not", null)
         .orderBy("created_at", "desc")
         .orderBy(sql`rowid`, "desc")
+        .executeTakeFirst();
+      return row ? asRun(row) : undefined;
+    },
+    getActiveInLoop: async (loopId) => {
+      const row = await kdb.selectFrom("workflow_runs").selectAll()
+        .where("loop_id", "=", loopId).where("status", "in", ACTIVE)
+        .orderBy("round", "desc").orderBy(sql`rowid`, "desc")
         .executeTakeFirst();
       return row ? asRun(row) : undefined;
     },
@@ -129,7 +138,7 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
     // Step CAS, run CAS and the outbox row in ONE transaction. A guard that
     // fails throws to roll the whole thing back — a claimed step with an
     // un-advanced run would be unrecoverable after a restart.
-    claimStepAndTransition: async ({ stepId, turnEndIndex, outputSnapshot, run, nextRun }) => {
+    claimStepAndTransition: async ({ stepId, turnEndIndex, outputSnapshot, run, nextRun, insertRun }) => {
       const LOST = Symbol("cas-lost");
       try {
         await kdb.transaction().execute(async (trx) => {
@@ -155,6 +164,16 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
                 .onConflict((oc) => oc.column("id").doNothing())
                 .execute();
             }
+          }
+          if (insertRun) {
+            await trx.insertInto("workflow_runs").values({
+              id: insertRun.id, project_id: insertRun.project_id, branch: insertRun.branch,
+              source_session_id: insertRun.source_session_id, source_turn_end_index: -1,
+              reviewer_session_id: null, review_focus: null, review_target: null, review_span: "this_turn",
+              status: insertRun.status, error: insertRun.error,
+              loop_id: insertRun.loop_id, round: insertRun.round, max_rounds: insertRun.max_rounds,
+              kind: "repeat", params: insertRun.params,
+            }).execute();
           }
           if (nextRun) {
             // After the run CAS on purpose: the run being completed in this

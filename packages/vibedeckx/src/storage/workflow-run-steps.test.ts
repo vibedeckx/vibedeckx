@@ -193,6 +193,64 @@ describe("workflowRunSteps repository", () => {
     expect((await storage.workflowRuns.getById("r1"))?.verdict).toBe("needs-changes");
   });
 
+  describe("repeat-loop runs", () => {
+    const createIteration = () => storage.workflowRuns.create({
+      id: "it1", project_id: "p1", branch: "dev", source_session_id: "s-it1", source_turn_end_index: -1,
+      review_focus: null, review_target: null, status: "preparing",
+      kind: "repeat", params: '{"prompt":"p"}', loop_id: "it1", round: 1, max_rounds: 20,
+    });
+    const openTask = () => storage.workflowRunSteps.open({
+      id: "t1", run_id: "it1", kind: "task_prompt", role: "source", session_id: "s-it1",
+      idempotency_key: "task:it1", payload_hash: "h",
+    });
+
+    it("rows default to kind=review; a repeat run carries its params", async () => {
+      expect(await storage.workflowRuns.getById("r1")).toMatchObject({ kind: "review", params: null, outcome_status: null });
+      expect(await createIteration()).toMatchObject({ kind: "repeat", params: '{"prompt":"p"}', status: "preparing", round: 1 });
+    });
+
+    it("settles an iteration and inserts the next one — or its resume gate — in one transaction", async () => {
+      await createIteration();
+      await openTask();
+      await storage.workflowRuns.update("it1", { status: "running_task" });
+      expect(await storage.workflowRuns.claimStepAndTransition({
+        stepId: "t1", turnEndIndex: 3, outputSnapshot: "Status: continue",
+        run: { id: "it1", from: "running_task", to: "completed", patch: { outcome_status: "continue" } },
+        insertRun: {
+          id: "it2", project_id: "p1", branch: "dev", source_session_id: "s-it2", loop_id: "it1", round: 2,
+          max_rounds: 20, params: '{"prompt":"p"}', status: "waiting_resume", error: "blocked",
+        },
+      })).toBe(true);
+      expect(await storage.workflowRuns.getById("it1")).toMatchObject({ status: "completed", outcome_status: "continue" });
+      const gate = await storage.workflowRuns.getById("it2");
+      expect(gate).toMatchObject({ kind: "repeat", status: "waiting_resume", error: "blocked", round: 2, source_turn_end_index: -1 });
+      // Both new statuses are active: the loop's one live run is findable, and listed.
+      expect((await storage.workflowRuns.getActiveInLoop("it1"))?.id).toBe("it2");
+      expect((await storage.workflowRuns.getActive("p1", "dev")).map((r) => r.id)).toContain("it2");
+    });
+
+    it("a lost run CAS inserts nothing", async () => {
+      await createIteration();
+      await openTask();
+      expect(await storage.workflowRuns.claimStepAndTransition({
+        stepId: "t1", turnEndIndex: 3, outputSnapshot: null,
+        run: { id: "it1", from: "running_task", to: "completed" },
+        insertRun: {
+          id: "it2", project_id: "p1", branch: "dev", source_session_id: "s-it2", loop_id: "it1", round: 2,
+          max_rounds: 20, params: null, status: "preparing", error: null,
+        },
+      })).toBe(false);
+      expect(await storage.workflowRuns.getById("it2")).toBeUndefined();
+      expect((await storage.workflowRunSteps.getById("t1"))?.status).toBe("dispatched");
+    });
+
+    it("a completed iteration does not make its session look reviewed", async () => {
+      await createIteration();
+      await storage.workflowRuns.update("it1", { status: "completed" });
+      expect(await storage.workflowRuns.listReviewedSourceSessions("p1", "dev")).not.toContain("s-it1");
+    });
+  });
+
   it("deletes steps with their run", async () => {
     await open("a", "reviewer_prompt");
     await storage.projects.delete("p1");

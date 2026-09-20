@@ -27,6 +27,7 @@ const TITLE_BY_KIND: Record<NotificationKind, string> = {
   session_result_ready: "Session result is ready",
   session_failed: "Session failed",
   workflow_failed: "Workflow needs attention",
+  loop_done: "Loop finished — nothing left to process",
   // "Stop, then send" — NOT "restart": restartSession wipes the conversation
   // history, while stop → dormant → next message respawns with a fresh token
   // and keeps everything.

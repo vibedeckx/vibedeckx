@@ -428,6 +428,15 @@ export type WorkflowRunStatus =
    * waiting_reviewer, the reuse-reviewer path) or cancel.
    */
   | "waiting_rereview"
+  /** Repeat loop (kind = "repeat"): the iteration's session is working on its item. */
+  | "running_task"
+  /**
+   * Repeat loop gate: the loop stopped and needs a human (blocked, a brake, an
+   * interrupted or stopped turn, a requested pause). Like `waiting_rereview`
+   * it IS the next iteration's run, dispatched nothing yet; its `error` says
+   * why. Leaves via `resume` (→ preparing) or cancel.
+   */
+  | "waiting_resume"
   | "completed"
   | "cancelled"
   | "failed";
@@ -442,7 +451,7 @@ export type ReviewSpan = "this_turn" | "session_start";
 export type WorkflowVerdict = "ship" | "needs-changes" | "cannot-verify";
 
 /** What an engine dispatch asks its target session to do. */
-export type WorkflowRunStepKind = "reviewer_prompt" | "rereview_prompt" | "final_verdict" | "feedback";
+export type WorkflowRunStepKind = "reviewer_prompt" | "rereview_prompt" | "final_verdict" | "feedback" | "task_prompt";
 /**
  * `dispatched`: sent (or being sent) and not yet attributed to a completed
  * turn. `claimed`: a turn completion was attributed to it. `abandoned`: it
@@ -505,9 +514,30 @@ export interface WorkflowRun {
   /** Round cap; only loop runs carry one. */
   max_rounds: number | null;
   verdict: WorkflowVerdict | null;
+  /**
+   * `review` (default; every row before repeat loops existed) or `repeat` — a
+   * repeat-until-done loop iteration (docs/superpowers/specs/2026-09-20-…).
+   * For `repeat`, `source_session_id` is the iteration's own (pre-allocated)
+   * session, `source_turn_end_index` is -1 and every review_* column is null.
+   */
+  kind: WorkflowRunKind;
+  /** JSON RepeatLoopParams; only `repeat` runs carry one, copied iteration to iteration. */
+  params: string | null;
+  /** The iteration's parsed closing status; null = none yet or unrecognised. */
+  outcome_status: WorkflowTaskStatus | null;
   created_at: string;
   updated_at: string;
 }
+
+export type WorkflowRunKind = "review" | "repeat";
+/** Closing status of a repeat-loop iteration, parsed by exact match (utils/review-verdict.ts). */
+export type WorkflowTaskStatus = "continue" | "done" | "blocked";
+
+/** A repeat-loop run inserted in the transaction that settles the previous iteration. */
+export type WorkflowRepeatRunInput = Pick<WorkflowRun,
+  "id" | "project_id" | "branch" | "source_session_id" | "loop_id" | "round" | "max_rounds" | "params" | "error"> & {
+  status: Extract<WorkflowRunStatus, "preparing" | "waiting_resume">;
+};
 
 /** A next-round gate run, created in the same transaction that claims the feedback step. */
 export type WorkflowNextRunInput = Pick<WorkflowRun,
@@ -525,6 +555,8 @@ export type NotificationKind =
   | "session_result_ready"
   | "session_failed"
   | "workflow_failed"
+  /** A repeat loop reported `done`. Its "needs a human" counterpart re-uses `workflow_failed`. */
+  | "loop_done"
   | "cross_remote_token_expired";
 
 /**
@@ -2083,7 +2115,11 @@ export interface Storage {
       loop_id?: string | null;
       round?: number;
       max_rounds?: number | null;
+      kind?: WorkflowRunKind;
+      params?: string | null;
     }): Promise<WorkflowRun>;
+    /** The one active run of a loop (review or repeat), if any. */
+    getActiveInLoop(loopId: string): Promise<WorkflowRun | undefined>;
     getById(id: string): Promise<WorkflowRun | undefined>;
     getActive(projectId: string, branch: string | null): Promise<WorkflowRun[]>;
     getAllActive(): Promise<WorkflowRun[]>;
@@ -2105,7 +2141,7 @@ export interface Storage {
     listReviewedSourceSessions(projectId: string, branch: string | null): Promise<string[]>;
     update(
       id: string,
-      patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error" | "prepared_context" | "source_turn_end_index" | "max_rounds">>,
+      patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error" | "prepared_context" | "source_turn_end_index" | "max_rounds" | "params">>,
     ): Promise<WorkflowRun | undefined>;
     transition(
       id: string,
@@ -2143,9 +2179,11 @@ export interface Storage {
         id: string;
         from: WorkflowRunStatus;
         to: WorkflowRunStatus;
-        patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error" | "verdict">>;
+        patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error" | "verdict" | "outcome_status">>;
         outbox?: Omit<NotificationOutboxEvent, "seq">;
       };
+      /** Repeat loop: insert the next iteration (or its resume gate) unconditionally, same transaction. */
+      insertRun?: WorkflowRepeatRunInput;
       /**
        * Loop continuation: insert this `waiting_rereview` gate run in the same
        * transaction — but only if its source is not part of ANY active run

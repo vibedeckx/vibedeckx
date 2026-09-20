@@ -1899,6 +1899,9 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       round INTEGER NOT NULL DEFAULT 1,
       max_rounds INTEGER,
       verdict TEXT,
+      kind TEXT NOT NULL DEFAULT 'review',
+      params TEXT,
+      outcome_status TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -2107,6 +2110,10 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     ["round", "round INTEGER NOT NULL DEFAULT 1"],
     ["max_rounds", "max_rounds INTEGER"],
     ["verdict", "verdict TEXT"],
+    // Repeat-until-done loops: every earlier row is a review.
+    ["kind", "kind TEXT NOT NULL DEFAULT 'review'"],
+    ["params", "params TEXT"],
+    ["outcome_status", "outcome_status TEXT"],
   ] as const) {
     if (!workflowRunsInfo.some((col) => col.name === name)) {
       db.exec(`ALTER TABLE workflow_runs ADD COLUMN ${ddl}`);

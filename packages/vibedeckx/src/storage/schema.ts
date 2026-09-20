@@ -605,6 +605,9 @@ export interface WorkflowRunsTable {
   round: Generated<number>;
   max_rounds: number | null;
   verdict: string | null;
+  kind: Generated<string>;
+  params: string | null;
+  outcome_status: string | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }
