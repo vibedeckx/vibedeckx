@@ -72,17 +72,21 @@ async function getUntrackedFiles(cwd: string): Promise<DiffFile[]> {
   let untrackedOutput: string;
   try {
     const { execSync } = await import("child_process");
+    // `-z` is load-bearing, not a nicety: without it `core.quotePath` (on by
+    // default) hands back `"docs/\345\212\237.md"` for any non-ASCII name, the
+    // read below then ENOENTs on that literal string, and the catch drops the
+    // file — it simply vanishes from the Diff tab. NUL separation also covers
+    // names holding spaces or newlines.
     untrackedOutput = execSync(
-      "git ls-files --others --exclude-standard",
+      "git ls-files --others --exclude-standard -z",
       { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
-    ).trim();
+    );
   } catch {
     return [];
   }
 
-  if (!untrackedOutput) return [];
-
-  const untrackedPaths = untrackedOutput.split("\n");
+  const untrackedPaths = untrackedOutput.split("\0").filter(Boolean);
+  if (untrackedPaths.length === 0) return [];
   const files: DiffFile[] = [];
 
   for (const filePath of untrackedPaths) {
@@ -90,9 +94,11 @@ async function getUntrackedFiles(cwd: string): Promise<DiffFile[]> {
       const fullPath = path.join(cwd, filePath);
       const buffer = readFileSync(fullPath);
 
-      // Skip binary files (contain null bytes)
+      // Skip binary files (contain null bytes). Flagged the same way git's own
+      // "Binary files ... differ" output is, so an added .xlsx reads as a
+      // binary file rather than an added file that mysteriously has no content.
       if (buffer.includes(0)) {
-        files.push({ path: filePath, status: "added", hunks: [] });
+        files.push({ path: filePath, status: "added", hunks: [], binary: true });
         continue;
       }
 
