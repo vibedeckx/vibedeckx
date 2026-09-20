@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { requireAuth as requireRawAuth } from "../server.js";
@@ -10,7 +11,44 @@ import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { projectIdFromRemoteSessionId, mapRemoteReviewerCandidate, mapRemoteRun, parseRemoteRunId } from "./remote-status-bridge.js";
 import { bindRemoteSessionMapping, createRemoteWorkflowReviewer, ensureRemoteAgentStream } from "../remote-agent-sessions.js";
 import type { ReviewSpan, WorkflowRun } from "../storage/types.js";
+import { publishRemoteLoopSessions } from "../remote-loop-sessions.js";
+import {
+  REPEAT_MAX_ITERATIONS_LIMIT, REPEAT_MAX_MINUTES_LIMIT, type StartRepeatLoopOptions,
+} from "../workflow-repeat-loop.js";
 import type { AgentType } from "../agent-types.js";
+
+/** Worker route a hub needs before it may start a repeat loop there (absent on older workers). */
+export const REPEAT_LOOP_CAPABILITY = "http:POST /api/path/workflow-loops";
+
+type RepeatLoopBody = Omit<StartRepeatLoopOptions, "project" | "branch">;
+
+/** Validated start parameters of a repeat-until-done loop, or the 400 message. */
+export function parseRepeatLoopBody(body: Record<string, unknown> | undefined): RepeatLoopBody | string {
+  const b = body ?? {};
+  if (typeof b.prompt !== "string" || b.prompt.trim() === "") return "prompt is required";
+  if (b.prompt.length > 64 * 1024) return "prompt is too long";
+  const agentType = parseReviewerAgentType(b.agentType);
+  if (agentType === null) return "agentType must be one of: claude-code, codex";
+  const bounded = (raw: unknown, max: number): number | undefined | null =>
+    raw === undefined || raw === null ? undefined
+      : typeof raw === "number" && Number.isInteger(raw) && raw >= 1 && raw <= max ? raw : null;
+  const maxIterations = bounded(b.maxIterations, REPEAT_MAX_ITERATIONS_LIMIT);
+  if (maxIterations === null) return `maxIterations must be an integer between 1 and ${REPEAT_MAX_ITERATIONS_LIMIT}`;
+  const maxMinutes = bounded(b.maxMinutes, REPEAT_MAX_MINUTES_LIMIT);
+  if (maxMinutes === null) return `maxMinutes must be an integer between 1 and ${REPEAT_MAX_MINUTES_LIMIT}`;
+  for (const field of ["name", "model", "checkCommand", "runId"] as const) {
+    if (b[field] !== undefined && b[field] !== null && typeof b[field] !== "string") return `${field} must be a string`;
+  }
+  if (typeof b.checkCommand === "string" && b.checkCommand.length > 2000) return "checkCommand is too long";
+  return {
+    prompt: b.prompt,
+    name: typeof b.name === "string" ? b.name.slice(0, 80) : undefined,
+    agentType, maxIterations, maxMinutes,
+    model: typeof b.model === "string" ? b.model : undefined,
+    checkCommand: typeof b.checkCommand === "string" ? b.checkCommand : undefined,
+    runId: typeof b.runId === "string" ? b.runId : undefined,
+  };
+}
 
 /** undefined → engine default; null → invalid (reject with 400). */
 function parseReviewerAgentType(raw: unknown): AgentType | undefined | null {
@@ -787,6 +825,101 @@ async function routes(fastify: FastifyInstance) {
    * the wrong branch" from "the run genuinely wasn't there". `branch` is scoped
    * exactly (`branch is ?`), so a workspace mismatch reads as a normal empty 200.
    */
+  const loopPublishDeps = () => ({
+    remoteSessionMap: fastify.remoteSessionMap,
+    remotePatchCache: fastify.remotePatchCache,
+    reverseConnectManager: fastify.reverseConnectManager,
+    eventBus: fastify.eventBus,
+    agentSessionManager: fastify.agentSessionManager,
+    storage: fastify.storage,
+    remoteNotificationSync: fastify.remoteNotificationSync,
+  });
+
+  // ---- Repeat-until-done loops (workflow-repeat-loop.ts) -------------------
+  // The engine runs where the sessions and the worktree live. For a project
+  // bound to a worker this route proxies to the worker's path mirror; the
+  // worker then creates EVERY session of the loop itself.
+  fastify.post<{ Body: Record<string, unknown> & { projectId?: string; branch?: string | null } }>(
+    "/api/workflow-loops", { bodyLimit: 1024 * 1024 }, async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const projectId = req.body?.projectId;
+      if (typeof projectId !== "string" || !projectId) return reply.code(400).send({ error: "projectId is required" });
+      const branch = typeof req.body?.branch === "string" && req.body.branch ? req.body.branch : null;
+      const parsed = parseRepeatLoopBody(req.body);
+      if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
+      const project = await fastify.storage.projects.getById(projectId, userId);
+      if (!project) return reply.code(404).send({ error: "Project not found" });
+
+      if (project.agent_mode && project.agent_mode !== "local") {
+        const remoteServerId = project.agent_mode;
+        const remoteConfig = await fastify.storage.projectRemotes.getByProjectAndServer(projectId, remoteServerId);
+        if (!remoteConfig?.remote_path) return reply.code(404).send({ error: "Remote project configuration not found" });
+        // Never probe an old worker with a 404: its handshake already says
+        // whether it can run a loop.
+        const server = await fastify.storage.remoteServers.getById(remoteServerId);
+        if (!server?.worker_capabilities?.includes(REPEAT_LOOP_CAPABILITY)) {
+          return reply.code(409).send({ error: "This machine's worker doesn't support loops yet — update the worker and try again.", code: "worker_unsupported" });
+        }
+        const result = await proxyAuto({ remoteServerId }, "POST", "/api/path/workflow-loops", {
+          ...parsed, path: remoteConfig.remote_path, branch,
+          // Stable id: a retried start returns the same loop instead of a second one.
+          runId: parsed.runId ?? randomUUID(),
+        });
+        if (!result.ok) return sendProxyFailure(reply, result);
+        const bareRun = (result.data as { run: WorkflowRun }).run;
+        const localRun = mapRemoteRun(bareRun, remoteServerId, projectId);
+        trackRemoteRun(localRun, { remoteServerId, bareRunId: bareRun.id, projectId });
+        // Anchor session + its long notification watch, before anything else
+        // can go wrong: this is what makes the loop's bell reliable.
+        await publishRemoteLoopSessions(loopPublishDeps(), localRun);
+        fastify.eventBus.emit({ type: "workflow:run-updated", projectId, branch: localRun.branch, run: localRun });
+        return reply.code(201).send({ run: localRun });
+      }
+
+      try {
+        const run = await fastify.workflowEngine.startRepeatLoop({ ...parsed, project, branch });
+        return reply.code(201).send({ run });
+      } catch (err) {
+        const status = errStatus(err);
+        if (status) return reply.code(status).send({ error: (err as Error).message });
+        throw err;
+      }
+    });
+
+  // Worker mirror. Same project resolution as /api/path/agent-sessions/*: the
+  // real project by path, else the pseudo project path-created sessions use.
+  fastify.post<{ Body: Record<string, unknown> & { path?: string; branch?: string | null } }>(
+    "/api/path/workflow-loops", { bodyLimit: 1024 * 1024 }, async (req, reply) => {
+      const authResult = requireRawAuth(req, reply);
+      if (authResult === null) return;
+      const projectPath = req.body?.path;
+      if (typeof projectPath !== "string" || !projectPath) return reply.code(400).send({ error: "path is required" });
+      const parsed = parseRepeatLoopBody(req.body);
+      if (typeof parsed === "string") return reply.code(400).send({ error: parsed });
+      let project = (await fastify.storage.projects.getById(`path:${projectPath}`, authResult))
+        ?? (await fastify.storage.projects.getByPath(projectPath));
+      if (!project) {
+        const name = projectPath.split("/").filter(Boolean).pop() || projectPath;
+        try {
+          await fastify.storage.projects.create({ id: `path:${projectPath}`, name, path: projectPath }, authResult);
+        } catch (err: unknown) {
+          if (!(err instanceof Error && err.message.includes("UNIQUE constraint failed"))) throw err;
+        }
+        project = await fastify.storage.projects.getById(`path:${projectPath}`, authResult);
+      }
+      if (!project) return reply.code(404).send({ error: "Project not found" });
+      const branch = typeof req.body?.branch === "string" && req.body.branch ? req.body.branch : null;
+      try {
+        const run = await fastify.workflowEngine.startRepeatLoop({ ...parsed, project, branch });
+        return reply.code(201).send({ run });
+      } catch (err) {
+        const status = errStatus(err);
+        if (status) return reply.code(status).send({ error: (err as Error).message });
+        throw err;
+      }
+    });
+
   fastify.get<{ Querystring: { projectId: string; branch?: string } }>(
     "/api/workflow-runs", async (req, reply) => {
       const userId = requireAuth(req, reply);
@@ -816,6 +949,9 @@ async function routes(fastify: FastifyInstance) {
             trackRemoteRun(mapped, { ...info, bareRunId: r.id, projectId });
             return mapped;
           });
+          // A loop's sessions are created by the worker; this list is one of
+          // the places the hub gets to learn them (remote-loop-sessions.ts).
+          await Promise.all(runs.map((r) => publishRemoteLoopSessions(loopPublishDeps(), r)));
           logRead(runs.length, `remote:${info.remoteServerId}`);
           // Worker-namespace ids, rewritten with mapRemoteRun's prefix scheme
           // (a pure string prefix — no mapping table needed). A worker that
@@ -850,6 +986,9 @@ async function routes(fastify: FastifyInstance) {
       if (!result.ok) return sendProxyFailure(reply, result);
       const localRun = mapRemoteRun((result.data as { run: WorkflowRun }).run, info.remoteServerId, info.projectId);
       trackRemoteRun(localRun, info);
+      // The bell of a loop lands here: the notification names a run, and the
+      // session to open is one only the worker created.
+      await publishRemoteLoopSessions(loopPublishDeps(), localRun);
       return reply.send({ run: localRun });
     }
     const run = await fastify.storage.workflowRuns.getById(req.params.id);
@@ -859,7 +998,7 @@ async function routes(fastify: FastifyInstance) {
     return reply.send({ run });
   });
 
-  fastify.post<{ Params: { id: string }; Body: { action: "approve" | "cancel" | "finalize" | "accept" | "rereview"; editedPayload?: string; extend?: boolean } }>(
+  fastify.post<{ Params: { id: string }; Body: { action: "approve" | "cancel" | "finalize" | "accept" | "rereview" | "pause" | "resume"; editedPayload?: string; extend?: boolean } }>(
     "/api/workflow-runs/:id/gate", async (req, reply) => {
       const userId = requireAuth(req, reply);
       if (userId === null) return;
@@ -899,7 +1038,10 @@ async function routes(fastify: FastifyInstance) {
           const run = await fastify.workflowEngine.approveRereview(req.params.id, { extend: req.body?.extend === true });
           return reply.send({ run });
         }
-        return reply.code(400).send({ error: "action must be approve, cancel, finalize, accept or rereview" });
+        // Repeat loop: soft stop ("finish this item, then wait") and continue.
+        if (action === "pause") return reply.send({ run: await fastify.workflowEngine.pauseLoop(req.params.id) });
+        if (action === "resume") return reply.send({ run: await fastify.workflowEngine.resumeLoop(req.params.id) });
+        return reply.code(400).send({ error: "action must be approve, cancel, finalize, accept, rereview, pause or resume" });
       } catch (err) {
         const status = errStatus(err);
         if (status) return reply.code(status).send({ error: (err as Error).message });

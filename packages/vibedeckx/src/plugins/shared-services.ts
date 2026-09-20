@@ -8,6 +8,7 @@ import { ProjectChatManager } from "../project-chat-manager.js";
 import { createRemoteProjectSessionReader } from "../project-chat-tools.js";
 import { WorkflowEngine, type AgentOps } from "../workflow-engine.js";
 import { deliverInstruction, serializeSessionMutation } from "../instruction-delivery.js";
+import { publishRemoteLoopSessions } from "../remote-loop-sessions.js";
 import { EventBus } from "../event-bus.js";
 import { ProxyManager } from "../utils/proxy-manager.js";
 import type { ProxyConfig } from "../utils/proxy-manager.js";
@@ -485,6 +486,18 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("workflowEngine", workflowEngine);
   chatSessionManager.setWorkflowEngine(workflowEngine);
   agentSessionManager.setWorkflowSuppressionCheck((sessionId) => workflowEngine.shouldSuppressAgentEvent(sessionId));
+
+  // Hub side of a worker-run repeat loop: the worker creates every session of
+  // the loop itself, so the hub publishes them whenever a loop run crosses its
+  // bus — the mapped `workflowRunUpdated` frames and the gate / start routes'
+  // own emits all land here (remote-loop-sessions.ts).
+  eventBus.subscribe((event) => {
+    if (event.type !== "workflow:run-updated" || event.run.kind !== "repeat" || !event.run.id.startsWith("remote-")) return;
+    void publishRemoteLoopSessions({
+      remoteSessionMap, remotePatchCache, reverseConnectManager, eventBus, agentSessionManager,
+      storage: opts.storage, remoteNotificationSync,
+    }, event.run);
+  });
 
   chatSessionManager.setEventBus(eventBus);
   chatSessionManager.setRemoteExecutorMonitor(remoteExecutorMonitor);

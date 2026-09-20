@@ -91,6 +91,7 @@ function makeApp(opts: { workerCapabilities?: string[]; projectId?: string; serv
   const extendWatch = vi.fn(async () => undefined);
   const syncServer = vi.fn(async () => undefined);
   const enqueue = vi.fn((work: () => Promise<void>) => { void work(); });
+  const extendNotificationWatch = vi.fn(async () => undefined);
   // maxParamLength mirrors createServer's: a real `remote-…` id is ~117 chars
   // and find-my-way's default of 100 would 404 it before any handler runs.
   app = Fastify({ maxParamLength: 500 });
@@ -109,6 +110,7 @@ function makeApp(opts: { workerCapabilities?: string[]; projectId?: string; serv
       upsertBound: async (opts: { localSessionId: string; projectId: string; remoteServerId: string; remoteSessionId: string; branch: string | null; notificationSyncStart?: string }) =>
         upsert(opts.localSessionId, opts.projectId, opts.remoteServerId, opts.remoteSessionId, opts.branch, opts.notificationSyncStart),
       markTitleResolved: markTitleResolvedDb,
+      extendNotificationWatch,
     },
     workspaceRegistry: {
       getByProjectBranch: async (_projectId: string, branch: string, targetId: string) => ({
@@ -142,7 +144,7 @@ function makeApp(opts: { workerCapabilities?: string[]; projectId?: string; serv
   return {
     remoteSessionMap, upsert, updateRemoteSessionActivity, emit, markTitleResolvedDb, markTitleResolvedMem, confirmIntent,
     emitBranchActivityIfChanged,
-    prepareForNewTurn, extendWatch, syncServer, enqueue,
+    prepareForNewTurn, extendWatch, syncServer, enqueue, extendNotificationWatch,
   };
 }
 
@@ -706,6 +708,97 @@ describe("workflow-run remote proxying (front server)", () => {
     expect(gate.statusCode).toBe(200);
     expect(gate.json().run.status).toBe("waiting_reviewer");
     expect(proxyMock.mock.calls[1][3]).toEqual({ action: "rereview", extend: true });
+  });
+
+  // Repeat-until-done loop: the engine runs on the worker and creates EVERY
+  // session itself, so the hub's job is to gate, proxy, and publish on sight.
+  describe("repeat loop", () => {
+    const LOOP_CAP = ["http:POST /api/path/workflow-loops"];
+    const loopRun = (over: Record<string, unknown> = {}) => ({
+      ...bareRun, id: UUID_RUN, kind: "repeat", reviewer_session_id: null, source_turn_end_index: -1,
+      source_session_id: "it1", status: "running_task", loop_id: UUID_RUN, round: 1, max_rounds: 20,
+      params: JSON.stringify({ name: "Orders", prompt: "p", anchorSessionId: "it1", maxMinutes: 60, startedAt: Date.now() }),
+      ...over,
+    });
+    const PREFIX = `remote-${UUID_SERVER}-${UUID_PROJECT}-`;
+
+    it("refuses a worker that lacks the loop route — a 409, never a probe", async () => {
+      makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER });
+      await app.register(workflowRunRoutes);
+      const res = await app.inject({ method: "POST", url: "/api/workflow-loops", payload: { projectId: UUID_PROJECT, prompt: "do the next one" } });
+      expect(res.statusCode).toBe(409);
+      expect(res.json().code).toBe("worker_unsupported");
+      expect(proxyMock).not.toHaveBeenCalled();
+    });
+
+    it("proxies the start to the worker's path mirror and publishes the anchor with a watch that outlasts the time cap", async () => {
+      const { remoteSessionMap, upsert, extendNotificationWatch, emit } = makeApp({
+        projectId: UUID_PROJECT, serverId: UUID_SERVER, workerCapabilities: LOOP_CAP,
+      });
+      await app.register(workflowRunRoutes);
+      proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: loopRun() } });
+      const before = Date.now();
+      const res = await app.inject({
+        method: "POST", url: "/api/workflow-loops",
+        payload: { projectId: UUID_PROJECT, branch: "dev", prompt: "do the next one", maxIterations: 5, maxMinutes: 60 },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(proxyMock.mock.calls[0].slice(1, 3)).toEqual(["POST", "/api/path/workflow-loops"]);
+      expect(proxyMock.mock.calls[0][3]).toMatchObject({
+        path: "/w/repo", branch: "dev", prompt: "do the next one", maxIterations: 5, maxMinutes: 60, runId: expect.any(String),
+      });
+
+      const run = res.json().run;
+      expect(run.id).toBe(UUID_RUN_ID);
+      expect(run.source_session_id).toBe(`${PREFIX}it1`);
+      // Session ids inside params are rewritten too: the panel links to them.
+      expect(JSON.parse(run.params).anchorSessionId).toBe(`${PREFIX}it1`);
+
+      expect(remoteSessionMap.get(`${PREFIX}it1`)).toMatchObject({ remoteServerId: UUID_SERVER, remoteSessionId: "it1" });
+      expect(upsert).toHaveBeenCalledWith(`${PREFIX}it1`, UUID_PROJECT, UUID_SERVER, "it1", "dev", "from_start");
+      expect(ensureStreamMock).toHaveBeenCalledWith(`${PREFIX}it1`, expect.anything());
+      const [watched, until] = extendNotificationWatch.mock.calls[0] as unknown as [string, number];
+      expect(watched).toBe(`${PREFIX}it1`);
+      expect(until).toBeGreaterThanOrEqual(before + 60 * 60_000 + 30 * 60_000);
+      expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "workflow:run-updated" }));
+    });
+
+    it("rejects bad loop parameters before touching the worker", async () => {
+      makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER, workerCapabilities: LOOP_CAP });
+      await app.register(workflowRunRoutes);
+      for (const payload of [
+        { projectId: UUID_PROJECT },
+        { projectId: UUID_PROJECT, prompt: "p", maxIterations: 0 },
+        { projectId: UUID_PROJECT, prompt: "p", maxMinutes: 100000 },
+        { projectId: UUID_PROJECT, prompt: "p", agentType: "gpt" },
+      ]) {
+        expect((await app.inject({ method: "POST", url: "/api/workflow-loops", payload })).statusCode).toBe(400);
+      }
+      expect(proxyMock).not.toHaveBeenCalled();
+    });
+
+    it("the run list publishes sessions only the worker knew about — but not a gate's reserved id", async () => {
+      const { remoteSessionMap } = makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER, workerCapabilities: LOOP_CAP });
+      await app.register(workflowRunRoutes);
+      const gate = loopRun({
+        id: UUID_RUN, status: "waiting_resume", round: 3, source_session_id: "reserved",
+        params: JSON.stringify({ name: "Orders", prompt: "p", anchorSessionId: "it1", prevSessionId: "it2", maxMinutes: 60, startedAt: Date.now() }),
+      });
+      proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { runs: [gate] } });
+      const res = await app.inject({ method: "GET", url: `/api/workflow-runs?projectId=${UUID_PROJECT}&branch=dev` });
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.json().runs[0].params).prevSessionId).toBe(`${PREFIX}it2`);
+      expect([...remoteSessionMap.keys()].filter((k) => k.startsWith(PREFIX)).sort()).toEqual([`${PREFIX}it1`, `${PREFIX}it2`]);
+    });
+
+    it("pause / resume ride the gate route to the worker verbatim", async () => {
+      makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER, workerCapabilities: LOOP_CAP });
+      await app.register(workflowRunRoutes);
+      proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { run: loopRun() } });
+      const res = await app.inject({ method: "POST", url: `/api/workflow-runs/${UUID_RUN_ID}/gate`, payload: { action: "pause" } });
+      expect(res.statusCode).toBe(200);
+      expect(proxyMock.mock.calls[0].slice(1, 4)).toEqual(["POST", `/api/workflow-runs/${UUID_RUN}/gate`, { action: "pause" }]);
+    });
   });
 
   it("gate 404s an unknown remote run id (empty remoteRunMap)", async () => {

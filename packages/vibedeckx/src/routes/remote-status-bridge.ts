@@ -104,7 +104,7 @@ export function taskCompletedEventFromRemoteFrame(
  * vocabulary across machines and pass through untouched.
  */
 export function mapRemoteRun<
-  T extends { id: string; project_id: string; source_session_id: string; reviewer_session_id: string | null },
+  T extends { id: string; project_id: string; source_session_id: string; reviewer_session_id: string | null; params?: string | null },
 >(run: T, remoteServerId: string, projectId: string): T {
   const prefix = `remote-${remoteServerId}-${projectId}-`;
   return {
@@ -113,7 +113,26 @@ export function mapRemoteRun<
     project_id: projectId,
     source_session_id: `${prefix}${run.source_session_id}`,
     reviewer_session_id: run.reviewer_session_id ? `${prefix}${run.reviewer_session_id}` : null,
+    ...(run.params ? { params: mapRepeatParamsSessionIds(run.params, prefix) } : {}),
   };
+}
+
+/**
+ * A repeat loop's params name two more worker sessions — the anchor and the
+ * previous iteration (the one a gate's reason is about; the panel links to
+ * it). Unparseable params pass through untouched.
+ */
+function mapRepeatParamsSessionIds(params: string, prefix: string): string {
+  try {
+    const parsed = JSON.parse(params) as { anchorSessionId?: unknown; prevSessionId?: unknown };
+    return JSON.stringify({
+      ...parsed,
+      ...(typeof parsed.anchorSessionId === "string" ? { anchorSessionId: prefix + parsed.anchorSessionId } : {}),
+      ...(typeof parsed.prevSessionId === "string" ? { prevSessionId: prefix + parsed.prevSessionId } : {}),
+    });
+  } catch {
+    return params;
+  }
 }
 
 const UUID_PATTERN = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";

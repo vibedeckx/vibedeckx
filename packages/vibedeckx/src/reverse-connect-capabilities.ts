@@ -110,6 +110,11 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:GET /api/workflow-runs/:param": { since: "0.2.5", summary: "读 workflow run" },
   "http:POST /api/workflow-runs/:param/gate": { since: "0.2.5", summary: "workflow 用户闸门决定" },
   "http:POST /api/workflow-runs/:param/cancel": { since: "0.2.5", summary: "取消 workflow run" },
+  // Repeat-until-done loop. Gated explicitly by the hub (REPEAT_LOOP_CAPABILITY
+  // in workflow-run-routes.ts): a worker without it gets a 409, never a probe.
+  // The loop's pause / resume ride the existing gate route as new `action`
+  // values — only a worker that has this route can have a loop to act on.
+  "http:POST /api/path/workflow-loops": { since: "0.3.42", summary: "发起 repeat-until-done 循环(引擎在 worker,逐迭代新建 session)" },
 
   // --- Git / worktrees / diff ---
   // Response gained `gitError` (additive): a worker whose Git cannot read the

@@ -51,6 +51,7 @@ exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes
     "routes/session-ownership.ts",
     "routes/ws-authz.ts",
     "workflow-engine.ts",
+    "workflow-repeat-loop.ts",
   ],
   "getAll": [
     "agent-session-manager.ts",
@@ -69,6 +70,7 @@ exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes
     "routes/workflow-run-routes.ts",
     "routes/ws-authz.ts",
     "workflow-engine.ts",
+    "workflow-repeat-loop.ts",
   ],
   "getEntries": [
     "agent-session-lifecycle.ts",
@@ -89,6 +91,7 @@ exports[`agent_sessions projection baseline (lifecycle design Phase 0) > freezes
     "chat-session-manager.ts",
     "routes/agent-session-routes.ts",
     "workflow-engine.ts",
+    "workflow-repeat-loop.ts",
   ],
   "getLifecycleByPrepareOperationId": [
     "agent-session-lifecycle.ts",

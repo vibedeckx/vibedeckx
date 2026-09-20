@@ -445,6 +445,34 @@ describe("workflow-run-routes", () => {
     expect(res.statusCode).toBe(409);
   });
 
+  it("starts a local repeat loop and drives its pause / resume through the gate", async () => {
+    const loop = { ...run, id: "l1", kind: "repeat", status: "running_task" };
+    const startRepeatLoop = vi.fn(async () => loop);
+    const pauseLoop = vi.fn(async () => loop);
+    const resumeLoop = vi.fn(async () => loop);
+    const app = makeApp({
+      engine: { startRepeatLoop, pauseLoop, resumeLoop },
+      runs: { getById: async (id: string) => (id === "l1" ? loop : undefined) },
+    });
+    await app.register(workflowRunRoutes);
+
+    const started = await app.inject({
+      method: "POST", url: "/api/workflow-loops",
+      payload: { projectId: "p1", branch: "dev", name: "Orders", prompt: "next order", maxIterations: 7, checkCommand: "npm test" },
+    });
+    expect(started.statusCode).toBe(201);
+    expect(startRepeatLoop).toHaveBeenCalledWith(expect.objectContaining({
+      project: expect.objectContaining({ id: "p1" }), branch: "dev", name: "Orders", prompt: "next order",
+      maxIterations: 7, checkCommand: "npm test",
+    }));
+    expect((await app.inject({ method: "POST", url: "/api/workflow-loops", payload: { projectId: "p1" } })).statusCode).toBe(400);
+
+    expect((await app.inject({ method: "POST", url: "/api/workflow-runs/l1/gate", payload: { action: "pause" } })).statusCode).toBe(200);
+    expect((await app.inject({ method: "POST", url: "/api/workflow-runs/l1/gate", payload: { action: "resume" } })).statusCode).toBe(200);
+    expect(pauseLoop).toHaveBeenCalledWith("l1");
+    expect(resumeLoop).toHaveBeenCalledWith("l1");
+  });
+
   it("gate finalize calls requestFinalVerdict and returns the run", async () => {
     const requestFinalVerdict = vi.fn(async () => ({ ...run, status: "waiting_reviewer" }));
     const app = makeApp({ engine: { requestFinalVerdict } });
