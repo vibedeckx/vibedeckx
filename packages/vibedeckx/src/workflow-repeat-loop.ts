@@ -67,6 +67,12 @@ export interface RepeatLoopParams {
   remaining?: string | null;
   /** Soft stop: finish the current item, then put up a gate. */
   stopAfterCurrent?: boolean;
+  /**
+   * This gate is an iteration that could not START (its run turned into the
+   * gate in place), not the successor of one that ended. The panel needs the
+   * difference: the round that stopped is this one, and it has no session.
+   */
+  dispatchFailed?: boolean;
 }
 
 export interface StartRepeatLoopOptions {
@@ -293,7 +299,8 @@ export class RepeatLoopRunner {
   private async toGateInPlace(run: WorkflowRun, reason: string): Promise<WorkflowRun> {
     const params = parseRepeatParams(run);
     const moved = await this.storage.workflowRuns.transitionWithOutbox(
-      run.id, "preparing", "waiting_resume", { error: reason },
+      run.id, "preparing", "waiting_resume",
+      { error: reason, ...(params ? { params: JSON.stringify({ ...params, dispatchFailed: true } satisfies RepeatLoopParams) } : {}) },
       this.outbox(run, params?.anchorSessionId ?? run.source_session_id, "workflow_failed", "dispatch-failed"),
     );
     if (moved) {
@@ -622,7 +629,7 @@ export class RepeatLoopRunner {
     }
     const overCap = gate.max_rounds !== null && gate.round > gate.max_rounds;
     const overTime = Date.now() - params.startedAt > params.maxMinutes * 60_000;
-    const nextParams: RepeatLoopParams = { ...params, stopAfterCurrent: false, ...(overTime ? { startedAt: Date.now() } : {}) };
+    const nextParams: RepeatLoopParams = { ...params, stopAfterCurrent: false, dispatchFailed: false, ...(overTime ? { startedAt: Date.now() } : {}) };
     // A fresh session id: the old one may be a tombstone from a failed dispatch.
     const resumed = await this.storage.workflowRuns.transition(gate.id, "waiting_resume", "preparing", {
       error: null, params: JSON.stringify(nextParams), source_session_id: randomUUID(),

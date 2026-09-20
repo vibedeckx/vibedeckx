@@ -27,6 +27,18 @@ export interface PublishLoopDeps extends EnsureStreamDeps {
   remoteNotificationSync?: { enqueue(work: () => Promise<void>): void; syncServer(id: string, opts: { includeExpired: boolean }): Promise<void> };
 }
 
+/**
+ * Sessions whose publication COMPLETED, per hub instance (keyed by its
+ * remoteSessionMap). In memory on purpose: after a restart everything is
+ * ensured once more, which is exactly the repair we want.
+ */
+const publishedByMap = new WeakMap<object, Set<string>>();
+function publishedIn(map: object): Set<string> {
+  let set = publishedByMap.get(map);
+  if (!set) { set = new Set(); publishedByMap.set(map, set); }
+  return set;
+}
+
 interface LoopParamsView { anchorSessionId?: string; prevSessionId?: string | null; maxMinutes?: number; startedAt?: number }
 
 /**
@@ -52,19 +64,34 @@ export async function publishRemoteLoopSessions(deps: PublishLoopDeps, run: Work
     if (params.prevSessionId) localIds.add(params.prevSessionId);
     if (live) localIds.add(run.source_session_id);
 
+    const published = publishedIn(deps.remoteSessionMap);
     for (const localId of localIds) {
-      if (!localId.startsWith(prefix) || deps.remoteSessionMap.has(localId)) continue;
+      if (!localId.startsWith(prefix) || published.has(localId)) continue;
       const bareId = localId.slice(prefix.length);
-      deps.remoteSessionMap.set(localId, { remoteServerId, remoteSessionId: bareId, branch: run.branch });
-      // from_start: the session was created by the loop moments ago — and for
-      // the anchor, sequence zero is what recovers a milestone written before
-      // this row landed. Insert-only, so a known session keeps its cursor.
-      await bindRemoteSessionMapping(deps.storage, {
-        localSessionId: localId, projectId, remoteServerId, remoteSessionId: bareId,
-        branch: run.branch, remotePath: remoteConfig.remote_path, notificationSyncStart: "from_start",
-      });
-      ensureRemoteAgentStream(localId, deps);
-      deps.eventBus?.emit({ type: "session:process", projectId, branch: run.branch, sessionId: localId, alive: true });
+      try {
+        // An entry in remoteSessionMap says nothing about the rest: it may be
+        // ours from an attempt whose persist failed, or the sidebar's, or boot
+        // hydration's. Every step below is idempotent, so "published" is
+        // recorded only once all of them went through — and the next run that
+        // crosses this hub completes whatever is missing.
+        if (!deps.remoteSessionMap.has(localId)) {
+          deps.remoteSessionMap.set(localId, { remoteServerId, remoteSessionId: bareId, branch: run.branch });
+        }
+        // from_start: the session was created by the loop moments ago — and for
+        // the anchor, sequence zero is what recovers a milestone written before
+        // this row landed. Insert-only, so a known session keeps its cursor
+        // and its workspace binding.
+        await bindRemoteSessionMapping(deps.storage, {
+          localSessionId: localId, projectId, remoteServerId, remoteSessionId: bareId,
+          branch: run.branch, remotePath: remoteConfig.remote_path, notificationSyncStart: "from_start",
+        });
+        ensureRemoteAgentStream(localId, deps); // no-op while a stream is up or reconnecting
+        deps.eventBus?.emit({ type: "session:process", projectId, branch: run.branch, sessionId: localId, alive: true });
+        published.add(localId);
+      } catch (err) {
+        // Per session: one failure must not cost the others, or the watch below.
+        console.warn(`[RemoteLoop] publishing session ${localId} failed; will retry on the next run update:`, err);
+      }
     }
 
     if (params.anchorSessionId) {

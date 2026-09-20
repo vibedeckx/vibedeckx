@@ -1795,6 +1795,8 @@ export interface RepeatLoopParams {
   prevItem?: string | null;
   remaining?: string | null;
   stopAfterCurrent?: boolean;
+  /** Gate only: this iteration could not start (no session exists for it), as opposed to the previous one having ended. */
+  dispatchFailed?: boolean;
 }
 export function repeatLoopParams(run: Pick<WorkflowRun, "params">): RepeatLoopParams | null {
   if (!run.params) return null;

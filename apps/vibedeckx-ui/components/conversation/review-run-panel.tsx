@@ -424,8 +424,11 @@ function LoopCard({ run, busy, error, onAction }: {
   const params = repeatLoopParams(run);
   const round = run.round ?? 1;
   const gate = run.status === "waiting_resume";
-  // A gate's round is the one that would start next; show the one that stopped.
-  const shown = gate ? Math.max(1, round - 1) : round;
+  // A gate is normally the NEXT iteration's run, so the round that stopped is
+  // the one before it — unless this very iteration could not start and turned
+  // into the gate in place: then it is this round, and it has no session.
+  const failedToStart = gate && params?.dispatchFailed === true;
+  const shown = gate && !failedToStart ? Math.max(1, round - 1) : round;
   const pausing = params?.stopAfterCurrent === true;
   return (
     <div className="space-y-2" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
@@ -476,7 +479,9 @@ function LoopCard({ run, busy, error, onAction }: {
             <Play className="h-3 w-3 mr-1" />继续循环
           </Button>
           <span className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-            相关 session：「{params?.name ?? "Loop"} #{shown}」（见侧栏）
+            {failedToStart
+              ? `第 ${round} 次迭代没能启动，没有对应的 session`
+              : `相关 session：「${params?.name ?? "Loop"} #${shown}」（见侧栏）`}
           </span>
         </div>
       )}

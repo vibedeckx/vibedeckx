@@ -285,10 +285,13 @@ describe("repeat-until-done loop", () => {
     const run = await startLoop();
     expect(run).toMatchObject({ status: "waiting_resume", round: 1 });
     expect(run.error).toContain("resident_limit");
+    // Tells the panel this round never started — unlike a gate that succeeds an ended iteration.
+    expect(parseRepeatParams(run)?.dispatchFailed).toBe(true);
     expect(await outbox()).toEqual([expect.objectContaining({ kind: "workflow_failed" })]);
     const resumed = await engine.resumeLoop(run.id);
     expect(resumed).toMatchObject({ id: run.id, status: "running_task" });
     expect(resumed.source_session_id).not.toBe(run.source_session_id);
+    expect(parseRepeatParams(resumed)?.dispatchFailed).toBe(false);
   });
 
   describe("restart", () => {
@@ -360,23 +363,29 @@ describe("repeat-until-done loop", () => {
       expect(stopped).toContain(second.source_session_id);
     });
 
-    it("an abnormal end is one transaction: a crash inside it cannot strand the run in running_task", async () => {
+    // No crash is injected here. What this pins is the SHAPE: an abnormal end is
+    // one storage call carrying all three writes — never `abandon` / `transition`
+    // / `create` in sequence, where a crash in between strands a `running_task`
+    // run that restart reconciliation (which walks open steps) never sees again.
+    // That the one call is all-or-nothing is pinned in
+    // storage/workflow-run-steps.test.ts ("…or does none of it").
+    it("an abnormal end is a single transactional write: step abandoned + run ended + gate inserted", async () => {
       const first = await startLoop();
-      const realAbandon = storage.workflowRunSteps.abandon.bind(storage.workflowRunSteps);
-      // Old shape: abandon step → end run → create gate, three writes. Die after the first.
-      vi.spyOn(storage.workflowRunSteps, "abandon").mockImplementationOnce(async (id, reason) => {
-        await realAbandon(id, reason);
-        throw new Error("crash");
+      const claim = vi.spyOn(storage.workflowRuns, "claimStepAndTransition");
+      const abandon = vi.spyOn(storage.workflowRunSteps, "abandon");
+      const create = vi.spyOn(storage.workflowRuns, "create");
+      await finish(first, "", "failed");
+
+      expect(claim).toHaveBeenCalledTimes(1);
+      expect(claim.mock.calls[0][0]).toMatchObject({
+        abandonStep: expect.stringContaining("failed"),
+        run: { id: first.id, to: "failed", outbox: expect.objectContaining({ kind: "workflow_failed" }) },
+        insertRun: { status: "waiting_resume", round: 2, loop_id: first.id },
       });
-      const list = transcripts.get(first.source_session_id)!;
-      list.push({ type: "turn_end", timestamp: 2, outcome: "failed" } as AgentMessage);
-      await storage.agentSessions.updateStatus(first.source_session_id, "stopped");
-      bus.emit({ type: "session:status", projectId: "p1", branch: "dev", sessionId: first.source_session_id, status: "stopped" });
-      await new Promise((r) => setTimeout(r, 80));
-      await restart();
-      await vi.waitFor(async () => expect((await storage.workflowRuns.getById(first.id))?.status).toBe("failed"));
+      expect(abandon).not.toHaveBeenCalled();
+      expect(create).not.toHaveBeenCalled();
+      expect((await storage.workflowRuns.getById(first.id))?.status).toBe("failed");
       expect(await onlyActive()).toMatchObject({ status: "waiting_resume", round: 2 });
-      expect(await outbox()).toEqual([expect.objectContaining({ kind: "workflow_failed" })]);
     });
 
     describe("crash after the instruction was delivered, before the run reached running_task", () => {

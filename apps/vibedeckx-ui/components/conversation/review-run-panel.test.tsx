@@ -533,6 +533,17 @@ describe("ReviewRunPanel repeat loop", () => {
     vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [runFixture] } as never);
   });
 
+  it("a gate for an iteration that could not start names THAT round, and no session that never existed", async () => {
+    await renderWith(loopRun({
+      status: "waiting_resume", round: 3, error: "无法启动迭代 session：resident_limit",
+      params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, dispatchFailed: true }),
+    }));
+    expect(container.textContent).toContain("第 3 / 20 次");
+    expect(container.textContent).toContain("第 3 次迭代没能启动");
+    expect(container.textContent).not.toContain("#2");
+    expect(container.textContent).not.toContain("#3」");
+  });
+
   it("a running iteration shows progress and offers the soft stop and the hard stop — never review controls", async () => {
     await renderWith(loopRun());
     expect(container.textContent).toContain("Loop — Orders");

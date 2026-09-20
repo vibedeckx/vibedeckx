@@ -2160,7 +2160,7 @@ export interface Storage {
       id: string,
       from: WorkflowRunStatus,
       to: WorkflowRunStatus,
-      patch: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error">> | undefined,
+      patch: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error" | "params">> | undefined,
       outbox: Omit<NotificationOutboxEvent, "seq">,
     ): Promise<boolean>;
     /**
