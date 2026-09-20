@@ -20,6 +20,7 @@ import {
 import { useChatSession, type AgentMessage } from "@/hooks/use-chat-session";
 import { ToolApprovalCard } from "./tool-approval-card";
 import { ReviewRunPanel } from "./review-run-panel";
+import { NewLoopDialog } from "./new-loop-dialog";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import { MessageSquare, Loader2, Square, Search, Radio, SquarePen, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -174,6 +175,11 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             >
               <Radio className="h-3.5 w-3.5" />
             </Button>
+            <NewLoopDialog
+              projectId={projectId}
+              branch={branch}
+              disabled={activeRuns.some((r) => r.kind === "repeat")}
+            />
             <Button
               variant="ghost"
               size="icon"

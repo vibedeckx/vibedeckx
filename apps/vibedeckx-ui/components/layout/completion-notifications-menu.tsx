@@ -10,6 +10,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { api } from "@/lib/api";
 import type { NotificationKind, Project, ServerNotification } from "@/lib/api";
 import { groupNotifications } from "@/hooks/use-completion-notifications";
 
@@ -34,11 +35,30 @@ interface CompletionNotificationsMenuProps {
  * success colors match the sidebar's `StatusDot`, and both failure kinds use the
  * destructive color so "needs attention" is visually distinct at a glance.
  */
+/**
+ * A repeat loop writes all its milestones to its FIRST session's outbox (that
+ * is what keeps its bell reliable across hub restarts), so `session_id` is the
+ * anchor — not the session the milestone is about. The run knows that one:
+ * resolve it, and fall back to the anchor if the run can't be read.
+ */
+async function navigateTo(
+  n: { project_id: string; branch: string | null; session_id: string | null; workflow_run_id: string | null; kind: NotificationKind },
+  onNavigate: (projectId: string, branch: string | null, sessionId: string | null) => void,
+): Promise<void> {
+  let sessionId = n.session_id;
+  if (n.workflow_run_id && (n.kind === "workflow_failed" || n.kind === "loop_done")) {
+    const run = await api.getWorkflowRun(n.workflow_run_id).catch(() => null);
+    if (run?.kind === "repeat") sessionId = run.source_session_id;
+  }
+  onNavigate(n.project_id, n.branch, sessionId);
+}
+
 export const KIND_META: Record<NotificationKind, { label: string; dot: string }> = {
   session_result_ready: { label: "Session result is ready", dot: "bg-lime-400" },
   review_ready: { label: "Review feedback is ready", dot: "bg-emerald-500" },
   session_failed: { label: "Session failed", dot: "bg-destructive" },
   workflow_failed: { label: "Workflow needs attention", dot: "bg-destructive" },
+  loop_done: { label: "Loop finished — nothing left to process", dot: "bg-emerald-500" },
   // "Stop & send", never "restart": the Restart action wipes conversation
   // history, whereas stopping and sending a message renews the token losslessly.
   cross_remote_token_expired: { label: "Cross-remote expired — stop & send a message to renew", dot: "bg-amber-500" },
@@ -147,7 +167,7 @@ export function CompletionNotificationsMenu({
                   key={n.id}
                   onSelect={() => {
                     for (const id of group.ids) markRead(id);
-                    onNavigate(n.project_id, n.branch, n.session_id);
+                    void navigateTo(n, onNavigate);
                   }}
                   className={cn(
                     "group flex flex-col items-start gap-0.5 rounded-none px-3 py-2",

@@ -17,6 +17,10 @@ vi.mock("@/lib/api", () => ({
     workflowRunGate: vi.fn(async () => runFixture),
     cancelWorkflowRun: vi.fn(async () => runFixture),
   },
+  // Pure helper — the real one, so the loop card reads params as it does in the app.
+  repeatLoopParams: (run: { params?: string | null }) => {
+    try { return run.params ? JSON.parse(run.params) : null; } catch { return null; }
+  },
 }));
 vi.mock("@/components/ai-elements/message", () => ({
   MessageResponse: ({ children }: { children?: unknown }) => <div>{String(children ?? "")}</div>,
@@ -493,5 +497,71 @@ describe("ReviewRunPanel stale-click errors", () => {
 
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
     expect(api.getActiveWorkflowRuns).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("ReviewRunPanel repeat loop", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  const loopRun = (over: Record<string, unknown> = {}) => ({
+    ...runFixture, id: "l2", kind: "repeat", reviewer_session_id: null, review_focus: null,
+    status: "running_task", error: null, loop_id: "l1", round: 2, max_rounds: 20,
+    params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, prevItem: "order 17", remaining: "4" }),
+    ...over,
+  });
+
+  async function renderWith(run: ReturnType<typeof loopRun>) {
+    resetWorkflowRunsInflightForTests();
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [run] } as never);
+    await act(async () => {
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
+    });
+  }
+  const buttonNamed = (text: string) =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent === text);
+
+  beforeEach(() => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [runFixture] } as never);
+  });
+
+  it("a running iteration shows progress and offers the soft stop and the hard stop — never review controls", async () => {
+    await renderWith(loopRun());
+    expect(container.textContent).toContain("Loop — Orders");
+    expect(container.textContent).toContain("第 2 / 20 次");
+    expect(container.textContent).toContain("上一项：order 17");
+    expect(container.textContent).toContain("剩余：4");
+    expect(buttonNamed("发送反馈给原 session")).toBeUndefined();
+
+    await act(async () => { buttonNamed("做完这项后停")!.click(); });
+    expect(api.workflowRunGate).toHaveBeenCalledWith("l2", "pause");
+    await act(async () => { buttonNamed("结束")!.click(); });
+    expect(api.cancelWorkflowRun).toHaveBeenCalledWith("l2");
+  });
+
+  it("once a pause is requested the soft-stop button is gone and the card says so", async () => {
+    await renderWith(loopRun({
+      params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, stopAfterCurrent: true }),
+    }));
+    expect(container.textContent).toContain("做完这一项后暂停");
+    expect(buttonNamed("做完这项后停")).toBeUndefined();
+  });
+
+  it("a resume gate shows why it stopped, names the iteration that stopped, and continues on click", async () => {
+    await renderWith(loopRun({ id: "l3", status: "waiting_resume", round: 3, error: "这次迭代报告 blocked：需要你处理后再继续。" }));
+    expect(container.textContent).toContain("已停下，等你决定");
+    expect(container.textContent).toContain("报告 blocked");
+    // The gate row is round 3 — the iteration the user needs to look at is #2.
+    expect(container.textContent).toContain("Orders #2");
+    await act(async () => { buttonNamed("继续循环")!.click(); });
+    expect(api.workflowRunGate).toHaveBeenCalledWith("l3", "resume");
   });
 });

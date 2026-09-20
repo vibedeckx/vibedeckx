@@ -1,17 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type WorkflowRun, type WorkflowVerdict } from "@/lib/api";
+import { api, repeatLoopParams, type WorkflowRun, type WorkflowVerdict } from "@/lib/api";
 import { fetchActiveWorkflowRunsAt } from "@/lib/workflow-runs-fetch";
 import { useNotificationInbox } from "@/hooks/notification-inbox-context";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MessageResponse } from "@/components/ai-elements/message";
-import { Eye, FileCheck, Loader2, Pencil, X } from "lucide-react";
+import { Eye, FileCheck, Loader2, Pause, Pencil, Play, X } from "lucide-react";
 
-type GateAction = "approve" | "finalize" | "cancel" | "accept" | "rereview";
+type GateAction = "approve" | "finalize" | "cancel" | "accept" | "rereview" | "pause" | "resume";
 
-const ACTIVE = new Set(["preparing", "waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback", "waiting_rereview"]);
+const ACTIVE = new Set(["preparing", "waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback", "waiting_rereview", "running_task", "waiting_resume"]);
 
 const VERDICT_LABEL: Record<WorkflowVerdict, { text: string; className: string }> = {
   ship: { text: "ship", className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400" },
@@ -47,6 +47,9 @@ function runsSignature(runs: WorkflowRun[]): string {
 function explainStale(action: GateAction, fresh: WorkflowRun | null): string | null {
   // 结束本来就是幂等的,原文(如"反馈正在发送,无法取消")比任何改写都准。
   if (action === "cancel") return null;
+  // 循环的动作按"整个循环"寻址:手里的 run id 过期(那次迭代刚结算、下一次已建)
+  // 后端照样能执行,所以真失败时后端原文就是原因,无需改写。
+  if (action === "pause" || action === "resume") return null;
   if (!fresh) return "这次 review 已经结束了 —— 反馈可能已经发出,或者 run 已被取消。";
   if (action === "approve") {
     if (fresh.status === "discussing") return "reviewer 已进入讨论:先点「生成终稿」拿到新的结论,再发送反馈。";
@@ -273,7 +276,12 @@ export function ReviewRunPanel({
           </Button>
         </div>
       )}
-      {activeRuns.map((run) => (
+      {activeRuns.map((run) => run.kind === "repeat" ? (
+        <LoopCard key={run.id} run={run} busy={busy === run.id}
+          error={actionError?.runId === run.id ? actionError.message : null}
+          onAction={(action) => act(run.id, action, () =>
+            action === "cancel" ? api.cancelWorkflowRun(run.id) : api.workflowRunGate(run.id, action))} />
+      ) : (
         <div key={run.id} className="space-y-2" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
           <div className="flex items-center justify-between">
             <span className="font-medium">
@@ -397,6 +405,82 @@ export function ReviewRunPanel({
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * One repeat-until-done loop (`run.kind === "repeat"`). The run in hand is the
+ * loop's single active iteration — or its resume gate. Every action is
+ * addressed to the loop as a whole server-side, so a card whose iteration was
+ * settled a moment ago still stops / pauses the right thing.
+ */
+function LoopCard({ run, busy, error, onAction }: {
+  run: WorkflowRun;
+  busy: boolean;
+  error: string | null;
+  onAction: (action: "pause" | "resume" | "cancel") => void;
+}) {
+  const params = repeatLoopParams(run);
+  const round = run.round ?? 1;
+  const gate = run.status === "waiting_resume";
+  // A gate's round is the one that would start next; show the one that stopped.
+  const shown = gate ? Math.max(1, round - 1) : round;
+  const pausing = params?.stopAfterCurrent === true;
+  return (
+    <div className="space-y-2" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium min-w-0 truncate">
+          Loop — {params?.name ?? "Loop"}
+          <span className="ml-2 text-muted-foreground">
+            {run.status === "preparing" && "正在启动下一个 session…"}
+            {run.status === "running_task" && (pausing ? "做完这一项后暂停…" : "处理中…")}
+            {gate && "已停下，等你决定"}
+          </span>
+          <span className="ml-2 text-muted-foreground">
+            第 {shown}{run.max_rounds ? ` / ${run.max_rounds}` : ""} 次
+          </span>
+        </span>
+        <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
+          title="立即结束循环，并停掉正在运行的 session">
+          <X className="h-3 w-3 mr-1" />结束
+        </Button>
+      </div>
+      {(params?.prevItem || params?.remaining) && (
+        <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+          {params.prevItem && <>上一项：{params.prevItem}</>}
+          {params.prevItem && params.remaining && " · "}
+          {params.remaining && <>剩余：{params.remaining}</>}
+        </div>
+      )}
+      {run.error && (
+        <div className="text-amber-600" style={{ fontSize: "var(--conv-font-size, 12px)" }}>{run.error}</div>
+      )}
+      {run.status === "running_task" && (
+        <div className="flex items-center gap-2">
+          <span className="flex items-center text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+            <Loader2 className="h-3 w-3 mr-1 animate-spin" /> session「{params?.name ?? "Loop"} #{round}」正在工作
+          </span>
+          {!pausing && (
+            // The safer stop: a hard stop can leave an item half-processed, and
+            // only the instruction — not the engine — can make that harmless.
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction("pause")}>
+              <Pause className="h-3 w-3 mr-1" />做完这项后停
+            </Button>
+          )}
+        </div>
+      )}
+      {gate && (
+        <div className="flex items-center gap-2">
+          <Button size="sm" disabled={busy} onClick={() => onAction("resume")}>
+            <Play className="h-3 w-3 mr-1" />继续循环
+          </Button>
+          <span className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+            相关 session：「{params?.name ?? "Loop"} #{shown}」（见侧栏）
+          </span>
+        </div>
+      )}
+      {error && <div className="text-destructive" style={{ fontSize: "var(--conv-font-size, 12px)" }}>{error}</div>}
     </div>
   );
 }

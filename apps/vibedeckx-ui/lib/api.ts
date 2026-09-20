@@ -1196,6 +1196,7 @@ export type NotificationKind =
   | "session_result_ready"
   | "session_failed"
   | "workflow_failed"
+  | "loop_done"
   | "cross_remote_token_expired";
 
 /** Server row shape — snake_case, exactly as `/api/notifications` returns it. */
@@ -1754,7 +1755,12 @@ export interface WorkflowRun {
    * feedback and the NEXT round's run waits for the user to confirm the
    * re-review (no reviewer bound yet) or end the loop.
    */
-  status: "preparing" | "waiting_reviewer" | "waiting_feedback" | "discussing" | "sending_feedback" | "waiting_rereview" | "completed" | "cancelled" | "failed";
+  /**
+   * Repeat loop (`kind: "repeat"`) adds `running_task` (the iteration's session
+   * is working) and `waiting_resume` (the loop stopped and needs a human — the
+   * reason is in `error`).
+   */
+  status: "preparing" | "waiting_reviewer" | "waiting_feedback" | "discussing" | "sending_feedback" | "waiting_rereview" | "running_task" | "waiting_resume" | "completed" | "cancelled" | "failed";
   error: string | null;
   /**
    * Review loop fields — absent from workers that predate loops, so every
@@ -1765,12 +1771,39 @@ export interface WorkflowRun {
   max_rounds?: number | null;
   /** Reviewer's closing verdict, parsed by exact match; null/undefined = none or unrecognised. */
   verdict?: WorkflowVerdict | null;
+  /** Absent (older workers) = "review". A `repeat` run is one iteration of a repeat-until-done loop. */
+  kind?: "review" | "repeat";
+  /** JSON `RepeatLoopParams` — see `repeatLoopParams()`. */
+  params?: string | null;
+  outcome_status?: "continue" | "done" | "blocked" | null;
   created_at: string;
   updated_at: string;
 }
 
 export type WorkflowVerdict = "ship" | "needs-changes" | "cannot-verify";
-export type WorkflowGateAction = "approve" | "cancel" | "finalize" | "accept" | "rereview";
+export type WorkflowGateAction = "approve" | "cancel" | "finalize" | "accept" | "rereview" | "pause" | "resume";
+
+/** The part of a repeat loop's params the UI reads (server: workflow-repeat-loop.ts). */
+export interface RepeatLoopParams {
+  name: string;
+  prompt: string;
+  maxIterations: number;
+  maxMinutes: number;
+  checkCommand?: string | null;
+  /** Previous iteration's session — the one a gate's reason is about. */
+  prevSessionId?: string | null;
+  prevItem?: string | null;
+  remaining?: string | null;
+  stopAfterCurrent?: boolean;
+}
+export function repeatLoopParams(run: Pick<WorkflowRun, "params">): RepeatLoopParams | null {
+  if (!run.params) return null;
+  try { return JSON.parse(run.params) as RepeatLoopParams; } catch { return null; }
+}
+export const REPEAT_LOOP_DEFAULT_ITERATIONS = 20;
+export const REPEAT_LOOP_MAX_ITERATIONS = 200;
+export const REPEAT_LOOP_DEFAULT_MINUTES = 240;
+export const REPEAT_LOOP_MAX_MINUTES = 24 * 60;
 export const REVIEW_LOOP_DEFAULT_ROUNDS = 3;
 export const REVIEW_LOOP_MAX_ROUNDS = 10;
 
@@ -3448,6 +3481,32 @@ export const api = {
     const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}`);
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`Failed to fetch workflow run: ${res.status}`);
+    return (await res.json()).run;
+  },
+
+  /**
+   * Start a repeat-until-done loop on this workspace: the same instruction runs
+   * in a fresh session per item until a session reports `Status: done`.
+   */
+  async createRepeatLoop(opts: {
+    projectId: string;
+    branch: string | null;
+    name?: string;
+    prompt: string;
+    agentType?: string;
+    maxIterations?: number;
+    maxMinutes?: number;
+    checkCommand?: string;
+  }): Promise<WorkflowRun> {
+    const res = await authFetch(`${getApiBase()}/api/workflow-loops`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `Failed to start loop: ${res.status}`);
+    }
     return (await res.json()).run;
   },
 

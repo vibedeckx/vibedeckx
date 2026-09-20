@@ -57,6 +57,10 @@ const STATUS_RANK: Record<WorkflowRun["status"], number> = {
   // not be sent goes waiting_reviewer → waiting_rereview, and a lower rank
   // would make that legitimate step back look like a stale frame.
   waiting_rereview: 1,
+  // Repeat-loop statuses. Never placeholders (no reviewer), ranked only so the
+  // table stays total: a gate and a running iteration are peers.
+  running_task: 1,
+  waiting_resume: 1,
   completed: 9,
   cancelled: 9,
   failed: 9,
