@@ -326,9 +326,27 @@ R1–R7 已提交。后端与前端全量测试通过，两端 `tsc` 干净。`c
     守卫落空就重读重算（上限 5 次，仍不成则步骤保持 dispatched 并报错）。异常结束的 CAS 同样接受两种状态。
 17. 软停落在“重读 params”与提交之间仍会丢：接口返回成功，下一迭代照常启动。由第 16 条的 `expectParams` 关闭。
 
+**第三轮复核（同日）：**
+
+18. **hub 的“已发布”以全部步骤成功为准。** `publishRemoteLoopSessions` 曾用 `remoteSessionMap.has()` 代表发布完成，
+    而内存登记先于持久化 mapping：持久化一旦失败，之后每次调用都跳过，锚点的 mapping——循环铃声的基础——永远补不上。
+    现在每步幂等、逐 session 隔离错误，全部成功后才记入进程内的 published 集合；重启后自然重新确保一次。
+19. **原地变成的闸门带 `dispatchFailed`**（params 内），面板据此显示“第 N 次迭代没能启动”，不再回指上一轮、
+    也不再提示一个不存在的 session。
+20. “异常结束是一个事务”的测试此前在已不被调用的 `abandon()` 上注入崩溃，名不副实；改为钉住形态（一次
+    `claimStepAndTransition`，不调用 `abandon / create`），原子性由存储层的回滚测试负责。
+
+**最终版本上的 remote smoke（c5193c38 构建，hub + reverse-connect worker，真实 claude CLI，一次性 data-dir）：**
+经 hub 发起 → worker 自行推进到第 2 次迭代 → **用过期的第 1 轮 id** 经 hub 软停 → 做完当前项后出现闸门、hub 无通知 →
+**闸门期间 `kill -9` hub 并重启**（worker 4s 后重连）→ 重启后的 hub 列出闸门 → 经 hub `resume` → 跑完 4 项，
+第 5 个 session 报 `done` → `loop_done` 出现在重启后的 hub 收件箱。另起一个循环，迭代进行中经 hub 硬停：
+run `cancelled`、session `stopped`，45s 后 worker 库里没有新迭代，todo 一项未动。
+本次 smoke 未覆盖 blocked → `workflow_failed` 到达 hub（修正前的 e2e 覆盖过；发布路径此后有改动，由单测覆盖）。
+
 **未做 / 已知限制：**
 
-- 以上两轮修正之后**没有重跑真机 e2e**，由单元 / 交错测试覆盖。
+- 维护性整理留待触及相关代码时：runner 借用 `prepareReviewer / activateReviewer` 这组名字创建 task session；
+  `AgentOps.stopSession` 对 repeat 是必需的却声明为可选；本文正文（§5–§7）与本节有重复和被本节作废的旧描述。
 - `scripts/cross-version-e2e.mjs` 没有循环的 smoke 步骤（它的桩 CLI 只会回固定字符串，跑不了"按约定收尾"的循环）；
   新 capability 登记在 `COVERED_BY`，指向路由测试。
 - 面板卡片不提供 session 跳转链接（review 卡片同样没有），靠侧栏里的 `<name> #N`。
