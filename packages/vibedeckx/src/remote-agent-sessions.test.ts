@@ -1088,6 +1088,17 @@ describe("createRemoteAgentSession", () => {
     }
     expect(emitted).toEqual(["working", "completed", "working", "completed"]);
 
+    // Frames delivered back to back, NOT awaited one by one: the `running`
+    // frame waits on a storage write, the `branchActivity` frame does not. If
+    // frames were handled concurrently the late `working` would land after
+    // `stopped` and relight a dot the user just stopped.
+    adapter!.deliverMessage(running);
+    adapter!.deliverMessage(JSON.stringify({ JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "stopped" } }] }));
+    adapter!.deliverMessage(JSON.stringify({ branchActivity: { activity: "stopped", since: Date.now() } }));
+    await vi.waitFor(() => expect(emitted).toHaveLength(6));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(emitted.slice(4)).toEqual(["working", "stopped"]);
+
     cache.setFinished(sessionId);
     cache.shutdown();
   });

@@ -352,6 +352,10 @@ run `cancelled`、session `stopped`，45s 后 worker 库里没有新迭代，tod
     学到的 `working` 再也回不来。侧栏有活跃 session 行时点被强制为灰，最后一个 session 消失才露出来。修在通用位置：
     hub 桥接到远程 session 的 `running` 状态补丁时发 `working`（1b2f5e10，hub-only，无需发 worker）。
     真机验证：hub SSE 序列 working → completed ×3，结束于 completed。
+23. **第 22 条的复核修正：同一连接的帧按接收顺序处理。** 帧原先各自并发处理，而 `running` 帧要等一次存储写入、
+    `branchActivity` 帧同步发布：连续到达的 `running → stopped → branchActivity:stopped` 会以 stopped、working 的顺序
+    发出，把刚停掉的点重新点亮。现在前一帧没处理完时后一帧排队（空闲时仍同步起步，行为与原先一致）。
+    回归测试连续投递、不逐帧等待。未重跑真机。
 
 **未做 / 已知限制：**
 

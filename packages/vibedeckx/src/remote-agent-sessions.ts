@@ -1149,10 +1149,25 @@ export function connectPersistentRemoteWs(
       cache.broadcast(sessionId, raw);
     }
   };
+  // One connection's frames are handled strictly in the order received. Some
+  // frames await a storage write before publishing (status, taskCompleted,
+  // error) and others publish synchronously (branchActivity); handled
+  // concurrently, a `running` frame's `working` could land AFTER the
+  // `stopped` that followed it on the wire and relight a dot the user just
+  // stopped. The awaited writes are local and take milliseconds; streaming
+  // text frames await nothing, so queuing adds no latency to them.
+  //
+  // With nothing in flight the frame still starts synchronously, exactly as
+  // before — only a frame that arrives behind an unfinished one waits.
+  let liveFrames: Promise<void> = Promise.resolve();
+  let framesInFlight = 0;
   const handleLiveMessage = (data: import("ws").RawData) => {
-    void processLiveMessage(data).catch((error) => {
-      console.error(`[AgentWS] live frame handling failed for ${sessionId}:`, error);
-    });
+    const run = () => processLiveMessage(data);
+    const handled = framesInFlight === 0 ? run() : liveFrames.then(run);
+    framesInFlight++;
+    liveFrames = handled
+      .catch((error) => console.error(`[AgentWS] live frame handling failed for ${sessionId}:`, error))
+      .finally(() => { framesInFlight--; });
   };
 
   remoteWs.on("open", () => {
