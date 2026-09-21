@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useGlobalEventStream } from '@/hooks/global-event-stream';
+import { STREAM_RECONNECTED_EVENT, useGlobalEventStream } from '@/hooks/global-event-stream';
 import {
   getNotifications,
   markAllNotificationsRead as markAllReadApi,
@@ -45,6 +45,24 @@ export const SOUND_FOR_KIND: Record<NotificationKind, string> = {
   // overstate it; the review cue's "look at this when you can" register fits.
   cross_remote_token_expired: '/sounds/sound2.mp3',
 };
+
+/**
+ * How old a milestone may be and still earn its cue when it only surfaces
+ * through the reconnect catch-up. The cue means "look now"; a completion
+ * missed for longer than this is just a bell entry — replaying it late would
+ * tell the user nothing the bell doesn't. Sized to cover the watchdog's
+ * detect-and-reopen of a silent stream (~45s) plus a slow reconnect.
+ */
+export const CATCH_UP_SOUND_WINDOW_MS = 2 * 60 * 1000;
+
+/**
+ * Delays before re-trying a failed catch-up read. The stream reopening says the
+ * server is reachable, not that the network has settled — the inbox read right
+ * behind it can still hit the tail of the same outage, and nothing else would
+ * ask again while the stream stays healthy. Bounded well inside the sound
+ * window: past it a success only lands bell entries.
+ */
+export const CATCH_UP_RETRY_DELAYS_MS = [2_000, 5_000, 15_000];
 
 /**
  * The pre-milestone, browser-only store: branch-keyed entries with no stable
@@ -240,6 +258,7 @@ export function useCompletionNotifications(
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
+
   /**
    * Optimistic read: flip locally, then persist. On failure the local flip is
    * rolled back, leaving the row unread on both sides — the next hydration
@@ -323,11 +342,12 @@ export function useCompletionNotifications(
     };
   }, [answerConsumed]);
 
-  useGlobalEventStream((data) => {
-    if (data.type !== 'notification:created') return;
-    const notification = (data as { notification?: ServerNotification }).notification;
-    if (!notification?.id) return;
-
+  /**
+   * Take in one milestone from the live stream or the reconnect catch-up.
+   * Returns whether it earns a cue; the caller plays it, so a catch-up batch
+   * can collapse into a single sound.
+   */
+  const ingest = useCallback((notification: ServerNotification): boolean => {
     const isNew = !heard.current.has(notification.id);
     heard.current.add(notification.id);
 
@@ -344,7 +364,7 @@ export function useCompletionNotifications(
     // so a hydrated or replayed row stays silent. A consumed run is the one
     // case that earns silence as well as no entry — it is over, so there is
     // nothing left for the cue to send the user to look at.
-    if (isNew && !consumed) playSound(SOUND_FOR_KIND[notification.kind]);
+    const earnsCue = isNew && !consumed;
 
     const autoRead = onScreen || consumed;
     setNotifications((prev) =>
@@ -356,6 +376,72 @@ export function useCompletionNotifications(
         // will show it unread again rather than losing it.
       });
     }
+    return earnsCue;
+  }, []);
+
+  /**
+   * The server keeps no per-client backlog, so a milestone emitted while the
+   * stream was down (or silently dead — a zombie socket swallows frames until
+   * the watchdog notices) never arrives as a frame. Re-read the inbox and take
+   * in whatever this browser hasn't seen. Only milestones still fresh get a
+   * cue, and a batch gets one cue (the newest's) rather than a burst.
+   *
+   * A failed read is retried on `CATCH_UP_RETRY_DELAYS_MS`. A newer reconnect
+   * supersedes a pending retry — it starts its own catch-up.
+   */
+  const catchUpRetry = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unmounted = useRef(false);
+  useEffect(() => {
+    unmounted.current = false;
+    return () => {
+      unmounted.current = true;
+      if (catchUpRetry.current) clearTimeout(catchUpRetry.current);
+    };
+  }, []);
+
+  const catchUp = useCallback(() => {
+    if (catchUpRetry.current) {
+      clearTimeout(catchUpRetry.current);
+      catchUpRetry.current = null;
+    }
+    const run = (attempt: number) => {
+      void getNotifications({ limit: 100 })
+        .then((rows) => {
+          const now = Date.now();
+          let cue: ServerNotification | null = null;
+          for (const row of rows) {
+            if (heard.current.has(row.id)) continue;
+            const earnsCue = ingest(row);
+            const fresh = row.read_at === null && now - row.created_at <= CATCH_UP_SOUND_WINDOW_MS;
+            if (earnsCue && fresh && (!cue || row.created_at > cue.created_at)) cue = row;
+          }
+          if (cue) playSound(SOUND_FOR_KIND[cue.kind]);
+        })
+        .catch((err) => {
+          const delay = CATCH_UP_RETRY_DELAYS_MS[attempt];
+          console.warn(
+            `[notifications] reconnect catch-up failed${delay === undefined ? ', giving up' : `, retrying in ${delay}ms`}:`,
+            err,
+          );
+          if (delay === undefined || unmounted.current) return;
+          catchUpRetry.current = setTimeout(() => {
+            catchUpRetry.current = null;
+            run(attempt + 1);
+          }, delay);
+        });
+    };
+    run(0);
+  }, [ingest]);
+
+  useGlobalEventStream((data) => {
+    if (data.type === STREAM_RECONNECTED_EVENT) {
+      catchUp();
+      return;
+    }
+    if (data.type !== 'notification:created') return;
+    const notification = (data as { notification?: ServerNotification }).notification;
+    if (!notification?.id) return;
+    if (ingest(notification)) playSound(SOUND_FOR_KIND[notification.kind]);
   });
 
   // Navigating *into* a session clears its pending notifications — covers the

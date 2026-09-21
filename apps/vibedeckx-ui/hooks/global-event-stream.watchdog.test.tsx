@@ -20,7 +20,9 @@ vi.mock("@/lib/api", async (importOriginal) => {
 import { getFreshToken } from "@/lib/api";
 import {
   GlobalEventStreamProvider,
+  STREAM_RECONNECTED_EVENT,
   useConnectionStatus,
+  useGlobalEventStream,
   type ConnectionState,
 } from "./global-event-stream";
 
@@ -61,6 +63,16 @@ function Probe() {
   return null;
 }
 
+/** Event types dispatched to stream listeners, in order. */
+let dispatched: Array<string | undefined> = [];
+
+function Recorder() {
+  useGlobalEventStream((data) => {
+    dispatched.push(data.type);
+  });
+  return null;
+}
+
 let root: Root | null = null;
 
 /** Render the provider and bring the first stream up to `live`. */
@@ -71,6 +83,7 @@ async function renderLive() {
     r.render(
       <GlobalEventStreamProvider>
         <Probe />
+        <Recorder />
       </GlobalEventStreamProvider>,
     );
   });
@@ -89,6 +102,7 @@ beforeEach(() => {
   tokenMock.mockReset();
   tokenMock.mockResolvedValue(null); // solo mode: no auth, no token
   state = "connecting";
+  dispatched = [];
 });
 
 afterEach(async () => {
@@ -186,6 +200,19 @@ describe("SSE watchdog", () => {
     // EventSource open, unreferenced, and still dispatching to every listener.
     expect(FakeEventSource.instances).toHaveLength(2);
     expect(FakeEventSource.instances[1].closed).toBe(false);
+  });
+
+  it("tells listeners when a stream opens again, but not on the first open", async () => {
+    await renderLive();
+    expect(dispatched).toEqual([]);
+
+    // Silent past the deadline → the watchdog reopens; the replacement opens.
+    await tick(45000);
+    await act(async () => {
+      FakeEventSource.instances[1].onopen?.();
+    });
+
+    expect(dispatched).toEqual([STREAM_RECONNECTED_EVENT]);
   });
 
   it("leaves a healthy stream alone", async () => {

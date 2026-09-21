@@ -26,6 +26,14 @@ function getApiBase(): string {
 export type GlobalEvent = { type?: string; [key: string]: unknown };
 type Listener = (data: GlobalEvent) => void;
 
+/**
+ * Synthetic, client-only event dispatched to listeners when the stream opens
+ * again after having been open before. The server keeps no per-client backlog,
+ * so anything emitted while the old stream was dropped (or silently dead) is
+ * gone — consumers that cannot afford that re-fetch their state on this event.
+ */
+export const STREAM_RECONNECTED_EVENT = "stream:reconnected";
+
 // Connection liveness for display:
 //   - connecting — opening or (auto-)reconnecting, no live stream yet
 //   - live       — open and receiving data (events or heartbeats)
@@ -119,6 +127,9 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
   const updateAvailable =
     SKEW_CHECK_ENABLED && serverBuildId !== null && serverBuildId !== UI_BUILD_ID;
 
+  // Survives effect re-runs: any open after the first is a reconnect.
+  const hasOpenedRef = useRef(false);
+
   const subscribe = useCallback((listener: Listener) => {
     listenersRef.current.add(listener);
     return () => {
@@ -182,6 +193,16 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
     // open, unreferenced, and still dispatching to every listener.
     let generation = 0;
 
+    function dispatch(data: GlobalEvent) {
+      for (const listener of listenersRef.current) {
+        try {
+          listener(data);
+        } catch {
+          // A faulty listener must not kill the stream for the others.
+        }
+      }
+    }
+
     function teardown() {
       generation += 1;
       if (retryTimer) {
@@ -222,6 +243,8 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
       source.onopen = () => {
         attempt = 0;
         markAlive("open");
+        if (hasOpenedRef.current) dispatch({ type: STREAM_RECONNECTED_EVENT });
+        hasOpenedRef.current = true;
       };
 
       source.onmessage = (event) => {
@@ -245,13 +268,7 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
           setServerBuildId(typeof data.uiBuildId === "string" ? data.uiBuildId : null);
           return;
         }
-        for (const listener of listenersRef.current) {
-          try {
-            listener(data);
-          } catch {
-            // A faulty listener must not kill the stream for the others.
-          }
-        }
+        dispatch(data);
       };
 
       source.onerror = () => {

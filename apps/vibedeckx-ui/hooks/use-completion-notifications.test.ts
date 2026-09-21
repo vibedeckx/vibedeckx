@@ -14,6 +14,7 @@ vi.mock('@/lib/api', () => api);
 // listener so tests can push SSE frames synchronously.
 const stream = vi.hoisted(() => ({ listener: null as ((data: unknown) => void) | null }));
 vi.mock('@/hooks/global-event-stream', () => ({
+  STREAM_RECONNECTED_EVENT: 'stream:reconnected',
   useGlobalEventStream: (listener: (data: unknown) => void) => {
     stream.listener = listener;
   },
@@ -22,6 +23,8 @@ vi.mock('@/hooks/global-event-stream', () => ({
 const played = vi.hoisted(() => ({ srcs: [] as string[] }));
 
 import {
+  CATCH_UP_RETRY_DELAYS_MS,
+  CATCH_UP_SOUND_WINDOW_MS,
   LEGACY_STORAGE_KEY,
   SOUND_FOR_KIND,
   groupNotifications,
@@ -212,6 +215,12 @@ describe('useCompletionNotifications', () => {
   async function pushSse(notification: ServerNotification) {
     await act(async () => {
       stream.listener?.({ type: 'notification:created', projectId: notification.project_id, notification });
+    });
+  }
+
+  async function reconnect() {
+    await act(async () => {
+      stream.listener?.({ type: 'stream:reconnected' });
     });
   }
 
@@ -519,6 +528,101 @@ describe('useCompletionNotifications', () => {
     await render();
     await act(async () => { latest.markReviewRunRead('run-1'); });
     expect(api.markNotificationRead).not.toHaveBeenCalled();
+  });
+
+  describe('reconnect catch-up', () => {
+    it('re-reads the inbox and sounds a milestone the dropped stream swallowed', async () => {
+      await render();
+      api.getNotifications.mockResolvedValue([row({ id: 'missed', created_at: Date.now() - 30_000 })]);
+      await reconnect();
+      expect(latest.notifications.map((n) => n.id)).toEqual(['missed']);
+      expect(played.srcs).toEqual(['/sounds/sound1.mp3']);
+    });
+
+    it('adds a stale milestone to the bell silently — a late cue means nothing', async () => {
+      await render();
+      api.getNotifications.mockResolvedValue([
+        row({ id: 'old', created_at: Date.now() - CATCH_UP_SOUND_WINDOW_MS - 1_000 }),
+      ]);
+      await reconnect();
+      expect(latest.notifications.map((n) => n.id)).toEqual(['old']);
+      expect(played.srcs).toEqual([]);
+    });
+
+    it('does not re-sound rows this browser already heard', async () => {
+      const now = Date.now();
+      api.getNotifications.mockResolvedValue([row({ id: 'hydrated', created_at: now })]);
+      await render();
+      await pushSse(row({ id: 'live', created_at: now }));
+      played.srcs = [];
+      api.getNotifications.mockResolvedValue([
+        row({ id: 'hydrated', created_at: now }),
+        row({ id: 'live', created_at: now }),
+      ]);
+      await reconnect();
+      expect(played.srcs).toEqual([]);
+    });
+
+    it('collapses several missed milestones into one cue, the newest one\'s', async () => {
+      await render();
+      const now = Date.now();
+      api.getNotifications.mockResolvedValue([
+        row({ id: 'b', kind: 'session_failed', session_id: 's2', created_at: now - 1_000 }),
+        row({ id: 'a', kind: 'session_result_ready', session_id: 's1', created_at: now - 20_000 }),
+      ]);
+      await reconnect();
+      expect(latest.notifications).toHaveLength(2);
+      expect(played.srcs).toEqual(['/sounds/failure.mp3']);
+    });
+
+    it('stays silent for a missed milestone already read elsewhere', async () => {
+      await render();
+      api.getNotifications.mockResolvedValue([row({ id: 'r', created_at: Date.now(), read_at: Date.now() })]);
+      await reconnect();
+      expect(played.srcs).toEqual([]);
+    });
+
+    it('retries a failed catch-up read without waiting for another reconnect', async () => {
+      await render();
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        api.getNotifications
+          .mockRejectedValueOnce(new Error('503'))
+          .mockResolvedValueOnce([row({ id: 'missed', created_at: Date.now() - 10_000 })]);
+        await reconnect();
+        expect(played.srcs).toEqual([]);
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(CATCH_UP_RETRY_DELAYS_MS[0]); });
+        expect(latest.notifications.map((n) => n.id)).toEqual(['missed']);
+        expect(played.srcs).toEqual(['/sounds/sound1.mp3']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('gives up after the bounded retries', async () => {
+      await render();
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        api.getNotifications.mockReset();
+        api.getNotifications.mockRejectedValue(new Error('offline'));
+        await reconnect();
+        const total = CATCH_UP_RETRY_DELAYS_MS.reduce((a, b) => a + b, 0);
+        await act(async () => { await vi.advanceTimersByTimeAsync(total * 2); });
+        expect(api.getNotifications).toHaveBeenCalledTimes(1 + CATCH_UP_RETRY_DELAYS_MS.length);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('auto-reads a missed milestone for the session on screen, still with its cue', async () => {
+      await render('s1');
+      api.getNotifications.mockResolvedValue([row({ id: 'x', session_id: 's1', created_at: Date.now() })]);
+      await reconnect();
+      expect(api.markNotificationRead).toHaveBeenCalledWith('x');
+      expect(latest.unreadCount).toBe(0);
+      expect(played.srcs).toEqual(['/sounds/sound1.mp3']);
+    });
   });
 
   it('ignores branch:activity entirely — no bell entry, no sound', async () => {
