@@ -1009,6 +1009,20 @@ export function connectPersistentRemoteWs(
         if (eventBus && activityReady === true) {
           console.log(`[AgentWS:remote→eventBus] ${sessionId} session:status=${statusEvent.status}`);
           eventBus.emit(statusEvent);
+          // A turn the WORKER started — a workflow dispatch, a repeat-loop
+          // iteration, a queued message — never passes through this hub's
+          // /message route, the only other place the hub says "working". Without
+          // this, such a branch's completions all read completed → completed
+          // and the dedupe gate drops every one after the first, while a
+          // browser that learnt "working" from the REST snapshot keeps a blue
+          // dot forever. A hub-sent message already emitted it: deduped here.
+          // Gated like the status event itself, so a stale replayed frame
+          // cannot flip a finished branch back.
+          if (statusEvent.status === "running") {
+            agentSessionManager?.emitBranchActivityIfChanged(statusEvent.projectId, statusEvent.branch, {
+              activity: "working", since: Date.now(), sessionId,
+            });
+          }
         }
       }
     } else if ("finished" in parsed) {

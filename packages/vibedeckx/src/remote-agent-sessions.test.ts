@@ -8,6 +8,7 @@ import { RemotePatchCache } from "./remote-patch-cache.js";
 import type { RemoteSessionInfo } from "./server-types.js";
 import type { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import { EventBus, type GlobalEvent } from "./event-bus.js";
+import { BranchActivityDedupe } from "./branch-activity.js";
 import { conventionalWorktreePath } from "./utils/worktree-paths.js";
 
 const proxyToRemoteAuto = vi.hoisted(() => vi.fn());
@@ -1038,6 +1039,55 @@ describe("createRemoteAgentSession", () => {
     expect(observed).toHaveLength(3);
 
     updateActivity.mockRestore();
+    cache.setFinished(sessionId);
+    cache.shutdown();
+  });
+
+  // A turn the WORKER starts (a workflow dispatch, a repeat-loop iteration, a
+  // queued message) never passes through the hub's /message route, which was
+  // the only place the hub said "working". Its completions then all read as
+  // completed → completed and the dedupe gate dropped every one after the
+  // first — so a browser that had learnt "working" from the REST snapshot kept
+  // a blue workspace dot forever.
+  it("a worker-started turn marks the branch working, so each completion gets through the dedupe gate", async () => {
+    await storage.projects.create({ id: "loop-project", name: "Loop", path: null }, "user-1");
+    const server = await storage.remoteServers.create({ name: "Loop worker", url: "http://worker" }, "user-1");
+    await storage.projectRemotes.add({ project_id: "loop-project", remote_server_id: server.id, remote_path: "/repo" });
+    const sessionId = `remote-${server.id}-loop-project-worker-session`;
+    const remoteInfo = { remoteServerId: server.id, remoteSessionId: "worker-session", branch: "dev" };
+    await storage.remoteSessionMappings.upsert(sessionId, "loop-project", server.id, "worker-session", "dev", "from_now");
+    await storage.searchCache.noteSessionCreated({
+      localSessionId: sessionId, projectId: "loop-project", targetId: server.id, branch: "dev",
+    });
+
+    let adapter: VirtualWsAdapter | undefined;
+    const reverse = {
+      isConnected: () => true,
+      setChannelAdapter: (_s: string, _c: string, value: VirtualWsAdapter) => { adapter = value; },
+      openVirtualChannel: vi.fn(), sendChannelData: vi.fn(), closeChannel: vi.fn(),
+    };
+    const cache = new RemotePatchCache();
+    // The real gate, as AgentSessionManager applies it.
+    const gate = new BranchActivityDedupe();
+    const emitted: string[] = [];
+    const manager = {
+      emitBranchActivityIfChanged: (projectId: string, branch: string | null, state: { activity: never; since: number }) => {
+        if (!gate.shouldEmit(projectId, branch, state.activity, state.since)) return null;
+        emitted.push(state.activity);
+        return state;
+      },
+    };
+    connectPersistentRemoteWs(sessionId, remoteInfo, cache, reverse as never, new EventBus(), manager as never, storage);
+
+    const running = JSON.stringify({ JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "running" } }] });
+    for (const turn of [1, 2]) {
+      adapter!.deliverMessage(running);
+      await vi.waitFor(() => expect(emitted).toHaveLength(turn * 2 - 1));
+      adapter!.deliverMessage(JSON.stringify({ taskCompleted: { summaryText: "Status: continue" } }));
+      await vi.waitFor(() => expect(emitted).toHaveLength(turn * 2));
+    }
+    expect(emitted).toEqual(["working", "completed", "working", "completed"]);
+
     cache.setFinished(sessionId);
     cache.shutdown();
   });
