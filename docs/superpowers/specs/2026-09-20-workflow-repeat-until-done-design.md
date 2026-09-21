@@ -343,6 +343,16 @@ R1–R7 已提交。后端与前端全量测试通过，两端 `tsc` 干净。`c
 run `cancelled`、session `stopped`，45s 后 worker 库里没有新迭代，todo 一项未动。
 本次 smoke 未覆盖 blocked → `workflow_failed` 到达 hub（修正前的 e2e 覆盖过；发布路径此后有改动，由单测覆盖）。
 
+**试用中发现的两处（2026-09-21）：**
+
+21. **循环停 session 时带自己的说明。** `stopSession` 的默认系统消息是 "Session stopped by user."，循环每次正常做完一项
+    都显示这句。四个停止点各带一条 `Loop…` 开头的说明（af18ea40）；只是显示问题，停发生在结算之后。
+22. **remote：workspace 的点卡在蓝色。** hub 只在自己的 `/message` 路由里发 `working`；worker 自己开的 turn（循环迭代、
+    workflow 派发、排队消息）不经过它，于是该分支的完成全是 completed → completed，被去重门丢掉，而浏览器从 REST 快照
+    学到的 `working` 再也回不来。侧栏有活跃 session 行时点被强制为灰，最后一个 session 消失才露出来。修在通用位置：
+    hub 桥接到远程 session 的 `running` 状态补丁时发 `working`（1b2f5e10，hub-only，无需发 worker）。
+    真机验证：hub SSE 序列 working → completed ×3，结束于 completed。
+
 **未做 / 已知限制：**
 
 - 维护性整理留待触及相关代码时：runner 借用 `prepareReviewer / activateReviewer` 这组名字创建 task session；
