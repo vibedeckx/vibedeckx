@@ -59,7 +59,7 @@ export interface AgentOps {
   /** Optional: push a raw WS frame to a session's stream subscribers. */
   broadcastRawToSession?(sessionId: string, payload: Record<string, unknown>): void;
   /** Stop a session's process (repeat loop: one item per session). Optional for review-only hosts. */
-  stopSession?(sessionId: string): Promise<unknown>;
+  stopSession?(sessionId: string, opts?: { note?: string }): Promise<unknown>;
 }
 
 export class WorkflowError extends Error {

@@ -49,7 +49,9 @@ describe("repeat-until-done loop", () => {
     switchMode: vi.fn(async () => true),
     getRawMessages: vi.fn(async (sessionId: string) => transcripts.get(sessionId) ?? []),
     broadcastRawToSession: vi.fn(),
-    stopSession: vi.fn(async (sessionId: string) => {
+    stopSession: vi.fn(async (sessionId: string, opts?: { note?: string }) => {
+      // Every stop the loop performs says so; the runtime default claims the user did it.
+      expect(opts?.note).toMatch(/^Loop/);
       stopped.push(sessionId);
       await storage.agentSessions.updateStatus(sessionId, "stopped");
       return true;

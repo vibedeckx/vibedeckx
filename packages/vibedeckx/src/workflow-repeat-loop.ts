@@ -89,6 +89,14 @@ export interface StartRepeatLoopOptions {
   runId?: string;
 }
 
+/** The system note left in an iteration's transcript when the LOOP stops its session. */
+const STOP_NOTE = {
+  itemDone: "Loop: this iteration finished its item; the session was closed. The next item runs in a fresh session.",
+  cancelled: "Loop ended; the session was closed.",
+  timeCap: "Loop: time cap reached; the session was stopped.",
+  resumed: "Loop resumed in a fresh session; this one was closed.",
+} as const;
+
 export class RepeatLoopError extends Error {
   constructor(public code: "session-busy" | "bad-state" | "spawn-failed", message: string) { super(message); }
 }
@@ -292,7 +300,7 @@ export class RepeatLoopRunner {
   private async tearDown(run: WorkflowRun): Promise<void> {
     await this.storage.workflowRunSteps.abandonOpenByRun(run.id, "run left preparing during dispatch");
     await this.ops.cancelReviewer({ sessionId: run.source_session_id, reason: "cancelled" }).catch(() => undefined);
-    await this.ops.stopSession?.(run.source_session_id).catch(() => undefined);
+    await this.stop(run.source_session_id, STOP_NOTE.cancelled);
   }
 
   /** `preparing → waiting_resume` on the same row, with the bell: nobody may be watching. */
@@ -407,7 +415,7 @@ export class RepeatLoopRunner {
     // A session that needs a human stays up — the user will want to look, and
     // probably keep talking. Everything else is stopped: one item per session.
     const keepSession = settlement.next === "gate" && (status === "blocked" || status === null || checkFailure !== null);
-    if (!keepSession) await this.stop(run.source_session_id);
+    if (!keepSession) await this.stop(run.source_session_id, STOP_NOTE.itemDone);
 
     if (!insertRun) return;
     const next = (await this.storage.workflowRuns.getById(insertRun.id))!;
@@ -542,7 +550,7 @@ export class RepeatLoopRunner {
       // The run first, the session second: once the step is settled, the stop
       // below cannot be mistaken for "stopped by the user".
       if (await this.endIteration(step, "time cap reached", "failed", reason, "max-minutes")) {
-        await this.stop(run.source_session_id);
+        await this.stop(run.source_session_id, STOP_NOTE.timeCap);
       }
     }
   }
@@ -586,7 +594,7 @@ export class RepeatLoopRunner {
       this.host.untrack(cancelled);
       if (was !== "waiting_resume") {
         await this.ops.cancelReviewer({ sessionId: active.source_session_id, reason: "cancelled" }).catch(() => undefined);
-        await this.stop(active.source_session_id);
+        await this.stop(active.source_session_id, STOP_NOTE.cancelled);
       }
       this.host.emitRunUpdated(cancelled);
       return cancelled;
@@ -625,7 +633,7 @@ export class RepeatLoopRunner {
       if ((await this.storage.agentSessions.getById(params.prevSessionId))?.status === "running") {
         throw new RepeatLoopError("session-busy", "上一次迭代的 session 还在运行。等它停下，或先停掉它。");
       }
-      await this.stop(params.prevSessionId);
+      await this.stop(params.prevSessionId, STOP_NOTE.resumed);
     }
     const overCap = gate.max_rounds !== null && gate.round > gate.max_rounds;
     const overTime = Date.now() - params.startedAt > params.maxMinutes * 60_000;
@@ -654,8 +662,13 @@ export class RepeatLoopRunner {
     }
   }
 
-  private async stop(sessionId: string): Promise<void> {
-    await this.ops.stopSession?.(sessionId).catch((err) => console.warn(`[RepeatLoop] stopping ${sessionId} failed:`, err));
+  /**
+   * Always with a note: the runtime's default is "Session stopped by user.",
+   * which is false for every stop the loop performs — and on a finished
+   * iteration reads as if the item had been interrupted.
+   */
+  private async stop(sessionId: string, note: string): Promise<void> {
+    await this.ops.stopSession?.(sessionId, { note }).catch((err) => console.warn(`[RepeatLoop] stopping ${sessionId} failed:`, err));
   }
 
   private outbox(run: WorkflowRun, anchorSessionId: string, kind: "loop_done" | "workflow_failed", reason: string): Omit<NotificationOutboxEvent, "seq"> {
