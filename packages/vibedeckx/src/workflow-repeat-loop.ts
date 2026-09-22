@@ -92,6 +92,8 @@ export interface StartRepeatLoopOptions {
 /** The system note left in an iteration's transcript when the LOOP stops its session. */
 const STOP_NOTE = {
   itemDone: "Loop: this iteration finished its item; the session was closed. The next item runs in a fresh session.",
+  finished: "Loop finished: this session reported nothing left to process (Status: done). The loop is complete; no further sessions will start.",
+  paused: "Loop paused after this item; the session was closed. The loop is waiting for you — resume or end it from the loop card.",
   cancelled: "Loop ended; the session was closed.",
   timeCap: "Loop: time cap reached; the session was stopped.",
   resumed: "Loop resumed in a fresh session; this one was closed.",
@@ -415,7 +417,14 @@ export class RepeatLoopRunner {
     // A session that needs a human stays up — the user will want to look, and
     // probably keep talking. Everything else is stopped: one item per session.
     const keepSession = settlement.next === "gate" && (status === "blocked" || status === null || checkFailure !== null);
-    if (!keepSession) await this.stop(run.source_session_id, STOP_NOTE.itemDone);
+    if (!keepSession) {
+      // The note must say what happens NEXT: a finished loop claiming "the next
+      // item runs in a fresh session" reads as if it were still going.
+      const note = settlement.next === "finished" ? STOP_NOTE.finished
+        : settlement.next === "gate" ? STOP_NOTE.paused
+          : STOP_NOTE.itemDone;
+      await this.stop(run.source_session_id, note);
+    }
 
     if (!insertRun) return;
     const next = (await this.storage.workflowRuns.getById(insertRun.id))!;
