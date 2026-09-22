@@ -204,6 +204,13 @@ interface AgentConversationProps {
    * (notification auto-read) must use this, not the URL.
    */
   onActiveSessionChange?: (sessionId: string | null) => void;
+  /**
+   * When the session stream delivered the finished state now on screen, or
+   * null while none is (running, a warm-cache preview, a failed revalidation, a
+   * transcript frozen by a dropped connection). Lets notification auto-read
+   * tell "was shown this result" from "looked at a page that predates it".
+   */
+  onActiveSessionResultAtChange?: (at: number | null) => void;
   onSessionTitleUpdated?: (sessionId: string, title: string) => void;
   /** Called only when the user explicitly selects a Session History row. */
   onSessionSelected?: (sessionId: string) => void;
@@ -274,7 +281,7 @@ function pasteTokenFor(id: number, bytes: number): string {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onOpenSchedule, preparingReviews, onReviewStarted, onViewPreparingReview }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onActiveSessionResultAtChange, onOpenSchedule, preparingReviews, onReviewStarted, onViewPreparingReview }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
@@ -352,6 +359,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     workflowRunUpdate,
     backgroundTasks,
     streamEpoch,
+    streamFinished,
     messageEntryIndices: loadedMessageEntryIndices,
     hasEarlierHistory,
     isLoadingEarlier,
@@ -421,6 +429,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   useEffect(() => {
     onActiveSessionChange?.(activeSessionId);
   }, [activeSessionId, onActiveSessionChange]);
+  const activeSessionResultAt =
+    streamFinished?.sessionId === activeSessionId && status !== "running"
+      ? streamFinished.at
+      : null;
+  useEffect(() => {
+    onActiveSessionResultAtChange?.(activeSessionResultAt);
+  }, [activeSessionResultAt, onActiveSessionResultAtChange]);
 
   // Cross-remote grants for this conversation. Hidden entirely when the server
   // cannot mint a gateway token, so the menu never offers a control that

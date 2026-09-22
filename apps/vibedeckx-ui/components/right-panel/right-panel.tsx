@@ -40,6 +40,10 @@ interface RightPanelProps {
   // The conversation currently rendered in the Agent tab. Only file reads use
   // it, and only for paths outside the checkout — see FileReadScope.
   agentSessionId?: string | null;
+  // Reports whether the Agent tab is the one on screen. The conversation stays
+  // mounted (visibility:hidden) behind the other tabs, so "a session is
+  // rendered" does not mean anyone is looking at it.
+  onAgentTabActiveChange?: (active: boolean) => void;
 }
 
 type TabType = TabShortcutTarget;
@@ -100,6 +104,7 @@ export function RightPanel({
   forceAgentTab = false,
   active = true,
   agentSessionId = null,
+  onAgentTabActiveChange,
 }: RightPanelProps) {
   const [activeTab, setActiveTab] = usePersistedTab(projectId, selectedBranch);
   // What the UI actually renders. While a session navigation is still resolving
@@ -236,6 +241,10 @@ export function RightPanel({
     }),
     [active, projectId, displayTab, agentFocusNonce],
   );
+
+  useEffect(() => {
+    onAgentTabActiveChange?.(agentTabFocus.active);
+  }, [agentTabFocus.active, onAgentTabActiveChange]);
 
   return (
     <FileNavigationProvider value={navValue}>

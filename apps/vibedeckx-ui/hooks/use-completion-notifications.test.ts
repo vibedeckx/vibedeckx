@@ -169,11 +169,18 @@ describe('page wiring: visibility source', () => {
 
   it('feeds the notification hook the rendered session, never the URL param', async () => {
     const page = await read('../app/page.tsx');
-    expect(page).toMatch(/useCompletionNotifications\(activeNotificationSessionId\)/);
+    expect(page).toMatch(/useCompletionNotifications\(activeNotificationSessionId, activeNotificationResultAt\)/);
     // Derived from what the conversation reports it is showing...
-    expect(page).toMatch(/activeNotificationSessionId\s*=\s*\n?\s*activeView === 'workspace' \? renderedSessionId : null/);
+    expect(page).toMatch(/notificationViewActive = activeView === 'workspace' && agentTabActive && renderedResultAt !== null;/);
+    expect(page).toMatch(/activeNotificationSessionId = notificationViewActive \? renderedSessionId : null;/);
+    // ...and only while the Agent tab is on screen: the conversation stays
+    // rendered behind Executors/Diff, where nobody is reading it.
+    expect(page).toMatch(/onAgentTabActiveChange=\{setAgentTabActive\}/);
+    // ...and only once the session stream has delivered a finished state: a
+    // frozen or cached transcript is not the result.
+    expect(page).toMatch(/onActiveSessionResultAtChange=\{setRenderedResultAt\}/);
     // ...and explicitly NOT from the URL selection.
-    expect(page).not.toMatch(/activeNotificationSessionId\s*=\s*\n?\s*activeView === 'workspace' \? urlSessionId : null/);
+    expect(page).not.toMatch(/activeNotificationSessionId\s*=[^;]*urlSessionId/);
   });
 
   it('subscribes to AgentConversation.onActiveSessionChange', async () => {
@@ -184,6 +191,10 @@ describe('page wiring: visibility source', () => {
     // Reports the RESOLVED session (auto-restored included), not the prop.
     expect(conversation).toMatch(/const activeSessionId = session\?\.id \?\? null;/);
     expect(conversation).toMatch(/onActiveSessionChange\?\.\(activeSessionId\)/);
+    // The result time comes from the session stream (see
+    // use-agent-session.stream-finished.test.tsx), never from a restored status.
+    expect(conversation).toMatch(/streamFinished\?\.sessionId === activeSessionId && status !== "running"/);
+    expect(conversation).toMatch(/onActiveSessionResultAtChange\?\.\(activeSessionResultAt\)/);
   });
 });
 
@@ -195,8 +206,8 @@ describe('useCompletionNotifications', () => {
   // Published from an effect, not during render: assigning to an outer variable
   // mid-render is a side effect React (and eslint) rightly rejects. act() flushes
   // effects, so `latest` is current by the time assertions run.
-  function Harness({ activeSessionId }: { activeSessionId: string | null }) {
-    const result = useCompletionNotifications(activeSessionId);
+  function Harness({ activeSessionId, activeResultAt }: { activeSessionId: string | null; activeResultAt: number | null }) {
+    const result = useCompletionNotifications(activeSessionId, activeResultAt);
     useEffect(() => {
       latest = result;
     });
@@ -204,9 +215,14 @@ describe('useCompletionNotifications', () => {
   }
 
   // createElement rather than JSX so this stays a .ts file alongside the hook.
-  async function render(activeSessionId: string | null = null) {
+  // By default a named session is showing a result the stream delivered just
+  // now; pass `activeResultAt` to model a page that predates a milestone.
+  async function render(
+    activeSessionId: string | null = null,
+    activeResultAt: number | null = activeSessionId ? Date.now() : null,
+  ) {
     await act(async () => {
-      root.render(createElement(Harness, { activeSessionId }));
+      root.render(createElement(Harness, { activeSessionId, activeResultAt }));
     });
   }
 
@@ -615,13 +631,124 @@ describe('useCompletionNotifications', () => {
       }
     });
 
-    it('auto-reads a missed milestone for the session on screen, still with its cue', async () => {
+    function setVisibility(state: DocumentVisibilityState) {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }
+
+    afterEach(() => {
+      // Drop the own-property override so the jsdom default applies again.
+      delete (document as { visibilityState?: unknown }).visibilityState;
+    });
+
+    it('stays silent for a missed milestone of the session already on screen, and reads it', async () => {
+      setVisibility('visible');
       await render('s1');
-      api.getNotifications.mockResolvedValue([row({ id: 'x', session_id: 's1', created_at: Date.now() })]);
+      api.getNotifications.mockResolvedValue([row({ id: 'x', session_id: 's1', created_at: Date.now() - 5_000 })]);
       await reconnect();
       expect(api.markNotificationRead).toHaveBeenCalledWith('x');
       expect(latest.unreadCount).toBe(0);
+      expect(played.srcs).toEqual([]);
+    });
+
+    it('still cues when that session is on screen in a hidden tab', async () => {
+      setVisibility('visible');
+      await render('s1');
+      setVisibility('hidden');
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+        // Finished while the tab was hidden — the stream delivers it, but
+        // nobody is looking.
+        const finishedAt = Date.now() - 10_000;
+        await render('s1', finishedAt);
+        api.getNotifications.mockResolvedValue([row({ id: 'x', session_id: 's1', created_at: finishedAt })]);
+        await reconnect();
+        expect(played.srcs).toEqual(['/sounds/sound1.mp3']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('stays silent when the user viewed the session after it finished, then moved on', async () => {
+      setVisibility('visible');
+      const finishedAt = Date.now() - 30_000;
+      await render('s1');
+      await rerender('s2');
+      api.getNotifications.mockResolvedValue([row({ id: 'x', session_id: 's1', created_at: finishedAt })]);
+      await reconnect();
+      expect(api.markNotificationRead).toHaveBeenCalledWith('x');
+      expect(played.srcs).toEqual([]);
+    });
+
+    it('cues, and leaves unread, a milestone newer than the result on screen', async () => {
+      // A page whose last delivered result predates the milestone — a cached
+      // transcript, or a stream that went quiet before the turn ended.
+      setVisibility('visible');
+      const shownAt = Date.now() - 60_000;
+      await render('s1', shownAt);
+      api.getNotifications.mockResolvedValue([row({ id: 'x', session_id: 's1', created_at: Date.now() - 10_000 })]);
+      await reconnect();
       expect(played.srcs).toEqual(['/sounds/sound1.mp3']);
+      expect(latest.unreadCount).toBe(1);
+      expect(api.markNotificationRead).not.toHaveBeenCalledWith('x');
+    });
+
+    it('treats a milestone seconds newer than the shown result as unseen', async () => {
+      // The stream delivered a result at T, then dropped; another turn ended
+      // (here, failed fast) at T+3s. The page still shows T's result.
+      setVisibility('visible');
+      const shownAt = Date.now() - 10_000;
+      await render('s1', shownAt);
+      api.getNotifications.mockResolvedValue([
+        row({ id: 'fast', kind: 'session_failed', session_id: 's1', created_at: shownAt + 3_000 }),
+      ]);
+      await reconnect();
+      expect(played.srcs).toEqual(['/sounds/failure.mp3']);
+      expect(latest.unreadCount).toBe(1);
+      expect(api.markNotificationRead).not.toHaveBeenCalledWith('fast');
+    });
+
+    it('reads it once the stream delivers that result', async () => {
+      setVisibility('visible');
+      const createdAt = Date.now() - 10_000;
+      await render('s1', Date.now() - 60_000);
+      api.getNotifications.mockResolvedValue([row({ id: 'x', session_id: 's1', created_at: createdAt })]);
+      await reconnect();
+      expect(api.markNotificationRead).not.toHaveBeenCalledWith('x');
+
+      await rerender('s1', Date.now());
+      expect(api.markNotificationRead).toHaveBeenCalledWith('x');
+    });
+
+    it('cues for a session viewed only while its transcript showed it running (page passes null)', async () => {
+      // Disconnect → finish on the server → the user moves on → reconnect.
+      // The frozen "running" transcript never made the session active, so
+      // leaving it records nothing.
+      setVisibility('visible');
+      await render(null);
+      await rerender('s2');
+      api.getNotifications.mockResolvedValue([row({ id: 'x', session_id: 's1', created_at: Date.now() - 30_000 })]);
+      await reconnect();
+      expect(played.srcs).toEqual(['/sounds/sound1.mp3']);
+      expect(latest.unreadCount).toBe(1);
+      expect(api.markNotificationRead).not.toHaveBeenCalledWith('x');
+    });
+
+    it('cues when the user last viewed the session before it finished', async () => {
+      setVisibility('visible');
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        await render('s1');
+        await rerender('s2');
+        await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+        api.getNotifications.mockResolvedValue([row({ id: 'x', session_id: 's1', created_at: Date.now() - 10_000 })]);
+        await reconnect();
+        expect(played.srcs).toEqual(['/sounds/sound1.mp3']);
+        expect(latest.unreadCount).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

@@ -121,6 +121,47 @@ function executorsPanel() {
 }
 
 describe("RightPanel", () => {
+  it("reports whether the Agent tab is the one on screen", () => {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const reports: boolean[] = [];
+    const onChange = (v: boolean) => reports.push(v);
+    const render = (active: boolean) =>
+      act(() => {
+        root!.render(
+          <FocusRegionProvider>
+            <RightPanel
+              projectId="project-1"
+              selectedBranch="dev"
+              activateAgentTabNonce={0}
+              agentSlot={<div>Agent panel</div>}
+              active={active}
+              onAgentTabActiveChange={onChange}
+            />
+          </FocusRegionProvider>,
+        );
+      });
+
+    render(true);
+    expect(reports.at(-1)).toBe(true);
+
+    // The conversation stays mounted behind Executors — but nobody is reading it.
+    act(() => {
+      tab("Executors")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(reports.at(-1)).toBe(false);
+
+    act(() => {
+      tab("Agent")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(reports.at(-1)).toBe(true);
+
+    // Workspace view itself hidden (another top-level view).
+    render(false);
+    expect(reports.at(-1)).toBe(false);
+  });
+
   it("switches back to the Agent tab when an external session selection asks for it", () => {
     container = document.createElement("div");
     document.body.appendChild(container);

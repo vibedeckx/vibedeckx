@@ -356,9 +356,23 @@ export default function Home() {
   // `urlSessionId`: opening a workspace without `?session=` still shows the
   // branch's auto-restored conversation, and treating that as "nothing visible"
   // would leave its own notifications stuck unread.
+  //
+  // Gated on the Agent tab being the one on screen: the conversation stays
+  // rendered behind Executors/Diff/etc., where the user is not reading it — a
+  // result that lands there must stay unread (and, on a reconnect catch-up,
+  // still earn its cue).
+  //
+  // And gated on the conversation showing a finished state the session stream
+  // delivered (`renderedResultAt`): a transcript frozen at "running", or a
+  // cached one restored while offline, is not the result, so looking at it
+  // must neither auto-read the milestone nor count as having seen it (the
+  // reconnect catch-up would otherwise silence its cue).
   const [renderedSessionId, setRenderedSessionId] = useState<string | null>(null);
-  const activeNotificationSessionId =
-    activeView === 'workspace' ? renderedSessionId : null;
+  const [renderedResultAt, setRenderedResultAt] = useState<number | null>(null);
+  const [agentTabActive, setAgentTabActive] = useState(false);
+  const notificationViewActive = activeView === 'workspace' && agentTabActive && renderedResultAt !== null;
+  const activeNotificationSessionId = notificationViewActive ? renderedSessionId : null;
+  const activeNotificationResultAt = notificationViewActive ? renderedResultAt : null;
   const {
     notifications,
     unreadCount,
@@ -367,7 +381,7 @@ export default function Home() {
     remove: removeNotification,
     clear: clearNotifications,
     markReviewRunRead,
-  } = useCompletionNotifications(activeNotificationSessionId);
+  } = useCompletionNotifications(activeNotificationSessionId, activeNotificationResultAt);
 
   // Handed down by context rather than through AgentConversation ->
   // MainConversation: neither of those knows or cares about the inbox, and the
@@ -1187,6 +1201,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                   <RightPanel
                     active={activeView === 'workspace'}
                     agentSessionId={renderedSessionId}
+                    onAgentTabActiveChange={setAgentTabActive}
                     projectId={currentProject?.id ?? null}
                     selectedBranch={selectedBranch}
                     activateAgentTabNonce={activateAgentTabNonce}
@@ -1229,6 +1244,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                         onViewPreparingReview={handleViewPreparingReview}
                         setSessionUrlParam={setSessionUrlParam}
                         onActiveSessionChange={setRenderedSessionId}
+                        onActiveSessionResultAtChange={setRenderedResultAt}
                         project={currentProject}
                         onAgentModeChange={handleAgentModeChange}
                         onTaskCompleted={handleTaskCompleted}

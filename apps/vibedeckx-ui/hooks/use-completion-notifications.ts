@@ -210,13 +210,22 @@ export interface CompletionNotificationsResult {
 }
 
 /**
- * `activeSessionId` is the session the user is currently looking at. A
- * notification targeting exactly that session is auto-read — being on screen is
- * the user having seen it. A notification for a *different* session stays
- * unread even when it shares a branch with the one on screen.
+ * `activeSessionId` is the session the user is currently looking at, and
+ * `activeResultAt` when the session stream delivered the finished state now on
+ * screen (the page passes null for both while the conversation shows the
+ * session running, a cache preview, or a transcript frozen by a dropped
+ * connection). A notification for that session is auto-read only if it is no
+ * newer than `activeResultAt` — being shown the result is the user having seen
+ * it; a page that predates it is not. The comparison is strict, with no
+ * allowance for clock skew: the milestone is written before its finished
+ * status reaches the browser, so in-sync clocks already order them, while a
+ * forward allowance would swallow a turn that ended seconds after the shown
+ * one. A skewed clock errs toward keeping the milestone unread. A notification for a *different* session
+ * stays unread even when it shares a branch with the one on screen.
  */
 export function useCompletionNotifications(
   activeSessionId: string | null,
+  activeResultAt: number | null = null,
 ): CompletionNotificationsResult {
   const [notifications, setNotifications] = useState<ServerNotification[]>([]);
   /**
@@ -254,10 +263,37 @@ export function useCompletionNotifications(
   // The SSE handler reads the *current* active session through a ref so it
   // never has to re-subscribe on navigation.
   const activeSessionIdRef = useRef(activeSessionId);
+  const activeResultAtRef = useRef(activeResultAt);
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
-  }, [activeSessionId]);
+    activeResultAtRef.current = activeResultAt;
+  }, [activeSessionId, activeResultAt]);
 
+  /**
+   * Per session, the latest `activeResultAt` the user actually looked at
+   * (visible tab). A milestone no newer than it is one whose result was shown;
+   * the reconnect catch-up reads it and skips the cue. A hidden tab doesn't
+   * count — there the cue is the only way to find out.
+   */
+  const seenResultAt = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    if (!activeSessionId || activeResultAt === null) return;
+    const note = () => {
+      if (document.visibilityState !== 'visible') return;
+      const prev = seenResultAt.current.get(activeSessionId) ?? -Infinity;
+      if (activeResultAt > prev) seenResultAt.current.set(activeSessionId, activeResultAt);
+    };
+    note();
+    document.addEventListener('visibilitychange', note);
+    return () => document.removeEventListener('visibilitychange', note);
+  }, [activeSessionId, activeResultAt]);
+
+  const hasSeenResult = useCallback(
+    (n: ServerNotification): boolean =>
+      n.session_id !== null &&
+      (seenResultAt.current.get(n.session_id) ?? -Infinity) >= n.created_at,
+    [],
+  );
 
   /**
    * Optimistic read: flip locally, then persist. On failure the local flip is
@@ -345,14 +381,20 @@ export function useCompletionNotifications(
   /**
    * Take in one milestone from the live stream or the reconnect catch-up.
    * Returns whether it earns a cue; the caller plays it, so a catch-up batch
-   * can collapse into a single sound.
+   * can collapse into a single sound. `alreadySeen` means the user has been
+   * looking at the session since the milestone — read it, and no cue.
    */
-  const ingest = useCallback((notification: ServerNotification): boolean => {
+  const ingest = useCallback((notification: ServerNotification, alreadySeen = false): boolean => {
     const isNew = !heard.current.has(notification.id);
     heard.current.add(notification.id);
 
     const active = activeSessionIdRef.current;
-    const onScreen = notification.session_id !== null && notification.session_id === active;
+    const resultAt = activeResultAtRef.current;
+    const onScreen =
+      notification.session_id !== null &&
+      notification.session_id === active &&
+      resultAt !== null &&
+      resultAt >= notification.created_at;
     // A straggler for a run the user already finished with in Main Chat.
     const consumed =
       notification.workflow_run_id !== null &&
@@ -364,9 +406,9 @@ export function useCompletionNotifications(
     // so a hydrated or replayed row stays silent. A consumed run is the one
     // case that earns silence as well as no entry — it is over, so there is
     // nothing left for the cue to send the user to look at.
-    const earnsCue = isNew && !consumed;
+    const earnsCue = isNew && !consumed && !alreadySeen;
 
-    const autoRead = onScreen || consumed;
+    const autoRead = onScreen || consumed || alreadySeen;
     setNotifications((prev) =>
       upsertNotification(prev, autoRead ? { ...notification, read_at: notification.read_at ?? Date.now() } : notification),
     );
@@ -384,7 +426,9 @@ export function useCompletionNotifications(
    * stream was down (or silently dead — a zombie socket swallows frames until
    * the watchdog notices) never arrives as a frame. Re-read the inbox and take
    * in whatever this browser hasn't seen. Only milestones still fresh get a
-   * cue, and a batch gets one cue (the newest's) rather than a burst.
+   * cue, and a batch gets one cue (the newest's) rather than a burst. A
+   * milestone whose result the user has already been shown (see
+   * `seenResultAt`) is read on arrival and stays silent.
    *
    * A failed read is retried on `CATCH_UP_RETRY_DELAYS_MS`. A newer reconnect
    * supersedes a pending retry — it starts its own catch-up.
@@ -411,7 +455,7 @@ export function useCompletionNotifications(
           let cue: ServerNotification | null = null;
           for (const row of rows) {
             if (heard.current.has(row.id)) continue;
-            const earnsCue = ingest(row);
+            const earnsCue = ingest(row, hasSeenResult(row));
             const fresh = row.read_at === null && now - row.created_at <= CATCH_UP_SOUND_WINDOW_MS;
             if (earnsCue && fresh && (!cue || row.created_at > cue.created_at)) cue = row;
           }
@@ -431,7 +475,7 @@ export function useCompletionNotifications(
         });
     };
     run(0);
-  }, [ingest]);
+  }, [ingest, hasSeenResult]);
 
   useGlobalEventStream((data) => {
     if (data.type === STREAM_RECONNECTED_EVENT) {
@@ -452,10 +496,14 @@ export function useCompletionNotifications(
   // setState here would cascade renders (this effect depends on `notifications`,
   // which it also writes). Navigation is not a click waiting on feedback, so
   // clearing the badge one round-trip later is the better trade.
+  //
+  // Only milestones the page on screen already covers: one newer than the
+  // shown result (a page that predates it) stays unread.
   useEffect(() => {
-    if (!activeSessionId) return;
+    if (!activeSessionId || activeResultAt === null) return;
     for (const notification of notifications) {
       if (notification.session_id !== activeSessionId || notification.read_at !== null) continue;
+      if (notification.created_at > activeResultAt) continue;
       if (readInFlight.current.has(notification.id)) continue;
       const { id } = notification;
       readInFlight.current.add(id);
@@ -472,7 +520,7 @@ export function useCompletionNotifications(
           readInFlight.current.delete(id);
         });
     }
-  }, [activeSessionId, notifications]);
+  }, [activeSessionId, activeResultAt, notifications]);
 
   const markRead = useCallback((id: string) => persistRead(id), [persistRead]);
 

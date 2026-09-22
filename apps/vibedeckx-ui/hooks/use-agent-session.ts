@@ -855,6 +855,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // counter is it. Consumers put it in their fetch effect's deps to re-read the
   // authoritative REST state on every (re)connect.
   const [streamEpoch, setStreamEpoch] = useState(0);
+  // When the session stream last delivered a finished (non-running) status,
+  // and for which session. Only the stream sets it — a warm-cache preview or a
+  // failed revalidation restores a `status` too, but one that may predate a
+  // turn finished elsewhere. Consumers asking "has the user been shown this
+  // result" (notification auto-read) compare `at` against the result's time.
+  const [streamFinished, setStreamFinished] = useState<{ sessionId: string; at: number } | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const wsSessionIdRef = useRef<string | null>(null);
@@ -1227,6 +1233,12 @@ export function useAgentSession(projectId: string | null, branch: string | null,
             setMessages(nextMessages);
             console.log("[AgentSession] setStatus(live) →", containerRef.current.status);
             setStatus(containerRef.current.status);
+            const liveStatus = containerRef.current.status;
+            setStreamFinished((prev) =>
+              liveStatus === "running"
+                ? null
+                : prev?.sessionId === sessionId ? prev : { sessionId, at: Date.now() },
+            );
             persistCurrentSnapshot();
           } else {
             console.log("[AgentSession] /status patch applied during replay (no setStatus), container.status =", containerRef.current.status);
@@ -1244,6 +1256,11 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           // Flush accumulated state to React in a single update
           setMessages(denseEntries(containerRef.current).map((entry) => entry.message));
           setStatus(containerRef.current.status);
+          // The replay is current as of now, so a finished status here covers
+          // every result the server had.
+          setStreamFinished(
+            containerRef.current.status === "running" ? null : { sessionId, at: Date.now() },
+          );
           setIsInitialized(true);
           persistCurrentSnapshot();
           // The stream is now caught up on everything that replays. Signal the
@@ -2958,6 +2975,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     workflowRunUpdate,
     backgroundTasks,
     streamEpoch,
+    streamFinished,
     messageEntryIndices: denseEntries(containerRef.current).map((entry) => entry.entryIndex),
     hasEarlierHistory,
     isLoadingEarlier,
