@@ -113,7 +113,7 @@ function InteractiveView({
   sendMessage,
 }: {
   questions: Question[];
-  sendMessage: (content: string, sessionId?: string) => Promise<void>;
+  sendMessage: (content: string, sessionId?: string) => Promise<unknown>;
 }) {
   // Track selection state per question
   const [selections, setSelections] = useState<Map<number, Set<string>>>(new Map());

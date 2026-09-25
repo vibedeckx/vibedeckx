@@ -34,6 +34,7 @@ const cancelPreparedConversation = vi.fn(async () => {});
 const uploadPaste = vi.fn();
 const uploadAttachment = vi.fn();
 const setModel = vi.fn(async (): Promise<string | null> => null);
+const sendMessage = vi.fn(async (..._args: unknown[]): Promise<boolean> => true);
 const reviewerRunState = vi.hoisted(() => ({ value: null as WorkflowRun | null }));
 type PickedFile = { id?: string; type: "file"; filename: string; mediaType: string; url: string };
 const promptState = vi.hoisted(() => ({
@@ -111,7 +112,7 @@ vi.mock("@/hooks/use-agent-session", () => ({
     workflowRunUpdate: hookState.workflowRunUpdate,
     backgroundTasks: { tasks: [], turnParked: false, parkDeadlineAt: null, canStopTasks: false },
     streamEpoch: 0,
-    sendMessage: vi.fn(),
+    sendMessage,
     startConversation,
     prepareConversation,
     activateConversation,
@@ -489,6 +490,36 @@ describe("AgentConversation pendingModel", () => {
   // history already copied in). The chip has to stay live there, or the model
   // a branch inherited is the only one it can ever run.
   describe("once a session exists", () => {
+    it("puts the draft back when delivery fails", async () => {
+      hookState.session = { id: "s1" };
+      hookState.status = "stopped";
+      hookState.messages = [{ type: "user" }];
+      // The hook reports a network failure (banner + toast) by resolving false.
+      sendMessage.mockResolvedValueOnce(false);
+
+      await render("pA", "featA");
+      await act(async () => {
+        await promptState.submit!({ text: "resend me", files: [] });
+      });
+
+      expect(sendMessage.mock.calls[0]?.[0]).toBe("resend me");
+      expect(draftState.set).toHaveBeenLastCalledWith("resend me");
+    });
+
+    it("leaves the composer empty when delivery succeeds", async () => {
+      hookState.session = { id: "s1" };
+      hookState.status = "stopped";
+      hookState.messages = [{ type: "user" }];
+
+      await render("pA", "featA");
+      await act(async () => {
+        await promptState.submit!({ text: "sent", files: [] });
+      });
+
+      expect(sendMessage).toHaveBeenCalled();
+      expect(draftState.set).not.toHaveBeenCalledWith("sent");
+    });
+
     it("stays live on a branch that has history but has not run", async () => {
       hookState.session = { id: "s1", model: "opus" };
       hookState.status = "stopped";

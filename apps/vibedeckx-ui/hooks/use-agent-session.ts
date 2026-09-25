@@ -250,17 +250,33 @@ async function loadExistingSession(
   return response.json();
 }
 
+// No response doesn't mean the server never got the POST, and /message carries
+// no idempotency key — so don't promise it was lost or invite a blind resend.
+export const SEND_NETWORK_ERROR = "Network connection lost — couldn't confirm the message was delivered. Check the conversation before sending again.";
+
 async function sendMessageToSession(
   sessionId: string,
   content: string | ContentPart[],
   /** What the composer is showing; omitted means "no opinion, leave the grants alone". */
   grantedRemoteIds?: string[],
 ): Promise<void> {
-  const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/message`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content, ...(grantedRemoteIds ? { grantedRemoteIds } : {}) }),
-  });
+  let response: Response;
+  try {
+    response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/message`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, ...(grantedRemoteIds ? { grantedRemoteIds } : {}) }),
+    });
+  } catch (e) {
+    // fetch rejects with a TypeError only when no response came back at all
+    // (connection dropped, network switched). The browser's own wording
+    // ("Failed to fetch") doesn't tell the user it was a network problem.
+    if (e instanceof TypeError) {
+      console.error(`[AgentSession] /message network error: ${e.message}, sessionId=${sessionId}`);
+      throw new Error(SEND_NETWORK_ERROR);
+    }
+    throw e;
+  }
 
   if (!response.ok) {
     let detail = "";
@@ -1735,21 +1751,32 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       sessionId?: string,
       /** Cross-remote machines the composer is showing; applied before delivery. */
       grantedRemoteIds?: string[],
-    ) => {
+    ): Promise<boolean> => {
       const targetSessionId = sessionId || session?.id;
       if (!targetSessionId) {
         console.warn("[AgentSession] sendMessage: no session ID available (sessionId param:", sessionId, ", session?.id:", session?.id, ")");
-        return;
+        return false;
       }
       // Validate: non-empty string or non-empty array
-      if (typeof content === "string" && !content.trim()) return;
-      if (Array.isArray(content) && content.length === 0) return;
+      if (typeof content === "string" && !content.trim()) return false;
+      if (Array.isArray(content) && content.length === 0) return false;
 
       console.log(`[AgentSession] sendMessage: targetSessionId=${targetSessionId}, source=${sessionId ? 'explicit' : 'state'}`);
+      // The hook may be reused for another workspace while the POST is in
+      // flight; its outcome must not touch that workspace's state.
+      const origin = workspaceIdentityRef.current;
+      const isOriginCurrent = () => {
+        const current = workspaceIdentityRef.current;
+        return !!origin && !!current && sameAgentWorkspace(origin, current);
+      };
       try {
         // Send via REST API (more reliable than WebSocket for important actions)
         const trimmed = typeof content === "string" ? content.trim() : content;
         await sendMessageToSession(targetSessionId, trimmed, grantedRemoteIds);
+        // A delivered message supersedes an earlier send failure; otherwise
+        // the banner outlives the retry until the socket happens to reconnect.
+        if (isOriginCurrent()) setError(null);
+        return true;
       } catch (e) {
         const errorMsg = e instanceof Error ? e.message : "Failed to send message";
         console.error("[AgentSession] Failed to send message:", errorMsg);
@@ -1760,14 +1787,17 @@ export function useAgentSession(projectId: string | null, branch: string | null,
             sessionCache.delete(getCacheKey(projectId, branch, explicitSessionId));
             if (session?.id) sessionCache.delete(getCacheKey(projectId, branch, session.id));
           }
-          setSession(null);
-          setStatus("stopped");
-          setIsInitialized(false);
-          shouldAutoStartRef.current = true;
+          if (isOriginCurrent()) {
+            setSession(null);
+            setStatus("stopped");
+            setIsInitialized(false);
+            shouldAutoStartRef.current = true;
+          }
         }
 
-        setError(errorMsg);
+        if (isOriginCurrent()) setError(errorMsg);
         toast.error("Failed to send message", { description: errorMsg });
+        return false;
       }
     },
     [session?.id, projectId, branch, explicitSessionId]
@@ -1783,6 +1813,8 @@ export function useAgentSession(projectId: string | null, branch: string | null,
     try {
       const trimmed = typeof content === "string" ? content.trim() : content;
       await sendMessageToSession(ensured.session.id, trimmed);
+      const currentIdentity = workspaceIdentityRef.current;
+      if (currentIdentity && sameAgentWorkspace(ensured.origin, currentIdentity)) setError(null);
       return true;
     } catch (e) {
       const errorMsg = e instanceof Error ? e.message : "Failed to send message";

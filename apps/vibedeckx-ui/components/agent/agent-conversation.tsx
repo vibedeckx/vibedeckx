@@ -150,7 +150,7 @@ function AttachmentHeader({ uploads, workspaceKey, apiRef }: {
 }
 
 interface AgentConversationContextValue {
-  sendMessage: (content: string | ContentPart[], sessionId?: string) => Promise<void>;
+  sendMessage: (content: string | ContentPart[], sessionId?: string) => Promise<unknown>;
   messages: AgentMessage[];
   acceptPlan: (planContent: string) => Promise<void>;
   permissionMode: "plan" | "edit";
@@ -1289,12 +1289,26 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       }
     } else {
       console.log(`[AgentConversation] handleSubmit: existing session ${session.id}, status=${status}`);
+      let delivered: boolean | void;
       try {
         // The chips ride with the message: what the composer shows is what
         // this turn runs under.
-        await sendMessage(content, undefined, remoteGrants.selectedIds);
+        delivered = await sendMessage(content, undefined, remoteGrants.selectedIds);
       } catch (e) {
         return await fail("Failed to send message", e);
+      }
+      if (delivered === false) {
+        // The hook already reported the failure (banner + toast); only the
+        // draft has to come back so a retry doesn't need history recall.
+        if (isOriginDraftDisplayed(submissionOrigin)) {
+          setInput(rawText);
+          setPastes(capturedPastes);
+          setNextPasteId(capturedNextPasteId);
+        }
+        returnDetached();
+        // Reject so PromptInput does not clear the restored attachments.
+        if (hasFiles) throw new Error("Failed to send message");
+        return;
       }
       releaseDetached();
     }
