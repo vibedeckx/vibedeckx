@@ -29,7 +29,8 @@ type ProjectChatPatch = {
     | { type: "ACTIVE_TURN"; content: string | null }
     | { type: "APPROVALS"; content: string[] }
     | { type: "QUEUE"; content: number }
-    | { type: "CONTEXT"; content: ProjectChatContextRef[] };
+    | { type: "CONTEXT"; content: ProjectChatContextRef[] }
+    | { type: "THREAD"; content: ProjectChatThread };
 };
 
 interface ProjectChatStreamState {
@@ -120,6 +121,15 @@ function isProjectChatMessage(value: unknown): value is ProjectChatMessage {
     && typeof value.type === "string"
     && typeof value.content === "string"
     && typeof value.created_at === "string";
+}
+
+function isProjectChatThread(value: unknown): value is ProjectChatThread {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.project_id === "string"
+    && typeof value.user_id === "string"
+    && (value.title === null || typeof value.title === "string")
+    && typeof value.updated_at === "string";
 }
 
 function isProjectChatContextRef(value: unknown): value is ProjectChatContextRef {
@@ -229,6 +239,13 @@ function applyPatches(state: ProjectChatStreamState, patches: unknown[]): Projec
       && Array.isArray(patch.value.content) && patch.value.content.every(isProjectChatContextRef)
       && patch.value.content.every((ref) => next.thread === null || ref.thread_id === next.thread.id)) {
       next = { ...next, contextRefs: patch.value.content };
+    } else if (patch.path === "/thread" && patch.value.type === "THREAD"
+      && isProjectChatThread(patch.value.content)
+      && next.thread !== null
+      && patch.value.content.id === next.thread.id
+      && patch.value.content.project_id === next.thread.project_id
+      && patch.value.content.user_id === next.thread.user_id) {
+      next = { ...next, thread: patch.value.content };
     } else {
       return null;
     }
@@ -544,6 +561,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
               setTerminalError(null);
               setThreadError(null);
               cacheSnapshot(snapshotCacheRef.current, snapshot);
+              setThreads((current) => current.map((item) => item.id === snapshot.thread.id ? snapshot.thread : item));
               publishStreamState({
                 thread: snapshot.thread,
                 messages: streamStateRef.current.thread?.id === activeThreadId
@@ -579,6 +597,9 @@ export function useProjectChat(projectId: string | null, threadId: string | null
               if (!next) throw new Error("invalid patch frame");
               lastFrameAt = Date.now();
               if (next.thread) {
+                if (next.thread !== streamStateRef.current.thread) {
+                  setThreads((current) => current.map((item) => item.id === next.thread!.id ? next.thread! : item));
+                }
                 cacheSnapshot(snapshotCacheRef.current, {
                   identity: {
                     projectId: activeProjectId,

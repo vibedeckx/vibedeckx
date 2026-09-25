@@ -23,6 +23,29 @@ import { assertProjectChatMessageWithinByteLimit } from "../../project-chat-mess
 
 const now = () => sql<string>`strftime('%Y-%m-%d %H:%M:%f', 'now')`;
 
+async function backfillMissingThreadTitles(
+  kdb: Kysely<DB>, projectId: string, userId: string, threadId?: string,
+): Promise<void> {
+  // Older conversations have no title. Use their first user message without
+  // changing updated_at, which is the history cursor and sort key.
+  let query = kdb.updateTable("project_chat_threads")
+    .set({ title: sql<string>`(
+      select substr(trim(m.content), 1, 60)
+      from project_chat_messages as m
+      where m.thread_id = project_chat_threads.id and m.type = 'user'
+      order by m.sequence asc limit 1
+    )` })
+    .where("project_id", "=", projectId)
+    .where("user_id", "=", userId)
+    .where("title", "is", null)
+    .where(sql<boolean>`exists (
+      select 1 from project_chat_messages as m
+      where m.thread_id = project_chat_threads.id and m.type = 'user'
+    )`);
+  if (threadId) query = query.where("id", "=", threadId);
+  await query.execute();
+}
+
 const mapThread = (row: Selectable<ProjectChatThreadsTable>): ProjectChatThread => {
   const {
     create_request_id: _requestId,
@@ -217,6 +240,7 @@ export const createProjectChatRepos = (
     }),
 
     listByProject: async (projectId, userId, limit, opts) => {
+      await backfillMissingThreadTitles(kdb, projectId, userId);
       let query = kdb.selectFrom("project_chat_threads")
         .selectAll()
         .where("project_id", "=", projectId)
@@ -231,6 +255,7 @@ export const createProjectChatRepos = (
     },
 
     listPageByProject: async (projectId, userId, limit, opts) => {
+      await backfillMissingThreadTitles(kdb, projectId, userId);
       let query = kdb.selectFrom("project_chat_threads")
         .selectAll()
         .where("project_id", "=", projectId)
@@ -272,12 +297,21 @@ export const createProjectChatRepos = (
 
     getById: async (id, projectId, userId) => {
       if (!userId) return undefined;
-      const row = await kdb.selectFrom("project_chat_threads")
+      let row = await kdb.selectFrom("project_chat_threads")
         .selectAll()
         .where("id", "=", id)
         .where("project_id", "=", projectId)
         .where("user_id", "=", userId)
         .executeTakeFirst();
+      if (row?.title === null) {
+        await backfillMissingThreadTitles(kdb, projectId, userId, id);
+        row = await kdb.selectFrom("project_chat_threads")
+          .selectAll()
+          .where("id", "=", id)
+          .where("project_id", "=", projectId)
+          .where("user_id", "=", userId)
+          .executeTakeFirst();
+      }
       return row ? mapThread(row) : undefined;
     },
 
@@ -307,6 +341,30 @@ export const createProjectChatRepos = (
         .execute();
       const row = await kdb.selectFrom("project_chat_threads")
         .selectAll().where("id", "=", id).where("project_id", "=", projectId).where("user_id", "=", userId).executeTakeFirst();
+      return row ? mapThread(row) : undefined;
+    },
+
+    setTitleIfMissing: async (id, projectId, userId, title) => {
+      const row = await kdb.updateTable("project_chat_threads")
+        .set({ title })
+        .where("id", "=", id)
+        .where("project_id", "=", projectId)
+        .where("user_id", "=", userId)
+        .where("title", "is", null)
+        .returningAll()
+        .executeTakeFirst();
+      return row ? mapThread(row) : undefined;
+    },
+
+    replaceTitleIfCurrent: async (id, projectId, userId, currentTitle, title) => {
+      const row = await kdb.updateTable("project_chat_threads")
+        .set({ title })
+        .where("id", "=", id)
+        .where("project_id", "=", projectId)
+        .where("user_id", "=", userId)
+        .where("title", "=", currentTitle)
+        .returningAll()
+        .executeTakeFirst();
       return row ? mapThread(row) : undefined;
     },
 

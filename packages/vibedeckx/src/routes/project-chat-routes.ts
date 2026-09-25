@@ -10,6 +10,7 @@ import {
 } from "../project-chat-manager.js";
 import { MAX_TOOL_SELECTOR_ID } from "../project-chat-tools.js";
 import { listProjectChatPublicContextRefs } from "../project-chat-context.js";
+import { snippetTitle } from "../utils/session-title.js";
 import { requireAuth } from "../server.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
@@ -241,7 +242,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     let accepted: { thread: ProjectChatThread; created: boolean };
     try {
       accepted = await fastify.storage.projectChatThreads.createIdempotent({
-        id: randomUUID(), project_id: projectId, user_id: userId, title: null,
+        id: randomUUID(), project_id: projectId, user_id: userId,
+        title: body.message ? snippetTitle(body.message) : null,
         create_request_id: createRequestId, create_payload_hash: createPayloadHash,
         ...(body.message !== undefined
           ? { initialTurn: {
@@ -266,6 +268,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // Thread and duplicates the user's intent.
         req.log.warn({ err: error, threadId: thread.id }, "Project Chat initial turn will resume later");
       }
+      void fastify.projectChatManager.generateTitle(
+        thread.id, userId, body.message, thread.title ?? snippetTitle(body.message),
+      );
     }
 
     return reply.code(201).send({ thread });

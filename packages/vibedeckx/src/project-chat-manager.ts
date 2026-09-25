@@ -12,6 +12,7 @@ import type {
   Storage,
 } from "./storage/types.js";
 import { resolveChatModel } from "./utils/chat-model.js";
+import { generateSessionTitle, snippetTitle } from "./utils/session-title.js";
 import {
   listProjectChatPublicContextRefs,
   type ProjectChatPublicContextRef,
@@ -99,6 +100,7 @@ export interface ProjectChatManagerOptions {
   maxConcurrentTurnsPerUser?: number;
   toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions" | "mutationServices">;
   eventBus?: EventBus;
+  titleGenerator?: typeof generateSessionTitle;
 }
 
 export interface ProjectChatReconciliationReport {
@@ -131,7 +133,8 @@ export type ProjectChatWsMessage =
         | { type: "ACTIVE_TURN"; content: string | null }
         | { type: "APPROVALS"; content: string[] }
         | { type: "QUEUE"; content: number }
-        | { type: "CONTEXT"; content: ProjectChatPublicContextRef[] };
+        | { type: "CONTEXT"; content: ProjectChatPublicContextRef[] }
+        | { type: "THREAD"; content: ProjectChatThread };
     }>;
   };
 
@@ -414,6 +417,7 @@ export class ProjectChatManager {
   private readonly outstandingOperations = new Set<Promise<unknown>>();
   private readonly operationReconciliationFlights = new Map<string, Promise<OperationReconciliationOutcome>>();
   private readonly runner: ProjectChatModelRunner;
+  private readonly titleGenerator: typeof generateSessionTitle;
   private readonly drainTimeoutMs: number;
   private readonly idleEvictionMs: number;
   private readonly terminalRetryDelayMs: number;
@@ -449,6 +453,7 @@ export class ProjectChatManager {
     options: ProjectChatManagerOptions = {},
   ) {
     this.runner = runner ?? new DefaultProjectChatModelRunner(storage);
+    this.titleGenerator = options.titleGenerator ?? generateSessionTitle;
     this.drainTimeoutMs = options.drainTimeoutMs ?? 2_000;
     this.idleEvictionMs = options.idleEvictionMs ?? 30_000;
     this.terminalRetryDelayMs = options.terminalRetryDelayMs ?? 100;
@@ -645,11 +650,58 @@ export class ProjectChatManager {
       content: trimmed,
     });
     this.assertLifecycle(threadId, generation, true);
+    if (live.thread.title === null) {
+      try {
+        const fallbackTitle = snippetTitle(trimmed);
+        const written = await this.storage.projectChatThreads.setTitleIfMissing(
+          threadId, live.thread.project_id, userId, fallbackTitle,
+        );
+        const updated = written ?? await this.storage.projectChatThreads.getById(
+          threadId, live.thread.project_id, userId,
+        );
+        if (updated && updated.title !== live.thread.title) {
+          live.thread = updated;
+          this.broadcast(live, { JsonPatch: [{
+            op: "replace", path: "/thread", value: { type: "THREAD", content: updated },
+          }] });
+        }
+        if (updated?.title === fallbackTitle) {
+          void this.generateTitle(threadId, userId, trimmed, fallbackTitle);
+        }
+      } catch (error) {
+        // The message is already durable; title failure must not invite a resend.
+        console.warn("[ProjectChat] Could not set conversation title:", error);
+      }
+    }
     if (accepted.acceptedMessage) this.publishMessage(live, accepted.acceptedMessage);
     if (this.shuttingDown) return;
     live.queue.push(accepted);
     this.broadcastStatus(live);
     this.pump(live);
+  }
+
+  /** Best-effort AI refinement of the first-message fallback title. */
+  async generateTitle(threadId: string, userId: string, firstMessage: string, fallbackTitle: string): Promise<void> {
+    try {
+      const generated = await this.titleGenerator(this.storage, firstMessage, userId);
+      if (!generated || generated === fallbackTitle) return;
+      const owned = await this.findAuthorized(threadId, userId);
+      if (!owned) return;
+      const updated = await this.storage.projectChatThreads.replaceTitleIfCurrent(
+        threadId, owned.project_id, userId, fallbackTitle, generated,
+      );
+      if (!updated) return;
+      const live = this.liveThreads.get(threadId);
+      if (live && live.thread.project_id === updated.project_id && live.thread.user_id === updated.user_id) {
+        live.thread = updated;
+        this.broadcast(live, { JsonPatch: [{
+          op: "replace", path: "/thread", value: { type: "THREAD", content: updated },
+        }] });
+      }
+    } catch (error) {
+      // The fallback is already persisted. Title generation never fails a turn.
+      console.warn("[ProjectChat] Could not generate conversation title:", error);
+    }
   }
 
   /** Authorization requires storage I/O, so stopping is deliberately async. */

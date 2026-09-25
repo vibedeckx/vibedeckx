@@ -1890,6 +1890,8 @@ export interface Storage {
       archived?: boolean;
     }) => Promise<ProjectChatThread | undefined>;
     updateTitle: (id: string, projectId: string, userId: string, title: string | null) => Promise<ProjectChatThread | undefined>;
+    setTitleIfMissing: (id: string, projectId: string, userId: string, title: string) => Promise<ProjectChatThread | undefined>;
+    replaceTitleIfCurrent: (id: string, projectId: string, userId: string, currentTitle: string, title: string) => Promise<ProjectChatThread | undefined>;
     archive: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;
     unarchive: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;
     touchUpdatedAt: (id: string, projectId: string, userId: string) => Promise<ProjectChatThread | undefined>;

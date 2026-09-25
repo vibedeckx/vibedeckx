@@ -24,6 +24,7 @@ describe("project chat thread routes", () => {
   let dir: string;
   let projectChatManager: {
     startAcceptedThread: ReturnType<typeof vi.fn>;
+    generateTitle: ReturnType<typeof vi.fn>;
     sendMessage: ReturnType<typeof vi.fn>;
     stopGeneration: ReturnType<typeof vi.fn>;
     resolveToolApproval: ReturnType<typeof vi.fn>;
@@ -56,6 +57,7 @@ describe("project chat thread routes", () => {
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     projectChatManager = {
       startAcceptedThread: vi.fn().mockResolvedValue(undefined),
+      generateTitle: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
       stopGeneration: vi.fn().mockResolvedValue(true),
       resolveToolApproval: vi.fn().mockResolvedValue(true),
@@ -207,7 +209,7 @@ describe("project chat thread routes", () => {
 
       expect(response.statusCode).toBe(201);
       const { thread } = response.json() as { thread: ProjectChatThread };
-      expect(thread).toMatchObject({ project_id: "project-1", user_id: "user-1", title: null });
+      expect(thread).toMatchObject({ project_id: "project-1", user_id: "user-1", title: "What changed?" });
       expect(thread.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
       expect(thread).not.toHaveProperty("branch");
       expect(thread).not.toHaveProperty("workspace");
@@ -217,6 +219,9 @@ describe("project chat thread routes", () => {
         .toEqual([expect.objectContaining({ status: "accepted", content: "What changed?" })]);
       expect(projectChatManager.startAcceptedThread).toHaveBeenCalledOnce();
       expect(projectChatManager.startAcceptedThread).toHaveBeenCalledWith(thread.id, "user-1");
+      expect(projectChatManager.generateTitle).toHaveBeenCalledWith(
+        thread.id, "user-1", "What changed?", "What changed?",
+      );
     });
 
     it("returns the same accepted thread for a lost-201 retry without restarting work", async () => {
@@ -233,6 +238,7 @@ describe("project chat thread routes", () => {
       expect(retry.statusCode).toBe(201);
       expect(retry.json().thread.id).toBe(first.json().thread.id);
       expect(projectChatManager.startAcceptedThread).toHaveBeenCalledOnce();
+      expect(projectChatManager.generateTitle).toHaveBeenCalledOnce();
       expect(await storage.projectChatMessages.listByThread(
         first.json().thread.id, "project-1", "user-1",
       )).toHaveLength(1);

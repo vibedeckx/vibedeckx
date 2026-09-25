@@ -127,6 +127,74 @@ describe("ProjectChatManager", () => {
     expect(snapshot).toMatchObject({ status: "idle", queueLength: 0, activeTurnId: null });
   });
 
+  it("names an empty thread from its first accepted message and broadcasts the title", async () => {
+    await storage.projectChatThreads.create({ id: "untitled", project_id: "project-1", user_id: "user-1", title: null });
+    const manager = new ProjectChatManager(storage, reply("Done"));
+    await manager.openThread("untitled", "user-1");
+    const frames: string[] = [];
+    manager.subscribe("untitled", {
+      projectChatUserId: "user-1", readyState: 1, OPEN: 1,
+      send: (frame: string) => frames.push(frame),
+    } as never);
+
+    await manager.sendMessage("untitled", "user-1", "Investigate checkout failure");
+
+    expect((await storage.projectChatThreads.getById("untitled", "project-1", "user-1"))?.title)
+      .toBe("Investigate checkout failure");
+    expect(frames.some((frame) => frame.includes('"path":"/thread"')
+      && frame.includes("Investigate checkout failure"))).toBe(true);
+    await manager.shutdown();
+  });
+
+  it("replaces the fallback with an AI title and broadcasts it", async () => {
+    await storage.projectChatThreads.create({ id: "ai-title", project_id: "project-1", user_id: "user-1", title: null });
+    const titleGenerator = vi.fn().mockResolvedValue("Checkout failure investigation");
+    const manager = new ProjectChatManager(storage, reply("Done"), { titleGenerator });
+    await manager.openThread("ai-title", "user-1");
+    const frames: string[] = [];
+    manager.subscribe("ai-title", {
+      projectChatUserId: "user-1", readyState: 1, OPEN: 1,
+      send: (frame: string) => frames.push(frame),
+    } as never);
+
+    await manager.sendMessage("ai-title", "user-1", "Investigate the checkout failure in payments");
+    await waitFor(async () => (await storage.projectChatThreads.getById("ai-title", "project-1", "user-1"))?.title
+      === "Checkout failure investigation");
+
+    expect(titleGenerator).toHaveBeenCalledOnce();
+    expect(frames.some((frame) => frame.includes("Checkout failure investigation"))).toBe(true);
+    await manager.shutdown();
+  });
+
+  it("preserves a manual rename made during AI title generation", async () => {
+    await storage.projectChatThreads.create({ id: "failed-ai", project_id: "project-1", user_id: "user-1", title: null });
+    const pending = deferred<string | null>();
+    const manager = new ProjectChatManager(storage, reply("Done"), {
+      titleGenerator: () => pending.promise,
+    });
+    const generateTitle = vi.spyOn(manager, "generateTitle");
+    await manager.sendMessage("failed-ai", "user-1", "Investigate checkout failure");
+    await storage.projectChatThreads.updateTitle("failed-ai", "project-1", "user-1", "My custom title");
+    pending.resolve("AI checkout title");
+    await generateTitle.mock.results[0].value;
+    expect((await storage.projectChatThreads.getById("failed-ai", "project-1", "user-1"))?.title)
+      .toBe("My custom title");
+    await manager.shutdown();
+  });
+
+  it("keeps the first-message fallback when AI generation fails", async () => {
+    await storage.projectChatThreads.create({ id: "fallback-title", project_id: "project-1", user_id: "user-1", title: null });
+    const manager = new ProjectChatManager(storage, reply("Done"), {
+      titleGenerator: async () => { throw new Error("model unavailable"); },
+    });
+    const generateTitle = vi.spyOn(manager, "generateTitle");
+    await manager.sendMessage("fallback-title", "user-1", "Investigate checkout failure");
+    await generateTitle.mock.results[0].value;
+    expect((await storage.projectChatThreads.getById("fallback-title", "project-1", "user-1"))?.title)
+      .toBe("Investigate checkout failure");
+    await manager.shutdown();
+  });
+
   it("replaces an existing live message when durable same-status operation content advances", async () => {
     await createThread("thread-operation-replace");
     const manager = new ProjectChatManager(storage, reply("unused"), { reconciliationIntervalMs: 60_000 });

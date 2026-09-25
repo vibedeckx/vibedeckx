@@ -314,6 +314,19 @@ describe("project chat storage", () => {
     expect(await storage.projectChatThreads.updateTitle("t1", "p1", "u2", "Not allowed")).toBeUndefined();
   });
 
+  it("fills historical titles from the first user message without changing history order", async () => {
+    await storage.projectChatThreads.createWithInitialTurn({
+      id: "legacy", project_id: "p1", user_id: "u1", title: null,
+      initialTurn: { messageId: "first", workItemId: "work", content: "Investigate login failure" },
+    });
+    const before = await storage.projectChatThreads.getById("legacy", "p1", "u1");
+    const page = await storage.projectChatThreads.listPageByProject("p1", "u1", 10);
+    expect(page.threads.find((thread) => thread.id === "legacy")?.title).toBe("Investigate login failure");
+    expect((await storage.projectChatThreads.getById("legacy", "p1", "u1"))?.updated_at).toBe(before?.updated_at);
+    expect(await storage.projectChatThreads.setTitleIfMissing("legacy", "p1", "u1", "Other"))
+      .toBeUndefined();
+  });
+
   it("updates title and archive state together within the full thread scope", async () => {
     await storage.projectChatThreads.create({ id: "t1", project_id: "p1", user_id: "u1", title: null });
 
