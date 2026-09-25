@@ -203,6 +203,7 @@ export function ProjectChatWorkbench({
               onStop={chat.stopTurn}
               onResolveApproval={chat.resolveToolApproval}
               onSelectWorkspace={chat.selectWorkspace}
+              onOpenContext={onOpenContext}
               onOpenAgentSession={onOpenAgentSession}
               onOpenScheduleRun={onOpenScheduleRun}
               onRunScheduleAgain={onRunScheduleAgain}

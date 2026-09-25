@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState, type AnchorHTMLAttributes } from "react";
 import { AlertTriangle, Check, Clock, Loader2, Search, Square, X } from "lucide-react";
 
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
@@ -31,6 +31,24 @@ function parseObject(content: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+// The model links entities it got from tools as `[label](#ref:<entity_type>:<id>)`
+// (see PROJECT_CHAT_SYSTEM_PROMPT). Only ids already in this thread's Context
+// refs are navigable, so a made-up or foreign id never becomes a jump.
+const CONTEXT_LINK_PREFIX = "#ref:";
+
+export function parseContextLink(href: string | undefined): { entityType: string; entityId: string } | null {
+  if (!href?.startsWith(CONTEXT_LINK_PREFIX)) return null;
+  let rest: string;
+  try {
+    rest = decodeURIComponent(href.slice(CONTEXT_LINK_PREFIX.length));
+  } catch {
+    return null;
+  }
+  const separator = rest.indexOf(":");
+  if (separator <= 0 || separator === rest.length - 1) return null;
+  return { entityType: rest.slice(0, separator), entityId: rest.slice(separator + 1) };
 }
 
 function toolLabel(content: string): string {
@@ -68,6 +86,7 @@ interface ProjectChatConversationProps {
   onStop: (expectedActiveTurnId: string) => Promise<boolean>;
   onResolveApproval: (approvalId: string, approved: boolean) => Promise<void>;
   onSelectWorkspace: (requestId: string, workspaceId: string) => Promise<void>;
+  onOpenContext?: (ref: ProjectChatContextRef) => void;
   onOpenAgentSession?: (sessionId: string, target: string, branch: string | null) => Promise<void> | void;
   onOpenScheduleRun?: (runId: string, scheduleId: string) => Promise<void> | void;
   onRunScheduleAgain?: (runId: string) => Promise<void>;
@@ -137,6 +156,7 @@ export function ProjectChatConversation({
   onStop,
   onResolveApproval,
   onSelectWorkspace,
+  onOpenContext,
   onOpenAgentSession,
   onOpenScheduleRun,
   onRunScheduleAgain,
@@ -153,6 +173,47 @@ export function ProjectChatConversation({
   const operationInFlightRef = useRef<Set<string>>(new Set());
   const [pendingOperationActions, setPendingOperationActions] = useState<Map<string, string>>(new Map());
   const [operationErrors, setOperationErrors] = useState<Map<string, string>>(new Map());
+
+  // Read at click time: MessageResponse only re-renders when its text changes,
+  // so the link component must stay stable while Context refs keep arriving.
+  const contextRefsRef = useRef(contextRefs);
+  contextRefsRef.current = contextRefs;
+  const onOpenContextRef = useRef(onOpenContext);
+  onOpenContextRef.current = onOpenContext;
+  const markdownComponents = useMemo(() => ({
+    a: ({ href, children, className, node, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
+      void node;
+      const contextLink = parseContextLink(href);
+      if (!contextLink) {
+        return (
+          <a href={href} className={className ?? "wrap-anywhere font-medium text-primary underline"}
+            data-streamdown="link" target="_blank" rel="noreferrer" {...props}>{children}</a>
+        );
+      }
+      return (
+        <a
+          href={href}
+          className="wrap-anywhere cursor-pointer font-medium text-primary underline"
+          data-context-link={contextLink.entityType}
+          onClick={(event) => {
+            event.preventDefault();
+            const ref = contextRefsRef.current.find((candidate) => (
+              candidate.entity_type === contextLink.entityType && candidate.entity_id === contextLink.entityId
+            ));
+            const open = onOpenContextRef.current;
+            if (!ref || ref.deleted || !ref.navigation || !open) {
+              setActionError("This item is no longer available");
+              return;
+            }
+            setActionError(null);
+            open(ref);
+          }}
+        >
+          {children}
+        </a>
+      );
+    },
+  }), []);
 
   const parsedOperations = useMemo(() => {
     const byMessageId = new Map<string, ProjectChatOperationMessage>();
@@ -302,7 +363,9 @@ export function ProjectChatConversation({
               return (
                 <Message key={message.id} from={message.type}>
                   <MessageContent>
-                    {message.type === "assistant" ? <MessageResponse>{message.content}</MessageResponse> : message.content}
+                    {message.type === "assistant"
+                      ? <MessageResponse components={markdownComponents}>{message.content}</MessageResponse>
+                      : message.content}
                   </MessageContent>
                 </Message>
               );

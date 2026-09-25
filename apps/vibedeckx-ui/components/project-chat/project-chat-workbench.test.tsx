@@ -689,6 +689,30 @@ describe("ProjectChatWorkbench", () => {
       .toEqual(["task", "workspace", "agent_session", "schedule", "schedule_run"]);
   });
 
+  it("opens sessions linked in assistant replies only when the thread's Context knows them", async () => {
+    const sessionRef = {
+      thread_id: "thread-7", entity_type: "agent_session" as const, entity_id: "remote-abc", last_referenced_at: "",
+      deleted: false, navigation: { kind: "agent_session" as const, sessionId: "remote-abc", target: "server-1", branch: "dev", label: "Starred one" },
+    };
+    hook.value.contextRefs = [sessionRef];
+    hook.value.messages = [message(1, "assistant",
+      "Starred: [Starred one](#ref:agent_session:remote-abc), [Ghost](#ref:agent_session:made-up), [Docs](https://example.com)")];
+    const onOpenContext = vi.fn();
+    render({ onOpenContext });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+
+    const link = (text: string) => [...container.querySelectorAll("a")].find((item) => item.textContent === text)!;
+    act(() => link("Starred one").click());
+    expect(onOpenContext).toHaveBeenCalledWith(sessionRef);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+
+    act(() => link("Ghost").click());
+    expect(onOpenContext).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("This item is no longer available");
+
+    expect(link("Docs").getAttribute("target")).toBe("_blank");
+  });
+
   it("sends, stops, and resolves approvals through the project hook", async () => {
     render();
     const composer = container.querySelector('textarea[aria-label="Message Project Chat"]') as HTMLTextAreaElement;

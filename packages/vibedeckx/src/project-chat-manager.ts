@@ -36,6 +36,8 @@ export const PROJECT_CHAT_SYSTEM_PROMPT = [
   "You may create a task, update a task, create an agent session in an explicitly selected existing workspace, select a requested workspace, send an agent instruction, and run an existing schedule now.",
   "Use supplied tools for factual context and report mutations only from successful tool results.",
   "There is no delete capability, no worktree creation, no schedule configuration, no agent-session stop, and no Git capability.",
+  "When you mention a task, workspace, agent session, schedule, or schedule run whose id a tool returned, write it as a Markdown link so the user can click to open it: [label](#ref:<type>:<id>), where <type> is task, workspace, agent_session, schedule, or schedule_run and <id> is the exact id from the tool result (for example [Fix login bug](#ref:agent_session:abc123)).",
+  "Never invent ids or link items no tool returned.",
 ].join(" ");
 export const PROJECT_CHAT_TOOL_CALL_LIMIT = 8;
 export const PROJECT_CHAT_TOOL_RESULT_BYTE_LIMIT = 64 * 1024;
