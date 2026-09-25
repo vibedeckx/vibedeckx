@@ -13,7 +13,6 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return { ...original, api: { ...original.api, ...apiMocks } };
 });
 
-vi.mock("@/hooks/use-project-remotes", () => ({ useProjectRemotes: () => ({ remotes: [] }) }));
 vi.mock("@/hooks/use-project-activity", () => ({
   useProjectActivity: () => ({
     activity: {

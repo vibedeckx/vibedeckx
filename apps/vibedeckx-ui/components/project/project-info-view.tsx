@@ -1,12 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { FolderOpen, Globe } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TaskDetailDialog } from "@/components/task/task-detail-dialog";
 import { useCreateProjectChatThread } from "@/hooks/use-create-project-chat-thread";
-import { useProjectRemotes } from "@/hooks/use-project-remotes";
-import type { Project, ProjectRemote, Task } from "@/lib/api";
+import type { Project, Task } from "@/lib/api";
 import { projectInitials } from "@/lib/project-initials";
 import { cn } from "@/lib/utils";
 import { ProjectActivityView } from "./project-activity-view";
@@ -30,20 +28,6 @@ function StatusBadge({ project }: { project: Project }) {
       {label}
     </span>
   );
-}
-
-/** Mono chip for one of the places this project lives. */
-function LocationChip({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
-  return (
-    <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border bg-secondary px-2 py-0.5 font-mono text-[11.5px] text-secondary-foreground">
-      <span className="shrink-0 text-muted-foreground/70">{icon}</span>
-      <span className="truncate">{children}</span>
-    </span>
-  );
-}
-
-function remoteLabel(remote: ProjectRemote): string {
-  return remote.remote_path ? `${remote.server_name}:${remote.remote_path}` : remote.server_name;
 }
 
 interface ProjectInfoViewProps {
@@ -82,7 +66,6 @@ export function ProjectInfoView({
   onViewAllTasks,
   onProjectUpdated,
 }: ProjectInfoViewProps) {
-  const { remotes } = useProjectRemotes(project.id);
   const createThread = useCreateProjectChatThread(project.id);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [taskDetailOpen, setTaskDetailOpen] = useState(false);
@@ -127,19 +110,6 @@ export function ProjectInfoView({
                   <span className="min-w-0 break-all">{project.name}</span>
                   <StatusBadge project={project} />
                 </h1>
-
-                <div className="mt-2 flex flex-wrap items-center gap-2">
-                  {project.path ? (
-                    <LocationChip icon={<FolderOpen className="size-[11px]" aria-hidden="true" />}>
-                      {project.path}
-                    </LocationChip>
-                  ) : null}
-                  {remotes.map((remote) => (
-                    <LocationChip key={remote.id} icon={<Globe className="size-[11px]" aria-hidden="true" />}>
-                      {remoteLabel(remote)}
-                    </LocationChip>
-                  ))}
-                </div>
               </div>
             </div>
           </div>
