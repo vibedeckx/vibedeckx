@@ -299,6 +299,11 @@ interface FilePreviewProps {
   onScroll?: (top: number) => void;
 }
 
+// Streamdown's Mermaid pan/zoom hijacks the mouse wheel over a diagram, so
+// scrolling through a document zooms the chart instead. Turn it off to keep the
+// wheel scrolling the file; download/copy/fullscreen controls stay available.
+const MARKDOWN_CONTROLS = { mermaid: { panZoom: false } } as const;
+
 export function FilePreview({
   filePath,
   fileContent,
@@ -796,6 +801,7 @@ export function FilePreview({
             <MessageResponse
               components={markdownComponents}
               rehypePlugins={rehypePlugins}
+              controls={MARKDOWN_CONTROLS}
             >
               {fileContent.content ?? ""}
             </MessageResponse>
