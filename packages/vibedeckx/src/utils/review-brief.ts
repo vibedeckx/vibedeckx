@@ -2,7 +2,7 @@ import { createHash } from "crypto";
 import { generateText } from "ai";
 import type { Storage } from "../storage/types.js";
 import type { AgentMessage } from "../agent-types.js";
-import { extractUserText } from "./session-title.js";
+import { extractUserText } from "./conversation-title.js";
 import { getChatProviderConfig, isModelConfigured, resolveChatModel, resolveFastChatModel } from "./chat-model.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

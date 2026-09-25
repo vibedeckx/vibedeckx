@@ -10,7 +10,7 @@ import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import { writePasteToTempFile } from "../utils/paste-file.js";
 import { writeAttachmentToTempFile, MAX_ATTACHMENT_BYTES, ATTACHMENT_BODY_LIMIT } from "../utils/attachment-file.js";
-import { extractUserText } from "../utils/session-title.js";
+import { extractUserText } from "../utils/conversation-title.js";
 import { appendRemoteGrantContext } from "../cross-remote-grant-context.js";
 import { validateSessionGrantIds } from "../cross-remote-access.js";
 import { authorizeLocalSession, authorizeRemoteSession, resolveRemoteSessionOwner } from "./session-ownership.js";

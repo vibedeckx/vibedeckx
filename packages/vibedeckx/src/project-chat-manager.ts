@@ -12,7 +12,7 @@ import type {
   Storage,
 } from "./storage/types.js";
 import { resolveChatModel } from "./utils/chat-model.js";
-import { generateSessionTitle, snippetTitle } from "./utils/session-title.js";
+import { generateConversationTitle, snippetTitle } from "./utils/conversation-title.js";
 import {
   listProjectChatPublicContextRefs,
   type ProjectChatPublicContextRef,
@@ -100,7 +100,7 @@ export interface ProjectChatManagerOptions {
   maxConcurrentTurnsPerUser?: number;
   toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions" | "mutationServices">;
   eventBus?: EventBus;
-  titleGenerator?: typeof generateSessionTitle;
+  titleGenerator?: typeof generateConversationTitle;
 }
 
 export interface ProjectChatReconciliationReport {
@@ -417,7 +417,7 @@ export class ProjectChatManager {
   private readonly outstandingOperations = new Set<Promise<unknown>>();
   private readonly operationReconciliationFlights = new Map<string, Promise<OperationReconciliationOutcome>>();
   private readonly runner: ProjectChatModelRunner;
-  private readonly titleGenerator: typeof generateSessionTitle;
+  private readonly titleGenerator: typeof generateConversationTitle;
   private readonly drainTimeoutMs: number;
   private readonly idleEvictionMs: number;
   private readonly terminalRetryDelayMs: number;
@@ -453,7 +453,7 @@ export class ProjectChatManager {
     options: ProjectChatManagerOptions = {},
   ) {
     this.runner = runner ?? new DefaultProjectChatModelRunner(storage);
-    this.titleGenerator = options.titleGenerator ?? generateSessionTitle;
+    this.titleGenerator = options.titleGenerator ?? generateConversationTitle;
     this.drainTimeoutMs = options.drainTimeoutMs ?? 2_000;
     this.idleEvictionMs = options.idleEvictionMs ?? 30_000;
     this.terminalRetryDelayMs = options.terminalRetryDelayMs ?? 100;

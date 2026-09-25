@@ -33,7 +33,7 @@ import {
   type SessionHistoryWindow,
 } from "./session-history-window.js";
 import { getRegisteredWorktreeBranches, resolveWorktreePath } from "./utils/worktree-paths.js";
-import { generateSessionTitle, snippetTitle, extractUserText } from "./utils/session-title.js";
+import { generateConversationTitle, snippetTitle, extractUserText } from "./utils/conversation-title.js";
 import { recordTurnSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
 import { logSessionLifecycle, type SessionPurpose } from "./session-lifecycle-log.js";
 import {
@@ -4880,7 +4880,7 @@ export class AgentSessionManager {
     const fallback = snippetTitle(userText);
     let title: string | null = null;
     try {
-      title = await generateSessionTitle(this.storage, userText, userId);
+      title = await generateConversationTitle(this.storage, userText, userId);
     } catch (error) {
       console.warn(`[AgentSession] Title generation threw for ${session.id}:`, error);
     }

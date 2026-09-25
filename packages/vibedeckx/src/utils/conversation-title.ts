@@ -31,7 +31,7 @@ function buildPrompt(userMessage: string): string {
  */
 export async function isChatModelConfigured(storage: Storage, userId: string): Promise<boolean> {
   const config = await getChatProviderConfig(storage, userId);
-  // Session titles run on the fast model, so check that lane's provider key.
+  // Conversation titles run on the fast model, so check that lane's provider key.
   return isModelConfigured(config, config.fast);
 }
 
@@ -53,7 +53,7 @@ export function extractUserText(content: string | ContentPart[]): string {
 }
 
 /**
- * Truncate a free-form string to a session-title-sized snippet. Used both as
+ * Truncate a free-form string to a conversation-title-sized snippet. Used both as
  * the AI fallback and to normalize the AI's own output.
  */
 export function snippetTitle(text: string): string {
@@ -82,7 +82,7 @@ function sanitizeTitle(raw: string): string {
  * null on timeout, network error, or empty output. Exported so eval harnesses
  * can reuse the exact prompt against arbitrary models.
  */
-export async function generateSessionTitleWithModel(
+export async function generateConversationTitleWithModel(
   model: AnyLanguageModel,
   userMessage: string,
   options: { userId?: string } = {},
@@ -92,10 +92,10 @@ export async function generateSessionTitleWithModel(
   const telemetry = options.userId
     ? {
         isEnabled: true,
-        functionId: "session-title",
+        functionId: "conversation-title",
         metadata: {
           userId: options.userId,
-          tags: ["vibedeckx", "session-title"],
+          tags: ["vibedeckx", "conversation-title"],
         },
       }
     : undefined;
@@ -116,7 +116,7 @@ export async function generateSessionTitleWithModel(
     const sanitized = sanitizeTitle(text);
     return sanitized.length > 0 ? sanitized : null;
   } catch (error) {
-    console.warn("[SessionTitle] AI generation failed:", (error as Error).message);
+    console.warn("[ConversationTitle] AI generation failed:", (error as Error).message);
     return null;
   }
 }
@@ -126,11 +126,11 @@ export async function generateSessionTitleWithModel(
  * short conversation title. Returns null on any failure (timeout, network,
  * empty output) so the caller can fall back to a snippet.
  */
-export async function generateSessionTitle(
+export async function generateConversationTitle(
   storage: Storage,
   userMessage: string,
   userId: string,
 ): Promise<string | null> {
   if (!(await isChatModelConfigured(storage, userId))) return null;
-  return generateSessionTitleWithModel(await resolveFastChatModel(storage, userId), userMessage, { userId });
+  return generateConversationTitleWithModel(await resolveFastChatModel(storage, userId), userMessage, { userId });
 }

@@ -9,7 +9,7 @@ import {
   buildRemoteGrantContext,
   stripRemoteGrantContext,
 } from "./cross-remote-grant-context.js";
-import { extractUserText } from "./utils/session-title.js";
+import { extractUserText } from "./utils/conversation-title.js";
 
 /** docs/cross-remote-session-grants-design.md §6. */
 describe("cross-remote grant context", () => {

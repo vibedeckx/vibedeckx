@@ -1,7 +1,7 @@
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
 import { evalite } from "evalite";
-import { generateSessionTitleWithModel } from "../src/utils/session-title.js";
+import { generateConversationTitleWithModel } from "../src/utils/conversation-title.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let cachedModel: any | undefined;
@@ -24,7 +24,7 @@ function getModel(): any {
   );
 }
 
-evalite("session title generation", {
+evalite("conversation title generation", {
   data: () => [
     { input: "帮我写一个 Python 的快速排序" },
     { input: "What's the difference between let and var in JavaScript?" },
@@ -34,7 +34,7 @@ evalite("session title generation", {
     { input: "summarize the key arguments in this paper about transformer scaling laws" },
   ],
   task: async (input) => {
-    const title = await generateSessionTitleWithModel(getModel(), input);
+    const title = await generateConversationTitleWithModel(getModel(), input);
     return title ?? "";
   },
   scorers: [],

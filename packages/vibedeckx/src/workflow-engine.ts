@@ -6,7 +6,7 @@ import { findTurnOpeningUserEntryIndex, reviewReadyId, workflowFailedId } from "
 import { deliverInstruction, instructionContentHash, serializeSessionMutation } from "./instruction-delivery.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
 import { captureSnapshot, computeScope, resolveStartSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
-import { snippetTitle } from "./utils/session-title.js";
+import { snippetTitle } from "./utils/conversation-title.js";
 import { parseVerdict } from "./utils/review-verdict.js";
 import { parseRepeatParams, RepeatLoopError, RepeatLoopRunner, type RepeatLoopHost, type StartRepeatLoopOptions } from "./workflow-repeat-loop.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";

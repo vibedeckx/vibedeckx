@@ -10,7 +10,7 @@ import {
 } from "../project-chat-manager.js";
 import { MAX_TOOL_SELECTOR_ID } from "../project-chat-tools.js";
 import { listProjectChatPublicContextRefs } from "../project-chat-context.js";
-import { snippetTitle } from "../utils/session-title.js";
+import { snippetTitle } from "../utils/conversation-title.js";
 import { requireAuth } from "../server.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";

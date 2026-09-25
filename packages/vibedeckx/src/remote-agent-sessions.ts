@@ -1,6 +1,6 @@
 import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
 import { ConversationPatch } from "./conversation-patch.js";
-import { generateSessionTitle, snippetTitle } from "./utils/session-title.js";
+import { generateConversationTitle, snippetTitle } from "./utils/conversation-title.js";
 import type { AgentMessage } from "./agent-types.js";
 import type { RemoteReviewerCreationIntent, RemoteSessionActivityUpdateResult, RemoteSessionCreationIntent, ReviewSpan, Storage, WorkflowRun } from "./storage/types.js";
 import type { RemoteSessionInfo } from "./server-types.js";
@@ -1416,7 +1416,7 @@ export async function generateAndPushRemoteSessionTitle(
 
   let aiTitle: string | null = null;
   try {
-    aiTitle = await generateSessionTitle(deps.storage, userText, userId);
+    aiTitle = await generateConversationTitle(deps.storage, userText, userId);
   } catch (error) {
     console.warn(
       `[SessionTitle] AI title generation threw for ${localSessionId}:`,

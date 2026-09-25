@@ -18,7 +18,7 @@ import type { ContentPart, NotificationDisposition } from "./agent-types.js";
 import type { EventBus } from "./event-bus.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
-import { extractUserText } from "./utils/session-title.js";
+import { extractUserText } from "./utils/conversation-title.js";
 import { appendContextBlock, buildRemoteGrantContext } from "./cross-remote-grant-context.js";
 import { WATCH_WINDOW_MS as NOTIFICATION_WATCH_WINDOW_MS } from "./remote-notification-sync.js";
 import {
