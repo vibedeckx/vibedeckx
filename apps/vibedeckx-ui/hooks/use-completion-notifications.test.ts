@@ -169,7 +169,8 @@ describe('page wiring: visibility source', () => {
 
   it('feeds the notification hook the rendered session, never the URL param', async () => {
     const page = await read('../app/page.tsx');
-    expect(page).toMatch(/useCompletionNotifications\(activeNotificationSessionId, activeNotificationResultAt\)/);
+    expect(page).toMatch(/useCompletionNotifications\(activeNotificationSessionId, activeNotificationResultAt, activeNotificationTurnEndAt\)/);
+    expect(page).toMatch(/onActiveSessionTurnEndAtChange=\{setRenderedTurnEndAt\}/);
     // Derived from what the conversation reports it is showing...
     expect(page).toMatch(/notificationViewActive = activeView === 'workspace' && agentTabActive && renderedResultAt !== null;/);
     expect(page).toMatch(/activeNotificationSessionId = notificationViewActive \? renderedSessionId : null;/);
@@ -206,8 +207,12 @@ describe('useCompletionNotifications', () => {
   // Published from an effect, not during render: assigning to an outer variable
   // mid-render is a side effect React (and eslint) rightly rejects. act() flushes
   // effects, so `latest` is current by the time assertions run.
-  function Harness({ activeSessionId, activeResultAt }: { activeSessionId: string | null; activeResultAt: number | null }) {
-    const result = useCompletionNotifications(activeSessionId, activeResultAt);
+  function Harness({ activeSessionId, activeResultAt, activeTurnEndAt }: {
+    activeSessionId: string | null;
+    activeResultAt: number | null;
+    activeTurnEndAt: number | null;
+  }) {
+    const result = useCompletionNotifications(activeSessionId, activeResultAt, activeTurnEndAt);
     useEffect(() => {
       latest = result;
     });
@@ -216,13 +221,16 @@ describe('useCompletionNotifications', () => {
 
   // createElement rather than JSX so this stays a .ts file alongside the hook.
   // By default a named session is showing a result the stream delivered just
-  // now; pass `activeResultAt` to model a page that predates a milestone.
+  // now; pass `activeResultAt` to model a page that predates a milestone. The
+  // newest turn_end on screen defaults to the same instant (clocks in sync);
+  // pass `activeTurnEndAt` to pull the two apart.
   async function render(
     activeSessionId: string | null = null,
     activeResultAt: number | null = activeSessionId ? Date.now() : null,
+    activeTurnEndAt: number | null = activeResultAt,
   ) {
     await act(async () => {
-      root.render(createElement(Harness, { activeSessionId, activeResultAt }));
+      root.render(createElement(Harness, { activeSessionId, activeResultAt, activeTurnEndAt }));
     });
   }
 
@@ -343,6 +351,81 @@ describe('useCompletionNotifications', () => {
     expect(latest.notifications[0].read_at).not.toBeNull();
     expect(latest.unreadCount).toBe(0);
     expect(api.markNotificationRead).toHaveBeenCalledWith('a');
+  });
+
+  /**
+   * A turn milestone's `created_at` is its turn_end's timestamp — another
+   * machine's clock. It is judged against the turn_end on screen, never the
+   * browser's clock, which may run behind the worker.
+   */
+  describe('clock skew between browser and worker', () => {
+    it.each(['session_result_ready', 'session_failed'] as const)(
+      'auto-reads a %s shown on screen even when the browser clock is behind',
+      async (kind) => {
+        // The browser stamped the result at 8; the worker ended the turn at 10.
+        await render('s1', 8, 10);
+        await pushSse(row({ id: 'a', kind, session_id: 's1', created_at: 10 }));
+        expect(latest.unreadCount).toBe(0);
+        expect(api.markNotificationRead).toHaveBeenCalledWith('a');
+      },
+    );
+
+    it('the sweep reads a pending turn milestone on the turn_end, not the browser clock', async () => {
+      api.getNotifications.mockResolvedValue([row({ id: 'a', session_id: 's1', created_at: 10 })]);
+      await render(null);
+      expect(latest.unreadCount).toBe(1);
+      await rerender('s1', 8, 10);
+      expect(latest.unreadCount).toBe(0);
+      expect(api.markNotificationRead).toHaveBeenCalledWith('a');
+    });
+
+    it('leaves a turn milestone newer than the turn_end on screen unread, however far ahead the browser clock is', async () => {
+      await render('s1', 1_000, 5);
+      await pushSse(row({ id: 'a', session_id: 's1', created_at: 10 }));
+      expect(latest.unreadCount).toBe(1);
+      expect(api.markNotificationRead).not.toHaveBeenCalled();
+    });
+
+    it('leaves a turn milestone unread when no turn_end is on screen', async () => {
+      await render('s1', 1_000, null);
+      await pushSse(row({ id: 'a', session_id: 's1', created_at: 10 }));
+      expect(latest.unreadCount).toBe(1);
+      expect(api.markNotificationRead).not.toHaveBeenCalled();
+    });
+
+    // Workflow milestones are stamped by their own Date.now() AFTER the
+    // session's last turn_end, which therefore can never cover them. Opening
+    // the session later must still read them, on the browser-clock result.
+    it.each([
+      ['review_ready', { workflow_run_id: 'run-1' }],
+      ['workflow_failed', { workflow_run_id: 'run-1' }],
+      ['loop_done', { workflow_run_id: 'loop-1' }],
+    ] as const)('still auto-reads a %s newer than the session\'s last turn_end', async (kind, extra) => {
+      api.getNotifications.mockResolvedValue([
+        row({ id: 'w', kind, session_id: 'rev', created_at: 20, ...extra }),
+      ]);
+      await render(null);
+      expect(latest.unreadCount).toBe(1);
+      // Opened later: the browser-clock result is recent, the last turn_end is
+      // older than the milestone.
+      await rerender('rev', Date.now(), 10);
+      expect(latest.unreadCount).toBe(0);
+      expect(api.markNotificationRead).toHaveBeenCalledWith('w');
+    });
+
+    it('catch-up stays silent for a turn milestone shown under a lagging browser clock', async () => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
+      try {
+        const endedAt = Date.now() - 5_000;
+        await render('s1', endedAt - 2_000, endedAt);
+        api.getNotifications.mockResolvedValue([row({ id: 'x', session_id: 's1', created_at: endedAt })]);
+        await reconnect();
+        expect(api.markNotificationRead).toHaveBeenCalledWith('x');
+        expect(played.srcs).toEqual([]);
+      } finally {
+        delete (document as { visibilityState?: unknown }).visibilityState;
+      }
+    });
   });
 
   /**

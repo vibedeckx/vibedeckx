@@ -674,6 +674,28 @@ function denseEntries(container: PatchContainer): WindowedAgentEntry[] {
     .sort((a, b) => a.entryIndex - b.entryIndex);
 }
 
+/**
+ * Timestamp of the newest `turn_end` the container holds. It is the same
+ * server-clock value as the `created_at` of that turn's session milestone
+ * (both are the turn's `endedAt`), so comparing the two needs no clock sync.
+ */
+function latestTurnEndAt(container: PatchContainer): number | null {
+  const entries = denseEntries(container);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const message = entries[i].message;
+    if (message.type === "turn_end") return message.timestamp;
+  }
+  return null;
+}
+
+export interface StreamFinished {
+  sessionId: string;
+  /** Browser clock when the stream delivered the finished state. */
+  at: number;
+  /** Server clock: the newest `turn_end` on screen then (see latestTurnEndAt). */
+  turnEndAt: number | null;
+}
+
 function emptyHistory(session: AgentSession): SessionHistoryWindow {
   return {
     historyEpoch: 0,
@@ -859,8 +881,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // and for which session. Only the stream sets it — a warm-cache preview or a
   // failed revalidation restores a `status` too, but one that may predate a
   // turn finished elsewhere. Consumers asking "has the user been shown this
-  // result" (notification auto-read) compare `at` against the result's time.
-  const [streamFinished, setStreamFinished] = useState<{ sessionId: string; at: number } | null>(null);
+  // result" (notification auto-read) compare `at` against the result's time,
+  // or — for a turn's own milestone — `turnEndAt`, which shares its clock.
+  const [streamFinished, setStreamFinished] = useState<StreamFinished | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const wsSessionIdRef = useRef<string | null>(null);
@@ -1234,11 +1257,14 @@ export function useAgentSession(projectId: string | null, branch: string | null,
             console.log("[AgentSession] setStatus(live) →", containerRef.current.status);
             setStatus(containerRef.current.status);
             const liveStatus = containerRef.current.status;
-            setStreamFinished((prev) =>
-              liveStatus === "running"
-                ? null
-                : prev?.sessionId === sessionId ? prev : { sessionId, at: Date.now() },
-            );
+            const turnEndAt = latestTurnEndAt(containerRef.current);
+            setStreamFinished((prev) => {
+              if (liveStatus === "running") return null;
+              if (prev?.sessionId !== sessionId) return { sessionId, at: Date.now(), turnEndAt };
+              // `at` stays put for this finished state; `turnEndAt` follows a
+              // turn_end that lands while stopped (e.g. a Stop on a cold turn).
+              return prev.turnEndAt === turnEndAt ? prev : { ...prev, turnEndAt };
+            });
             persistCurrentSnapshot();
           } else {
             console.log("[AgentSession] /status patch applied during replay (no setStatus), container.status =", containerRef.current.status);
@@ -1259,7 +1285,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           // The replay is current as of now, so a finished status here covers
           // every result the server had.
           setStreamFinished(
-            containerRef.current.status === "running" ? null : { sessionId, at: Date.now() },
+            containerRef.current.status === "running"
+              ? null
+              : { sessionId, at: Date.now(), turnEndAt: latestTurnEndAt(containerRef.current) },
           );
           setIsInitialized(true);
           persistCurrentSnapshot();

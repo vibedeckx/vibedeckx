@@ -74,6 +74,10 @@ const statusPatch = (status: string) => ({
   JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: status } }],
 });
 
+const entryPatch = (index: number, content: unknown) => ({
+  JsonPatch: [{ op: "add", path: `/entries/${index}`, value: { type: "ENTRY", content } }],
+});
+
 beforeEach(() => {
   FakeWebSocket.instances = [];
   fetchMock.mockReset();
@@ -116,6 +120,27 @@ describe("streamFinished", () => {
     await act(async () => { ws.receive(statusPatch("stopped")); });
     expect(latest!.streamFinished?.sessionId).toBe("sf-a");
     expect(latest!.streamFinished!.at).toBeGreaterThanOrEqual(first);
+  });
+
+  it("carries the newest turn_end's server timestamp, not just the browser clock", async () => {
+    await open("sf-a");
+    const ws = await ready();
+    expect(latest!.streamFinished?.turnEndAt).toBeNull();
+
+    await act(async () => { ws.receive(statusPatch("running")); });
+    // The worker's clock: deliberately far from the browser's Date.now().
+    await act(async () => { ws.receive(entryPatch(1, { type: "turn_end", timestamp: 1234 })); });
+    await act(async () => { ws.receive(statusPatch("stopped")); });
+    expect(latest!.streamFinished?.turnEndAt).toBe(1234);
+
+    // A replay picks it up the same way.
+    await open("sf-b");
+    const wsB = FakeWebSocket.instances.at(-1)!;
+    wsB.readyState = FakeWebSocket.OPEN;
+    await act(async () => { wsB.onopen?.(); });
+    await act(async () => { wsB.receive(entryPatch(1, { type: "turn_end", timestamp: 5678 })); });
+    await act(async () => { wsB.receive({ Ready: true }); });
+    expect(latest!.streamFinished).toMatchObject({ sessionId: "sf-b", turnEndAt: 5678 });
   });
 
   it("is not claimed by a cached stopped state restored while the server is unreachable", async () => {

@@ -210,6 +210,43 @@ export interface CompletionNotificationsResult {
 }
 
 /**
+ * Milestones minted by the turn_end they announce: their `created_at` IS that
+ * turn_end's timestamp (the turn's `endedAt`, on whichever machine ran it).
+ */
+const TURN_MILESTONE_KINDS: ReadonlySet<NotificationKind> = new Set([
+  'session_result_ready',
+  'session_failed',
+]);
+
+/** What the page on screen has shown for a session, per clock. */
+export interface ShownResult {
+  /** Browser clock when the stream delivered the finished state. */
+  resultAt: number | null;
+  /** Server clock: the newest turn_end in it. */
+  turnEndAt: number | null;
+}
+
+/**
+ * Whether `shown` already covers `n` — i.e. the result it announces was on
+ * screen.
+ *
+ * A turn milestone is compared against the turn_end timestamp, which shares
+ * its clock: the browser's clock is another machine's, and one running a few
+ * hundred ms behind the worker would keep every result on screen unread. No
+ * turn_end on screen means no same-clock evidence, so it stays unread.
+ *
+ * Everything else (`review_ready`, `workflow_failed`, `loop_done`, …) is
+ * stamped by its own `Date.now()` *after* the session's last turn_end, so the
+ * turn_end can never cover it; those keep the browser-clock comparison.
+ */
+export function shownResultCovers(n: ServerNotification, shown: ShownResult): boolean {
+  if (TURN_MILESTONE_KINDS.has(n.kind)) {
+    return shown.turnEndAt !== null && shown.turnEndAt >= n.created_at;
+  }
+  return shown.resultAt !== null && shown.resultAt >= n.created_at;
+}
+
+/**
  * `activeSessionId` is the session the user is currently looking at, and
  * `activeResultAt` when the session stream delivered the finished state now on
  * screen (the page passes null for both while the conversation shows the
@@ -220,12 +257,16 @@ export interface CompletionNotificationsResult {
  * allowance for clock skew: the milestone is written before its finished
  * status reaches the browser, so in-sync clocks already order them, while a
  * forward allowance would swallow a turn that ended seconds after the shown
- * one. A skewed clock errs toward keeping the milestone unread. A notification for a *different* session
- * stays unread even when it shares a branch with the one on screen.
+ * one. A skewed clock errs toward keeping the milestone unread — which is why
+ * a turn's own milestone is compared against `activeTurnEndAt` (the newest
+ * turn_end on screen, same clock as its `created_at`) instead; see
+ * `shownResultCovers`. A notification for a *different* session stays unread
+ * even when it shares a branch with the one on screen.
  */
 export function useCompletionNotifications(
   activeSessionId: string | null,
   activeResultAt: number | null = null,
+  activeTurnEndAt: number | null = null,
 ): CompletionNotificationsResult {
   const [notifications, setNotifications] = useState<ServerNotification[]>([]);
   /**
@@ -263,37 +304,41 @@ export function useCompletionNotifications(
   // The SSE handler reads the *current* active session through a ref so it
   // never has to re-subscribe on navigation.
   const activeSessionIdRef = useRef(activeSessionId);
-  const activeResultAtRef = useRef(activeResultAt);
+  const activeShownRef = useRef<ShownResult>({ resultAt: activeResultAt, turnEndAt: activeTurnEndAt });
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
-    activeResultAtRef.current = activeResultAt;
-  }, [activeSessionId, activeResultAt]);
+    activeShownRef.current = { resultAt: activeResultAt, turnEndAt: activeTurnEndAt };
+  }, [activeSessionId, activeResultAt, activeTurnEndAt]);
 
   /**
-   * Per session, the latest `activeResultAt` the user actually looked at
-   * (visible tab). A milestone no newer than it is one whose result was shown;
-   * the reconnect catch-up reads it and skips the cue. A hidden tab doesn't
-   * count — there the cue is the only way to find out.
+   * Per session, the latest result the user actually looked at (visible tab),
+   * on both clocks. A milestone it covers is one whose result was shown; the
+   * reconnect catch-up reads it and skips the cue. A hidden tab doesn't count
+   * — there the cue is the only way to find out.
    */
-  const seenResultAt = useRef<Map<string, number>>(new Map());
+  const seenResult = useRef<Map<string, ShownResult>>(new Map());
   useEffect(() => {
     if (!activeSessionId || activeResultAt === null) return;
     const note = () => {
       if (document.visibilityState !== 'visible') return;
-      const prev = seenResultAt.current.get(activeSessionId) ?? -Infinity;
-      if (activeResultAt > prev) seenResultAt.current.set(activeSessionId, activeResultAt);
+      const prev = seenResult.current.get(activeSessionId);
+      const max = (a: number | null | undefined, b: number | null) =>
+        a == null ? b : b === null ? a : Math.max(a, b);
+      seenResult.current.set(activeSessionId, {
+        resultAt: max(prev?.resultAt, activeResultAt),
+        turnEndAt: max(prev?.turnEndAt, activeTurnEndAt),
+      });
     };
     note();
     document.addEventListener('visibilitychange', note);
     return () => document.removeEventListener('visibilitychange', note);
-  }, [activeSessionId, activeResultAt]);
+  }, [activeSessionId, activeResultAt, activeTurnEndAt]);
 
-  const hasSeenResult = useCallback(
-    (n: ServerNotification): boolean =>
-      n.session_id !== null &&
-      (seenResultAt.current.get(n.session_id) ?? -Infinity) >= n.created_at,
-    [],
-  );
+  const hasSeenResult = useCallback((n: ServerNotification): boolean => {
+    if (n.session_id === null) return false;
+    const seen = seenResult.current.get(n.session_id);
+    return seen !== undefined && shownResultCovers(n, seen);
+  }, []);
 
   /**
    * Optimistic read: flip locally, then persist. On failure the local flip is
@@ -389,12 +434,10 @@ export function useCompletionNotifications(
     heard.current.add(notification.id);
 
     const active = activeSessionIdRef.current;
-    const resultAt = activeResultAtRef.current;
     const onScreen =
       notification.session_id !== null &&
       notification.session_id === active &&
-      resultAt !== null &&
-      resultAt >= notification.created_at;
+      shownResultCovers(notification, activeShownRef.current);
     // A straggler for a run the user already finished with in Main Chat.
     const consumed =
       notification.workflow_run_id !== null &&
@@ -428,7 +471,7 @@ export function useCompletionNotifications(
    * in whatever this browser hasn't seen. Only milestones still fresh get a
    * cue, and a batch gets one cue (the newest's) rather than a burst. A
    * milestone whose result the user has already been shown (see
-   * `seenResultAt`) is read on arrival and stays silent.
+   * `seenResult`) is read on arrival and stays silent.
    *
    * A failed read is retried on `CATCH_UP_RETRY_DELAYS_MS`. A newer reconnect
    * supersedes a pending retry — it starts its own catch-up.
@@ -503,7 +546,7 @@ export function useCompletionNotifications(
     if (!activeSessionId || activeResultAt === null) return;
     for (const notification of notifications) {
       if (notification.session_id !== activeSessionId || notification.read_at !== null) continue;
-      if (notification.created_at > activeResultAt) continue;
+      if (!shownResultCovers(notification, { resultAt: activeResultAt, turnEndAt: activeTurnEndAt })) continue;
       if (readInFlight.current.has(notification.id)) continue;
       const { id } = notification;
       readInFlight.current.add(id);
@@ -520,7 +563,7 @@ export function useCompletionNotifications(
           readInFlight.current.delete(id);
         });
     }
-  }, [activeSessionId, activeResultAt, notifications]);
+  }, [activeSessionId, activeResultAt, activeTurnEndAt, notifications]);
 
   const markRead = useCallback((id: string) => persistRead(id), [persistRead]);
 

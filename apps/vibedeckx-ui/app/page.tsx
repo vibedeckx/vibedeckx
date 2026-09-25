@@ -369,10 +369,15 @@ export default function Home() {
   // reconnect catch-up would otherwise silence its cue).
   const [renderedSessionId, setRenderedSessionId] = useState<string | null>(null);
   const [renderedResultAt, setRenderedResultAt] = useState<number | null>(null);
+  // The newest turn_end in that finished state, on the server clock — what a
+  // turn's own milestone is compared against, so a browser clock running
+  // behind the worker cannot keep the result on screen unread.
+  const [renderedTurnEndAt, setRenderedTurnEndAt] = useState<number | null>(null);
   const [agentTabActive, setAgentTabActive] = useState(false);
   const notificationViewActive = activeView === 'workspace' && agentTabActive && renderedResultAt !== null;
   const activeNotificationSessionId = notificationViewActive ? renderedSessionId : null;
   const activeNotificationResultAt = notificationViewActive ? renderedResultAt : null;
+  const activeNotificationTurnEndAt = notificationViewActive ? renderedTurnEndAt : null;
   const {
     notifications,
     unreadCount,
@@ -381,7 +386,7 @@ export default function Home() {
     remove: removeNotification,
     clear: clearNotifications,
     markReviewRunRead,
-  } = useCompletionNotifications(activeNotificationSessionId, activeNotificationResultAt);
+  } = useCompletionNotifications(activeNotificationSessionId, activeNotificationResultAt, activeNotificationTurnEndAt);
 
   // Handed down by context rather than through AgentConversation ->
   // MainConversation: neither of those knows or cares about the inbox, and the
@@ -1245,6 +1250,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                         setSessionUrlParam={setSessionUrlParam}
                         onActiveSessionChange={setRenderedSessionId}
                         onActiveSessionResultAtChange={setRenderedResultAt}
+                        onActiveSessionTurnEndAtChange={setRenderedTurnEndAt}
                         project={currentProject}
                         onAgentModeChange={handleAgentModeChange}
                         onTaskCompleted={handleTaskCompleted}

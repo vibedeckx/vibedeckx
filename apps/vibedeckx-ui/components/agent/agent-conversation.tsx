@@ -211,6 +211,13 @@ interface AgentConversationProps {
    * tell "was shown this result" from "looked at a page that predates it".
    */
   onActiveSessionResultAtChange?: (at: number | null) => void;
+  /**
+   * The newest `turn_end` timestamp in that finished state (server clock), or
+   * null alongside a null result time. A turn's own milestone carries the same
+   * value as its `created_at`, so auto-read can compare the two without
+   * trusting the browser clock.
+   */
+  onActiveSessionTurnEndAtChange?: (at: number | null) => void;
   onSessionTitleUpdated?: (sessionId: string, title: string) => void;
   /** Called only when the user explicitly selects a Session History row. */
   onSessionSelected?: (sessionId: string) => void;
@@ -281,7 +288,7 @@ function pasteTokenFor(id: number, bytes: number): string {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onActiveSessionResultAtChange, onOpenSchedule, preparingReviews, onReviewStarted, onViewPreparingReview }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onActiveSessionResultAtChange, onActiveSessionTurnEndAtChange, onOpenSchedule, preparingReviews, onReviewStarted, onViewPreparingReview }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
@@ -436,6 +443,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   useEffect(() => {
     onActiveSessionResultAtChange?.(activeSessionResultAt);
   }, [activeSessionResultAt, onActiveSessionResultAtChange]);
+  const activeSessionTurnEndAt =
+    activeSessionResultAt !== null ? streamFinished?.turnEndAt ?? null : null;
+  useEffect(() => {
+    onActiveSessionTurnEndAtChange?.(activeSessionTurnEndAt);
+  }, [activeSessionTurnEndAt, onActiveSessionTurnEndAtChange]);
 
   // Cross-remote grants for this conversation. Hidden entirely when the server
   // cannot mint a gateway token, so the menu never offers a control that
