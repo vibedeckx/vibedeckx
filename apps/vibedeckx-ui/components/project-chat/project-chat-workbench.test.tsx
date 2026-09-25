@@ -233,6 +233,22 @@ describe("ProjectChatWorkbench", () => {
     expect(container.textContent).toContain("Schedule run");
   });
 
+  it("pairs each parallel tool result with its call", () => {
+    hook.value.messages = [
+      message(1, "tool_use", JSON.stringify({ toolCallId: "c1", toolName: "list_agent_sessions", input: {} })),
+      message(2, "tool_use", JSON.stringify({ toolCallId: "c2", toolName: "list_workspaces", input: {} })),
+      message(3, "tool_use", JSON.stringify({ toolCallId: "c3", toolName: "list_schedules", input: {} })),
+      message(4, "tool_result", JSON.stringify({ toolCallId: "c2", toolName: "list_workspaces", output: "3 workspaces" })),
+      message(5, "tool_result", JSON.stringify({ toolCallId: "c1", toolName: "list_agent_sessions", error: "boom" })),
+    ];
+    render();
+
+    const cards = [...container.querySelectorAll('[data-testid="tool-call"]')].map((card) => card.textContent);
+    expect(cards).toEqual(["list agent sessions failedboom", "list workspaces3 workspaces"]);
+    expect(container.textContent).toContain("Running list schedules…");
+    expect(container.textContent).not.toContain("Tool result");
+  });
+
   it("coalesces persisted operation history into one live card and keeps its final state after reload", () => {
     hook.value.status = "idle";
     hook.value.activeTurnId = null;

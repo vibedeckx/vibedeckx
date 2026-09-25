@@ -120,6 +120,15 @@ function toolOutput(content: string): string {
   return content;
 }
 
+function toolCallId(content: string): string | null {
+  const id = parseObject(content)?.toolCallId;
+  return typeof id === "string" && id ? id : null;
+}
+
+function isToolError(content: string): boolean {
+  return typeof parseObject(content)?.error === "string";
+}
+
 interface ProjectChatConversationProps {
   messages: ProjectChatMessage[];
   contextRefs: ProjectChatContextRef[];
@@ -241,6 +250,21 @@ export function ProjectChatConversation({
       latestMessageIdByOperation.set(operation.operationId, message.id);
     }
     return { byMessageId, latestMessageIdByOperation };
+  }, [messages]);
+
+  // Parallel tool calls stream as use, use, result, result. Fold each result
+  // into its call's card; a result whose call isn't loaded stays standalone.
+  const toolResultsByCallId = useMemo(() => {
+    const callIds = new Set<string>();
+    const results = new Map<string, ProjectChatMessage>();
+    for (const message of messages) {
+      if (message.type !== "tool_use" && message.type !== "tool_result") continue;
+      const id = toolCallId(message.content);
+      if (!id) continue;
+      if (message.type === "tool_use") callIds.add(id);
+      else if (callIds.has(id)) results.set(id, message);
+    }
+    return results;
   }, [messages]);
 
   const runOperationAction = async (
@@ -387,9 +411,27 @@ export function ProjectChatConversation({
               );
             }
             if (message.type === "tool_use") {
-              return <div key={message.id} className="flex items-center gap-2 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground"><Search className="size-3.5" />Running {toolLabel(message.content)}…</div>;
+              const id = toolCallId(message.content);
+              const result = id ? toolResultsByCallId.get(id) : undefined;
+              if (!result) {
+                return <div key={message.id} className="flex items-center gap-2 rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground"><Search className="size-3.5" />Running {toolLabel(message.content)}…</div>;
+              }
+              const failed = isToolError(result.content);
+              return (
+                <details key={message.id} data-testid="tool-call" className="rounded-md border px-3 py-2 text-xs">
+                  <summary className="cursor-pointer text-muted-foreground">
+                    <span className="inline-flex items-center gap-2 align-middle">
+                      {failed ? <AlertTriangle className="size-3.5 text-destructive" /> : <Check className="size-3.5" />}
+                      {toolLabel(message.content)}{failed ? " failed" : ""}
+                    </span>
+                  </summary>
+                  <pre className="mt-2 overflow-x-auto whitespace-pre-wrap">{toolOutput(result.content)}</pre>
+                </details>
+              );
             }
             if (message.type === "tool_result") {
+              const id = toolCallId(message.content);
+              if (id && toolResultsByCallId.get(id) === message) return null;
               return <details key={message.id} className="rounded-md border px-3 py-2 text-xs"><summary className="cursor-pointer text-muted-foreground">Tool result</summary><pre className="mt-2 overflow-x-auto whitespace-pre-wrap">{toolOutput(message.content)}</pre></details>;
             }
             if (message.type === "tool_approval_request") {
