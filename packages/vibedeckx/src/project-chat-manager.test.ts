@@ -1723,7 +1723,8 @@ describe("ProjectChatManager", () => {
       async *run(input) {
         expect(Object.keys(input.tools ?? {}).sort()).toEqual([
           "create_agent_session", "create_task", "get_agent_session", "get_project_summary", "get_schedule_run", "get_task",
-          "list_agent_sessions", "list_schedule_runs", "list_schedules", "list_tasks", "list_workspaces",
+          "list_agent_sessions", "list_schedule_runs", "list_schedules", "list_starred_sessions", "list_tasks",
+          "list_workspaces",
           "run_schedule_now", "select_workspace", "send_agent_instruction", "update_task",
         ]);
         const result = await input.tools!.get_task.execute({ taskId: "task-1" });

@@ -175,6 +175,7 @@ export type ProjectChatTools = {
   get_task: ProjectChatTool<{ taskId: string }, Record<string, unknown>>;
   list_workspaces: ProjectChatTool<Record<string, never>, ListResult<{ id: string; target: string; branch: string | null }>>;
   list_agent_sessions: ProjectChatTool<Record<string, never>, ListResult<ProjectSessionSummary>>;
+  list_starred_sessions: ProjectChatTool<Record<string, never>, ListResult<ProjectSessionSummary & { starredAt: string }>>;
   get_agent_session: ProjectChatTool<{ sessionId: string }, ProjectSessionDetail>;
   list_schedules: ProjectChatTool<Record<string, never>, ListResult<Record<string, unknown>>>;
   list_schedule_runs: ProjectChatTool<Record<string, never>, ListResult<Record<string, unknown>>>;
@@ -1260,6 +1261,47 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
         return {
           items: entries.map((entry) => entry.item),
           truncated: localRows.length === LIST_LIMIT / 2 || remoteRows.length === LIST_LIMIT / 2,
+        };
+      }),
+    },
+    list_starred_sessions: {
+      description: "List sessions the user starred in this project, local and remote, newest star first. "
+        + "Use this instead of list_agent_sessions when looking for starred sessions: old starred sessions "
+        + "may be missing from the recent-activity list.",
+      inputSchema: emptySchema,
+      execute: readInScope(async () => {
+        // Remote stars come from the hub's catalog cache (updated when the star
+        // is toggled through the hub, and on every catalog sync), so no worker
+        // round-trip is needed. Without a remote reader, remote ids could not be
+        // opened by get_agent_session, so they are not offered.
+        const [localRows, remoteRows] = await Promise.all([
+          storage.agentSessions.listFavoritedActivityByProject(projectId, LIST_LIMIT + 1, "project-chat"),
+          remoteSessions
+            ? storage.searchCache.listRemoteSessionFavoritesByProject(projectId, LIST_LIMIT + 1, "project-chat")
+            : Promise.resolve([]),
+        ]);
+        const byId = new Map<string, (typeof localRows)[number]>();
+        for (const row of [...localRows, ...remoteRows]) {
+          if (row.favoritedAt === null || row.projectId !== projectId || !isToolSelectorId(row.id)) continue;
+          if (!byId.has(row.id)) byId.set(row.id, row);
+        }
+        const merged = [...byId.values()]
+          .sort((left, right) => (right.favoritedAt ?? 0) - (left.favoritedAt ?? 0) || left.id.localeCompare(right.id));
+        const rows = merged.slice(0, LIST_LIMIT);
+        await touchAll("agent_session", rows.map((row) => row.id));
+        return {
+          items: rows.map((row) => ({
+            id: preview(row.id, ID_CHAR_LIMIT),
+            projectId: preview(row.projectId, ID_CHAR_LIMIT),
+            branch: nullablePreview(row.branch, LIST_BRANCH_CHAR_LIMIT),
+            title: nullablePreview(row.title, LIST_NAME_CHAR_LIMIT),
+            status: preview(row.status, ENUM_CHAR_LIMIT),
+            target: preview(row.target, LIST_TARGET_CHAR_LIMIT),
+            agentType: nullablePreview(row.agentType, ENUM_CHAR_LIMIT),
+            model: nullablePreview(row.model, LIST_MODEL_CHAR_LIMIT),
+            starredAt: new Date(row.favoritedAt ?? 0).toISOString(),
+          })),
+          truncated: merged.length > LIST_LIMIT,
         };
       }),
     },

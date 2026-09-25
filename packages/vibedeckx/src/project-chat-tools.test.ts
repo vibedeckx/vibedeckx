@@ -131,6 +131,7 @@ describe("createProjectChatTools", () => {
       () => surface.get_task.execute({ taskId: "revoked-task" }),
       () => surface.list_workspaces.execute({}),
       () => surface.list_agent_sessions.execute({}),
+      () => surface.list_starred_sessions.execute({}),
       () => surface.get_agent_session.execute({ sessionId: "revoked-session" }),
       () => surface.list_schedules.execute({}),
       () => surface.list_schedule_runs.execute({}),
@@ -196,7 +197,8 @@ describe("createProjectChatTools", () => {
     const surface = await tools();
     expect(Object.keys(surface).sort()).toEqual([
       "create_agent_session", "create_task", "get_agent_session", "get_project_summary", "get_schedule_run", "get_task",
-      "list_agent_sessions", "list_schedule_runs", "list_schedules", "list_tasks", "list_workspaces",
+      "list_agent_sessions", "list_schedule_runs", "list_schedules", "list_starred_sessions", "list_tasks",
+          "list_workspaces",
       "run_schedule_now", "select_workspace", "send_agent_instruction", "update_task",
     ]);
     expect(Object.keys(surface).join(" ")).not.toMatch(/delete|stop|git|worktree|schedule_(create|update)|modify_schedule/i);
@@ -696,6 +698,47 @@ describe("createProjectChatTools", () => {
 
     expect(createOperation).not.toHaveBeenCalled();
     expect(touch).not.toHaveBeenCalled();
+  });
+
+  it("lists local and remote starred sessions newest star first, scoped to the project", async () => {
+    const serverId = await linkedRemoteServer();
+    await storage.agentSessions.create({ id: "starred-local", project_id: "project-1", branch: "dev" });
+    await storage.agentSessions.create({ id: "plain-local", project_id: "project-1", branch: "plain" });
+    await storage.agentSessions.create({ id: "starred-foreign", project_id: "project-2", branch: "secret" });
+    await storage.agentSessions.setFavorited("starred-local", true);
+    await storage.agentSessions.setFavorited("starred-foreign", true);
+    const localStarredAt = (await storage.agentSessions.getById("starred-local"))!.favorited_at!;
+    await storage.remoteSessionMappings.upsert("remote-starred", "project-1", serverId, "worker-starred", "feature", "from_now");
+    await storage.remoteSessionMappings.upsert("remote-old-star", "project-1", serverId, "worker-old", "old", "from_now");
+    await storage.remoteSessionMappings.upsert("remote-plain", "project-1", serverId, "worker-plain", "other", "from_now");
+    await storage.searchCache.applyCatalogSnapshot("project-1", serverId, {
+      workspaces: [{ branch: "feature" }, { branch: "old" }, { branch: "other" }],
+      sessions: [
+        { id: "remote-starred", branch: "feature", title: "Remote starred", lastActiveAt: 1,
+          favoritedAt: localStarredAt + 1_000, entryCount: 1, status: "stopped", agentType: "codex" },
+        // Starred long ago and idle since: absent from recent activity, still listed here.
+        { id: "remote-old-star", branch: "old", title: "Old star", lastActiveAt: 0,
+          favoritedAt: localStarredAt - 1_000, entryCount: 1, status: "stopped" },
+        { id: "remote-plain", branch: "other", title: "Remote plain", lastActiveAt: 2,
+          favoritedAt: null, entryCount: 1, status: "stopped" },
+      ],
+    });
+    const touch = vi.spyOn(storage.projectChatContextRefs, "touchMany");
+    const surface = await tools();
+
+    const listed = await surface.list_starred_sessions.execute({});
+    expect(listed.truncated).toBe(false);
+    expect(listed.items.map((item) => item.id)).toEqual(["remote-starred", "starred-local", "remote-old-star"]);
+    expect(listed.items[0]).toMatchObject({
+      projectId: "project-1", branch: "feature", title: "Remote starred", status: "stopped",
+      target: serverId, agentType: "codex", starredAt: new Date(localStarredAt + 1_000).toISOString(),
+    });
+    expect(JSON.stringify(listed)).not.toMatch(/starred-foreign|plain-local|remote-plain/);
+    expect(touch).toHaveBeenCalledWith("thread-1", "project-1", "user-1", [
+      { entityType: "agent_session", entityId: "remote-starred" },
+      { entityType: "agent_session", entityId: "starred-local" },
+      { entityType: "agent_session", entityId: "remote-old-star" },
+    ]);
   });
 
   it("lists local and mapped remote sessions and bounds detailed transcript previews", async () => {
