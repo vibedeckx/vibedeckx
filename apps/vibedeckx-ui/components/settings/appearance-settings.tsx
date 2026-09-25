@@ -56,7 +56,7 @@ export function AppearanceSettings() {
       >
         <div className="space-y-5">
           <FontSizeRow
-            label="Agent conversation"
+            label="Agent session, Project Chat"
             value={settings.agentFontSize}
             onChange={setAgentFontSize}
           />

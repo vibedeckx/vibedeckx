@@ -21,6 +21,7 @@ import {
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import { parseProjectChatOperationMessage } from "@/lib/api";
 import type {
   ProjectChatMessage,
@@ -224,6 +225,7 @@ export function ProjectChatConversation({
   onOpenScheduleRun,
   onRunScheduleAgain,
 }: ProjectChatConversationProps) {
+  const { settings: convSettings } = useConversationSettings();
   const [input, setInput] = useState(initialDraft);
   const [submitting, setSubmitting] = useState(false);
   const [stoppingTurnId, setStoppingTurnId] = useState<string | null>(null);
@@ -402,7 +404,7 @@ export function ProjectChatConversation({
             if (message.type === "user" || message.type === "assistant") {
               return (
                 <Message key={message.id} from={message.type}>
-                  <MessageContent>
+                  <MessageContent style={{ fontSize: `${convSettings.agentFontSize}px` }}>
                     {message.type === "assistant"
                       ? <MessageResponse components={markdownComponents}>{message.content}</MessageResponse>
                       : message.content}
