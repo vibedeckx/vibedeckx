@@ -1,6 +1,16 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useRef, useState, type AnchorHTMLAttributes } from "react";
+import {
+  createContext,
+  FormEvent,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type AnchorHTMLAttributes,
+  type ReactNode,
+} from "react";
 import { AlertTriangle, Check, Clock, Loader2, Search, Square, X } from "lucide-react";
 
 import { Message, MessageContent, MessageResponse } from "@/components/ai-elements/message";
@@ -34,9 +44,53 @@ function parseObject(content: string): Record<string, unknown> | null {
 }
 
 // The model links entities it got from tools as `[label](#ref:<entity_type>:<id>)`
-// (see PROJECT_CHAT_SYSTEM_PROMPT). Only ids already in this thread's Context
-// refs are navigable, so a made-up or foreign id never becomes a jump.
+// (see PROJECT_CHAT_SYSTEM_PROMPT). Only ids in this thread's Context refs
+// render as links; anything else (made-up, foreign, deleted) stays plain text.
 const CONTEXT_LINK_PREFIX = "#ref:";
+
+// Delivered by context rather than props: MessageResponse re-renders only when
+// its text changes, but links must follow Context refs as they arrive or vanish.
+const ContextLinkScope = createContext<{
+  contextRefs: ProjectChatContextRef[];
+  onOpenContext?: (ref: ProjectChatContextRef) => void;
+}>({ contextRefs: [] });
+
+function ContextLink({ href, entityType, entityId, children }: {
+  href: string; entityType: string; entityId: string; children: ReactNode;
+}) {
+  const { contextRefs, onOpenContext } = useContext(ContextLinkScope);
+  const ref = contextRefs.find((candidate) => (
+    candidate.entity_type === entityType && candidate.entity_id === entityId
+  ));
+  if (!ref || ref.deleted || !ref.navigation || !onOpenContext) return <>{children}</>;
+  return (
+    <a
+      href={href}
+      className="wrap-anywhere cursor-pointer font-medium text-primary underline"
+      data-context-link={entityType}
+      onClick={(event) => {
+        event.preventDefault();
+        onOpenContext(ref);
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+const markdownComponents = {
+  a: ({ href, children, className, node, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
+    void node;
+    const contextLink = parseContextLink(href);
+    if (contextLink) {
+      return <ContextLink href={href!} entityType={contextLink.entityType} entityId={contextLink.entityId}>{children}</ContextLink>;
+    }
+    return (
+      <a href={href} className={className ?? "wrap-anywhere font-medium text-primary underline"}
+        data-streamdown="link" target="_blank" rel="noreferrer" {...props}>{children}</a>
+    );
+  },
+};
 
 export function parseContextLink(href: string | undefined): { entityType: string; entityId: string } | null {
   if (!href?.startsWith(CONTEXT_LINK_PREFIX)) return null;
@@ -174,46 +228,7 @@ export function ProjectChatConversation({
   const [pendingOperationActions, setPendingOperationActions] = useState<Map<string, string>>(new Map());
   const [operationErrors, setOperationErrors] = useState<Map<string, string>>(new Map());
 
-  // Read at click time: MessageResponse only re-renders when its text changes,
-  // so the link component must stay stable while Context refs keep arriving.
-  const contextRefsRef = useRef(contextRefs);
-  contextRefsRef.current = contextRefs;
-  const onOpenContextRef = useRef(onOpenContext);
-  onOpenContextRef.current = onOpenContext;
-  const markdownComponents = useMemo(() => ({
-    a: ({ href, children, className, node, ...props }: AnchorHTMLAttributes<HTMLAnchorElement> & { node?: unknown }) => {
-      void node;
-      const contextLink = parseContextLink(href);
-      if (!contextLink) {
-        return (
-          <a href={href} className={className ?? "wrap-anywhere font-medium text-primary underline"}
-            data-streamdown="link" target="_blank" rel="noreferrer" {...props}>{children}</a>
-        );
-      }
-      return (
-        <a
-          href={href}
-          className="wrap-anywhere cursor-pointer font-medium text-primary underline"
-          data-context-link={contextLink.entityType}
-          onClick={(event) => {
-            event.preventDefault();
-            const ref = contextRefsRef.current.find((candidate) => (
-              candidate.entity_type === contextLink.entityType && candidate.entity_id === contextLink.entityId
-            ));
-            const open = onOpenContextRef.current;
-            if (!ref || ref.deleted || !ref.navigation || !open) {
-              setActionError("This item is no longer available");
-              return;
-            }
-            setActionError(null);
-            open(ref);
-          }}
-        >
-          {children}
-        </a>
-      );
-    },
-  }), []);
+  const contextLinkScope = useMemo(() => ({ contextRefs, onOpenContext }), [contextRefs, onOpenContext]);
 
   const parsedOperations = useMemo(() => {
     const byMessageId = new Map<string, ProjectChatOperationMessage>();
@@ -330,6 +345,7 @@ export function ProjectChatConversation({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <Conversation className="min-h-0" initial="instant" resize="smooth" data-testid="project-chat-scroll">
+        <ContextLinkScope.Provider value={contextLinkScope}>
         <ConversationContent className="mx-auto w-full max-w-3xl gap-4 px-4 py-5 sm:px-6">
         {hasEarlierMessages ? (
           <div className="flex justify-center">
@@ -479,6 +495,7 @@ export function ProjectChatConversation({
           {actionError ? <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{actionError}</div> : null}
         </div>
         </ConversationContent>
+        </ContextLinkScope.Provider>
         <ConversationScrollButton aria-label="Jump to latest message" />
       </Conversation>
 

@@ -689,7 +689,7 @@ describe("ProjectChatWorkbench", () => {
       .toEqual(["task", "workspace", "agent_session", "schedule", "schedule_run"]);
   });
 
-  it("opens sessions linked in assistant replies only when the thread's Context knows them", async () => {
+  it("links only entities the thread's Context can open and follows Context updates", async () => {
     const sessionRef = {
       thread_id: "thread-7", entity_type: "agent_session" as const, entity_id: "remote-abc", last_referenced_at: "",
       deleted: false, navigation: { kind: "agent_session" as const, sessionId: "remote-abc", target: "server-1", branch: "dev", label: "Starred one" },
@@ -698,19 +698,21 @@ describe("ProjectChatWorkbench", () => {
     hook.value.messages = [message(1, "assistant",
       "Starred: [Starred one](#ref:agent_session:remote-abc), [Ghost](#ref:agent_session:made-up), [Docs](https://example.com)")];
     const onOpenContext = vi.fn();
-    render({ onOpenContext });
+    const props = render({ onOpenContext });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const link = (text: string) => [...container.querySelectorAll("a")].find((item) => item.textContent === text);
 
-    const link = (text: string) => [...container.querySelectorAll("a")].find((item) => item.textContent === text)!;
-    act(() => link("Starred one").click());
+    act(() => link("Starred one")!.click());
     expect(onOpenContext).toHaveBeenCalledWith(sessionRef);
-    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(link("Ghost")).toBeUndefined();
+    expect(container.textContent).toContain("Ghost");
+    expect(link("Docs")!.getAttribute("target")).toBe("_blank");
 
-    act(() => link("Ghost").click());
-    expect(onOpenContext).toHaveBeenCalledTimes(1);
-    expect(container.querySelector('[role="alert"]')?.textContent).toBe("This item is no longer available");
-
-    expect(link("Docs").getAttribute("target")).toBe("_blank");
+    // Same message text, so only the Context update can change the rendering.
+    hook.value.contextRefs = [{ ...sessionRef, deleted: true, navigation: null }];
+    render(props);
+    expect(link("Starred one")).toBeUndefined();
+    expect(container.textContent).toContain("Starred one");
   });
 
   it("sends, stops, and resolves approvals through the project hook", async () => {
