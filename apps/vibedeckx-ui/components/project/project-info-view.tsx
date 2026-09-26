@@ -13,23 +13,6 @@ import { ProjectSettingsForm } from "./project-settings-form";
 /** Shared horizontal rhythm: hero, tab bar and content all align to one gutter. */
 const GUTTER = "mx-auto w-full max-w-[1200px] px-5 sm:px-7";
 
-function StatusBadge({ project }: { project: Project }) {
-  const hasLocal = !!project.path;
-  const hasRemote = project.is_remote || !!project.remote_path;
-
-  const [label, tone] = hasLocal && hasRemote
-    ? ["Local + Remote", "bg-violet-500/10 text-violet-600 dark:text-violet-400"]
-    : hasRemote
-      ? ["Remote", "bg-blue-500/10 text-blue-600 dark:text-blue-400"]
-      : ["Local", "bg-muted text-muted-foreground"];
-
-  return (
-    <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-[10.5px] font-medium leading-[1.35]", tone)}>
-      {label}
-    </span>
-  );
-}
-
 interface ProjectInfoViewProps {
   project: Project;
   /** Unread attention milestones for this project — see ProjectActivityViewProps. */
@@ -106,9 +89,8 @@ export function ProjectInfoView({
                   <span>created {new Date(project.created_at).toLocaleDateString()}</span>
                 </div>
 
-                <h1 className="flex flex-wrap items-center gap-2.5 font-mono text-[25px] font-semibold tracking-[-0.025em]">
-                  <span className="min-w-0 break-all">{project.name}</span>
-                  <StatusBadge project={project} />
+                <h1 className="break-all font-mono text-[25px] font-semibold tracking-[-0.025em]">
+                  {project.name}
                 </h1>
               </div>
             </div>
