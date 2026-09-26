@@ -115,7 +115,7 @@ export function ProjectChatCard({ scopeKey, projectId, threads, onCreateThread, 
       </div>
 
       <form onSubmit={(event) => void submit(event)} className="px-3 pt-2.5">
-        <div className="flex items-start gap-2">
+        <div className="flex items-center gap-2">
           {/* One-line composer that grows only when the message needs it. */}
           <div className="flex min-w-0 flex-1 items-center gap-1 rounded-lg border bg-secondary py-0 pl-2.5 pr-1 transition-[color,background-color,border-color,box-shadow] focus-within:border-primary focus-within:bg-card focus-within:ring-[3px] focus-within:ring-accent">
             <Textarea
