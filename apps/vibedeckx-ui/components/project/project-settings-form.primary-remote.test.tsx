@@ -11,6 +11,7 @@ vi.mock("@/lib/api", () => ({
   api: { setProjectRemotePrimary },
 }));
 vi.mock("@/hooks/use-project-remotes", () => ({ useProjectRemotes }));
+vi.mock("@/hooks/use-app-config", () => ({ useAppConfig: () => ({ config: null, loading: false }) }));
 vi.mock("./remote-directory-browser", () => ({ RemoteDirectoryBrowser: () => null }));
 
 import { ProjectSettingsForm } from "./project-settings-form";

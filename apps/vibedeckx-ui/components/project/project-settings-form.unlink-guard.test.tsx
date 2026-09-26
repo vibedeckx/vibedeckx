@@ -12,6 +12,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return { ...actual, api: { removeProjectRemote } };
 });
 vi.mock("@/hooks/use-project-remotes", () => ({ useProjectRemotes }));
+vi.mock("@/hooks/use-app-config", () => ({ useAppConfig: () => ({ config: null, loading: false }) }));
 vi.mock("./remote-directory-browser", () => ({ RemoteDirectoryBrowser: () => null }));
 
 import { ProjectRemoteUnlinkError } from "@/lib/api";

@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { useAppConfig } from "@/hooks/use-app-config";
 import { useProjectRemotes } from "@/hooks/use-project-remotes";
 import {
   FolderOpen,
@@ -98,6 +99,10 @@ export function ProjectSettingsForm({
   onCancel,
 }: ProjectSettingsFormProps) {
   const { remotes, refresh: refreshRemotes } = useProjectRemotes(project.id);
+  const { config } = useAppConfig();
+  // Missing field (older server) → default to enabled. A project that already
+  // has a local folder keeps the field so it can still be cleared.
+  const showLocalFolder = config?.localProjectsEnabled !== false || !!project.path;
 
   const [name, setName] = useState(project.name);
   const [path, setPath] = useState(project.path ?? "");
@@ -209,7 +214,11 @@ export function ProjectSettingsForm({
     }
 
     if (!hasLocalPath && remotes.length === 0) {
-      setError("Project must have at least a local folder or remote server");
+      setError(
+        showLocalFolder
+          ? "Project must have at least a local folder or remote server"
+          : "Project must have at least one remote server"
+      );
       return;
     }
 
@@ -252,6 +261,7 @@ export function ProjectSettingsForm({
           />
         </div>
 
+        {showLocalFolder && (
         <div className="space-y-2">
           <label className="text-sm font-medium">Local Folder</label>
           <div className="flex gap-2">
@@ -266,14 +276,15 @@ export function ProjectSettingsForm({
             </Button>
           </div>
         </div>
+        )}
 
         <div className="space-y-3">
           <label className="text-sm font-medium">Remote Servers</label>
           <p className="text-xs text-muted-foreground">
             The primary remote is whose Git the sidebar describes: each workspace&apos;s
             merge status and uncommitted changes, plus the Files and Diff views. Where
-            sessions run is chosen separately, in the session header. When a local
-            checkout exists, the sidebar reads it instead.
+            sessions run is chosen separately, in the session header.
+            {showLocalFolder && " When a local checkout exists, the sidebar reads it instead."}
           </p>
 
           {remotes.length > 0 && (
