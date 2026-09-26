@@ -38,7 +38,7 @@ function threadAge(thread: ProjectChatThread): string | null {
 /** Keycap hint, borrowed from the topbar's search trigger. */
 function Kbd({ children }: { children: React.ReactNode }) {
   return (
-    <span className="rounded-[4px] border border-b-2 bg-secondary px-[5px] font-mono text-[10px] leading-[1.4] text-muted-foreground">
+    <span className="inline-flex h-4 items-center rounded-[4px] border border-b-2 bg-secondary px-[5px] font-mono text-[10px] leading-none text-muted-foreground">
       {children}
     </span>
   );
@@ -134,7 +134,7 @@ export function ProjectChatCard({ scopeKey, projectId, threads, onCreateThread, 
                 }
               }}
             />
-            <span className="shrink-0" aria-hidden="true"><Kbd>⏎</Kbd></span>
+            <span className="flex shrink-0 items-center" aria-hidden="true"><Kbd>⏎</Kbd></span>
           </div>
           <Button type="submit" size="sm" disabled={!available || submitting || message.trim().length === 0}>
             <Send className="size-3" aria-hidden="true" />
