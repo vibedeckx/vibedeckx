@@ -1605,7 +1605,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               conversation on every scrolled frame (measured 15fps → 60fps on a
               slow-raster machine). Trade-off: a stacking context + a persistent
               layer for the scroll contents. */}
-          <ConversationContent className="gap-1 p-4" scrollClassName="edge-scrollbar will-change-transform">
+          {/* Capped at the Project page's 1200px column and centred, so a wide
+              panel (Main Chat collapsed) doesn't stretch lines edge to edge. */}
+          <ConversationContent className="gap-1 p-4 mx-auto w-full max-w-[1200px]" scrollClassName="edge-scrollbar will-change-transform">
             {showPreparingReview ? (
               // This session is the placeholder reviewer of a run still
               // distilling its intent brief (two-phase review start). The
@@ -1741,12 +1743,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       </div>
 
       {/* Input area */}
-      {/* Horizontal padding mirrors the message list so the composer and the
+      {/* Horizontal box mirrors the message list so the composer and the
           background-task bar line up with the turn-end dividers: the scroller
           carries an inline `scrollbar-gutter: stable both-edges` (set by
           use-stick-to-bottom, not overridable from a class), reserving 14px on
-          each side, plus the content's own p-4 — 30px per side. */}
-      <div className="flex-shrink-0 py-3 px-[30px]">
+          each side, then the same 1200px-capped, p-4 content box. */}
+      <div className="flex-shrink-0 py-3 px-[14px]">
+      <div className="mx-auto w-full max-w-[1200px] px-4">
         {/* Above the composer, not on the turn_end divider: when a parked
             completion holds the turn open there IS no divider, which is
             exactly the case this needs to explain. */}
@@ -1848,6 +1851,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             </div>
           </div>
         </PromptInput>
+      </div>
       </div>
 
       {/* Resident-limit eviction confirm — answers the suspended ensureSession
