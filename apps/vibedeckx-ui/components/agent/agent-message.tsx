@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye, CalendarClock } from "lucide-react";
+import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye, CalendarClock, Copy, Check } from "lucide-react";
 import type { AgentMessage, ContentPart } from "@/hooks/use-agent-session";
 import { AgentMarkdown } from "./agent-markdown";
 import { useAgentConversation } from "./agent-conversation";
@@ -38,7 +38,7 @@ import { PROPOSE_SCHEDULE_TOOL, ScheduleProposalUI } from "./schedule-proposal";
 import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./cross-remote-tools";
 import { ZoomableImage } from "./zoomable-image";
 import { VPasteChip, RemoteGrantMeta, splitVPasteMarkers, takeRemotesMarker } from "./vpaste-chip";
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 interface AgentMessageProps {
   message: AgentMessage;
@@ -291,6 +291,24 @@ function AssistantMessage({
   // source (the exact string fed to the renderer). Per-message, default rendered.
   const [showSource, setShowSource] = useState(false);
 
+  // Copies the raw markdown source without having to open the source view.
+  // `copied` flips the icon to a check briefly as confirmation.
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1500);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  const handleCopy = async () => {
+    if (!navigator?.clipboard?.writeText) return;
+    try {
+      await navigator.clipboard.writeText(content ?? "");
+      setCopied(true);
+    } catch (err) {
+      console.error("Failed to copy message", err);
+    }
+  };
+
   return (
     <div className="group flex gap-3 py-3">
       <div className={`flex-shrink-0 w-7 h-7 rounded-lg ${iconBg} flex items-center justify-center`}>
@@ -308,6 +326,15 @@ function AssistantMessage({
             className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
           >
             {showSource ? <Eye className="w-3.5 h-3.5" /> : <Code className="w-3.5 h-3.5" />}
+          </button>
+          <button
+            type="button"
+            onClick={handleCopy}
+            title={copied ? "Copied" : "Copy source"}
+            aria-label={copied ? "Copied" : "Copy source"}
+            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+          >
+            {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
           </button>
         </div>
         {showSource ? (
