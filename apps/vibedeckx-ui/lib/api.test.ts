@@ -7,6 +7,9 @@ import {
   parseProjectChatOperationMessage,
   setAuthToken,
   setTokenGetter,
+  startAgentSession,
+  LIFECYCLE_RETRY_DELAYS_MS,
+  SERVER_UNREACHABLE_MESSAGE,
 } from "@/lib/api";
 
 // Build a JWT whose `exp` is `secondsFromNow` away (negative = already expired).
@@ -583,5 +586,60 @@ describe("cancelWorkflowRun", () => {
     await expect(api.cancelWorkflowRun("r1")).resolves.toMatchObject({ status: "cancelled" });
 
     global.fetch = originalFetch;
+  });
+});
+
+describe("lifecycle requests across a server restart", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const startBody = { operationId: "op-1", branch: null, instruction: "hi" };
+  const gateway = (status: number) => new Response("<html>origin down</html>", { status });
+  const lifecycle = (status: number, body: object) =>
+    new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+
+  it("retries gateway errors and dropped connections, then returns the real answer", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(gateway(521))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(lifecycle(200, { kind: "activated", session: { id: "s1" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = startAgentSession("p1", startBody);
+    await vi.runAllTimersAsync();
+    const res = await promise;
+
+    expect(res.kind).toBe("activated");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // Same keyed body every time — that is what makes the retry safe.
+    for (const call of fetchMock.mock.calls) expect(JSON.parse(call[1].body).operationId).toBe("op-1");
+  });
+
+  it("gives up with a readable message once the retries run out", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn().mockImplementation(async () => gateway(521));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const promise = startAgentSession("p1", startBody);
+    const settled = promise.catch((e: Error) => e);
+    await vi.runAllTimersAsync();
+    const err = await settled;
+
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe(`${SERVER_UNREACHABLE_MESSAGE} (521)`);
+    expect(fetchMock).toHaveBeenCalledTimes(LIFECYCLE_RETRY_DELAYS_MS.length + 1);
+  });
+
+  it("does not retry a backend refusal that happens to use 503", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(lifecycle(503, { kind: "retryable_failure", error: "busy" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await startAgentSession("p1", startBody);
+
+    expect(res.kind).toBe("retryable_failure");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

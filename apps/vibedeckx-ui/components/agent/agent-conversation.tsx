@@ -1723,13 +1723,6 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 </div>
               </AgentConversationContext.Provider>
             )}
-
-            {error && (
-              <div className="flex items-center gap-2 p-3 bg-red-500/10 rounded-lg text-red-500 text-sm mt-4">
-                <AlertCircle className="h-4 w-4" />
-                {error}
-              </div>
-            )}
           </ConversationContent>
           <ConversationScrollButton />
           <ConversationAnchorHold
@@ -1761,6 +1754,15 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           canStopTasks={backgroundTasks.canStopTasks}
           agentWorking={status === "running"}
         />
+        {/* Next to the composer, not in the scroller: on an empty session
+            the scroller's centred "Start a conversation" placeholder would
+            leave it floating mid-panel, far from the send that caused it. */}
+        {error && (
+          <div className="flex items-center gap-2 p-3 mb-2 bg-red-500/10 rounded-lg text-red-500 text-sm">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span className="min-w-0 break-words">{error}</span>
+          </div>
+        )}
         <PromptInput
           onSubmit={handleSubmit}
           maxFileSize={MAX_ATTACHMENT_BYTES}

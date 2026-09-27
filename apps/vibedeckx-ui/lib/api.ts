@@ -1450,17 +1450,45 @@ export function lifecycleSessionReady(kind: LifecycleKind): boolean {
   return kind === "activated" || kind === "replayed" || kind === "uncertain";
 }
 
+// Statuses a reverse proxy / CDN answers with when the origin itself is
+// down or restarting (Cloudflare's 520–524 included): the request never
+// reached a handler, or its outcome is unknown.
+const GATEWAY_STATUSES = new Set([502, 503, 504, 520, 521, 522, 523, 524]);
+/** Backoff between attempts; ~15s total rides out a routine server restart. */
+export const LIFECYCLE_RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000];
+export const SERVER_UNREACHABLE_MESSAGE = "服务器暂时不可达，请稍后重试";
+
+// Every lifecycle call is keyed (operationId / activationKey / session id),
+// so the server replays rather than duplicates — retrying a gateway error
+// or a dropped connection is safe even when the first attempt did land.
 async function lifecycleRequest(url: string, method: string, body?: unknown): Promise<LifecycleResponse> {
-  const res = await authFetch(url, {
-    method,
-    headers: { "Content-Type": "application/json" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  const parsed = await res.json().catch(() => ({}));
-  if (typeof parsed?.kind !== "string") {
-    throw new Error(`Lifecycle request failed: ${res.status}${parsed?.error ? ` — ${parsed.error}` : ""}`);
+  for (let attempt = 0; ; attempt++) {
+    let res: Response | null = null;
+    try {
+      res = await authFetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch {
+      // Connection refused / reset: the same situation without a proxy in front.
+    }
+    const parsed = res ? await res.json().catch(() => ({})) : {};
+    // The backend answers some refusals with 502/503 too (remote_unreachable,
+    // retryable_failure) — those carry a `kind` and are real answers.
+    if (res && typeof parsed?.kind === "string") {
+      return { status: res.status, ...parsed } as LifecycleResponse;
+    }
+    const unreachable = res === null || GATEWAY_STATUSES.has(res.status);
+    if (unreachable && attempt < LIFECYCLE_RETRY_DELAYS_MS.length) {
+      await new Promise<void>((resolve) => setTimeout(resolve, LIFECYCLE_RETRY_DELAYS_MS[attempt]));
+      continue;
+    }
+    if (unreachable) {
+      throw new Error(res ? `${SERVER_UNREACHABLE_MESSAGE} (${res.status})` : SERVER_UNREACHABLE_MESSAGE);
+    }
+    throw new Error(`Lifecycle request failed: ${res!.status}${parsed?.error ? ` — ${parsed.error}` : ""}`);
   }
-  return { status: res.status, ...parsed } as LifecycleResponse;
 }
 
 export interface StartAgentSessionRequest {
