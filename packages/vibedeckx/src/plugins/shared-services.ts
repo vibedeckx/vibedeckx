@@ -23,6 +23,7 @@ import { RemoteNotificationSync } from "../remote-notification-sync.js";
 import { createRemoteAgentSession, recoverPendingRemoteAgentSessions } from "../remote-agent-sessions.js";
 import { formatBackfillSummary, healWorkspaceBindings } from "../workspace-binding-backfill.js";
 import { SessionRetentionSweeper } from "../session-retention.js";
+import { pruneCrossRemoteAudit } from "../cross-remote-retention.js";
 import { AgentSessionLifecycleService } from "../agent-session-lifecycle.js";
 import { RemoteSessionLifecycleAdapter } from "../remote-session-lifecycle.js";
 import { readRetentionDays } from "../session-retention-config.js";
@@ -514,6 +515,11 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     deleteIfExpired: (sessionId, cutoff) =>
       agentSessionManager.deleteDormantSessionIfExpired(sessionId, cutoff),
     maintenance: async () => {
+      // Independent of the lifecycle bookkeeping below: a failure there must
+      // not leave the audit growing unpruned tick after tick.
+      await pruneCrossRemoteAudit(opts.storage).catch((error) => {
+        console.error("[CrossRemoteRetention] prune failed:", error);
+      });
       await agentSessionLifecycle.maintain();
       // Hub half of §11: a lifecycle intent whose caller never came back has
       // a worker row that TTL-expired long ago; the intent is the only trace.

@@ -57,7 +57,7 @@ interface AppOptions {
   /** Machines the user may reach through the cross-remote gateway. */
   reachable?: string[];
   /** Machines this session already touched through the gateway. */
-  auditTargets?: string[];
+  touchedTargets?: string[];
   /** Local session id → the machine its agent runs on. */
   sessions?: Record<string, string>;
   /** Local (non-`remote-`) session id → the project it belongs to. */
@@ -85,7 +85,7 @@ function makeApp(opts: AppOptions): FastifyInstance {
       getByProjectAndServer: async (_projectId: string, serverId: string) =>
         remotes.find((r) => r.remote_server_id === serverId),
     },
-    crossRemoteAudit: { listSessionTargets: async () => opts.auditTargets ?? [] },
+    sessionRemoteTouches: { list: async () => opts.touchedTargets ?? [] },
     remoteServers: {
       getById: async (id: string) =>
         (opts.reachable ?? []).includes(id)
@@ -251,7 +251,7 @@ describe("hub-side project reads across machines", () => {
       localPath: null,
       remotes: [{ remote_server_id: WORKER3, remote_path: "/src/app" }],
       sessions: { [SESSION]: WORKER3 },
-      auditTargets: [UBUNTU],
+      touchedTargets: [UBUNTU],
       reachable: [UBUNTU],
     });
     const res = await app.inject({
@@ -270,7 +270,7 @@ describe("hub-side project reads across machines", () => {
       localPath: null,
       remotes: [{ remote_server_id: WORKER3, remote_path: "/src/app" }],
       sessions: { [SESSION]: WORKER3 },
-      auditTargets: [UBUNTU],
+      touchedTargets: [UBUNTU],
       reachable: [], // access revoked (or someone else's machine)
     });
     const res = await app.inject({
@@ -288,7 +288,7 @@ describe("hub-side project reads across machines", () => {
       localPath: null,
       remotes: [{ remote_server_id: PRIMARY, remote_path: "/src/app" }],
       sessions: { [SESSION]: WORKER3 },
-      auditTargets: [UBUNTU],
+      touchedTargets: [UBUNTU],
       reachable: [UBUNTU],
     });
     const res = await app.inject({
@@ -305,7 +305,7 @@ describe("hub-side project reads across machines", () => {
       authEnabled: true,
       localPath: null,
       remotes: [{ remote_server_id: PRIMARY, remote_path: "/src/app" }],
-      auditTargets: [UBUNTU],
+      touchedTargets: [UBUNTU],
       reachable: [UBUNTU],
     });
     const res = await app.inject({
@@ -317,7 +317,7 @@ describe("hub-side project reads across machines", () => {
   });
 
   // The session id is a lookup key into two GLOBAL maps (remoteSessionMap and
-  // the audit trail), so a session belonging elsewhere must not steer the search
+  // the touch table), so a session belonging elsewhere must not steer the search
   // — even though every candidate it could produce is authorized on its own.
   it("ignores a session id belonging to another project", async () => {
     onlyOn(UBUNTU);
@@ -326,7 +326,7 @@ describe("hub-side project reads across machines", () => {
       localPath: null,
       remotes: [{ remote_server_id: PRIMARY, remote_path: "/src/app" }],
       sessions: { [FOREIGN_SESSION]: WORKER3 },
-      auditTargets: [UBUNTU],
+      touchedTargets: [UBUNTU],
       reachable: [UBUNTU, WORKER3],
     });
     const res = await app.inject({
@@ -346,7 +346,7 @@ describe("hub-side project reads across machines", () => {
       localPath: null,
       remotes: [{ remote_server_id: PRIMARY, remote_path: "/src/app" }],
       localSessions: { [localSession]: OTHER_PROJECT },
-      auditTargets: [UBUNTU],
+      touchedTargets: [UBUNTU],
       reachable: [UBUNTU],
     });
     const res = await app.inject({
@@ -365,7 +365,7 @@ describe("hub-side project reads across machines", () => {
       localPath: null,
       remotes: [{ remote_server_id: PRIMARY, remote_path: "/src/app" }],
       localSessions: { [localSession]: PROJECT },
-      auditTargets: [UBUNTU],
+      touchedTargets: [UBUNTU],
       reachable: [UBUNTU],
     });
     const res = await app.inject({
@@ -393,7 +393,7 @@ describe("hub-side project reads across machines", () => {
         { remote_server_id: UBUNTU, remote_path: "/home/j/app" },
       ],
       sessions: { [SESSION]: WORKER3 },
-      auditTargets: [UBUNTU],
+      touchedTargets: [UBUNTU],
       reachable: [], // grant revoked since the screenshot was taken
     });
     const res = await app.inject({

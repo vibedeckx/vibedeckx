@@ -22,6 +22,7 @@ import {
 } from "../../workspace-binding-metrics.js";
 import { WORKFLOW_ACTIVE_STATUSES } from "../workflow-run-status.js";
 import { VISIBLE_LIFECYCLE_STATES } from "../types.js";
+import { deleteSessionSideRows } from "./session-side-rows.js";
 // NotificationOutboxEvent is referenced only through Storage's method
 // signatures, which this factory's return type already pins.
 
@@ -879,9 +880,7 @@ export const createAgentSessionRepos = (
     delete: async (id) => {
       await kdb.transaction().execute(async (trx) => {
         await trx.deleteFrom("agent_sessions").where("id", "=", id).execute();
-        // No FK from the grant table (it also keys `remote-` sessions), so the
-        // cascade is manual.
-        await trx.deleteFrom("agent_session_remote_grants").where("session_id", "=", id).execute();
+        await deleteSessionSideRows(trx, [id]);
       });
     },
 
@@ -982,18 +981,22 @@ export const createAgentSessionRepos = (
     },
 
     deleteIfExpired: async (id, cutoff) => {
-      const result = await kdb.deleteFrom("agent_sessions")
-        .where("id", "=", id)
-        .where(retentionPredicate(cutoff))
-        .executeTakeFirst();
-      return (result.numDeletedRows ?? 0n) > 0n;
+      return kdb.transaction().execute(async (trx) => {
+        const result = await trx.deleteFrom("agent_sessions")
+          .where("id", "=", id)
+          .where(retentionPredicate(cutoff))
+          .executeTakeFirst();
+        const deleted = (result.numDeletedRows ?? 0n) > 0n;
+        if (deleted) await deleteSessionSideRows(trx, [id]);
+        return deleted;
+      });
     },
 
     // Legacy compensation only ever targets rows the legacy `/new` path
     // created, i.e. `active` ones. Pending identities and tombstones belong
     // to the lifecycle service; deleting them here would break its replay.
-    deleteIfEmpty: async (id) => {
-      const result = await kdb.deleteFrom("agent_sessions")
+    deleteIfEmpty: async (id) => kdb.transaction().execute(async (trx) => {
+      const result = await trx.deleteFrom("agent_sessions")
         .where("id", "=", id)
         .where("lifecycle_state", "=", "active")
         .where(sql<SqlBool>`NOT EXISTS (
@@ -1001,8 +1004,10 @@ export const createAgentSessionRepos = (
           WHERE entry.session_id = agent_sessions.id
         )`)
         .executeTakeFirst();
-      return (result.numDeletedRows ?? 0n) > 0n;
-    },
+      const deleted = (result.numDeletedRows ?? 0n) > 0n;
+      if (deleted) await deleteSessionSideRows(trx, [id]);
+      return deleted;
+    }),
 
     listIdsByProject: async (projectId) => {
       const rows = await kdb.selectFrom("agent_sessions")
@@ -1274,12 +1279,16 @@ export const createAgentSessionRepos = (
       if (victims.length === 0) return 0;
       // Exact id + lifecycle CAS (§11.4): a tombstone cannot be resurrected,
       // but the re-check keeps the statement honest if that ever changes.
-      const result = await kdb.deleteFrom("agent_sessions")
-        .where("id", "in", victims.map((r) => r.id))
-        .where("lifecycle_state", "=", "expired")
-        .where("expired_at", "<", cutoff)
-        .executeTakeFirst();
-      return Number(result.numDeletedRows ?? 0n);
+      return kdb.transaction().execute(async (trx) => {
+        const deleted = await trx.deleteFrom("agent_sessions")
+          .where("id", "in", victims.map((r) => r.id))
+          .where("lifecycle_state", "=", "expired")
+          .where("expired_at", "<", cutoff)
+          .returning("id")
+          .execute();
+        await deleteSessionSideRows(trx, deleted.map((r) => r.id));
+        return deleted.length;
+      });
     },
 
     clearActivationPayloads: async ({ cutoff, limit }) => {
@@ -1568,8 +1577,7 @@ export const createAgentSessionRepos = (
             .where("remote_session_id", "=", row.remote_session_id)
             .execute();
         }
-        await trx.deleteFrom("agent_session_remote_grants")
-          .where("session_id", "=", localSessionId).execute();
+        await deleteSessionSideRows(trx, [localSessionId]);
         return (result.numDeletedRows ?? 0n) > 0n;
       });
     },

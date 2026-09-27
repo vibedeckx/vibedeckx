@@ -137,6 +137,22 @@ Authorization header 中的会话级 scoped token（见下）。工具分两个�
 照常打，用于运维排查；审计表是产品事实来源，将来可直接做成开关旁的"访问历史"
 面板。
 
+**保留期（2026-09 补）**：审计表按 `created_at` 清理，默认 90 天，
+`VIBEDECKX_CROSS_REMOTE_AUDIT_RETENTION_DAYS` 可调；非法值回落到默认值，不存在
+"永久保留"。清理挂在 session-retention 的 6 小时定时任务的 maintenance 上
+（`cross-remote-retention.ts`），按 seq 前缀分批删除。
+
+**会话触达表 `agent_session_remote_touches`**：gateway 每次**实际执行到**目标机
+（排除 denied / offline）时 upsert 一行 `(session_id, remote_server_id,
+last_used_at)`。它回答"这个会话的命令在哪些机器上跑过"，供对话里仓库外路径
+（如另一台机器上的截图 `/tmp/x.png`）解析所在机器（`artifact-read-targets.ts`）。
+与审计表分开，是因为生命周期不同：审计按时间清理，触达记录跟会话同生共死
+——所有删会话的路径（手动删除、保留策略、空会话补偿、tombstone 回收、删项目、
+hub 同步 worker 删除后删映射）都在同一事务里调用 `deleteSessionSideRows`
+（`storage/repositories/session-side-rows.ts`，连同授权表一起删）。刻意不用数据库
+触发器：规则留在 Kysely 里，将来切 Postgres 不用重写。没有按时间的清理，所以标星
+（永不删除）的会话里的链接永远可解析。
+
 ### 7. 前端开关（`components/settings/remote-servers-settings.tsx`）
 
 每个 remote 条目上一个三档选择（默认"关闭"）：

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -55,31 +55,6 @@ describe("crossRemoteAudit storage", () => {
     expect(rows[0].source_remote_id).toBeNull();
   });
 
-  // What this feeds: the machine an artifact path in a conversation might live
-  // on (artifact-read-targets.ts). A refused call never ran anywhere, so the
-  // machine it aimed at is not a place this session could have written a file.
-  it("lists a session's machines newest-first, and only ones a call reached", async () => {
-    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "srv-b" }));
-    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "srv-c", status: "timeout" }));
-    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "srv-b", status: "error" }));
-    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "refused", status: "denied" }));
-    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "unreachable", status: "offline" }));
-    await storage.crossRemoteAudit.insert(entry({ session_id: "sess-2", target_remote_id: "other-session" }));
-
-    // srv-b is last-used, so it leads; denied/offline targets never appear.
-    expect(await storage.crossRemoteAudit.listSessionTargets("sess-1")).toEqual(["srv-b", "srv-c"]);
-  });
-
-  it("scopes a session's machines to the user, and honours the limit", async () => {
-    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "srv-b" }));
-    await storage.crossRemoteAudit.insert(entry({ target_remote_id: "srv-c" }));
-    await storage.crossRemoteAudit.insert(entry({ user_id: "user-2", target_remote_id: "theirs" }));
-
-    expect(await storage.crossRemoteAudit.listSessionTargets("sess-1", "user-1")).toEqual(["srv-c", "srv-b"]);
-    expect(await storage.crossRemoteAudit.listSessionTargets("sess-1", "user-2")).toEqual(["theirs"]);
-    expect(await storage.crossRemoteAudit.listSessionTargets("sess-1", "user-1", 1)).toEqual(["srv-c"]);
-  });
-
   it("filters by target and returns newest first, honouring the limit", async () => {
     await storage.crossRemoteAudit.insert(entry({ args_summary: "first" }));
     await storage.crossRemoteAudit.insert(entry({ args_summary: "second" }));
@@ -88,5 +63,41 @@ describe("crossRemoteAudit storage", () => {
     const rows = await storage.crossRemoteAudit.listByTarget("srv-b", 1);
     expect(rows).toHaveLength(1);
     expect(rows[0].args_summary).toBe("second");
+  });
+
+  describe("pruneBefore", () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    const insertAt = async (iso: string, args_summary: string) => {
+      vi.setSystemTime(new Date(iso));
+      await storage.crossRemoteAudit.insert(entry({ args_summary }));
+    };
+    const remaining = async () =>
+      (await storage.crossRemoteAudit.listByTarget("srv-b")).map((r) => r.args_summary).reverse();
+
+    beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); });
+
+    it("deletes only rows older than the cutoff, in batches", async () => {
+      await insertAt("2026-01-01T00:00:00Z", "old-1");
+      await insertAt("2026-01-02T00:00:00Z", "old-2");
+      await insertAt("2026-01-03T00:00:00Z", "old-3");
+      await insertAt("2026-03-01T00:00:00Z", "new");
+      const cutoff = new Date("2026-02-01T00:00:00Z");
+
+      // A full batch tells the caller to come back for more…
+      expect(await storage.crossRemoteAudit.pruneBefore(cutoff, 2)).toBe(2);
+      expect(await remaining()).toEqual(["old-3", "new"]);
+      // …a short one says the backlog is gone.
+      expect(await storage.crossRemoteAudit.pruneBefore(cutoff, 2)).toBe(1);
+      expect(await storage.crossRemoteAudit.pruneBefore(cutoff, 2)).toBe(0);
+      expect(await remaining()).toEqual(["new"]);
+    });
+
+    it("empties a table in which every row is past the window", async () => {
+      await insertAt("2026-01-01T00:00:00Z", "a");
+      await insertAt("2026-01-02T00:00:00Z", "b");
+      expect(await storage.crossRemoteAudit.pruneBefore(new Date("2026-06-01T00:00:00Z"), 10)).toBe(2);
+      expect(await remaining()).toEqual([]);
+    });
   });
 });

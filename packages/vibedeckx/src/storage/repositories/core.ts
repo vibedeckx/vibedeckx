@@ -2,6 +2,7 @@ import { type Kysely, type Selectable } from "kysely";
 import type { DB, ProjectsTable } from "../schema.js";
 import { fromDbBool, type DialectHelpers } from "../dialect.js";
 import type { Storage, Project, ExecutionMode } from "../types.js";
+import { deleteSessionSideRows } from "./session-side-rows.js";
 
 const mapProject = (row: Selectable<ProjectsTable>): Project => ({
   id: row.id,
@@ -102,9 +103,19 @@ export const createCoreRepos = (
         if (!(await scope.executeTakeFirst())) return;
 
         const mappings = await trx.selectFrom("remote_session_mappings")
-          .select(["remote_server_id", "remote_session_id"])
+          .select(["local_session_id", "remote_server_id", "remote_session_id"])
           .where("project_id", "=", id)
           .execute();
+        // Local sessions leave through the FK cascade on `projects` below,
+        // which cannot reach their side rows — collect them before it runs.
+        const localSessions = await trx.selectFrom("agent_sessions")
+          .select("id")
+          .where("project_id", "=", id)
+          .execute();
+        await deleteSessionSideRows(trx, [
+          ...localSessions.map((row) => row.id),
+          ...mappings.map((row) => row.local_session_id),
+        ]);
         for (const mapping of mappings) {
           await trx.deleteFrom("notification_sync_cursors")
             .where("remote_server_id", "=", mapping.remote_server_id)

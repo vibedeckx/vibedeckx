@@ -21,6 +21,7 @@ import { createAgentSessionRepos } from "./repositories/agent-sessions.js";
 import { createWorkspaceRepos } from "./repositories/workspace.js";
 import { createCrossRemoteAuditRepo } from "./repositories/cross-remote-audit.js";
 import { createSessionRemoteGrantRepo } from "./repositories/session-remote-grants.js";
+import { createSessionRemoteTouchRepo } from "./repositories/session-remote-touches.js";
 import { createMergeTargetsRepo } from "./repositories/merge-targets.js";
 import { createSearchCacheRepos } from "./repositories/search-cache.js";
 import { createWorkflowRunRepos } from "./repositories/workflow-runs.js";
@@ -638,11 +639,27 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
 
     CREATE INDEX IF NOT EXISTS idx_cross_remote_audit_target ON cross_remote_audit(target_remote_id, seq);
 
-    -- listSessionTargets asks "which machines has this session touched?" on the
-    -- path of every artifact hover, so it must not scan a table that grows with
-    -- every gateway call ever made. seq trails session_id to serve the
-    -- most-recent-first ordering from the index.
-    CREATE INDEX IF NOT EXISTS idx_cross_remote_audit_session ON cross_remote_audit(session_id, seq);
+    -- Briefly served "which machines has this session touched?" before that
+    -- moved to agent_session_remote_touches; the audit is time-pruned now and
+    -- no longer read by session.
+    DROP INDEX IF EXISTS idx_cross_remote_audit_session;
+
+    -- Which machines a session's calls actually ran on through the cross-remote
+    -- gateway: one row per (session, machine), refreshed on every call. The
+    -- grants table above says where the agent MAY go; this says where it WENT,
+    -- which is where its artifacts (a screenshot in another box's /tmp) live —
+    -- artifact-read-targets.ts reads it on every artifact hover. Kept apart from
+    -- cross_remote_audit because the lifetimes differ: the audit is pruned by
+    -- age, while this lives exactly as long as its session (every session
+    -- delete path calls deleteSessionSideRows). No FK on session_id, for the
+    -- same reason as the grants table.
+    CREATE TABLE IF NOT EXISTS agent_session_remote_touches (
+      session_id TEXT NOT NULL,
+      remote_server_id TEXT NOT NULL REFERENCES remote_servers(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      last_used_at TEXT NOT NULL,
+      PRIMARY KEY (session_id, remote_server_id)
+    );
   `);
 
   // The original registry schema made (target_id, worktree_path) globally
@@ -2346,6 +2363,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createWorkspaceRepos(kdb, h),
     ...createCrossRemoteAuditRepo(kdb),
     ...createSessionRemoteGrantRepo(kdb),
+    ...createSessionRemoteTouchRepo(kdb),
     ...createMergeTargetsRepo(kdb),
     ...createSearchCacheRepos(kdb, h),
     ...createWorkflowRunRepos(kdb),

@@ -1049,20 +1049,30 @@ export interface Storage {
     replace(sessionId: string, userId: string, remoteServerIds: string[]): Promise<void>;
     deleteBySession(sessionId: string): Promise<void>;
   };
+  /**
+   * Machines a session's gateway calls actually ran on — the counterpart of
+   * `sessionRemoteGrants` (where it may go) for where it went. This is the
+   * only record of where a cross-remote artifact (`/tmp/shot.png` written by
+   * `remote_bash` on another box) lives: the conversation carries the path but
+   * not the machine. Lives as long as the session, unlike the audit: every
+   * session delete path removes its rows (`deleteSessionSideRows`), so there
+   * is no delete method here.
+   */
+  sessionRemoteTouches: {
+    /** Upsert: first touch inserts, later ones refresh `last_used_at`. */
+    record(sessionId: string, userId: string, remoteServerId: string): Promise<void>;
+    /** Most recently used first. Unscoped by user in solo mode (`userId` absent). */
+    list(sessionId: string, userId?: string, limit?: number): Promise<string[]>;
+  };
   crossRemoteAudit: {
     insert(entry: CrossRemoteAuditEntry): Promise<void>;
     listByTarget(targetRemoteId: string, limit?: number): Promise<CrossRemoteAuditRow[]>;
     /**
-     * Distinct machines this session reached through the gateway, most recently
-     * used first. This is the only record of where a cross-remote artifact
-     * (`/tmp/shot.png` written by `remote_bash` on another box) actually lives —
-     * the conversation carries the path but not the machine.
-     *
-     * Reached, not merely targeted: calls the gateway refused (`denied`) or
-     * could not deliver (`offline`) are excluded, so a machine appears here only
-     * if a call of this session actually ran on it.
+     * Delete rows created before `cutoff`, oldest first, at most `limit` per
+     * call so the caller can yield between batches. Returns the number removed;
+     * fewer than `limit` means nothing older is left.
      */
-    listSessionTargets(sessionId: string, userId?: string, limit?: number): Promise<string[]>;
+    pruneBefore(cutoff: Date, limit: number): Promise<number>;
   };
   projectRemotes: {
     getByProject(projectId: string): Promise<ProjectRemoteWithServer[]>;

@@ -393,6 +393,13 @@ export interface AgentSessionRemoteGrantsTable {
   granted_at: string;
 }
 
+export interface AgentSessionRemoteTouchesTable {
+  session_id: string;
+  remote_server_id: string;
+  user_id: string;
+  last_used_at: string;
+}
+
 export interface RemoteSessionCreationIntentsTable {
   local_session_id: string;
   remote_session_id: string;
@@ -681,6 +688,7 @@ export interface DB {
   remote_session_mappings: RemoteSessionMappingsTable;
   remote_session_creation_intents: RemoteSessionCreationIntentsTable;
   agent_session_remote_grants: AgentSessionRemoteGrantsTable;
+  agent_session_remote_touches: AgentSessionRemoteTouchesTable;
   remote_reviewer_creation_intents: RemoteReviewerCreationIntentsTable;
   notification_outbox: NotificationOutboxTable;
   notifications: NotificationsTable;

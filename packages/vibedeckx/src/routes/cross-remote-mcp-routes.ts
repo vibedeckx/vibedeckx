@@ -406,6 +406,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
     } catch (err) {
       console.error("[CrossRemoteMCP] Failed to write audit row:", err);
     }
+    // Refused (`denied`) and undeliverable (`offline`) calls never ran on the
+    // machine, so they left nothing there for the conversation to link to.
+    // `error`/`timeout` did reach it — a timed-out command can still have
+    // written its output.
+    if (status === "denied" || status === "offline") return;
+    try {
+      await fastify.storage.sessionRemoteTouches.record(payload.sessionId, payload.userId, targetRemoteId);
+    } catch (err) {
+      console.error("[CrossRemoteMCP] Failed to record session touch:", err);
+    }
   };
 
   const callTool = async (payload: CrossRemoteTokenPayload, toolName: string, args: Record<string, unknown>) => {

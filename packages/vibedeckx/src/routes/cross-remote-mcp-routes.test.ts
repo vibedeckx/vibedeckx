@@ -226,6 +226,17 @@ describe("cross-remote MCP gateway", () => {
 
     const rows = await storage.crossRemoteAudit.listByTarget(targetId);
     expect(rows[0].status).toBe("denied");
+    // Nothing ran there, so nothing this session wrote can live there.
+    expect(await storage.sessionRemoteTouches.list("sess-1")).toEqual([]);
+  });
+
+  // The touch is what later tells an artifact hover which machine a path in
+  // this conversation belongs to (artifact-read-targets.ts).
+  it("records the machine a call ran on against the session", async () => {
+    proxyToRemoteAuto.mockResolvedValueOnce({ ok: true, status: 200, data: { stdout: "up", stderr: "", exitCode: 0 } });
+    await call(tokenFor(), "remote_bash", { remoteId: targetId, command: "uptime" });
+    expect(await storage.sessionRemoteTouches.list("sess-1")).toEqual([targetId]);
+    expect(await storage.sessionRemoteTouches.list("sess-2")).toEqual([]);
   });
 
   it("hides ungranted machines from list_accessible_remotes", async () => {

@@ -29,7 +29,7 @@ export interface ArtifactReadTarget {
 
 export interface ArtifactTargetDeps extends ReachDeps {
   storage: ReachDeps["storage"] &
-    Pick<Storage, "projectRemotes" | "crossRemoteAudit" | "agentSessions">;
+    Pick<Storage, "projectRemotes" | "sessionRemoteTouches" | "agentSessions">;
   /** Local session id → the machine its agent runs on (`remote-` sessions only). */
   remoteSessionMap: Map<string, { remoteServerId: string }>;
 }
@@ -44,7 +44,7 @@ const REMOTE_SESSION_PROJECT_RE = new RegExp(`^remote-${UUID}-(${UUID})-`);
 /**
  * Whether this session is one of the project's own.
  *
- * `remoteSessionMap` and the audit trail are global maps keyed by session id, so
+ * `remoteSessionMap` and the touch table are global maps keyed by session id, so
  * without this a caller could hand a project it owns the id of a session from
  * somewhere else and steer the search by it. The candidates it produces are all
  * authorized on their own, so this is not the access check — it is what keeps a
@@ -86,10 +86,9 @@ async function sessionBelongsToProject(
  * required to touch it. A session id is only ever a lookup key here — it
  * confers nothing the user does not already hold.
  *
- * The audit is a record of calls that RAN (denied and offline attempts are
- * filtered out in listSessionTargets), so a machine reaches this list only by
- * having actually hosted a command of this session — never by having been
- * merely aimed at.
+ * The touch table records only calls that RAN (the gateway skips denied and
+ * offline attempts), so a machine reaches this list only by having actually
+ * hosted a command of this session — never by having been merely aimed at.
  */
 export async function resolveArtifactReadTargets(
   deps: ArtifactTargetDeps,
@@ -116,7 +115,7 @@ export async function resolveArtifactReadTargets(
     const sessionServerId = deps.remoteSessionMap.get(sessionId)?.remoteServerId;
     if (sessionServerId) candidates.push(sessionServerId);
     candidates.push(
-      ...(await deps.storage.crossRemoteAudit.listSessionTargets(sessionId, opts.userId)),
+      ...(await deps.storage.sessionRemoteTouches.list(sessionId, opts.userId)),
     );
   }
 
