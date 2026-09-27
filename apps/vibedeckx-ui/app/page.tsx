@@ -19,7 +19,7 @@ import { useProjectChatContextNavigation } from '@/hooks/use-project-chat-contex
 import { SchedulesView } from '@/components/schedule';
 import { useBranchActivity } from '@/hooks/use-branch-activity';
 import { Button } from '@/components/ui/button';
-import { AlertTriangle, Plus, Search } from 'lucide-react';
+import { AlertTriangle, PanelLeftClose, PanelLeftOpen, Plus, Search } from 'lucide-react';
 import { useAppConfig } from '@/hooks/use-app-config';
 import { DiscordButton } from '@/components/layout/discord-button';
 import { CreateProjectDialog } from '@/components/project/create-project-dialog';
@@ -39,6 +39,7 @@ import type { AgentSession } from '@/hooks/use-agent-session';
 import { ProjectRemotesProvider } from '@/hooks/project-remotes-context';
 import { MainConversation, type MainConversationHandle } from '@/components/conversation';
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
+import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import { TaskDetailDialog } from '@/components/task/task-detail-dialog';
@@ -289,6 +290,17 @@ export default function Home() {
   const { rules, createRule, updateRule, deleteRule } = useRules(currentProject?.id ?? null, selectedBranch);
   const { commands, createCommand, updateCommand, deleteCommand } = useCommands(currentProject?.id ?? null, selectedBranch);
   const mainChatRef = useRef<MainConversationHandle>(null);
+  // Main Chat column collapse. The panel group's autoSaveId persists the
+  // collapsed layout, and the library fires onCollapse/onExpand on mount, so
+  // this state follows the restored layout rather than being stored separately.
+  const mainChatPanelRef = useRef<ImperativePanelHandle>(null);
+  const [mainChatCollapsed, setMainChatCollapsed] = useState(false);
+  const toggleMainChat = useCallback(() => {
+    const panel = mainChatPanelRef.current;
+    if (!panel) return;
+    if (panel.isCollapsed()) panel.expand();
+    else panel.collapse();
+  }, []);
 
   // Placeholder set (per-workspace "user hit New Conversation, no DB session
   // yet") layered on top of the SSE-backed activity map. Without this
@@ -1011,6 +1023,21 @@ Please proceed step by step and let me know if there are any issues or conflicts
             </h1>
           </div>
           <div className="flex items-center gap-2.5">
+            {/* Only the workspace view has a Main Chat column to toggle. */}
+            {activeView === 'workspace' && !needsProject && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={mainChatCollapsed ? 'Show Main Chat' : 'Hide Main Chat'}
+                aria-pressed={mainChatCollapsed}
+                title={mainChatCollapsed ? 'Show Main Chat' : 'Hide Main Chat'}
+                onClick={toggleMainChat}
+              >
+                {mainChatCollapsed
+                  ? <PanelLeftOpen className="h-4 w-4" />
+                  : <PanelLeftClose className="h-4 w-4" />}
+              </Button>
+            )}
             <Button
               variant="ghost"
               size="icon-sm"
@@ -1161,7 +1188,15 @@ Please proceed step by step and let me know if there are any issues or conflicts
           <div className={(activeView !== 'workspace' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden flex'}>
             <ResizablePanelGroup direction="horizontal" autoSaveId="workspace-panels">
               {/* Left Panel: Project Card + Main Chat */}
-              <ResizablePanel defaultSize={33} minSize={25}>
+              <ResizablePanel
+                ref={mainChatPanelRef}
+                defaultSize={33}
+                minSize={25}
+                collapsible
+                collapsedSize={0}
+                onCollapse={() => setMainChatCollapsed(true)}
+                onExpand={() => setMainChatCollapsed(false)}
+              >
                 <div data-focus-region="default" className="h-full flex flex-col overflow-hidden">
                   {currentProject && (
                     <div className="px-4 py-3 border-b border-border/60 flex-shrink-0">
