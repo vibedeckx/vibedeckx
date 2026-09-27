@@ -1,6 +1,7 @@
 "use client";
 
 import { Badge } from "@/components/ui/badge";
+import { ZoomableImage } from "./zoomable-image";
 
 interface ReadInput {
   file_path: string;
@@ -101,8 +102,7 @@ export function ImageToolResultUI({ images }: { images: ImageBlock[] }) {
   return (
     <div className="flex flex-wrap gap-2">
       {images.map((img, i) => (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
+        <ZoomableImage
           key={i}
           src={`data:${img.mediaType};base64,${img.data}`}
           alt="Image viewed by the agent"

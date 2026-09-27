@@ -36,6 +36,7 @@ import { TaskOutputToolUseUI, TaskOutputToolResultUI } from "./task-output-tools
 import { FileChangeToolUseUI, FileChangeToolResultUI } from "./file-change-tools";
 import { PROPOSE_SCHEDULE_TOOL, ScheduleProposalUI } from "./schedule-proposal";
 import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./cross-remote-tools";
+import { ZoomableImage } from "./zoomable-image";
 import { VPasteChip, RemoteGrantMeta, splitVPasteMarkers, takeRemotesMarker } from "./vpaste-chip";
 import { Fragment, useState } from "react";
 
@@ -245,12 +246,13 @@ function UserMessage({
               part.type === "text" ? (
                 <Fragment key={i}>{renderTextWithVPaste(part.text)}</Fragment>
               ) : (
-                <img
-                  key={i}
-                  src={`data:${part.mediaType};base64,${part.data}`}
-                  alt="Attached image"
-                  className="max-w-sm rounded-lg mt-2"
-                />
+                <div key={i} className="mt-2">
+                  <ZoomableImage
+                    src={`data:${part.mediaType};base64,${part.data}`}
+                    alt="Attached image"
+                    className="max-w-sm rounded-lg"
+                  />
+                </div>
               )
             )
           )}
