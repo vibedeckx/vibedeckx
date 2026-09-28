@@ -44,6 +44,7 @@
     "embla-carousel-react": "^8.6.0",
     "immer": "^10.1.1",
     "lucide-react": "^0.562.0",
+    "marked": "^16.4.2",
     "motion": "^12.25.0",
     "nanoid": "^5.1.6",
     "next": "16.1.1",

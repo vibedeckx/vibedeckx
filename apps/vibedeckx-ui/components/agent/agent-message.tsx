@@ -37,12 +37,18 @@ import { FileChangeToolUseUI, FileChangeToolResultUI } from "./file-change-tools
 import { PROPOSE_SCHEDULE_TOOL, ScheduleProposalUI } from "./schedule-proposal";
 import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./cross-remote-tools";
 import { ZoomableImage } from "./zoomable-image";
+import { SpeakButton, speakOwnerKey } from "./speak-button";
 import { VPasteChip, RemoteGrantMeta, splitVPasteMarkers, takeRemotesMarker } from "./vpaste-chip";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 
 interface AgentMessageProps {
   message: AgentMessage;
   messageIndex: number;
+  /**
+   * Persisted entry index — stable across history prepends, unlike
+   * `messageIndex`. Used to tell identical assistant replies apart.
+   */
+  entryIndex?: number;
   // True only for the message a turn is currently streaming into; see the
   // `mode` note in agent-markdown.tsx.
   streaming?: boolean;
@@ -61,8 +67,8 @@ function formatTimestamp(ts: number): string {
   return `${date} ${time}`;
 }
 
-export function AgentMessageItem({ message, messageIndex, streaming = false }: AgentMessageProps) {
-  const body = renderBody(message, messageIndex, streaming);
+export function AgentMessageItem({ message, messageIndex, entryIndex, streaming = false }: AgentMessageProps) {
+  const body = renderBody(message, messageIndex, streaming, entryIndex);
   if (!body) return null;
   return (
     <div className="group relative">
@@ -74,7 +80,7 @@ export function AgentMessageItem({ message, messageIndex, streaming = false }: A
   );
 }
 
-function renderBody(message: AgentMessage, messageIndex: number, streaming: boolean) {
+function renderBody(message: AgentMessage, messageIndex: number, streaming: boolean, entryIndex?: number) {
   switch (message.type) {
     // A workflow-injected user turn is machine-authored markdown that is
     // complete the moment it lands, so it never wants the deferred path — not
@@ -84,7 +90,7 @@ function renderBody(message: AgentMessage, messageIndex: number, streaming: bool
       return <UserMessage content={message.content} origin={message.origin} />;
 
     case "assistant":
-      return <AssistantMessage content={message.content} agentType={message.agentType} streaming={streaming} />;
+      return <AssistantMessage content={message.content} agentType={message.agentType} streaming={streaming} entryIndex={entryIndex} />;
 
     case "tool_use":
       return (
@@ -270,16 +276,34 @@ function useAgentType(): string {
   }
 }
 
+function useConversationSessionId(): string | null {
+  try {
+    return useAgentConversation().sessionId;
+  } catch {
+    return null;
+  }
+}
+
 function AssistantMessage({
   content,
   agentType: messageAgentType,
   streaming = false,
+  entryIndex,
 }: {
   content: string;
   agentType?: string;
   streaming?: boolean;
+  entryIndex?: number;
 }) {
   const currentAgentType = useAgentType();
+  // Identifies this message to the page-wide read-aloud player (see
+  // speakOwnerKey); prefixed with the session id so a session switch can stop
+  // only its own playback.
+  const sessionId = useConversationSessionId();
+  const speakKey = useMemo(
+    () => speakOwnerKey(sessionId, content ?? "", entryIndex),
+    [sessionId, content, entryIndex],
+  );
   const agentType = messageAgentType ?? currentAgentType;
   const isCodex = agentType === "codex";
   const label = isCodex ? "Codex" : "Claude";
@@ -336,6 +360,7 @@ function AssistantMessage({
           >
             {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
           </button>
+          {!streaming && <SpeakButton ownerKey={speakKey} text={content ?? ""} />}
         </div>
         {showSource ? (
           <pre className="text-xs font-mono whitespace-pre-wrap break-words bg-muted/50 rounded-md p-3 overflow-x-auto text-foreground select-text">

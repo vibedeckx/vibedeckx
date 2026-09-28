@@ -84,6 +84,7 @@ import { ReviewFailedPlaceholder, ReviewPreparingPlaceholder } from "./review-pl
 import type { PreparingReviewEntry } from "@/hooks/preparing-reviews";
 import { MAX_ATTACHMENT_BYTES, formatMegabytes } from "@/lib/attachment-limits";
 import { useAttachmentUploads, type AttachmentUploads } from "@/hooks/use-attachment-uploads";
+import { ttsPlayer } from "@/lib/tts/tts-player";
 
 /**
  * Renders the attachment strip and, from inside `PromptInput` (the only place
@@ -537,6 +538,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     prevMessagesCountRef.current = { sessionId: sid, count: messages.length };
   }, [session?.id, messages.length]);
 
+  // Read-aloud belongs to the session on screen: leaving it (switch or
+  // unmount) stops its playback, but not another conversation's.
+  useEffect(() => {
+    const sid = session?.id ?? null;
+    return () => ttsPlayer.stopOwnersWithPrefix(`${sid ?? "none"}:`);
+  }, [session?.id]);
+
   // Drop the loader when switching away from a session whose AI title hasn't
   // resolved yet — the WS for that session is gone, so we'd never get the
   // titleUpdated event on this client. The session list refresh on switch
@@ -781,6 +789,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
           <AgentMessageItem
             message={message}
             messageIndex={index}
+            entryIndex={messageEntryIndices[index] ?? index}
             streaming={false}
           />
         </div>
@@ -1707,6 +1716,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                         <AgentMessageItem
                           message={msg}
                           messageIndex={index}
+                          entryIndex={messageEntryIndices[index] ?? index}
                           streaming={
                             msg.type === "assistant" && turnInFlight && index === messages.length - 1
                           }

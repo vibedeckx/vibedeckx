@@ -31,6 +31,7 @@ import commandRoutes from "./routes/command-routes.js";
 import workflowRunRoutes from "./routes/workflow-run-routes.js";
 import settingsRoutes from "./routes/settings-routes.js";
 import translateRoutes from "./routes/translate-routes.js";
+import ttsRoutes from "./routes/tts-routes.js";
 import websocketRoutes from "./routes/websocket-routes.js";
 import reverseConnectRoutes from "./routes/reverse-connect-routes.js";
 import eventRoutes from "./routes/event-routes.js";
@@ -413,6 +414,7 @@ export const createServer = async (opts: {
   server.register(workflowRunRoutes);
   server.register(settingsRoutes);
   server.register(translateRoutes);
+  server.register(ttsRoutes);
   server.register(eventRoutes);
   server.register(notificationRoutes);
   server.register(notificationOutboxRoutes);

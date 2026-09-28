@@ -116,6 +116,9 @@ importers:
       lucide-react:
         specifier: ^0.562.0
         version: 0.562.0(react@19.2.3)
+      marked:
+        specifier: ^16.4.2
+        version: 16.4.2
       motion:
         specifier: ^12.25.0
         version: 12.29.2(react-dom@19.2.3(react@19.2.3))(react@19.2.3)

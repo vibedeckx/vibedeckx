@@ -1,13 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { Archive, Bot, Info, Network, Palette, Sparkles, TerminalSquare } from "lucide-react";
+import { Archive, Bot, Info, Network, Palette, Sparkles, TerminalSquare, Volume2 } from "lucide-react";
 import { PageHeader } from "@/components/layout";
 import { useAppConfig } from "@/hooks/use-app-config";
 import { getPersistedConfig } from "@/lib/api";
 import { AboutSettings } from "./about-settings";
 import { AppearanceSettings } from "./appearance-settings";
 import { ChatProviderSettings } from "./chat-provider-settings";
+import { TtsSettings } from "./tts-settings";
 import { ProxySettings } from "./proxy-settings";
 import { TerminalSettingsSection } from "./terminal-settings";
 import { AgentProcessSettingsSection } from "./agent-process-settings";
@@ -21,6 +22,7 @@ import {
 const NAV: SettingsNavItem[] = [
   { id: "appearance", label: "Appearance", Icon: Palette },
   { id: "ai-chat", label: "AI Chat", Icon: Sparkles },
+  { id: "speech", label: "Speech", Icon: Volume2 },
   { id: "agents", label: "Agents", Icon: Bot },
   { id: "retention", label: "History", Icon: Archive },
   { id: "terminal", label: "Terminal", Icon: TerminalSquare },
@@ -69,6 +71,14 @@ export function SettingsView() {
           description="Provider, credentials, and default model used for the orchestrator chat."
         >
           <ChatProviderSettings />
+        </SettingsSection>
+
+        <SettingsSection
+          id="speech"
+          label="Speech"
+          description="Text-to-speech provider and voice used to read agent replies aloud."
+        >
+          <TtsSettings />
         </SettingsSection>
 
         <SettingsSection

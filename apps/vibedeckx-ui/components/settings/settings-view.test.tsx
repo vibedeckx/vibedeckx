@@ -59,6 +59,7 @@ vi.mock("./settings-shell", () => ({
 
 vi.mock("./appearance-settings", () => ({ AppearanceSettings: () => <div /> }));
 vi.mock("./chat-provider-settings", () => ({ ChatProviderSettings: () => <div /> }));
+vi.mock("./tts-settings", () => ({ TtsSettings: () => <div /> }));
 vi.mock("./agent-process-settings", () => ({ AgentProcessSettingsSection: () => <div /> }));
 vi.mock("./session-retention-settings", () => ({ SessionRetentionSettingsSection: () => <div /> }));
 vi.mock("./terminal-settings", () => ({ TerminalSettingsSection: () => <div /> }));

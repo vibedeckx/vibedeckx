@@ -1119,6 +1119,70 @@ export function defaultChatProviderConfig(): ChatProviderConfig {
   };
 }
 
+// ---- Text-to-speech (docs/agent-message-tts-design.md) ----
+// Provider-neutral: the server describes each provider (credential fields,
+// limits), so nothing here names a vendor.
+
+export interface TtsCredentialFieldInfo {
+  key: string;
+  label: string;
+  secret: boolean;
+  placeholder?: string;
+  /** The server has an env-var default for this field (value never exposed). */
+  fromEnv: boolean;
+}
+
+export interface TtsProviderInfo {
+  id: string;
+  label: string;
+  defaultVoice: string;
+  maxCharsPerRequest: number;
+  configured: boolean;
+  credentialFields: TtsCredentialFieldInfo[];
+}
+
+export interface TtsSettings {
+  provider: string;
+  voice: string;
+  rate: number;
+  configured: boolean;
+  /** Per provider; secret fields come back masked ("****1234"). */
+  credentials: Record<string, Record<string, string>>;
+  rateRange: { min: number; max: number };
+  providers: TtsProviderInfo[];
+}
+
+export interface TtsSettingsUpdate {
+  provider?: string;
+  credentials?: Record<string, Record<string, string>>;
+  voice?: string;
+  rate?: number;
+}
+
+export interface TtsVoice {
+  id: string;
+  label: string;
+  locale?: string;
+  multilingual?: boolean;
+}
+
+/** A failed TTS request. `code` is the server's machine-readable reason (e.g. "tts_not_configured"). */
+export class TtsRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | undefined,
+  ) {
+    super(message);
+    this.name = "TtsRequestError";
+  }
+}
+
+async function ttsError(res: Response, fallback: string): Promise<TtsRequestError> {
+  const body = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
+  return new TtsRequestError(body?.error || fallback, res.status, body?.code);
+}
+
 /** `{ deepseek: v, openrouter: v, … }` — keeps callers off hardcoded provider lists. */
 export function emptyByProvider<T>(value: T): Record<ProviderId, T> {
   return Object.fromEntries(PROVIDER_IDS.map((id) => [id, value])) as Record<ProviderId, T>;
@@ -3126,6 +3190,45 @@ export const api = {
       throw new Error(error.error);
     }
     return res.json();
+  },
+
+  // Text-to-speech
+  async getTtsSettings(): Promise<TtsSettings> {
+    const res = await authFetch(`${getApiBase()}/api/settings/tts`);
+    if (!res.ok) throw await ttsError(res, "Failed to load speech settings");
+    return res.json();
+  },
+
+  async updateTtsSettings(update: TtsSettingsUpdate): Promise<TtsSettings> {
+    const res = await authFetch(`${getApiBase()}/api/settings/tts`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(update),
+    });
+    if (!res.ok) throw await ttsError(res, "Failed to save speech settings");
+    return res.json();
+  },
+
+  async listTtsVoices(provider?: string): Promise<TtsVoice[]> {
+    const query = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+    const res = await authFetch(`${getApiBase()}/api/tts/voices${query}`);
+    if (!res.ok) throw await ttsError(res, "Failed to load voices");
+    return ((await res.json()) as { voices: TtsVoice[] }).voices;
+  },
+
+  /** One chunk of speech. `voice` / `rate` override the saved settings (settings preview). */
+  async synthesizeSpeech(
+    text: string,
+    opts: { voice?: string; rate?: number; signal?: AbortSignal } = {},
+  ): Promise<Blob> {
+    const res = await authFetch(`${getApiBase()}/api/tts/synthesize`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice: opts.voice, rate: opts.rate }),
+      signal: opts.signal,
+    });
+    if (!res.ok) throw await ttsError(res, "Speech synthesis failed");
+    return res.blob();
   },
 
   // Terminal Settings
