@@ -101,7 +101,8 @@ export const TTS_PROVIDERS: Record<TtsProviderId, TtsProviderDef> = { azure: azu
 - 音色：`GET https://{region}.tts.speech.microsoft.com/cognitiveservices/voices/list`。只保留 Neural 音色，hub 进程内按 region 缓存 24h。
 - **默认音色用 Dragon HD Omni**（`zh-CN-Xiaoxiao:DragonHDOmniLatestNeural`，2026-09-28 从 `zh-CN-XiaoxiaoMultilingualNeural` 改过来）。Omni 是新一代基础模型，700 多个声音全部支持多语言、自动识别语种，agent 回复中英混杂也不用我们做语种检测。
 - **HD 声音只在部分区域可用**（2026-09 文档：canadacentral、centralindia、eastus、eastus2、francecentral、southeastasia、swedencentral、westeurope、westus2；eastasia 不在内）。不在代码里写死区域表（会过时）：HD 声音收到 400 时，错误信息附一句「HD voices are only available in some Azure regions」。Region 输入框示例用 `southeastasia`。
-- 声音列表：HD 声音不论 `VoiceType` 标什么都保留，按 HD Omni → HD → Multilingual → Standard 分组。音色 ID 允许下划线（Omni 有 `zh-cn-yunze_customer:…` 这类名字）。
+- 声音列表**只保留自带多语言的声音**，分两组：「HD Omni (recommended)」（不论 `VoiceType` 标什么都保留）和「Multilingual」（Neural 的 `…MultilingualNeural`）。去掉单语言 Neural（中英混杂的回复要按语言换声音，SaaS 用户没法配）和非 Omni 的 Dragon HD（约 30 个人设，基本被 Omni 覆盖）。Multilingual 给两种情况兜底：自带 key 的区域不支持 HD、在意成本（Neural $15 vs Neural HD $22 / 百万字符，汉字按 2 字符计费）。选择器里仍可手动输入任意声音 ID。
+- 音色 ID 允许下划线（Omni 有 `zh-cn-yunze_customer:…` 这类名字）。
 - `maxCharsPerRequest`：1500。Azure 单次上限是 10 分钟音频，这里主要是为了首段延迟，不是贴着上限走。
 - 状态码映射：401/403 → `auth`，429 → `quota`，400 → `bad_request`，5xx → `upstream`。
 

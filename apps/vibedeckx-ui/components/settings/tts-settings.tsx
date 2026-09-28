@@ -211,7 +211,7 @@ export function TtsSettings() {
         hint={
           voicesError ??
           (savedConfigured
-            ? "HD Omni and Multilingual voices switch languages on their own. Not listed? Type the full voice ID in the search box."
+            ? "Every listed voice speaks multiple languages and switches on its own. HD Omni sounds best; Multilingual costs less and works in every region. Not listed? Type the full voice ID in the search box."
             : "Save your credentials to load the voice list.")
         }
       >

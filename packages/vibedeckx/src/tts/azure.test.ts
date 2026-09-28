@@ -29,7 +29,7 @@ describe("azure SSML", () => {
 });
 
 describe("azure voices", () => {
-  it("keeps neural and HD voices, grouped HD Omni → HD → Multilingual → Standard", () => {
+  it("keeps only multilingual voices: HD Omni first, then neural Multilingual", () => {
     const voices = mapAzureVoices([
       { ShortName: "en-US-JennyNeural", LocalName: "Jenny", Locale: "en-US", VoiceType: "Neural" },
       { ShortName: "en-US-OldStandard", Locale: "en-US", VoiceType: "Standard" },
@@ -38,14 +38,13 @@ describe("azure voices", () => {
       { ShortName: "zh-CN-Xiaochen:DragonHDLatestNeural", Locale: "zh-CN", VoiceType: "NeuralHD" },
       { ShortName: "zh-CN-Xiaoxiao:DragonHDOmniLatestNeural", LocalName: "晓晓", Locale: "zh-CN" },
     ]);
+    // Single-language neural (Jenny), retired standard, and plain Dragon HD are dropped.
     expect(voices.map((v) => [v.id, v.group])).toEqual([
-      ["zh-CN-Xiaoxiao:DragonHDOmniLatestNeural", "HD Omni"],
-      ["zh-CN-Xiaochen:DragonHDLatestNeural", "HD"],
+      ["zh-CN-Xiaoxiao:DragonHDOmniLatestNeural", "HD Omni (recommended)"],
       ["zh-CN-XiaoxiaoMultilingualNeural", "Multilingual"],
-      ["en-US-JennyNeural", "Standard"],
     ]);
-    expect(voices[0]).toMatchObject({ multilingual: true, label: "晓晓 (zh-CN)" });
-    expect(voices[3].multilingual).toBe(false);
+    expect(voices.every((v) => v.multilingual)).toBe(true);
+    expect(voices[0].label).toBe("晓晓 (zh-CN)");
   });
 
   it("recognizes HD voices", () => {

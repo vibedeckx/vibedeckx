@@ -93,34 +93,36 @@ interface AzureVoiceRow {
   VoiceType?: string;
 }
 
-const GROUPS = ["HD Omni", "HD", "Multilingual", "Standard"] as const;
+const OMNI_GROUP = "HD Omni (recommended)";
+const MULTILINGUAL_GROUP = "Multilingual";
 
-function azureGroup(shortName: string): (typeof GROUPS)[number] {
-  if (/:DragonHDOmni/i.test(shortName)) return "HD Omni";
-  if (isHdVoice(shortName)) return "HD";
-  if (/Multilingual/i.test(shortName)) return "Multilingual";
-  return "Standard";
-}
-
+/**
+ * Only voices that speak every language on their own: Dragon HD Omni (all of
+ * them are multilingual) and the neural "…MultilingualNeural" voices. Agent
+ * replies mix languages, and a single-language voice would force users (this
+ * runs as SaaS) to pick a voice per language. Plain Dragon HD (~30 personas,
+ * covered by Omni) and single-language neural voices are left out; a user can
+ * still type any voice ID by hand.
+ */
 export function mapAzureVoices(rows: AzureVoiceRow[]): TtsVoice[] {
   const voices: TtsVoice[] = [];
   for (const row of rows) {
-    if (!row.ShortName) continue;
-    // HD voices are kept whatever VoiceType the list reports for them; of the
-    // rest only neural voices (the standard ones are retired).
-    if (!isHdVoice(row.ShortName) && row.VoiceType !== "Neural") continue;
-    const group = azureGroup(row.ShortName);
+    const id = row.ShortName;
+    if (!id) continue;
+    // Omni is kept whatever VoiceType the list reports for it.
+    const omni = /:DragonHDOmni/i.test(id);
+    const multilingual = !isHdVoice(id) && row.VoiceType === "Neural" && /Multilingual/i.test(id);
+    if (!omni && !multilingual) continue;
     voices.push({
-      id: row.ShortName,
-      label: `${row.LocalName || row.DisplayName || row.ShortName} (${row.Locale ?? voiceLocale(row.ShortName)})`,
+      id,
+      label: `${row.LocalName || row.DisplayName || id} (${row.Locale ?? voiceLocale(id)})`,
       locale: row.Locale,
-      // Every Omni voice is multilingual; for the others Azure says so in the name.
-      multilingual: group === "HD Omni" || /Multilingual/i.test(row.ShortName),
-      group,
+      multilingual: true,
+      group: omni ? OMNI_GROUP : MULTILINGUAL_GROUP,
     });
   }
-  // HD Omni first, then the other multilingual-capable voices.
-  voices.sort((a, b) => GROUPS.indexOf(a.group as never) - GROUPS.indexOf(b.group as never) || a.id.localeCompare(b.id));
+  // Omni first; the UI shows groups in the order they appear.
+  voices.sort((a, b) => Number(b.group === OMNI_GROUP) - Number(a.group === OMNI_GROUP) || a.id.localeCompare(b.id));
   return voices;
 }
 
