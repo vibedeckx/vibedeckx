@@ -395,3 +395,16 @@ export const ttsPlayer = new TtsPlayer();
 export function useTtsState(): TtsState {
   return useSyncExternalStore(ttsPlayer.subscribe, ttsPlayer.getSnapshot, ttsPlayer.getSnapshot);
 }
+
+/**
+ * Whether `ownerKey` currently holds the player (loading / playing / failed).
+ * Returns a boolean snapshot so callers re-render only when it flips, not on
+ * every chunk-progress update.
+ */
+export function useTtsOwnedBy(ownerKey: string): boolean {
+  const owned = () => {
+    const s = ttsPlayer.getSnapshot();
+    return s.status !== "idle" && s.ownerKey === ownerKey;
+  };
+  return useSyncExternalStore(ttsPlayer.subscribe, owned, owned);
+}

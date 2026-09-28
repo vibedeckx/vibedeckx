@@ -38,6 +38,7 @@ import { PROPOSE_SCHEDULE_TOOL, ScheduleProposalUI } from "./schedule-proposal";
 import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./cross-remote-tools";
 import { ZoomableImage } from "./zoomable-image";
 import { SpeakButton, speakOwnerKey } from "./speak-button";
+import { useTtsOwnedBy } from "@/lib/tts/tts-player";
 import { VPasteChip, RemoteGrantMeta, splitVPasteMarkers, takeRemotesMarker } from "./vpaste-chip";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
@@ -304,6 +305,12 @@ function AssistantMessage({
     () => speakOwnerKey(sessionId, content ?? "", entryIndex),
     [sessionId, content, entryIndex],
   );
+  // While this message holds the player, the speak button stays pinned; keep
+  // its neighbours visible too so it doesn't float after an empty gap.
+  const speaking = useTtsOwnedBy(speakKey);
+  const actionReveal = speaking
+    ? "opacity-100"
+    : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100";
   const agentType = messageAgentType ?? currentAgentType;
   const isCodex = agentType === "codex";
   const label = isCodex ? "Codex" : "Claude";
@@ -347,7 +354,7 @@ function AssistantMessage({
             title={showSource ? "View rendered" : "View source"}
             aria-label={showSource ? "View rendered" : "View source"}
             aria-pressed={showSource}
-            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+            className={cn(actionReveal, "transition-opacity text-muted-foreground hover:text-foreground")}
           >
             {showSource ? <Eye className="w-3.5 h-3.5" /> : <Code className="w-3.5 h-3.5" />}
           </button>
@@ -356,7 +363,7 @@ function AssistantMessage({
             onClick={handleCopy}
             title={copied ? "Copied" : "Copy source"}
             aria-label={copied ? "Copied" : "Copy source"}
-            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+            className={cn(actionReveal, "transition-opacity text-muted-foreground hover:text-foreground")}
           >
             {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
           </button>

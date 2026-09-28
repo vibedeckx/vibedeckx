@@ -25,6 +25,10 @@ vi.mock("@/lib/tts/tts-player", async () => {
   return {
     ttsPlayer: { toggle: player.toggle },
     useTtsState: () => useSyncExternalStore(player.subscribe, player.get, player.get),
+    useTtsOwnedBy: (key: string) => {
+      const owned = () => player.get().status !== "idle" && player.get().ownerKey === key;
+      return useSyncExternalStore(player.subscribe, owned, owned);
+    },
   };
 });
 
@@ -71,5 +75,12 @@ describe("AgentMessageItem read-aloud", () => {
 
     act(() => player.set({ status: "playing", ownerKey: firstKey, chunk: 0, total: 1 }));
     expect(buttons().map((b) => b.getAttribute("aria-label"))).toEqual(["Stop reading", "Read aloud"]);
+
+    // The playing message's view-source / copy buttons stay pinned alongside
+    // its speak button; the other message's stay hover-revealed.
+    const copyButtons = Array.from(container!.querySelectorAll<HTMLButtonElement>('button[aria-label="Copy source"]'));
+    expect(copyButtons[0].className).toContain("opacity-100");
+    expect(copyButtons[0].className).not.toContain("opacity-0");
+    expect(copyButtons[1].className).toContain("opacity-0");
   });
 });
