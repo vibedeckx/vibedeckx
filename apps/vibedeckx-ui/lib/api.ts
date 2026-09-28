@@ -3219,13 +3219,14 @@ export const api = {
   },
 
   /**
-   * One chunk of speech at normal speed (speed is applied at playback).
+   * One chunk of speech at normal speed (speed is applied at playback), as
+   * the raw response so the body can be played while it streams in.
    * `voice` overrides the saved voice (settings preview).
    */
-  async synthesizeSpeech(
+  async openSpeechStream(
     text: string,
     opts: { voice?: string; signal?: AbortSignal } = {},
-  ): Promise<Blob> {
+  ): Promise<Response> {
     const res = await authFetch(`${getApiBase()}/api/tts/synthesize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3233,7 +3234,7 @@ export const api = {
       signal: opts.signal,
     });
     if (!res.ok) throw await ttsError(res, "Speech synthesis failed");
-    return res.blob();
+    return res;
   },
 
   // Terminal Settings

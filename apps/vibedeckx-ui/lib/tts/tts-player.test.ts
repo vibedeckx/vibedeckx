@@ -3,15 +3,19 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   getTtsSettings: vi.fn(),
-  synthesizeSpeech: vi.fn(),
+  openSpeechStream: vi.fn(),
 }));
 
 vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
-  return { ...actual, api: { getTtsSettings: mocks.getTtsSettings, synthesizeSpeech: mocks.synthesizeSpeech } };
+  return { ...actual, api: { getTtsSettings: mocks.getTtsSettings, openSpeechStream: mocks.openSpeechStream } };
 });
 
 import { TtsRequestError } from "@/lib/api";
+
+function audioResponse(body: BodyInit, type = "audio/mpeg") {
+  return new Response(body, { headers: { "Content-Type": type } });
+}
 import { TtsPlayer } from "./tts-player";
 
 class FakeAudio extends EventTarget {
@@ -80,7 +84,7 @@ describe("TtsPlayer", () => {
     URL.createObjectURL = vi.fn(() => `blob:${++blobCount}`);
     URL.revokeObjectURL = vi.fn();
     mocks.getTtsSettings.mockReset().mockResolvedValue(SETTINGS);
-    mocks.synthesizeSpeech.mockReset().mockImplementation(async (text: string) => new Blob([text]));
+    mocks.openSpeechStream.mockReset().mockImplementation(async (text: string) => audioResponse(text));
     player = new TtsPlayer();
   });
 
@@ -99,8 +103,8 @@ describe("TtsPlayer", () => {
     await flush();
     expect(player.getSnapshot()).toMatchObject({ status: "playing", ownerKey: "m1", chunk: 0, total: 2 });
     // Chunk 2 was requested before chunk 1 finished playing.
-    expect(mocks.synthesizeSpeech).toHaveBeenCalledTimes(2);
-    expect(mocks.synthesizeSpeech.mock.calls[0][0]).toBe(`${"a".repeat(150)}.`);
+    expect(mocks.openSpeechStream).toHaveBeenCalledTimes(2);
+    expect(mocks.openSpeechStream.mock.calls[0][0]).toBe(`${"a".repeat(150)}.`);
 
     const seen: string[] = [];
     const unsubscribe = player.subscribe(() => seen.push(player.getSnapshot().status));
@@ -118,9 +122,9 @@ describe("TtsPlayer", () => {
   });
 
   it("stop aborts in-flight synthesis and goes idle", async () => {
-    const pending = deferred<Blob>();
+    const pending = deferred<Response>();
     let signal: AbortSignal | undefined;
-    mocks.synthesizeSpeech.mockImplementation((_t: string, opts: { signal: AbortSignal }) => {
+    mocks.openSpeechStream.mockImplementation((_t: string, opts: { signal: AbortSignal }) => {
       signal = opts.signal;
       return pending.promise;
     });
@@ -132,7 +136,7 @@ describe("TtsPlayer", () => {
     expect(signal?.aborted).toBe(true);
     expect(player.getSnapshot()).toEqual({ status: "idle" });
     // A late result from the stopped run must not resurrect it.
-    pending.resolve(new Blob(["x"]));
+    pending.resolve(audioResponse("x"));
     await flush();
     expect(player.getSnapshot()).toEqual({ status: "idle" });
   });
@@ -158,11 +162,11 @@ describe("TtsPlayer", () => {
     player.play("m1", "Hello.");
     await flush();
     expect(player.getSnapshot()).toMatchObject({ status: "error", ownerKey: "m1", code: "not_configured" });
-    expect(mocks.synthesizeSpeech).not.toHaveBeenCalled();
+    expect(mocks.openSpeechStream).not.toHaveBeenCalled();
   });
 
   it("maps a server-side not_configured to the same code", async () => {
-    mocks.synthesizeSpeech.mockRejectedValue(new TtsRequestError("nope", 409, "tts_not_configured"));
+    mocks.openSpeechStream.mockRejectedValue(new TtsRequestError("nope", 409, "tts_not_configured"));
     player.play("m1", "Hello.");
     await flush();
     expect(player.getSnapshot()).toMatchObject({ status: "error", code: "not_configured" });
@@ -171,12 +175,12 @@ describe("TtsPlayer", () => {
   it("retries once when the server says it is busy", async () => {
     vi.useFakeTimers();
     try {
-      mocks.synthesizeSpeech
+      mocks.openSpeechStream
         .mockRejectedValueOnce(new TtsRequestError("busy", 429, "tts_busy"))
-        .mockResolvedValueOnce(new Blob(["ok"]));
+        .mockResolvedValueOnce(audioResponse("ok"));
       player.play("m1", "Hello.");
       await vi.advanceTimersByTimeAsync(400);
-      expect(mocks.synthesizeSpeech).toHaveBeenCalledTimes(2);
+      expect(mocks.openSpeechStream).toHaveBeenCalledTimes(2);
       expect(player.getSnapshot()).toMatchObject({ status: "playing" });
     } finally {
       vi.useRealTimers();
@@ -190,14 +194,14 @@ describe("TtsPlayer", () => {
     await flush();
     player.play("m1", "Hello.");
     await flush();
-    expect(mocks.synthesizeSpeech).toHaveBeenCalledTimes(1);
+    expect(mocks.openSpeechStream).toHaveBeenCalledTimes(1);
     expect(player.getSnapshot()).toMatchObject({ status: "playing" });
 
     player.stop();
     player.invalidateSettings();
     player.play("m1", "Hello.");
     await flush();
-    expect(mocks.synthesizeSpeech).toHaveBeenCalledTimes(2);
+    expect(mocks.openSpeechStream).toHaveBeenCalledTimes(2);
   });
 
   it("applies speed at playback, never in the synthesis request", async () => {
@@ -207,13 +211,13 @@ describe("TtsPlayer", () => {
     expect(audio().playRates.at(-1)).toBe(1.5);
     expect(audio().defaultPlaybackRate).toBe(1.5);
     expect(audio().preservesPitch).toBe(true);
-    expect(mocks.synthesizeSpeech.mock.calls[0][1]).not.toHaveProperty("rate");
+    expect(mocks.openSpeechStream.mock.calls[0][1]).not.toHaveProperty("rate");
 
     // A preview override wins, and reuses the audio already synthesized.
     player.play("m1", "Hello.", { rate: 0.75 });
     await flush();
     expect(audio().playRates.at(-1)).toBe(0.75);
-    expect(mocks.synthesizeSpeech).toHaveBeenCalledTimes(1);
+    expect(mocks.openSpeechStream).toHaveBeenCalledTimes(1);
   });
 
   it("stopOwnersWithPrefix only stops matching owners", async () => {

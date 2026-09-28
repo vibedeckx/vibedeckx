@@ -211,7 +211,11 @@ ttsPlayer.subscribe / getSnapshot
 ```
 
 - **只用一个 `HTMLAudioElement`**，在点击的同步调用栈里创建或复用并先 `play()` 一次解锁。后面每段只换 `src`，这样异步拿到音频后也不会被浏览器的 autoplay 策略拦下（Safari 尤其严格）。
-- 流水线：播第 n 段的同时预取第 n+1 段，最多 2 个请求在途。每段的音频转成 `URL.createObjectURL`，播完 `revokeObjectURL`。
+- **流式播放（2026-09-28 改，`lib/tts/stream-playback.ts`）**：浏览器支持 MediaSource 播放该 MIME（Chrome/Edge/Firefox 的 `MediaSource`，Safari 17+ 的 `ManagedMediaSource`）时，响应体边到边 `appendBuffer`，所有段按 `sequence` 模式追加进**同一个** SourceBuffer，段间无缝。第 n+1 段在第 n 段**下载完**时才请求（一次只一个 Azure 流）。进度按各段在时间轴上的结束点换算；`waiting` → loading、`playing` → playing。缓冲满（超长回复）时删掉已播部分再追加。
+  - 起因：生产日志显示 Azure HD Omni 首字节 1–2 s，但 170 字的整段要 8–11 s 才推完（约 17–20 字/s，朗读约 4–5 字/s）。旧的整段 `res.blob()` 让首次出声等 8–11 s，而 1100+ 字的第 2 段要 60–75 s 才生成完，第 1 段只能播 35–40 s → 中途卡 20–35 s。
+  - 实测（真实 Chrome + 模拟 Azure 的慢速流：1.2 s 首字节、4 倍实时，第 1 段 8 s、第 2 段 60 s）：1.48 s 出声，全程无 `waiting`，一个 MediaSource，结束时 currentTime = 68.11 s（无缝）；中途停止时下载连接被断开。
+- 后备（不支持 MediaSource 或 MIME 时，由第一段响应的 Content-Type 决定）：整段下载，播第 n 段时预取第 n+1 段，每段 `URL.createObjectURL`，播完 `revokeObjectURL`。
+- 缓存存原始字节（`{ type, parts }`），两条路径都能重放。
 - `stop()`：abort 所有在途 fetch，暂停 audio，释放 blob URL，状态回到 idle。
 - 同一 owner 的最近一次合成结果按 `text + voice` 缓存（不含语速，改语速后可直接复用）在内存里，只留最后一条。重播同一条回复时直接出声，不再调 Azure。
 - 切换会话或卸载对话面板时调用 `stop()`。单条消息卸载（例如滚动虚拟化）**不**停止播放：状态在外部 store 里，消息重新挂载后会重新接上。

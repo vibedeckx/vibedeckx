@@ -2,10 +2,12 @@ import { useSyncExternalStore } from "react";
 import { api, TtsRequestError, type TtsSettings } from "@/lib/api";
 import { chunkForSpeech } from "./chunk-text";
 import { hasSpeakableContent, toSpeakableText } from "./speakable-text";
+import { playStreaming, streamingSourceFor } from "./stream-playback";
 
 /**
- * Page-wide read-aloud player: one message at a time, chunked synthesis with
- * one-ahead prefetch, a single <audio> element. Components subscribe through
+ * Page-wide read-aloud player: one message at a time, chunked synthesis, a
+ * single <audio> element. Where the browser can (MediaSource), audio plays
+ * while it streams in; otherwise whole chunks with one-ahead prefetch. Components subscribe through
  * `useTtsState()`; the state lives here so a message that unmounts (scroll
  * virtualization) and remounts picks its playback state back up.
  * Design: docs/agent-message-tts-design.md §4.2.
@@ -78,6 +80,41 @@ interface Run {
   controller: AbortController;
 }
 
+/** A chunk's audio, fully received — kept as raw bytes so it can be replayed either way. */
+interface CachedChunk {
+  type: string;
+  parts: Uint8Array[];
+}
+
+/** One chunk's audio: from the network, or replayed from the cache. */
+interface ChunkSource {
+  type: string;
+  stream(): ReadableStream<Uint8Array> | null;
+  blob(): Promise<Blob>;
+}
+
+function mimeOf(res: Response): string {
+  return (res.headers.get("Content-Type") ?? "").split(";")[0].trim();
+}
+
+function fromResponse(res: Response): ChunkSource {
+  return { type: mimeOf(res), stream: () => res.body, blob: () => res.blob() };
+}
+
+function fromCache(chunk: CachedChunk): ChunkSource {
+  return {
+    type: chunk.type,
+    stream: () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const part of chunk.parts) controller.enqueue(part);
+          controller.close();
+        },
+      }),
+    blob: async () => new Blob(chunk.parts as BlobPart[], { type: chunk.type }),
+  };
+}
+
 export class TtsPlayer {
   private state: TtsState = IDLE;
   private listeners = new Set<() => void>();
@@ -85,7 +122,7 @@ export class TtsPlayer {
   private run: Run | null = null;
   private settings: Promise<TtsSettings> | null = null;
   /** The last played text's audio, so replaying the same reply skips synthesis. */
-  private cache: { key: string; blobs: Blob[] } | null = null;
+  private cache: { key: string; chunks: CachedChunk[] } | null = null;
   private errorTimer: ReturnType<typeof setTimeout> | null = null;
 
   subscribe = (listener: () => void): (() => void) => {
@@ -123,6 +160,7 @@ export class TtsPlayer {
       },
       (err: unknown) => {
         if (this.run !== run) return; // stopped or superseded
+        run.controller.abort(); // don't leave a download running
         this.run = null;
         this.resetAudio();
         this.fail(ownerKey, err);
@@ -171,22 +209,52 @@ export class TtsPlayer {
     const rate = opts.rate ?? settings.rate ?? 1;
 
     const key = JSON.stringify([text, opts.voice ?? null]);
-    if (this.cache?.key !== key) this.cache = { key, blobs: [] };
-    const blobs = this.cache.blobs;
+    if (this.cache?.key !== key) this.cache = { key, chunks: [] };
+    const cached = this.cache.chunks;
+    const total = chunks.length;
 
-    const fetchChunk = (i: number): Promise<Blob> => {
-      const hit = blobs[i];
-      if (hit) return Promise.resolve(hit);
-      return this.synthesize(chunks[i], opts.voice, signal).then((blob) => {
-        blobs[i] = blob;
-        return blob;
-      });
+    const respond = async (i: number): Promise<ChunkSource> => {
+      const hit = cached[i];
+      return hit ? fromCache(hit) : fromResponse(await this.open(chunks[i], opts.voice, signal));
     };
 
-    // Tracks whether the prefetched chunk has already arrived, so a chunk
-    // boundary only shows the spinner when there is actually a wait.
+    // The first response decides the path: its content type tells whether
+    // this browser can play it while it streams.
+    const first = await respond(0);
+    if (signal.aborted) return;
+    const mime = first.type;
+    const source = streamingSourceFor(mime);
+
+    if (source) {
+      await playStreaming({
+        audio,
+        source,
+        mime,
+        rate,
+        total,
+        signal,
+        openChunk: async (i) => {
+          const body = (i === 0 ? first : await respond(i)).stream();
+          if (!body) throw new Error("Empty audio response");
+          return body;
+        },
+        onChunkComplete: (i, parts) => {
+          cached[i] = { type: mime, parts };
+        },
+        onProgress: (status, chunk) => this.set({ status, ownerKey, chunk: Math.min(chunk, total - 1), total }),
+      });
+      return;
+    }
+
+    // Fallback: whole chunks. Tracks whether the prefetched one has already
+    // arrived, so a boundary only shows the spinner when there is a wait.
+    const fetchBlob = async (i: number): Promise<Blob> => {
+      const blob = await (i === 0 ? first : await respond(i)).blob();
+      cached[i] = { type: mime, parts: [new Uint8Array(await blob.arrayBuffer())] };
+      return blob;
+    };
     const prefetch = (i: number) => {
-      const entry = { promise: fetchChunk(i), ready: false };
+      const entry = { promise: fetchBlob(i), ready: false };
       entry.promise.then(
         () => (entry.ready = true),
         () => {}, // surfaced when awaited; avoid an unhandled rejection if we stop first
@@ -195,25 +263,25 @@ export class TtsPlayer {
     };
 
     let next = prefetch(0);
-    for (let i = 0; i < chunks.length; i++) {
-      if (!next.ready) this.set({ status: "loading", ownerKey, chunk: i, total: chunks.length });
+    for (let i = 0; i < total; i++) {
+      if (!next.ready) this.set({ status: "loading", ownerKey, chunk: i, total });
       const blob = await next.promise;
       if (signal.aborted) return;
-      if (i + 1 < chunks.length) next = prefetch(i + 1);
-      this.set({ status: "playing", ownerKey, chunk: i, total: chunks.length });
+      if (i + 1 < total) next = prefetch(i + 1);
+      this.set({ status: "playing", ownerKey, chunk: i, total });
       await this.playBlob(audio, blob, rate, signal);
     }
   }
 
-  private async synthesize(text: string, voice: string | undefined, signal: AbortSignal): Promise<Blob> {
+  private async open(text: string, voice: string | undefined, signal: AbortSignal): Promise<Response> {
     try {
-      return await api.synthesizeSpeech(text, { voice, signal });
+      return await api.openSpeechStream(text, { voice, signal });
     } catch (err) {
       // The server caps in-flight requests per user; a just-stopped request can
       // still hold a slot for a moment after we switch messages.
       if (err instanceof TtsRequestError && err.code === "tts_busy") {
         await sleep(BUSY_RETRY_MS, signal);
-        return api.synthesizeSpeech(text, { voice, signal });
+        return api.openSpeechStream(text, { voice, signal });
       }
       throw err;
     }
@@ -305,6 +373,18 @@ export class TtsPlayer {
   }
 
   private set(next: TtsState): void {
+    // Streaming reports progress on every timeupdate; skip no-op updates.
+    const prev = this.state;
+    if (
+      prev.status === next.status &&
+      (prev.status === "loading" || prev.status === "playing") &&
+      (next.status === "loading" || next.status === "playing") &&
+      prev.ownerKey === next.ownerKey &&
+      prev.chunk === next.chunk &&
+      prev.total === next.total
+    ) {
+      return;
+    }
     this.state = next;
     for (const listener of this.listeners) listener();
   }
