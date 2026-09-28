@@ -85,6 +85,7 @@ import type { PreparingReviewEntry } from "@/hooks/preparing-reviews";
 import { MAX_ATTACHMENT_BYTES, formatMegabytes } from "@/lib/attachment-limits";
 import { useAttachmentUploads, type AttachmentUploads } from "@/hooks/use-attachment-uploads";
 import { ttsPlayer } from "@/lib/tts/tts-player";
+import { handleSpeakShortcut } from "@/lib/tts/speak-shortcut";
 
 /**
  * Renders the attachment strip and, from inside `PromptInput` (the only place
@@ -837,6 +838,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     if (!agentTabActive) return;
     focusComposer();
   }, [agentTabActive, agentTabFocusNonce, focusComposer]);
+
+  // ⌃⇧S / Ctrl+Alt+S reads aloud the lowest agent reply on screen (see
+  // handleSpeakShortcut). Agent-tab-scoped like the review shortcut: the panel
+  // stays mounted behind the other tabs.
+  useEffect(() => {
+    if (!agentTabActive) return;
+    const handleKeyDown = (event: KeyboardEvent) => handleSpeakShortcut(event, messagesRef.current);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [agentTabActive]);
 
   const handleQuote = useCallback((text: string) => {
     setInput(appendQuote(input, text));

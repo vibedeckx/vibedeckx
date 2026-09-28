@@ -341,7 +341,7 @@ function AssistantMessage({
   };
 
   return (
-    <div className="group flex gap-3 py-3">
+    <div className="group flex gap-3 py-3" data-speak-message="">
       <div className={`flex-shrink-0 w-7 h-7 rounded-lg ${iconBg} flex items-center justify-center`}>
         <Bot className={`w-3.5 h-3.5 ${iconColor}`} />
       </div>

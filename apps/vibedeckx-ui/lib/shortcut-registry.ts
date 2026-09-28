@@ -4,7 +4,7 @@
 // entries derive from lib/tab-shortcuts.ts (the same data the bindings and
 // tooltips use), so the overlay can't drift from the actual keys.
 
-import { REVIEW_SHORTCUT_CODE, TAB_SHORTCUTS, comboShortcutHint } from './tab-shortcuts';
+import { REVIEW_SHORTCUT_CODE, SPEAK_SHORTCUT_CODE, TAB_SHORTCUTS, comboShortcutHint } from './tab-shortcuts';
 
 export interface ShortcutEntry {
   /** Rendered as <kbd> chips, one per alternative binding. */
@@ -34,6 +34,10 @@ export function shortcutGroups(isMac: boolean): ShortcutGroup[] {
           // lib/tab-shortcuts.ts for why that namespace exists.
           hints: [comboShortcutHint(isMac, REVIEW_SHORTCUT_CODE)],
           description: 'Start review of this session',
+        },
+        {
+          hints: [comboShortcutHint(isMac, SPEAK_SHORTCUT_CODE)],
+          description: 'Read aloud the lowest reply on screen (again to stop)',
         },
         { hints: ['a…z'], description: 'Locate workspace (type, ↑↓ cycle, ↵ jump)' },
         { hints: ['Esc'], description: 'Clear locate query / unfocus right panel' },

@@ -1,5 +1,6 @@
 // The app's ⌃⇧/Ctrl+Alt shortcut namespace: the workspace tab shortcuts plus
-// the few non-tab bindings that share the same modifier pair (Start review).
+// the few non-tab bindings that share the same modifier pair (Start review,
+// Read aloud).
 // Shared between the right panel (window keydown → switch tab), the dialogs
 // that bind their own letter, and xterm hosts
 // (attachCustomKeyEventHandler → let the combo bubble instead of sending
@@ -45,6 +46,8 @@ export const isMacPlatform = () =>
 // one panel (Start review is bound only while the Agent tab is on screen), so
 // they need no xterm passthrough — no terminal is ever mounted there.
 export const REVIEW_SHORTCUT_CODE = 'KeyR';
+// Read aloud (Speak) the lowest agent reply on screen; stops playback if any.
+export const SPEAK_SHORTCUT_CODE = 'KeyS';
 
 type ComboKeys = Pick<KeyboardEvent, 'ctrlKey' | 'shiftKey' | 'altKey' | 'metaKey' | 'code'>;
 

@@ -59,6 +59,7 @@ export function SpeakButton({ ownerKey, text, className }: { ownerKey: string; t
   return (
     <button
       type="button"
+      data-speak-button=""
       onClick={() => ttsPlayer.toggle(ownerKey, text)}
       title={error ? error.message : label + progress}
       aria-label={label}
