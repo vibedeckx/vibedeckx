@@ -1164,6 +1164,8 @@ export interface TtsVoice {
   label: string;
   locale?: string;
   multilingual?: boolean;
+  /** Provider-defined picker section ("HD Omni", "Multilingual", …), in display order. */
+  group?: string;
 }
 
 /** A failed TTS request. `code` is the server's machine-readable reason (e.g. "tts_not_configured"). */
@@ -3216,15 +3218,18 @@ export const api = {
     return ((await res.json()) as { voices: TtsVoice[] }).voices;
   },
 
-  /** One chunk of speech. `voice` / `rate` override the saved settings (settings preview). */
+  /**
+   * One chunk of speech at normal speed (speed is applied at playback).
+   * `voice` overrides the saved voice (settings preview).
+   */
   async synthesizeSpeech(
     text: string,
-    opts: { voice?: string; rate?: number; signal?: AbortSignal } = {},
+    opts: { voice?: string; signal?: AbortSignal } = {},
   ): Promise<Blob> {
     const res = await authFetch(`${getApiBase()}/api/tts/synthesize`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice: opts.voice, rate: opts.rate }),
+      body: JSON.stringify({ text, voice: opts.voice }),
       signal: opts.signal,
     });
     if (!res.ok) throw await ttsError(res, "Speech synthesis failed");

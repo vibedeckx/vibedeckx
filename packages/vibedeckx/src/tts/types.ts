@@ -23,14 +23,19 @@ export interface TtsVoice {
   locale?: string;
   /** Speaks several languages with one voice (auto-detected per sentence). */
   multilingual?: boolean;
+  /**
+   * Provider-defined section for the voice picker (e.g. "HD Omni",
+   * "Multilingual"). The UI shows groups in the order they first appear.
+   */
+  group?: string;
 }
 
 export interface SynthesizeRequest {
   /** Plain text — the provider does its own escaping / SSML wrapping. */
   text: string;
   voice: string;
-  /** Speaking rate multiplier, 1 = normal. Already clamped by the caller. */
-  rate: number;
+  // No speaking rate: speed is applied at playback (audio.playbackRate), which
+  // works for every provider and voice — Azure's HD voices ignore SSML prosody.
   signal: AbortSignal;
   dispatcher?: Dispatcher;
 }

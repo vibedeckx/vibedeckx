@@ -19,7 +19,7 @@ export type TtsState =
   | { status: "error"; ownerKey: string; code: TtsErrorCode; message: string };
 
 export interface TtsPlayOptions {
-  /** Override the saved voice / rate (settings preview of unsaved values). */
+  /** Override the saved voice / speed (settings preview of unsaved values). */
   voice?: string;
   rate?: number;
 }
@@ -165,15 +165,19 @@ export class TtsPlayer {
     const maxChars =
       settings.providers.find((p) => p.id === settings.provider)?.maxCharsPerRequest ?? FALLBACK_MAX_CHARS;
     const chunks = chunkForSpeech(text, maxChars);
+    // Speed is a playback property, not part of synthesis: audio is always
+    // fetched at normal speed, so it works for every voice (Azure HD voices
+    // ignore SSML prosody) and the cache survives a speed change.
+    const rate = opts.rate ?? settings.rate ?? 1;
 
-    const key = JSON.stringify([text, opts.voice ?? null, opts.rate ?? null]);
+    const key = JSON.stringify([text, opts.voice ?? null]);
     if (this.cache?.key !== key) this.cache = { key, blobs: [] };
     const blobs = this.cache.blobs;
 
     const fetchChunk = (i: number): Promise<Blob> => {
       const hit = blobs[i];
       if (hit) return Promise.resolve(hit);
-      return this.synthesize(chunks[i], opts, signal).then((blob) => {
+      return this.synthesize(chunks[i], opts.voice, signal).then((blob) => {
         blobs[i] = blob;
         return blob;
       });
@@ -197,25 +201,25 @@ export class TtsPlayer {
       if (signal.aborted) return;
       if (i + 1 < chunks.length) next = prefetch(i + 1);
       this.set({ status: "playing", ownerKey, chunk: i, total: chunks.length });
-      await this.playBlob(audio, blob, signal);
+      await this.playBlob(audio, blob, rate, signal);
     }
   }
 
-  private async synthesize(text: string, opts: TtsPlayOptions, signal: AbortSignal): Promise<Blob> {
+  private async synthesize(text: string, voice: string | undefined, signal: AbortSignal): Promise<Blob> {
     try {
-      return await api.synthesizeSpeech(text, { ...opts, signal });
+      return await api.synthesizeSpeech(text, { voice, signal });
     } catch (err) {
       // The server caps in-flight requests per user; a just-stopped request can
       // still hold a slot for a moment after we switch messages.
       if (err instanceof TtsRequestError && err.code === "tts_busy") {
         await sleep(BUSY_RETRY_MS, signal);
-        return api.synthesizeSpeech(text, { ...opts, signal });
+        return api.synthesizeSpeech(text, { voice, signal });
       }
       throw err;
     }
   }
 
-  private playBlob(audio: HTMLAudioElement, blob: Blob, signal: AbortSignal): Promise<void> {
+  private playBlob(audio: HTMLAudioElement, blob: Blob, rate: number, signal: AbortSignal): Promise<void> {
     const url = URL.createObjectURL(blob);
     return new Promise<void>((resolve, reject) => {
       const cleanup = () => {
@@ -240,7 +244,12 @@ export class TtsPlayer {
       audio.addEventListener("ended", onEnded);
       audio.addEventListener("error", onError);
       signal.addEventListener("abort", onAbort);
+      // Loading a new src resets playbackRate to defaultPlaybackRate, so set
+      // both. preservesPitch (the default) keeps the voice from going chipmunk.
+      audio.defaultPlaybackRate = rate;
       audio.src = url;
+      audio.playbackRate = rate;
+      audio.preservesPitch = true;
       Promise.resolve(audio.play()).catch((err: unknown) => {
         cleanup();
         reject(err);

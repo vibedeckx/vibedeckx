@@ -234,7 +234,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
-  fastify.post<{ Body: { text?: unknown; voice?: unknown; rate?: unknown } }>(
+  fastify.post<{ Body: { text?: unknown; voice?: unknown } }>(
     "/api/tts/synthesize",
     async (req, reply) => {
       const userId = requireTtsUser(req, reply);
@@ -248,12 +248,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (text.length > def.maxCharsPerRequest) {
         return reply.code(400).send({ error: `text must be at most ${def.maxCharsPerRequest} characters` });
       }
-      // Overrides let the settings page preview an unsaved voice / rate.
+      // Lets the settings page preview an unsaved voice. There is no rate:
+      // speed is applied by the player (audio.playbackRate), not synthesized.
       if (body.voice !== undefined && (typeof body.voice !== "string" || !def.isValidVoice(body.voice))) {
         return reply.code(400).send({ error: "invalid voice" });
-      }
-      if (body.rate !== undefined && (typeof body.rate !== "number" || !Number.isFinite(body.rate))) {
-        return reply.code(400).send({ error: "invalid rate" });
       }
       if (!isTtsConfigured(config)) {
         return reply.code(409).send({ code: "tts_not_configured", error: "Text-to-speech is not configured" });
@@ -287,7 +285,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         result = await def.synthesize(resolveCredentials(config), {
           text,
           voice: typeof body.voice === "string" ? body.voice : config.voice,
-          rate: body.rate !== undefined ? clampRate(body.rate) : config.rate,
           signal: AbortSignal.any([controller.signal, AbortSignal.timeout(SYNTHESIZE_TIMEOUT_MS)]),
           dispatcher: dispatcher(),
         });

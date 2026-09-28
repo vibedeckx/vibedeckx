@@ -18,13 +18,18 @@ class FakeAudio extends EventTarget {
   static instances: FakeAudio[] = [];
   src = "";
   playCalls: string[] = [];
+  playRates: number[] = [];
   paused = true;
+  playbackRate = 1;
+  defaultPlaybackRate = 1;
+  preservesPitch = false;
   constructor() {
     super();
     FakeAudio.instances.push(this);
   }
   play() {
     this.playCalls.push(this.src);
+    this.playRates.push(this.playbackRate);
     this.paused = false;
     return Promise.resolve();
   }
@@ -193,6 +198,22 @@ describe("TtsPlayer", () => {
     player.play("m1", "Hello.");
     await flush();
     expect(mocks.synthesizeSpeech).toHaveBeenCalledTimes(2);
+  });
+
+  it("applies speed at playback, never in the synthesis request", async () => {
+    mocks.getTtsSettings.mockResolvedValue({ ...SETTINGS, rate: 1.5 });
+    player.play("m1", "Hello.");
+    await flush();
+    expect(audio().playRates.at(-1)).toBe(1.5);
+    expect(audio().defaultPlaybackRate).toBe(1.5);
+    expect(audio().preservesPitch).toBe(true);
+    expect(mocks.synthesizeSpeech.mock.calls[0][1]).not.toHaveProperty("rate");
+
+    // A preview override wins, and reuses the audio already synthesized.
+    player.play("m1", "Hello.", { rate: 0.75 });
+    await flush();
+    expect(audio().playRates.at(-1)).toBe(0.75);
+    expect(mocks.synthesizeSpeech).toHaveBeenCalledTimes(1);
   });
 
   it("stopOwnersWithPrefix only stops matching owners", async () => {

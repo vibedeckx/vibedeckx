@@ -211,7 +211,7 @@ export function TtsSettings() {
         hint={
           voicesError ??
           (savedConfigured
-            ? "Multilingual voices switch between Chinese and English on their own."
+            ? "HD Omni and Multilingual voices switch languages on their own. Not listed? Type the full voice ID in the search box."
             : "Save your credentials to load the voice list.")
         }
       >
@@ -237,6 +237,9 @@ export function TtsSettings() {
           <span>{settings.rateRange.min}×</span>
           <span>{settings.rateRange.max}×</span>
         </div>
+        <p className="mt-1.5 text-[11px] text-muted-foreground/85 leading-relaxed">
+          Applied during playback, so it works with every voice and takes effect without re-synthesizing.
+        </p>
       </div>
 
       <p className="text-[11px] text-muted-foreground/85 leading-relaxed">
@@ -287,14 +290,28 @@ function VoicePicker({
   onChange: (voice: string) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
   const selected = useMemo(() => voices?.find((v) => v.id === value), [voices, value]);
   const groups = useMemo(() => {
+    // The provider's list may not include every usable voice (and the saved
+    // one may be missing from it) — keep the current value selectable.
     const list = voices ?? [];
-    return [
-      { heading: "Multilingual", items: list.filter((v) => v.multilingual) },
-      { heading: "All voices", items: list.filter((v) => !v.multilingual) },
-    ].filter((g) => g.items.length > 0);
-  }, [voices]);
+    const items = list.some((v) => v.id === value) || !value ? list : [{ id: value, label: value, group: "Current" }, ...list];
+    const byGroup = new Map<string, TtsVoice[]>();
+    for (const v of items) {
+      const heading = v.group ?? (v.multilingual ? "Multilingual" : "All voices");
+      byGroup.set(heading, [...(byGroup.get(heading) ?? []), v]);
+    }
+    return [...byGroup].map(([heading, groupItems]) => ({ heading, items: groupItems }));
+  }, [voices, value]);
+  // Any voice ID can be typed in (validated by the server on save).
+  const typedId = search.trim();
+  const offerTyped = typedId.length > 0 && !(voices ?? []).some((v) => v.id === typedId) && typedId !== value;
+  const pick = (id: string) => {
+    onChange(id);
+    setOpen(false);
+    setSearch("");
+  };
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -316,19 +333,30 @@ function VoicePicker({
       </PopoverTrigger>
       <PopoverContent className="p-0 w-[var(--radix-popover-trigger-width)]" align="start">
         <Command>
-          <CommandInput placeholder="Search voices…" className="text-[12.5px]" />
+          <CommandInput
+            placeholder="Search voices, or type a voice ID…"
+            className="text-[12.5px]"
+            value={search}
+            onValueChange={setSearch}
+          />
           <CommandList className="max-h-72">
             <CommandEmpty>No voice found.</CommandEmpty>
+            {offerTyped && (
+              <CommandGroup heading="Voice ID">
+                <CommandItem value={`__typed__ ${typedId}`} onSelect={() => pick(typedId)} className="text-[12.5px]">
+                  <span className="truncate">
+                    Use <span className="font-mono">{typedId}</span>
+                  </span>
+                </CommandItem>
+              </CommandGroup>
+            )}
             {groups.map((group) => (
               <CommandGroup key={group.heading} heading={group.heading}>
                 {group.items.map((v) => (
                   <CommandItem
                     key={v.id}
                     value={`${v.label} ${v.id}`}
-                    onSelect={() => {
-                      onChange(v.id);
-                      setOpen(false);
-                    }}
+                    onSelect={() => pick(v.id)}
                     className="text-[12.5px]"
                   >
                     <Check className={cn("h-3.5 w-3.5", v.id === value ? "opacity-100" : "opacity-0")} />

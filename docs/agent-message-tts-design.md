@@ -26,7 +26,7 @@ AssistantMessage ─ <SpeakButton text={content}>
         │  toSpeakableText(markdown) → chunkForSpeech(text)
         ▼
   ttsPlayer（前端单例，外部 store）
-        │  每段一次 POST /api/tts/synthesize  { text, voice?, rate? }
+        │  每段一次 POST /api/tts/synthesize  { text, voice? }（语速在播放时由 audio.playbackRate 施加）
         ▼
   hub: tts-routes.ts ── requireAuth + resolveUserId
         │  getTtsConfig(storage, userId) → TTS_PROVIDERS[provider].synthesize(...)
@@ -54,16 +54,17 @@ export interface TtsCredentialField {
 }
 
 export interface TtsVoice {
-  id: string;                  // 供应商自己的音色 id，例如 "zh-CN-XiaoxiaoMultilingualNeural"
+  id: string;                  // 供应商自己的音色 id，例如 "zh-CN-Xiaoxiao:DragonHDOmniLatestNeural"
   label: string;
   locale?: string;
   multilingual?: boolean;
+  group?: string;              // 供应商定义的分组名（"HD Omni"、"Multilingual"…），选择器按出现顺序分组
 }
 
 export interface SynthesizeRequest {
   text: string;                // 已经是纯文本，供应商负责自己的转义 / SSML
   voice: string;
-  rate: number;                // 0.5–2.0，1 = 正常
+  // 没有 rate：语速是播放端的事（audio.playbackRate），见 §3.7
   signal: AbortSignal;
   dispatcher?: Dispatcher;     // proxyManager.getFetchDispatcher()
 }
@@ -93,12 +94,14 @@ export const TTS_PROVIDERS: Record<TtsProviderId, TtsProviderDef> = { azure: azu
 
 ### 3.2 Azure 实现 `tts/azure.ts`
 
-- 凭据字段：`apiKey`（secret，env `AZURE_SPEECH_KEY`）、`region`（env `AZURE_SPEECH_REGION`，例如 `eastasia`）。
+- 凭据字段：`apiKey`（secret，env `AZURE_SPEECH_KEY`）、`region`（env `AZURE_SPEECH_REGION`，例如 `southeastasia`）。
 - 合成：`POST https://{region}.tts.speech.microsoft.com/cognitiveservices/v1`
   - 请求头：`Ocp-Apim-Subscription-Key`、`Content-Type: application/ssml+xml`、`X-Microsoft-OutputFormat: audio-24khz-48kbitrate-mono-mp3`、`User-Agent: vibedeckx`
-  - 请求体：`buildSsml({ text, voice, rate })`，text 必须做 XML 转义（`& < > " '`），rate 转成 `<prosody rate="+20%">`。`xml:lang` 取音色的 locale。
+  - 请求体：`buildSsml({ text, voice })`，text 必须做 XML 转义（`& < > " '`）。**不发 `<prosody>`**：HD 声音不支持它（见 §3.7）。`xml:lang` 取音色的 locale。
 - 音色：`GET https://{region}.tts.speech.microsoft.com/cognitiveservices/voices/list`。只保留 Neural 音色，hub 进程内按 region 缓存 24h。
-- **默认音色用 Multilingual 系列**（`zh-CN-XiaoxiaoMultilingualNeural`）。agent 回复经常中英混杂，这类音色会按句子自动切换语言，省得我们自己做语种检测。
+- **默认音色用 Dragon HD Omni**（`zh-CN-Xiaoxiao:DragonHDOmniLatestNeural`，2026-09-28 从 `zh-CN-XiaoxiaoMultilingualNeural` 改过来）。Omni 是新一代基础模型，700 多个声音全部支持多语言、自动识别语种，agent 回复中英混杂也不用我们做语种检测。
+- **HD 声音只在部分区域可用**（2026-09 文档：canadacentral、centralindia、eastus、eastus2、francecentral、southeastasia、swedencentral、westeurope、westus2；eastasia 不在内）。不在代码里写死区域表（会过时）：HD 声音收到 400 时，错误信息附一句「HD voices are only available in some Azure regions」。Region 输入框示例用 `southeastasia`。
+- 声音列表：HD 声音不论 `VoiceType` 标什么都保留，按 HD Omni → HD → Multilingual → Standard 分组。音色 ID 允许下划线（Omni 有 `zh-cn-yunze_customer:…` 这类名字）。
 - `maxCharsPerRequest`：1500。Azure 单次上限是 10 分钟音频，这里主要是为了首段延迟，不是贴着上限走。
 - 状态码映射：401/403 → `auth`，429 → `quota`，400 → `bad_request`，5xx → `upstream`。
 
@@ -129,14 +132,14 @@ interface TtsConfig {
 | `GET /api/settings/tts` | 返回 `{ provider, credentials(secret 打码), voice, rate, configured, providers: [{id,label,credentialFields,defaultVoice,maxCharsPerRequest}] }`。前端设置页完全由这份元数据渲染 |
 | `PUT /api/settings/tts` | 用 `userSettings.update` 原子合并。字段不传表示不改；secret 字段原样回传打码值也表示不改，传空串表示清空；换 provider 时如果 voice 不属于新 provider，重置为 defaultVoice |
 | `GET /api/tts/voices?provider=` | 调 `listVoices`，按「provider + 凭据哈希」在进程内缓存 24h。未配置返回 409 `tts_not_configured` |
-| `POST /api/tts/synthesize` | body `{ text, voice?, rate? }`，返回 `audio/*` 流 |
+| `POST /api/tts/synthesize` | body `{ text, voice? }`，返回正常语速的 `audio/*` 流 |
 
 `synthesize` 的约束：
 
 - 去掉首尾空白后 text 不能为空，长度 ≤ 当前 provider 的 `maxCharsPerRequest`，否则返回 400。分段是客户端的事，服务端只负责兜底拒绝。
 - 未配置时返回 **409 `{ code: "tts_not_configured" }`**，前端据此给出「去设置」的引导，不当成普通错误处理。
 - 错误映射：`auth` → 502 `tts_auth_failed`（不返回 401，免得前端以为是 Clerk 登录失效），`quota` → 429，其它 → 502。
-- body 可带 `voice` / `rate` 覆盖存储值（设置页试听未保存的音色时用）；voice 要过 provider 的 `isValidVoice`。
+- body 可带 `voice` 覆盖存储值（设置页试听未保存的音色时用）；voice 要过 provider 的 `isValidVoice`。
 - 请求中断时（`reply.raw` 的 `close` 事件且响应未写完）abort 上游 fetch，这样停止播放能真正省掉 Azure 的调用。另有 60s 总超时，免得挂住的上游一直占着并发名额。
 - 每个用户最多 2 个并发合成（进程内计数）。播放器最多同时发出「当前段 + 预取段」两个请求，所以这个上限足够，还能防止脚本把别人的额度刷爆。和 chat API 的 64KB 上限一样属于纵深防御。
 - 日志只记长度、provider 和耗时，**不记文本**（回复里可能有代码或密钥片段），也不记密钥。
@@ -157,6 +160,16 @@ interface TtsConfig {
 id 方案真正的好处是**服务端能决定念什么**，也就是只能念 transcript 里有的内容，没法把 hub 当成通用 TTS 代理来刷额度。这一点只在「运维给全站配了 env key、又不信任用户」时才重要。用户自带 key 时，只能刷自己的额度。目前靠登录、单段长度上限和并发上限已经够了。如果以后真有滥用，优先加按用户的字数配额，而不是改成按 id 合成。
 
 请求体的大小也不是问题：一段不超过 1500 字符，比返回的音频小两个数量级。
+### 3.7 语速在播放端（2026-09-28 改）
+
+最初用 SSML `<prosody rate>` 让 Azure 直接合成出快/慢的语音。改为播放端 `audio.playbackRate`，合成一律按正常语速，理由：
+
+- Azure 的 HD 声音（Dragon HD / Omni）**不支持 `<prosody>`**，默认声音换成 Omni 后原方案直接失效。
+- 语速参数各家 TTS 都不一样，放在播放端就和供应商无关，符合注册表的初衷。
+- 改语速不用重新合成，缓存可复用。
+
+代价：`playbackRate` 是对音频做时间伸缩，极端倍速下不如模型原生调速自然；设置范围本来就限定在 0.5–2×。浏览器默认 `preservesPitch`，不会变调。实现细节：浏览器加载新 `src` 时会把 `playbackRate` 重置为 `defaultPlaybackRate`，所以两个都要设（真实 Chrome 实测：只设 `playbackRate` 的话换 src 后回到 1×）。
+
 ## 4. 前端
 
 ### 4.1 纯函数（`lib/tts/`，都有单测）
@@ -199,7 +212,7 @@ ttsPlayer.subscribe / getSnapshot
 - **只用一个 `HTMLAudioElement`**，在点击的同步调用栈里创建或复用并先 `play()` 一次解锁。后面每段只换 `src`，这样异步拿到音频后也不会被浏览器的 autoplay 策略拦下（Safari 尤其严格）。
 - 流水线：播第 n 段的同时预取第 n+1 段，最多 2 个请求在途。每段的音频转成 `URL.createObjectURL`，播完 `revokeObjectURL`。
 - `stop()`：abort 所有在途 fetch，暂停 audio，释放 blob URL，状态回到 idle。
-- 同一 owner 的最近一次合成结果按 `hash(text + voice + rate)` 缓存在内存里，只留最后一条。重播同一条回复时直接出声，不再调 Azure。
+- 同一 owner 的最近一次合成结果按 `text + voice` 缓存（不含语速，改语速后可直接复用）在内存里，只留最后一条。重播同一条回复时直接出声，不再调 Azure。
 - 切换会话或卸载对话面板时调用 `stop()`。单条消息卸载（例如滚动虚拟化）**不**停止播放：状态在外部 store 里，消息重新挂载后会重新接上。
 - `ownerKey` = `${sessionId}:${entryIndex}:${内容 hash}`。`entryIndex` 是持久化的 entry 下标（即对话列表的 `messageEntryIndices`），用来区分内容相同的两条回复；不用 `messageIndex`，因为它是数组下标，加载更早的历史时会整体偏移。
 
@@ -227,8 +240,8 @@ settings-view 里新增「Speech」分区，放在 Chat provider 之后：
 
 - Provider 下拉框（v1 只有 Azure，也照样渲染，给以后的供应商留好位置）。
 - 凭据输入框**由 `credentialFields` 元数据生成**：secret 字段用 password 输入框，显示打码值，只有被改动过的字段才提交，逻辑同 chat-provider-settings 的 `keyDirty`。
-- Voice：可搜索的下拉框（Popover + Command），保存凭据后调 `GET /api/tts/voices` 加载，Multilingual 音色单独成组置顶。
-- Rate 滑块：0.5–2.0。
+- Voice：可搜索的下拉框（Popover + Command），保存凭据后调 `GET /api/tts/voices` 加载，按供应商给的 `group` 分组。当前选中的声音即使不在列表里也会显示；搜索框里可以直接输入任意声音 ID（「Use …」项），保存时由服务端校验。
+- Speed 滑块：0.5–2.0，播放时生效。
 - 「试听」按钮：用同一个 `ttsPlayer` 念一句固定示例，顺便验证密钥和 region。
 - 说明文字：「朗读时，消息文本会发送给所选语音服务商」。
 
@@ -253,7 +266,7 @@ settings-view 里新增「Speech」分区，放在 Chat provider 之后：
 
 ## 7. 测试
 
-- 后端：`parseTtsConfig` 的归一与兜底；PUT 合并（secret 打码不覆盖、换 provider 时重置 voice）；Azure `buildSsml` 的转义和 rate 换算；synthesize 路由（mock fetch，覆盖超长、未配置 409、401→502、客户端断开时 abort 上游）；并发上限。
+- 后端：`parseTtsConfig` 的归一与兜底；PUT 合并（secret 打码不覆盖、换 provider 时重置 voice）；Azure `buildSsml` 的转义且不含 prosody；synthesize 路由（mock fetch，覆盖超长、未配置 409、401→502、客户端断开时 abort 上游）；并发上限。
 - 前端：`toSpeakableText` / `chunkForSpeech` 的表驱动用例（中英混合、代码块、表格、超长单句）；`ttsPlayer` 的状态机（mock Audio 与 fetch：切换 owner 会停掉前一个、stop 会 abort、预取不超过 2 个）；`SpeakButton` 仿照 `agent-message.copy-source.test.tsx`，覆盖 aria-label 切换、streaming 时不渲染、播放中常显。
 - 真机：用 Azure 试用 key 在 Chrome 和 Safari 上各跑一次长回复，确认首段延迟和段落衔接没有明显停顿。
 

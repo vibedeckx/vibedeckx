@@ -121,14 +121,17 @@ describe("tts routes", () => {
 
     it("streams audio from the provider", async () => {
       await configure();
-      const res = await app.inject({ method: "POST", url: "/api/tts/synthesize", payload: { text: "a < b", rate: 1.5 } });
+      // A saved rate must not reach the provider: speed is a playback concern.
+      await app.inject({ method: "PUT", url: "/api/settings/tts", payload: { rate: 1.5 } });
+      const res = await app.inject({ method: "POST", url: "/api/tts/synthesize", payload: { text: "a < b" } });
       expect(res.statusCode).toBe(200);
       expect(res.headers["content-type"]).toBe("audio/mpeg");
       expect(res.headers["cache-control"]).toBe("no-store");
       expect(new Uint8Array(res.rawPayload)).toEqual(AUDIO);
       const [url, init] = fetchMock.mock.calls[0];
       expect(url).toContain("eastasia.tts.speech.microsoft.com");
-      expect(init.body).toContain('<prosody rate="+50%">a &lt; b</prosody>');
+      expect(init.body).toContain(">a &lt; b</voice>");
+      expect(init.body).not.toContain("prosody");
     });
 
     it("maps a rejected key to 502, not 401", async () => {
