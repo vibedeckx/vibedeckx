@@ -202,6 +202,17 @@
   background-clip: content-box;
 }
 
+/* Capped tool-output blocks in the agent conversation: hide the scrollbar but
+   keep wheel/trackpad scrolling. Must stay AFTER the global ::-webkit-scrollbar
+   rules so `display: none` wins at equal specificity. */
+.scrollbar-none {
+  scrollbar-width: none;
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
 /* Transient highlight applied to a Shiki line when a symbol jump scrolls to it.
    The Shiki `code` element is `display: grid`, so each `.line` is already a
    full-width row — no `display: block` needed (it would re-introduce the

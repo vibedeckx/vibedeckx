@@ -78,7 +78,7 @@ export function EditToolUseUI({ input }: { input: unknown }) {
         <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
           Diff
         </summary>
-        <div className="mt-1 text-xs rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full">
+        <div className="mt-1 text-xs rounded overflow-x-auto max-h-48 overflow-y-auto scrollbar-none max-w-full">
           <pre
             className="bg-red-500/10 p-1.5 rounded-t whitespace-pre-wrap break-all"
             style={{ fontSize: "var(--conv-font-size, 12px)" }}
@@ -119,7 +119,7 @@ export function EditToolResultUI({ output }: { output: string }) {
         Result ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
       <pre
-        className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+        className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto scrollbar-none max-w-full whitespace-pre-wrap break-all"
         style={{ fontSize: "var(--conv-font-size, 12px)" }}
       >
         {output.length > 1000 ? output.substring(0, 1000) + "..." : output}

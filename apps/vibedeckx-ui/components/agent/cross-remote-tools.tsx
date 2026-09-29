@@ -79,7 +79,7 @@ function RawJson({ value, limit }: { value: unknown; limit: number }) {
   const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
   return (
     <pre
-      className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+      className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto scrollbar-none max-w-full whitespace-pre-wrap break-all"
       style={{ fontSize: "var(--conv-font-size, 12px)" }}
     >
       {text.length > limit ? text.substring(0, limit) + "..." : text}

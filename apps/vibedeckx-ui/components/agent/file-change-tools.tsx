@@ -50,7 +50,7 @@ export function FileChangeToolUseUI({ input }: { input: unknown }) {
                 View diff
               </summary>
               <pre
-                className="mt-1 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+                className="mt-1 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto scrollbar-none max-w-full whitespace-pre-wrap break-all"
                 style={{ fontSize: "var(--conv-font-size, 12px)" }}
               >
                 {change.diff.split("\n").map((line, li) => {

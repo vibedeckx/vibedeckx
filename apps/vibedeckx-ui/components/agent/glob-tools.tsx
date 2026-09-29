@@ -69,7 +69,7 @@ export function GlobToolResultUI({ output }: { output: string }) {
         {fileCount} {fileCount === 1 ? "file" : "files"} found
       </summary>
       <pre
-        className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto max-w-full whitespace-pre-wrap break-all"
+        className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-h-48 overflow-y-auto scrollbar-none max-w-full whitespace-pre-wrap break-all"
         style={{ fontSize: "var(--conv-font-size, 12px)" }}
       >
         {output.length > 1000 ? output.substring(0, 1000) + "..." : output}
