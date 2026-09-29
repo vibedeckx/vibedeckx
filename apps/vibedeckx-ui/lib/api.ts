@@ -1863,6 +1863,8 @@ export interface WorkflowRun {
   loop_id?: string | null;
   round?: number;
   max_rounds?: number | null;
+  /** 1 once the user stepped into the loop (messaged a side): every later gate waits for them. */
+  loop_manual?: number;
   /** Reviewer's closing verdict, parsed by exact match; null/undefined = none or unrecognised. */
   verdict?: WorkflowVerdict | null;
   /** Absent (older workers) = "review". A `repeat` run is one iteration of a repeat-until-done loop. */

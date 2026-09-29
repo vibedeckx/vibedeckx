@@ -118,7 +118,7 @@ describe("workflowRunSteps repository", () => {
   describe("next-round gate run (review loop)", () => {
     const nextRun = {
       id: "r2", project_id: "p1", branch: "dev", source_session_id: "s-src", source_turn_end_index: 9,
-      review_focus: "tests", review_target: null, loop_id: "r1", round: 2, max_rounds: 3,
+      review_focus: "tests", review_target: null, loop_id: "r1", round: 2, max_rounds: 3, loop_manual: 0,
     };
     // The round that sent the feedback is over by the time its step is claimed.
     const finishRound = () => storage.workflowRuns.update("r1", { status: "completed" });

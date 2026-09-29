@@ -23,7 +23,8 @@ const VERDICT_LABEL: Record<WorkflowVerdict, { text: string; className: string }
 function roundLabel(run: WorkflowRun): string | null {
   if (!run.loop_id) return null;
   const round = run.round ?? 1;
-  return run.max_rounds ? `第 ${round} / ${run.max_rounds} 轮` : `第 ${round} 轮`;
+  const label = run.max_rounds ? `第 ${round} / ${run.max_rounds} 轮` : `第 ${round} 轮`;
+  return run.loop_manual ? `${label} · 已转人工` : label;
 }
 
 /** The gate run's round is the one about to start; past the cap it needs an explicit extension. */
@@ -332,7 +333,8 @@ export function ReviewRunPanel({
           {run.status === "waiting_rereview" && (
             // Loop gate: the source finished the turn our feedback opened. A clear
             // needs-changes within the cap re-reviews on its own; the gate is
-            // what is left — another verdict, the cap, or an attempt that failed.
+            // what is left — another verdict, the cap, a failed attempt, or a
+            // loop the user stepped into.
             <>
               <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
                 {isOverRoundCap(run)

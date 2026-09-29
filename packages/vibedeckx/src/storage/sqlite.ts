@@ -1915,6 +1915,7 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       loop_id TEXT,
       round INTEGER NOT NULL DEFAULT 1,
       max_rounds INTEGER,
+      loop_manual INTEGER NOT NULL DEFAULT 0,
       verdict TEXT,
       kind TEXT NOT NULL DEFAULT 'review',
       params TEXT,
@@ -2131,6 +2132,8 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     ["kind", "kind TEXT NOT NULL DEFAULT 'review'"],
     ["params", "params TEXT"],
     ["outcome_status", "outcome_status TEXT"],
+    // Unattended review loops: set once the user steps in.
+    ["loop_manual", "loop_manual INTEGER NOT NULL DEFAULT 0"],
   ] as const) {
     if (!workflowRunsInfo.some((col) => col.name === name)) {
       db.exec(`ALTER TABLE workflow_runs ADD COLUMN ${ddl}`);

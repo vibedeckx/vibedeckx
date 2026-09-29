@@ -1,5 +1,5 @@
 import { randomUUID } from "crypto";
-import type { AgentSession, ReviewSpan, Storage, WorkflowRun, WorkflowRunStep, WorkflowRunStepKind } from "./storage/types.js";
+import type { AgentSession, ReviewSpan, Storage, WorkflowRun, WorkflowRunStep, WorkflowRunStepKind, WorkflowVerdict } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { AgentMessage, AgentType, NotificationDisposition, TextPart } from "./agent-types.js";
 import { findTurnOpeningUserEntryIndex, reviewReadyId, workflowFailedId } from "./notification-milestones.js";
@@ -69,6 +69,8 @@ export class WorkflowError extends Error {
 }
 
 const LOOP_DEADLINE_CHECK_MS = 60_000;
+/** Reason of an automatic hop the user took over just before it was sent. */
+const HANDED_OVER = "handed over to the user";
 
 /** Statuses a run can never leave — see failRun / cancelRun. */
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "cancelled", "failed"]);
@@ -583,11 +585,12 @@ export class WorkflowEngine {
   /** sessionId → participation in an active run (rebuilt on boot). */
   private participants = new Map<string, Participant>();
   /**
-   * Source session → next-round gate whose automatic re-review is waiting for
-   * the source to go idle. The completion event fires before the source's
-   * status leaves `running`, so the first attempt can land too early.
+   * Source session → the loop run whose automatic next hop (relaying the
+   * feedback, or starting the re-review) waits for the source to go idle. The
+   * completion event fires before the source's status leaves `running`, so a
+   * first attempt can land too early.
    */
-  private autoRereviewWaiting = new Map<string, string>();
+  private autoWaiting = new Map<string, { runId: string; action: "relay" | "rereview" }>();
   /** runId → prompt inputs captured at prepare time (see PendingActivation). */
   private pendingActivations = new Map<string, PendingActivation>();
   /** runId → armed preparation-timeout timer. */
@@ -610,10 +613,10 @@ export class WorkflowEngine {
           console.error("[WorkflowEngine] handleTaskCompleted failed:", err),
         );
       } else if (event.type === "session:status" && event.status !== "running"
-          && this.autoRereviewWaiting.has(event.sessionId)) {
-        const gateId = this.autoRereviewWaiting.get(event.sessionId)!;
-        this.autoRereviewWaiting.delete(event.sessionId);
-        void this.autoRereview(gateId);
+          && this.autoWaiting.has(event.sessionId)) {
+        const { runId, action } = this.autoWaiting.get(event.sessionId)!;
+        this.autoWaiting.delete(event.sessionId);
+        void (action === "relay" ? this.autoRelay(runId, true) : this.autoRereview(runId, true));
       } else if (event.type === "session:status" && event.status !== "running"
           && this.participants.get(event.sessionId)?.role === "task") {
         // A turn that did NOT complete emits no taskCompleted at all; for an
@@ -707,6 +710,10 @@ export class WorkflowEngine {
             "发送状态未知：服务在发送反馈期间重启。请检查 source session 是否已收到反馈，再决定重发或结束。",
         });
         run.status = "waiting_feedback";
+      } else if (run.status === "waiting_feedback" && run.loop_id) {
+        // A restart between an unattended claim and its relay leaves a gate
+        // nobody was told about. Idempotent for every gate that did ring.
+        await this.notifyFeedbackGate(run);
       } else if (run.status === "waiting_reviewer") {
         await this.storage.workflowRuns.update(run.id, {
           error: "服务重启，可能错过 reviewer 完成事件。若 reviewer 已完成，请打开其窗口查看，或结束本次 review。",
@@ -964,18 +971,13 @@ export class WorkflowEngine {
       loop_id: run.loop_id,
       round: run.round + 1,
       max_rounds: run.max_rounds,
+      loop_manual: run.loop_manual,
     };
   }
 
   /**
    * The insert is conditional (see claimStepAndTransition); read it back to know.
-   *
-   * With `auto`, the next round starts by itself instead of waiting at the
-   * gate: the confirmation carries no information while the verdict says
-   * there is more to fix and rounds remain. Only a clear `needs-changes`
-   * qualifies — `cannot-verify` or an unparsed verdict is the user's call, and
-   * so is going past the cap. Anything that stops the attempt leaves the gate
-   * where it is, which is exactly the manual path.
+   * With `auto`, the next round starts by itself (see `autoRereview`).
    */
   private async announceNextRoundGate(nextRunId: string | undefined, auto = false): Promise<void> {
     if (!nextRunId) return;
@@ -983,32 +985,122 @@ export class WorkflowEngine {
     if (!gate) return;
     this.trackParticipants(gate);
     this.emitRunUpdated(gate);
-    if (auto && gate.max_rounds !== null && gate.round <= gate.max_rounds) await this.autoRereview(gate.id);
+    if (auto) await this.autoRereview(gate.id);
   }
 
-  /** `approveRereview` without a caller to report to: failures land on the gate. */
-  private async autoRereview(gateId: string): Promise<void> {
-    try {
-      await this.approveRereview(gateId);
-    } catch (err) {
-      const gate = await this.storage.workflowRuns.getById(gateId);
-      if (gate?.status !== "waiting_rereview") return;
-      if (err instanceof WorkflowError && err.code === "source-running") {
-        this.autoRereviewWaiting.set(gate.source_session_id, gate.id);
-        // The status event may have gone out between the check and the line
-        // above; look once more so the attempt is not stranded.
-        const source = await this.storage.agentSessions.getById(gate.source_session_id);
-        if (source?.status !== "running" && this.autoRereviewWaiting.get(gate.source_session_id) === gate.id) {
-          this.autoRereviewWaiting.delete(gate.source_session_id);
-          await this.autoRereview(gate.id);
-        }
+  // ---------- unattended review loops ----------
+  //
+  // Inside the round cap a loop runs by itself while the reviewer says a clear
+  // `needs-changes`: its feedback goes to the source as-is, and the source's
+  // fix is re-reviewed. The cap is the hand-over point — the LAST round's
+  // feedback waits for the user, and so does every round past it. Anything
+  // else stops at the gate it reached, which is exactly the manual path:
+  // another verdict, a drift note, a claim found by restart reconciliation, a
+  // failed attempt, or the user stepping in (`loop_manual`).
+
+  /**
+   * Whether a round's feedback goes out without the user. `live` = claimed
+   * from a completion event, not by restart reconciliation.
+   */
+  private shouldAutoRelay(run: WorkflowRun, verdict: WorkflowVerdict | null, driftNote: string | null, live: boolean): boolean {
+    return live && run.loop_id !== null && !run.loop_manual && verdict === "needs-changes" && driftNote === null
+      && run.max_rounds !== null && run.round < run.max_rounds;
+  }
+
+  /**
+   * Park an automatic hop until `sessionId` goes idle. False when it already
+   * is — the status event may have gone out before the entry was written — and
+   * the caller should retry now.
+   */
+  private async waitForIdle(sessionId: string, runId: string, action: "relay" | "rereview"): Promise<boolean> {
+    this.autoWaiting.set(sessionId, { runId, action });
+    const session = await this.storage.agentSessions.getById(sessionId);
+    if (session?.status === "running") return true;
+    if (this.autoWaiting.get(sessionId)?.runId !== runId) return true; // taken by the status event
+    this.autoWaiting.delete(sessionId);
+    return false;
+  }
+
+  private async isStillAutomatic(runId: string): Promise<boolean> {
+    return !(await this.storage.workflowRuns.getById(runId))?.loop_manual;
+  }
+
+  /** `approveFeedback` with nobody to report to: a failure stays at the gate, and rings. */
+  private async autoRelay(runId: string, retried = false): Promise<void> {
+    const run = await this.storage.workflowRuns.getById(runId);
+    if (run?.status !== "waiting_feedback") return;
+    if (!run.loop_manual) {
+      try {
+        await this.approveFeedback(runId, undefined, { auto: true });
         return;
+      } catch (err) {
+        const back = await this.storage.workflowRuns.getById(runId);
+        if (back?.status !== "waiting_feedback") return;
+        if (!retried && err instanceof WorkflowError && err.code === "session-busy") {
+          if (await this.waitForIdle(back.source_session_id, runId, "relay")) return;
+          return this.autoRelay(runId, true);
+        }
+        if (!back.error && !back.loop_manual) {
+          const reason = err instanceof Error ? err.message : String(err);
+          const noted = await this.storage.workflowRuns.update(runId, { error: `自动转发未能发出：${reason}` });
+          if (noted) this.emitRunUpdated(noted);
+        }
       }
+    }
+    await this.notifyFeedbackGate(run);
+  }
+
+  /**
+   * The review_ready milestone an automatic relay skipped, for a gate that
+   * ends up waiting for the user after all. Same deterministic id as the one
+   * the claim would have written, so it rings at most once.
+   */
+  private async notifyFeedbackGate(run: WorkflowRun): Promise<void> {
+    const step = (await this.storage.workflowRunSteps.listByRun(run.id))
+      .filter((st) => st.role === "reviewer" && st.status === "claimed" && st.turn_end_index !== null)
+      .at(-1);
+    if (!step) return;
+    const { inserted } = await this.storage.notificationOutbox.insert(
+      this.reviewReadyOutbox(run, step.session_id, step.turn_end_index!),
+    );
+    if (inserted) this.onMilestoneCreated?.();
+  }
+
+  /**
+   * `approveRereview` with nobody to report to. Only a clear `needs-changes`
+   * within the cap qualifies — the caller checks the verdict; failures land on
+   * the gate and ring.
+   */
+  private async autoRereview(gateId: string, retried = false): Promise<void> {
+    const gate = await this.storage.workflowRuns.getById(gateId);
+    if (gate?.status !== "waiting_rereview" || gate.loop_manual) return;
+    if (gate.max_rounds === null || gate.round > gate.max_rounds) return;
+    try {
+      await this.approveRereview(gateId, { auto: true });
+    } catch (err) {
+      const back = await this.storage.workflowRuns.getById(gateId);
+      if (back?.status !== "waiting_rereview") return;
+      if (!retried && err instanceof WorkflowError && err.code === "source-running") {
+        if (await this.waitForIdle(back.source_session_id, gateId, "rereview")) return;
+        return this.autoRereview(gateId, true);
+      }
+      if (back.loop_manual) return; // the user stepped in meanwhile: they are here
       // A rollback inside approveRereview already said why; otherwise say it here.
-      if (gate.error) return;
-      const reason = err instanceof Error ? err.message : String(err);
-      const noted = await this.storage.workflowRuns.update(gate.id, { error: `自动复审未能发起：${reason}` });
-      if (noted) this.emitRunUpdated(noted);
+      if (!back.error) {
+        const reason = err instanceof Error ? err.message : String(err);
+        const noted = await this.storage.workflowRuns.update(gateId, { error: `自动复审未能发起：${reason}` });
+        if (noted) this.emitRunUpdated(noted);
+      }
+      const { inserted } = await this.storage.notificationOutbox.insert({
+        id: workflowFailedId(gateId, "auto-rereview"),
+        kind: "workflow_failed",
+        project_id: back.project_id,
+        branch: back.branch,
+        session_id: back.source_session_id,
+        workflow_run_id: back.id,
+        created_at: Date.now(),
+      });
+      if (inserted) this.onMilestoneCreated?.();
     }
   }
 
@@ -1029,7 +1121,7 @@ export class WorkflowEngine {
    * gate can be retried. An unknown outcome stays in `waiting_reviewer` under
    * the usual step reconciliation.
    */
-  async approveRereview(runId: string, opts: { extend?: boolean } = {}): Promise<WorkflowRun> {
+  async approveRereview(runId: string, opts: { extend?: boolean; auto?: boolean } = {}): Promise<WorkflowRun> {
     const gate = await this.storage.workflowRuns.getById(runId);
     if (!gate || gate.status !== "waiting_rereview") {
       throw new WorkflowError("bad-state", "run 不在等待复审确认的状态");
@@ -1108,10 +1200,14 @@ export class WorkflowEngine {
 
     const outcome = await this.dispatchRereview({
       run, reviewerSession, project: { id: project.id, path: project.path }, entries, turnEndIndex, target,
+      stillAutomatic: opts.auto ? () => this.isStillAutomatic(gate.id) : undefined,
     });
     if (outcome.kind === "mode-switch-failed" || outcome.kind === "no_side_effect") {
       const busy = outcome.kind === "no_side_effect" && outcome.busy;
-      const reason = outcome.kind === "mode-switch-failed"
+      const handedOver = outcome.kind === "no_side_effect" && outcome.reason === HANDED_OVER;
+      const reason = handedOver
+        ? "你已介入这个循环，复审改为由你确认。"
+        : outcome.kind === "mode-switch-failed"
         ? "无法将 reviewer 恢复为只读 plan 模式，复审未发出。可重试，或结束循环。"
         : busy
           ? "reviewer 正在回复中，复审未发出。请等待其完成后重试。"
@@ -1191,6 +1287,7 @@ export class WorkflowEngine {
     entries: AgentMessage[];
     turnEndIndex: number;
     target: ReviewTarget;
+    stillAutomatic?: () => Promise<boolean>;
   }): Promise<DispatchOutcome | { kind: "mode-switch-failed" }> {
     if (opts.reviewerSession.permission_mode !== "plan") {
       let switched = false;
@@ -1210,6 +1307,7 @@ export class WorkflowEngine {
     return this.dispatchStep({
       run: opts.run, kind: "rereview_prompt", role: "reviewer", sessionId: opts.reviewerSession.id,
       payload: prompt, projectPath: opts.project.path, turn: REVIEWER_TURN,
+      stillAutomatic: opts.stillAutomatic,
     });
   }
 
@@ -1262,6 +1360,12 @@ export class WorkflowEngine {
     payload: string;
     projectPath: string | undefined;
     turn: typeof REVIEWER_TURN | typeof FEEDBACK_TURN;
+    /**
+     * Automatic hops only: re-checked under the target's session lock, which
+     * the `/message` route also holds while it hands a loop over — so a user
+     * message to the target and this send cannot interleave.
+     */
+    stillAutomatic?: () => Promise<boolean>;
   }): Promise<DispatchOutcome> {
     const steps = this.storage.workflowRunSteps;
     const stepId = randomUUID();
@@ -1280,6 +1384,10 @@ export class WorkflowEngine {
         // is running — leave it for its completion to claim.
         if (!reused) await steps.abandon(step.id, "target session busy");
         return { kind: "no_side_effect", busy: true, reason: "target session is mid-turn" };
+      }
+      if (opts.stillAutomatic && !(await opts.stillAutomatic())) {
+        if (!reused) await steps.abandon(step.id, "handed over to the user");
+        return { kind: "no_side_effect", busy: false, reason: HANDED_OVER };
       }
 
       let runtimeAccepted = false;
@@ -1950,7 +2058,7 @@ export class WorkflowEngine {
       const nextRun = run ? this.nextRoundGate(run, boundary) : undefined;
       // A claim found by restart reconciliation stays at the gate: the user
       // was not around when the source finished, and may have moved on.
-      const auto = opts.live && run?.verdict === "needs-changes";
+      const auto = opts.live && run?.verdict === "needs-changes" && !run.loop_manual;
       if (run && (run.status === "sending_feedback" || run.status === "waiting_feedback")) {
         const completed = await this.storage.workflowRuns.claimStepAndTransition({
           stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
@@ -1977,6 +2085,10 @@ export class WorkflowEngine {
     if (!run || run.status !== "waiting_reviewer") return;
     const feedback = output ?? "(reviewer 没有输出可用的反馈文本)";
     const driftNote = await this.computeDriftNote(run);
+    const verdict = parseVerdict(output);
+    // An unattended hop rings nothing; if it stops at this gate after all,
+    // autoRelay writes the same milestone then.
+    const relay = this.shouldAutoRelay(run, verdict, driftNote, opts.live);
 
     // Step claim, run transition and the attention milestone are one
     // transaction: a claimed step whose run never advanced would be lost for
@@ -1989,14 +2101,15 @@ export class WorkflowEngine {
         // `error: null` also clears a "delivery outcome unknown" note: the
         // completion just answered it.
         // Parsed by exact match; null = unrecognised = the human decides.
-        patch: { feedback_snapshot: feedback, error: driftNote, verdict: parseVerdict(output) },
-        outbox: this.reviewReadyOutbox(run, step.session_id, boundary),
+        patch: { feedback_snapshot: feedback, error: driftNote, verdict },
+        outbox: relay ? undefined : this.reviewReadyOutbox(run, step.session_id, boundary),
       },
     });
     if (!ok) return;
-    this.onMilestoneCreated?.();
+    if (!relay) this.onMilestoneCreated?.();
     const updated = await this.storage.workflowRuns.getById(run.id);
     if (updated) this.emitRunUpdated(updated);
+    if (relay) await this.autoRelay(run.id);
   }
 
   private async computeDriftNote(run: WorkflowRun): Promise<string | null> {
@@ -2062,7 +2175,7 @@ export class WorkflowEngine {
     if (updated) this.emitRunUpdated(updated);
   }
 
-  async approveFeedback(runId: string, editedPayload?: string): Promise<WorkflowRun> {
+  async approveFeedback(runId: string, editedPayload?: string, opts: { auto?: boolean } = {}): Promise<WorkflowRun> {
     const run = await this.storage.workflowRuns.getById(runId);
     if (!run || run.status !== "waiting_feedback") {
       throw new WorkflowError("bad-state", "run 不在等待反馈确认的状态");
@@ -2088,6 +2201,7 @@ export class WorkflowEngine {
     const outcome = await this.dispatchStep({
       run, kind: "feedback", role: "source", sessionId: run.source_session_id,
       payload, projectPath: project?.path ?? undefined, turn: FEEDBACK_TURN,
+      stillAutomatic: opts.auto ? () => this.isStillAutomatic(runId) : undefined,
     });
 
     if (outcome.kind !== "accepted") {
@@ -2096,7 +2210,9 @@ export class WorkflowEngine {
       // the same key (replay if it did land) instead of sending a second copy.
       const error = outcome.kind === "unknown"
         ? `${DELIVERY_UNKNOWN_PREFIX}：反馈可能已送达 source session。请检查其窗口；再次确认会按原文重试（已送达则不会重复发送）。`
-        : outcome.busy
+        : outcome.reason === HANDED_OVER
+          ? null
+          : outcome.busy
           ? "source session 正在运行，请等待其完成后再发送反馈。"
           : "发送失败：目标 session 可能未运行。请在其窗口中唤醒后重试，或结束本次 review。";
       await this.storage.workflowRuns.transition(runId, "sending_feedback", "waiting_feedback", { error });
@@ -2245,6 +2361,7 @@ export class WorkflowEngine {
    */
   async handleExternalUserMessage(sessionId: string): Promise<void> {
     const p = this.participants.get(sessionId);
+    await this.handOverLoop(sessionId, p);
     if (!p) return;
     if (p.role === "reviewer") {
       // 讨论不是接管:用户给 reviewer 发消息 → run 进入 discussing,gate 收起,
@@ -2282,6 +2399,41 @@ export class WorkflowEngine {
     // Source and reviewer are independent after the review snapshot is
     // captured. Continuing the source conversation must not implicitly cancel
     // the review or discard a verdict that is already in flight.
+  }
+
+  /**
+   * Stepping into a review loop — to either side — hands the rest of it to the
+   * user: every later gate waits for them. Besides the run holding the
+   * session, that covers a source busy with feedback already sent: its round
+   * has completed and holds nothing, but its open feedback step still names
+   * the loop, and the next gate copies the flag from it. The reviewer is held
+   * by nothing between rounds either: its last loop run finds the loop, and
+   * both that run (the next gate copies from it) and the loop's active run, if
+   * a gate already exists, are marked. Never throws (see
+   * handleExternalUserMessage).
+   */
+  private async handOverLoop(sessionId: string, p: Participant | undefined): Promise<void> {
+    try {
+      const runIds = new Set<string>(p ? [p.runId] : []);
+      for (const step of await this.storage.workflowRunSteps.getOpenBySession(sessionId)) {
+        if (step.kind === "feedback") runIds.add(step.run_id);
+      }
+      const reviewed = await this.storage.workflowRuns.getLatestLoopRunByReviewer(sessionId);
+      if (reviewed?.loop_id) {
+        runIds.add(reviewed.id);
+        const active = await this.storage.workflowRuns.getActiveInLoop(reviewed.loop_id);
+        if (active) runIds.add(active.id);
+      }
+      for (const runId of runIds) {
+        const run = await this.storage.workflowRuns.getById(runId);
+        if (run?.kind !== "review" || !run.loop_id || run.loop_manual) continue;
+        const updated = await this.storage.workflowRuns.update(run.id, { loop_manual: 1 });
+        // The reviewer branch of the caller broadcasts its run itself.
+        if (updated && !(p?.role === "reviewer" && p.runId === run.id)) this.emitRunUpdated(updated);
+      }
+    } catch (err) {
+      console.error(`[WorkflowEngine] handleExternalUserMessage: failed handing loop over for ${sessionId}; swallowed`, err);
+    }
   }
 
   private emitRunUpdated(run: WorkflowRun): void {

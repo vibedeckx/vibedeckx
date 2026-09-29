@@ -513,6 +513,11 @@ export interface WorkflowRun {
   round: number;
   /** Round cap; only loop runs carry one. */
   max_rounds: number | null;
+  /**
+   * 1 once the user stepped into a review loop by messaging its reviewer or
+   * source: from then on every gate waits for them. Copied round to round.
+   */
+  loop_manual: number;
   verdict: WorkflowVerdict | null;
   /**
    * `review` (default; every row before repeat loops existed) or `repeat` — a
@@ -542,7 +547,7 @@ export type WorkflowRepeatRunInput = Pick<WorkflowRun,
 /** A next-round gate run, created in the same transaction that claims the feedback step. */
 export type WorkflowNextRunInput = Pick<WorkflowRun,
   "id" | "project_id" | "branch" | "source_session_id" | "source_turn_end_index"
-  | "review_focus" | "review_target" | "loop_id" | "round" | "max_rounds">;
+  | "review_focus" | "review_target" | "loop_id" | "round" | "max_rounds" | "loop_manual">;
 
 /**
  * Attention milestones the notification bell surfaces. Deliberately narrower
@@ -2139,6 +2144,8 @@ export interface Storage {
     getLatestCompletedBySource(sourceSessionId: string): Promise<WorkflowRun | undefined>;
     /** The run of one round of a review loop (latest row if a round was ever re-created). */
     getLoopRound(loopId: string, round: number): Promise<WorkflowRun | undefined>;
+    /** The latest review-loop run this session reviewed, whatever its status. */
+    getLatestLoopRunByReviewer(reviewerSessionId: string): Promise<WorkflowRun | undefined>;
     /**
      * Source sessions on this branch that have at least one completed review —
      * i.e. the exact set for which `getLatestCompletedBySource` can return a
@@ -2153,7 +2160,7 @@ export interface Storage {
     listReviewedSourceSessions(projectId: string, branch: string | null): Promise<string[]>;
     update(
       id: string,
-      patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error" | "prepared_context" | "source_turn_end_index" | "max_rounds" | "params">>,
+      patch: Partial<Pick<WorkflowRun, "reviewer_session_id" | "review_target" | "feedback_snapshot" | "status" | "error" | "prepared_context" | "source_turn_end_index" | "max_rounds" | "params" | "loop_manual">>,
     ): Promise<WorkflowRun | undefined>;
     transition(
       id: string,

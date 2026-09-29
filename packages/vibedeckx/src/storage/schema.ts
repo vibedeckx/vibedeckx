@@ -611,6 +611,7 @@ export interface WorkflowRunsTable {
   loop_id: string | null;
   round: Generated<number>;
   max_rounds: number | null;
+  loop_manual: Generated<number>;
   verdict: string | null;
   kind: Generated<string>;
   params: string | null;

@@ -760,6 +760,9 @@ export function ReviewDialog({
                     <button
                       key={label}
                       type="button"
+                      title={value
+                        ? "Feedback and re-reviews run by themselves while the verdict is needs-changes; stops at ship, an unclear verdict, or the last round"
+                        : undefined}
                       aria-pressed={loopEnabled === value}
                       onClick={() => setLoopEnabled(value)}
                       className={cn(

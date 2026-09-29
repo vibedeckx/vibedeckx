@@ -85,6 +85,15 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         .executeTakeFirst();
       return row ? asRun(row) : undefined;
     },
+    getLatestLoopRunByReviewer: async (reviewerSessionId) => {
+      const row = await kdb.selectFrom("workflow_runs").selectAll()
+        .where("reviewer_session_id", "=", reviewerSessionId)
+        .where("loop_id", "is not", null)
+        .where("kind", "=", "review")
+        .orderBy("created_at", "desc").orderBy(sql`rowid`, "desc")
+        .executeTakeFirst();
+      return row ? asRun(row) : undefined;
+    },
     listReviewedSourceSessions: async (projectId, branch) => {
       const rows = await kdb
         .selectFrom("workflow_runs")
@@ -185,10 +194,11 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
             await sql`
               INSERT INTO workflow_runs
                 (id, project_id, branch, source_session_id, source_turn_end_index, reviewer_session_id,
-                 review_focus, review_target, review_span, status, loop_id, round, max_rounds)
+                 review_focus, review_target, review_span, status, loop_id, round, max_rounds, loop_manual)
               SELECT ${nextRun.id}, ${nextRun.project_id}, ${nextRun.branch}, ${nextRun.source_session_id},
                      ${nextRun.source_turn_end_index}, NULL, ${nextRun.review_focus}, ${nextRun.review_target},
-                     'this_turn', 'waiting_rereview', ${nextRun.loop_id}, ${nextRun.round}, ${nextRun.max_rounds}
+                     'this_turn', 'waiting_rereview', ${nextRun.loop_id}, ${nextRun.round}, ${nextRun.max_rounds},
+                     ${nextRun.loop_manual}
               WHERE NOT EXISTS (
                 SELECT 1 FROM workflow_runs
                 WHERE status IN (${sql.join(ACTIVE)})

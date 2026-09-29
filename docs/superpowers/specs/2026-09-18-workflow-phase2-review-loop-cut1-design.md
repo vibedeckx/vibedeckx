@@ -301,16 +301,42 @@ L1–L6 已提交；后端 2719 / 前端 1230 个测试通过，两端 `tsc` 干
 **未做**：双服务器（hub + worker）真机 e2e，理由同前置设计 §7；随 worker 发版跑
 `scripts/cross-version-e2e.mjs`。
 
-## 12. 追加：自动复审（2026-09-29，dev1）
+## 12. 追加：上限内无人值守（2026-09-29，dev1）
 
-试用前的判断：复审闸门几乎不带信息（verdict 已是 needs-changes、轮数未到上限时，人只会点"复审"），
-留着它 Loop 与手动重发区别不大。于是把**复审闸门**自动化，**反馈闸门保持人工**（改稿发生在那里，
-也是第二刀全自动要试用观察的对象）。
+两步走到这里。先只自动化复审闸门（它几乎不带信息）；随后用户的使用经验是"前几轮基本不改稿，
+讨论多了才介入"，而**轮数上限本身就是交接点**——于是反馈闸门也在上限内自动化，不另设
+"前 N 轮"或开关：选 Loop 即上限内全自动，想每轮自己看就用 Single pass。
 
-- 触发：feedback step 被**实时**认领（`claimStep(..., {live:true})`），上一轮 verdict 精确为
-  `needs-changes`，且 `gate.round <= max_rounds` → 插入闸门后立即走 `approveRereview`。
-- 不自动：`cannot-verify`、解析不出的 verdict、超上限（仍需 `extend`）、重启对账认领的完成（人当时不在场）。
-- 完成事件早于 source 状态离开 `running`：`source-running` 时登记 `autoRereviewWaiting`，
-  等该 source 的 `session:status` 非 running 再试一次；登记后复查一次状态防漏。
-- 失败：留在闸门；`approveRereview` 回滚已写原因则沿用，否则写 `自动复审未能发起：…`。
-- 纯 worker 侧改动，无新路由/字段；remote 需发 worker 才生效，旧 worker 行为同第一刀。
+**自动转发反馈**（`shouldAutoRelay`）：reviewer 这一轮被**实时**认领、`loop_id` 非空、未转人工、
+verdict 精确为 `needs-changes`、无漂移提示、且 `round < max_rounds`（**最后一轮的反馈留给人**）。
+此时认领事务**不写** review_ready，随后 `approveFeedback` 原文发出。
+
+**自动复审**：source 完成反馈那一轮被实时认领、上一轮 verdict 为 `needs-changes`、未转人工、
+`gate.round <= max_rounds` → `approveRereview`。超上限 `extend` 后 `max_rounds = round`，
+故加出的轮次两道闸门都是人工，无需额外状态。
+
+**停下来等人**：ship / cannot-verify / 解析不出 / 漂移 / 最后一轮 / 超上限 / 重启对账认领 /
+尝试失败 / 用户介入。停在反馈闸门时补写同一确定性 id 的 review_ready（`notifyFeedbackGate`，
+init 时对 loop 的 waiting_feedback 再补一次，覆盖认领与转发之间崩溃）；复审发起失败写
+`workflow_failed`（id `workflowFailedId(gate, "auto-rereview")`）并在闸门上写原因。
+
+**source 仍在 running**：完成事件早于状态落定，或 source 正忙——登记 `autoWaiting`
+（session → {runId, relay|rereview}），等其 `session:status` 非 running 再试一次；登记后复查防漏；
+重试只一次，再失败按失败处理。
+
+**转人工**：`workflow_runs.loop_manual`（新列，默认 0，逐轮复制到下一轮闸门）。用户经 `/message`
+给 reviewer 或 source 发消息即置 1：除当前持有该 session 的 run 外，还查该 session 上**未认领的
+feedback step**——转发后 source 正在改的那段时间，本轮已 completed、不持有 source，只有这一步还指向循环。
+面板轮次标签显示"· 已转人工"。reviewer 在两轮之间同样不被任何 run 持有：按 `getLatestLoopRunByReviewer` 找到它最近的
+loop run，连同该循环的活动闸门（若已存在）一并标记。
+
+**介入与自动发送的竞态**：自动转发/复审把 `stillAutomatic`（重读 `loop_manual`）传进
+`dispatchStep`，在目标 session 的锁内、写 stdin 之前复查；`/message` 路由在同一把锁内调用
+`handleExternalUserMessage`，所以对**发送目标**的介入与这次发送不会交错。被拦下时 step 作废，
+反馈回到闸门且不写错误（review_ready 照常补发），复审回到闸门并注明"你已介入"、不响铃。
+残余窗口：介入的是**另一侧**（转发时给 reviewer 发消息）且恰落在复查与 stdin 之间的毫秒级区间——
+这一跳仍会发出，但标记已落在该 run 上，之后的闸门都等人。
+
+**风险（用户已知悉）**：上限内 reviewer 原文不经人直接进入有写权限的 source；轮数上限是唯一护栏，默认 3。
+
+纯 worker 侧 + 一列加法迁移，无新路由/字段契约变化；remote 需发 worker，旧 worker 行为同第一刀。
