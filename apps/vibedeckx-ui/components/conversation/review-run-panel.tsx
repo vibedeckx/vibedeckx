@@ -330,8 +330,9 @@ export function ReviewRunPanel({
             </div>
           )}
           {run.status === "waiting_rereview" && (
-            // Loop gate: the source finished the turn our feedback opened. Every
-            // hop stays confirmed — nothing is sent to the reviewer until here.
+            // Loop gate: the source finished the turn our feedback opened. A clear
+            // needs-changes within the cap re-reviews on its own; the gate is
+            // what is left — another verdict, the cap, or an attempt that failed.
             <>
               <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
                 {isOverRoundCap(run)

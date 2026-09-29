@@ -582,6 +582,12 @@ export class WorkflowEngine {
   private eventBus?: EventBus;
   /** sessionId → participation in an active run (rebuilt on boot). */
   private participants = new Map<string, Participant>();
+  /**
+   * Source session → next-round gate whose automatic re-review is waiting for
+   * the source to go idle. The completion event fires before the source's
+   * status leaves `running`, so the first attempt can land too early.
+   */
+  private autoRereviewWaiting = new Map<string, string>();
   /** runId → prompt inputs captured at prepare time (see PendingActivation). */
   private pendingActivations = new Map<string, PendingActivation>();
   /** runId → armed preparation-timeout timer. */
@@ -603,6 +609,11 @@ export class WorkflowEngine {
         void this.handleTaskCompleted(event).catch((err) =>
           console.error("[WorkflowEngine] handleTaskCompleted failed:", err),
         );
+      } else if (event.type === "session:status" && event.status !== "running"
+          && this.autoRereviewWaiting.has(event.sessionId)) {
+        const gateId = this.autoRereviewWaiting.get(event.sessionId)!;
+        this.autoRereviewWaiting.delete(event.sessionId);
+        void this.autoRereview(gateId);
       } else if (event.type === "session:status" && event.status !== "running"
           && this.participants.get(event.sessionId)?.role === "task") {
         // A turn that did NOT complete emits no taskCompleted at all; for an
@@ -766,7 +777,7 @@ export class WorkflowEngine {
         const outcome = turnEnd.outcome ?? "completed";
         const completed = outcome === "completed" || outcome === "completed_with_pending_tasks";
         if (completed && findTurnOpeningUserEntryIndex(entries, turnEndIndex) === entryIndex) {
-          await this.claimStep(step, entries, turnEndIndex);
+          await this.claimStep(step, entries, turnEndIndex, { live: false });
           settled.add(run.id);
           continue;
         }
@@ -956,13 +967,49 @@ export class WorkflowEngine {
     };
   }
 
-  /** The insert is conditional (see claimStepAndTransition); read it back to know. */
-  private async announceNextRoundGate(nextRunId: string | undefined): Promise<void> {
+  /**
+   * The insert is conditional (see claimStepAndTransition); read it back to know.
+   *
+   * With `auto`, the next round starts by itself instead of waiting at the
+   * gate: the confirmation carries no information while the verdict says
+   * there is more to fix and rounds remain. Only a clear `needs-changes`
+   * qualifies — `cannot-verify` or an unparsed verdict is the user's call, and
+   * so is going past the cap. Anything that stops the attempt leaves the gate
+   * where it is, which is exactly the manual path.
+   */
+  private async announceNextRoundGate(nextRunId: string | undefined, auto = false): Promise<void> {
     if (!nextRunId) return;
     const gate = await this.storage.workflowRuns.getById(nextRunId);
     if (!gate) return;
     this.trackParticipants(gate);
     this.emitRunUpdated(gate);
+    if (auto && gate.max_rounds !== null && gate.round <= gate.max_rounds) await this.autoRereview(gate.id);
+  }
+
+  /** `approveRereview` without a caller to report to: failures land on the gate. */
+  private async autoRereview(gateId: string): Promise<void> {
+    try {
+      await this.approveRereview(gateId);
+    } catch (err) {
+      const gate = await this.storage.workflowRuns.getById(gateId);
+      if (gate?.status !== "waiting_rereview") return;
+      if (err instanceof WorkflowError && err.code === "source-running") {
+        this.autoRereviewWaiting.set(gate.source_session_id, gate.id);
+        // The status event may have gone out between the check and the line
+        // above; look once more so the attempt is not stranded.
+        const source = await this.storage.agentSessions.getById(gate.source_session_id);
+        if (source?.status !== "running" && this.autoRereviewWaiting.get(gate.source_session_id) === gate.id) {
+          this.autoRereviewWaiting.delete(gate.source_session_id);
+          await this.autoRereview(gate.id);
+        }
+        return;
+      }
+      // A rollback inside approveRereview already said why; otherwise say it here.
+      if (gate.error) return;
+      const reason = err instanceof Error ? err.message : String(err);
+      const noted = await this.storage.workflowRuns.update(gate.id, { error: `自动复审未能发起：${reason}` });
+      if (noted) this.emitRunUpdated(noted);
+    }
   }
 
   /** The reviewer the loop continues with: the previous round's. */
@@ -1874,7 +1921,9 @@ export class WorkflowEngine {
    * completion event and restart reconciliation, so a late claim goes through
    * exactly the transaction a live one does.
    */
-  private async claimStep(step: WorkflowRunStep, entries: AgentMessage[], boundary: number): Promise<void> {
+  private async claimStep(
+    step: WorkflowRunStep, entries: AgentMessage[], boundary: number, opts: { live: boolean } = { live: true },
+  ): Promise<void> {
     const output = extractLastAssistantInTurn(entries, boundary);
     if (step.kind === "task_prompt") {
       await this.repeat.onTaskTurnCompleted(step, entries, boundary, output);
@@ -1899,6 +1948,9 @@ export class WorkflowEngine {
       // Review loop: this is where the next hop attaches. The gate run for the
       // next round is inserted by the SAME transaction that claims the step.
       const nextRun = run ? this.nextRoundGate(run, boundary) : undefined;
+      // A claim found by restart reconciliation stays at the gate: the user
+      // was not around when the source finished, and may have moved on.
+      const auto = opts.live && run?.verdict === "needs-changes";
       if (run && (run.status === "sending_feedback" || run.status === "waiting_feedback")) {
         const completed = await this.storage.workflowRuns.claimStepAndTransition({
           stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
@@ -1908,7 +1960,7 @@ export class WorkflowEngine {
         if (completed) {
           const done = await this.storage.workflowRuns.getById(run.id);
           if (done) { this.untrackRun(done); this.emitRunUpdated(done); }
-          await this.announceNextRoundGate(nextRun?.id);
+          await this.announceNextRoundGate(nextRun?.id, auto);
           return;
         }
         // Lost the run CAS — approveFeedback's own transition just completed
@@ -1917,7 +1969,7 @@ export class WorkflowEngine {
       const claimed = await this.storage.workflowRuns.claimStepAndTransition({
         stepId: step.id, turnEndIndex: boundary, outputSnapshot: output, nextRun,
       });
-      if (claimed) await this.announceNextRoundGate(nextRun?.id);
+      if (claimed) await this.announceNextRoundGate(nextRun?.id, auto);
       return;
     }
 

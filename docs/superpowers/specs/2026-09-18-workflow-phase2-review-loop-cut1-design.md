@@ -300,3 +300,17 @@ L1–L6 已提交；后端 2719 / 前端 1230 个测试通过，两端 `tsc` 干
 
 **未做**：双服务器（hub + worker）真机 e2e，理由同前置设计 §7；随 worker 发版跑
 `scripts/cross-version-e2e.mjs`。
+
+## 12. 追加：自动复审（2026-09-29，dev1）
+
+试用前的判断：复审闸门几乎不带信息（verdict 已是 needs-changes、轮数未到上限时，人只会点"复审"），
+留着它 Loop 与手动重发区别不大。于是把**复审闸门**自动化，**反馈闸门保持人工**（改稿发生在那里，
+也是第二刀全自动要试用观察的对象）。
+
+- 触发：feedback step 被**实时**认领（`claimStep(..., {live:true})`），上一轮 verdict 精确为
+  `needs-changes`，且 `gate.round <= max_rounds` → 插入闸门后立即走 `approveRereview`。
+- 不自动：`cannot-verify`、解析不出的 verdict、超上限（仍需 `extend`）、重启对账认领的完成（人当时不在场）。
+- 完成事件早于 source 状态离开 `running`：`source-running` 时登记 `autoRereviewWaiting`，
+  等该 source 的 `session:status` 非 running 再试一次；登记后复查一次状态防漏。
+- 失败：留在闸门；`approveRereview` 回滚已写原因则沿用，否则写 `自动复审未能发起：…`。
+- 纯 worker 侧改动，无新路由/字段；remote 需发 worker 才生效，旧 worker 行为同第一刀。
