@@ -19,6 +19,7 @@ import {
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { hasPriorReview, subscribeReviewedSessions } from "@/lib/workflow-runs-fetch";
 import {
@@ -754,27 +755,33 @@ export function ReviewDialog({
                 <span className="w-[92px] shrink-0 text-[11.5px] text-muted-foreground">Rounds</span>
                 <div className="min-w-0 flex h-8 flex-1 items-center gap-0.5 rounded-lg border bg-secondary p-0.5">
                   {([
-                    [false, "Single pass"],
-                    [true, "Loop"],
-                  ] as const).map(([value, label]) => (
-                    <button
-                      key={label}
-                      type="button"
-                      title={value
-                        ? "Feedback and re-reviews run by themselves while the verdict is needs-changes; stops at ship, an unclear verdict, or the last round"
-                        : undefined}
-                      aria-pressed={loopEnabled === value}
-                      onClick={() => setLoopEnabled(value)}
-                      className={cn(
-                        "h-full min-w-0 flex-1 rounded-md px-2 text-[11.5px] whitespace-nowrap transition-colors",
-                        loopEnabled === value
-                          ? "border bg-card font-medium text-foreground shadow-sm"
-                          : "border border-transparent text-muted-foreground hover:text-foreground",
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
+                    [false, "Single pass", "One review. You decide what to send back."],
+                    [true, "Auto loop", "Sends feedback and re-reviews on its own until ship. The last round waits for you."],
+                  ] as const).map(([value, label, hint]) => {
+                    const toggle = (
+                      <button
+                        type="button"
+                        aria-pressed={loopEnabled === value}
+                        onClick={() => setLoopEnabled(value)}
+                        className={cn(
+                          "h-full min-w-0 flex-1 rounded-md px-2 text-[11.5px] whitespace-nowrap transition-colors",
+                          loopEnabled === value
+                            ? "border bg-card font-medium text-foreground shadow-sm"
+                            : "border border-transparent text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {label}
+                      </button>
+                    );
+                    return (
+                      <TooltipProvider key={label} delayDuration={300}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>{toggle}</TooltipTrigger>
+                          <TooltipContent className="max-w-64">{hint}</TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    );
+                  })}
                 </div>
                 {/* Always rendered so toggling the loop does not resize the row. */}
                 <label className={cn("flex shrink-0 items-center gap-1.5 text-[11.5px] text-muted-foreground", !loopEnabled && "opacity-45")}>
