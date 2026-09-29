@@ -1,5 +1,6 @@
 'use client';
-import { useState, useEffect, useRef, useCallback, useMemo, useTransition } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, useTransition, useSyncExternalStore } from 'react';
+import { MAIN_CHAT_SHORTCUT_CODE, comboShortcutHint, isMacPlatform, matchComboShortcut } from '@/lib/tab-shortcuts';
 import { WorkspaceTabs } from '@/components/workspace/workspace-tabs';
 import { useRules } from '@/hooks/use-rules';
 import { useCommands } from '@/hooks/use-commands';
@@ -72,6 +73,8 @@ import {
 } from '@/lib/pending-navigation';
 
 export type { WorkspaceStatus } from '@/lib/workspace-status';
+
+const noopSubscribe = () => () => {};
 
 export default function Home() {
   const { projectId: urlProject, tab: urlTab, branch: urlBranch, threadId: urlThreadId } = useUrlState();
@@ -301,6 +304,10 @@ export default function Home() {
     if (panel.isCollapsed()) panel.expand();
     else panel.collapse();
   }, []);
+  // Server snapshot (static export, no `navigator`) is false; re-read on the
+  // client so hydration stays clean — same as the right panel's tooltips.
+  const isMac = useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
+  const mainChatToggleLabel = `${mainChatCollapsed ? 'Show' : 'Hide'} Main Chat`;
 
   // Placeholder set (per-workspace "user hit New Conversation, no DB session
   // yet") layered on top of the SSE-backed activity map. Without this
@@ -697,16 +704,25 @@ export default function Home() {
   );
 
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const hasProject = !!currentProject;
 
   // Cmd/Ctrl+K opens the quick switcher (same pattern as the sidebar's Cmd+B).
   // Cmd/Ctrl+Shift+O starts a new agent conversation — same as clicking the
   // New Conversation button. Workspace view only; also raises the Agent tab
   // so the action is visible when Diff/Terminal/Executors is in front.
+  // ⌃⇧M / Ctrl+Alt+M toggles the Main Chat column, like the header button
+  // (same workspace-view gate as that button).
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "k" && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
         setSwitcherOpen((o) => !o);
+        return;
+      }
+      if (matchComboShortcut(event, MAIN_CHAT_SHORTCUT_CODE)) {
+        if (activeView !== "workspace" || !hasProject) return;
+        event.preventDefault();
+        if (!event.repeat) toggleMainChat();
         return;
       }
       if (
@@ -722,7 +738,7 @@ export default function Home() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeView]);
+  }, [activeView, hasProject, toggleMainChat]);
 
   // Ignore further switcher selections while one navigation (which may await
   // a mode PATCH) is still in flight — a double-click or Enter+click race
@@ -1028,9 +1044,9 @@ Please proceed step by step and let me know if there are any issues or conflicts
               <Button
                 variant="ghost"
                 size="icon-sm"
-                aria-label={mainChatCollapsed ? 'Show Main Chat' : 'Hide Main Chat'}
+                aria-label={mainChatToggleLabel}
                 aria-pressed={mainChatCollapsed}
-                title={mainChatCollapsed ? 'Show Main Chat' : 'Hide Main Chat'}
+                title={`${mainChatToggleLabel} (${comboShortcutHint(isMac, MAIN_CHAT_SHORTCUT_CODE)})`}
                 onClick={toggleMainChat}
               >
                 {mainChatCollapsed

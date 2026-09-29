@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { comboShortcutHint, matchComboShortcut, matchTabShortcut } from "./tab-shortcuts";
+import { comboShortcutHint, isXtermPassthrough, matchComboShortcut, matchTabShortcut } from "./tab-shortcuts";
 
 const realPlatform = Object.getOwnPropertyDescriptor(Navigator.prototype, "platform");
 
@@ -61,5 +61,17 @@ describe("matchComboShortcut", () => {
     setPlatform("MacIntel");
     expect(matchComboShortcut(key("KeyR", { ctrlKey: true, shiftKey: true }), "KeyR")).toBe(true);
     expect(matchComboShortcut(key("KeyR", { ctrlKey: true, altKey: true }), "KeyR")).toBe(false);
+  });
+});
+
+describe("isXtermPassthrough", () => {
+  it("passes tab shortcuts and the Main Chat toggle through, not other combos", () => {
+    setPlatform("Linux x86_64");
+    expect(isXtermPassthrough(key("KeyD", { ctrlKey: true, altKey: true }))).toBe(true);
+    expect(isXtermPassthrough(key("KeyM", { ctrlKey: true, altKey: true }))).toBe(true);
+    expect(isXtermPassthrough(key("KeyR", { ctrlKey: true, altKey: true }))).toBe(false);
+    expect(isXtermPassthrough(key("KeyM", { ctrlKey: true }))).toBe(false);
+    setPlatform("MacIntel");
+    expect(isXtermPassthrough(key("KeyM", { ctrlKey: true, shiftKey: true }))).toBe(true);
   });
 });

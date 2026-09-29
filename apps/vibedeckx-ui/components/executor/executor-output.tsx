@@ -9,7 +9,7 @@ import { Circle, Square, Info, Copy, ListFilter, Maximize2, Minimize2 } from "lu
 import { toast } from "sonner";
 import type { LogMessage } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { matchTabShortcut } from "@/lib/tab-shortcuts";
+import { isXtermPassthrough } from "@/lib/tab-shortcuts";
 import { applyFilters, collectLogicalLines, type TerminalFilter } from "@/lib/terminal-filter";
 import { useTerminalSettings } from "@/hooks/use-terminal-settings";
 import { TerminalFilterBar } from "./terminal-filter-bar";
@@ -461,7 +461,7 @@ convertEol: true, // Convert \n to \r\n for proper line handling on macOS
     // false makes xterm skip the key entirely (no control bytes reach the
     // PTY — ⌃⇧D would otherwise arrive as ^D and EOF the shell) while the
     // event still bubbles to the window listener that switches tabs.
-    terminal.attachCustomKeyEventHandler((event) => matchTabShortcut(event) === null);
+    terminal.attachCustomKeyEventHandler((event) => !isXtermPassthrough(event));
 
     terminal.open(containerRef.current);
 

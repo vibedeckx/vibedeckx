@@ -1,6 +1,6 @@
 // The app's ⌃⇧/Ctrl+Alt shortcut namespace: the workspace tab shortcuts plus
 // the few non-tab bindings that share the same modifier pair (Start review,
-// Read aloud).
+// Read aloud, Toggle Main Chat).
 // Shared between the right panel (window keydown → switch tab), the dialogs
 // that bind their own letter, and xterm hosts
 // (attachCustomKeyEventHandler → let the combo bubble instead of sending
@@ -48,6 +48,9 @@ export const isMacPlatform = () =>
 export const REVIEW_SHORTCUT_CODE = 'KeyR';
 // Read aloud (Speak) the lowest agent reply on screen; stops playback if any.
 export const SPEAK_SHORTCUT_CODE = 'KeyS';
+// Collapse/expand the Main Chat column. The exception to the rule above: it's
+// workspace-wide, so it does pass through xterm (see isXtermPassthrough).
+export const MAIN_CHAT_SHORTCUT_CODE = 'KeyM';
 
 type ComboKeys = Pick<KeyboardEvent, 'ctrlKey' | 'shiftKey' | 'altKey' | 'metaKey' | 'code'>;
 
@@ -65,6 +68,13 @@ export function matchTabShortcut(event: ComboKeys): TabShortcutTarget | null {
 /** Whether the event is the platform combo plus `code` — for non-tab bindings. */
 export const matchComboShortcut = (event: ComboKeys, code: string) =>
   comboHeld(event) && event.code === code;
+
+/**
+ * Whether xterm should skip the key and let it bubble to the window listeners:
+ * the tab shortcuts plus the workspace-wide non-tab ones.
+ */
+export const isXtermPassthrough = (event: ComboKeys) =>
+  matchTabShortcut(event) !== null || matchComboShortcut(event, MAIN_CHAT_SHORTCUT_CODE);
 
 export const comboShortcutHint = (isMac: boolean, code: string) =>
   `${isMac ? '⌃⇧' : 'Ctrl+Alt+'}${code.slice(3)}`;

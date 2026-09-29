@@ -4,7 +4,7 @@
 // entries derive from lib/tab-shortcuts.ts (the same data the bindings and
 // tooltips use), so the overlay can't drift from the actual keys.
 
-import { REVIEW_SHORTCUT_CODE, SPEAK_SHORTCUT_CODE, TAB_SHORTCUTS, comboShortcutHint } from './tab-shortcuts';
+import { MAIN_CHAT_SHORTCUT_CODE, REVIEW_SHORTCUT_CODE, SPEAK_SHORTCUT_CODE, TAB_SHORTCUTS, comboShortcutHint } from './tab-shortcuts';
 
 export interface ShortcutEntry {
   /** Rendered as <kbd> chips, one per alternative binding. */
@@ -29,6 +29,10 @@ export function shortcutGroups(isMac: boolean): ShortcutGroup[] {
         { hints: [meta(isMac, 'J')], description: 'Notifications' },
         { hints: [meta(isMac, 'B')], description: 'Toggle sidebar' },
         { hints: [metaShift(isMac, 'O')], description: 'New agent conversation' },
+        {
+          hints: [comboShortcutHint(isMac, MAIN_CHAT_SHORTCUT_CODE)],
+          description: 'Show / hide Main Chat',
+        },
         {
           // Shares the tab shortcuts' modifier pair, not ⌘/Ctrl — see
           // lib/tab-shortcuts.ts for why that namespace exists.
