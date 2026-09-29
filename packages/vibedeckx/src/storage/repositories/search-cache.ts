@@ -837,19 +837,22 @@ export const createSearchCacheRepos = (
         .leftJoin("project_remotes as pr", (join) => join
           .onRef("pr.project_id", "=", "w.project_id")
           .onRef("pr.remote_server_id", "=", "w.target_id"))
-        .select(["w.project_id", "w.target_id", "w.branch"])
+        .select(["w.project_id", "w.branch"])
         .where("w.project_id", "in", projectIds)
         .where("w.deleted_at", "is", null)
         .where((eb) => eb.or([
           eb("w.target_id", "=", "local"),
           eb("pr.id", "is not", null),
         ]))
+        // One row per workspace, not per machine: a branch checked out on
+        // several remotes is still one workspace, and opening it behaves like
+        // the sidebar row (the project's current remote is left alone).
+        .groupBy(["w.project_id", "w.branch"])
         .execute();
       const workspaces: SearchResultWorkspaceRow[] = rankAndCap(wsRows.map((w) => ({
         item: {
           projectId: w.project_id,
           projectName: nameById.get(w.project_id) ?? "",
-          targetId: w.target_id,
           branch: fromDbBranch(w.branch),
         },
         tier: matchTier(fromDbBranch(w.branch) ?? "main", q),

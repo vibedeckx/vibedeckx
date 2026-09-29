@@ -212,8 +212,8 @@ export function QuickSwitcher({
           <CommandGroup heading="Workspaces">
             {results.workspaces.map((w) => (
               <CommandItem
-                key={`${w.projectId}-${w.targetId}-${w.branch ?? ""}`}
-                value={`ws-${w.projectId}-${w.targetId}-${w.branch ?? ""}`}
+                key={`${w.projectId}-${w.branch ?? ""}`}
+                value={`ws-${w.projectId}-${w.branch ?? ""}`}
                 onSelect={() => onNavigateWorkspace(w)}
               >
                 <GitBranch />

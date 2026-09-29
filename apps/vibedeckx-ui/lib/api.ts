@@ -1333,7 +1333,7 @@ export async function translateText(text: string): Promise<{ translatedText: str
 
 export type SearchCacheState = "cold" | "stale" | "fresh";
 export interface SearchResultProject { id: string; name: string; path: string | null }
-export interface SearchResultWorkspace { projectId: string; projectName: string; targetId: string; branch: string | null }
+export interface SearchResultWorkspace { projectId: string; projectName: string; branch: string | null }
 export interface SearchResultSession {
   sessionId: string; projectId: string; projectName: string; targetId: string;
   branch: string | null; title: string | null; lastActiveAt: number | null; favoritedAt: number | null;

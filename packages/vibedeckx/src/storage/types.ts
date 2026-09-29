@@ -834,7 +834,6 @@ export interface SearchResultProjectRow {
 export interface SearchResultWorkspaceRow {
   projectId: string;
   projectName: string;
-  targetId: string;           // "local" or remote server id
   branch: string | null;      // null = main workspace (API convention)
 }
 

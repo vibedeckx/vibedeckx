@@ -69,6 +69,7 @@ import {
 } from '@/lib/placeholder-workspaces';
 import {
   selectionForProjectSwitch,
+  workspacePlacement,
   type PendingWorkspaceNavigation,
 } from '@/lib/pending-navigation';
 
@@ -602,7 +603,25 @@ export default function Home() {
     if (worktreesStale || worktrees.length === 0) return;
     // Honor a pending cross-project workspace selection before any fallback.
     if (pending !== undefined && pending.projectId === currentProject?.id) {
-      if (worktrees.some(w => w.branch === pending.branch)) {
+      const target = worktrees.find(w => w.branch === pending.branch);
+      if (target && pending.checkPlacement) {
+        // A quick-switcher workspace jump: finish it the way the sidebar row
+        // click would, now that the new project's list is here to ask.
+        pendingWorkspaceRef.current = undefined;
+        setSessionNavPending(false);
+        setBranchNavPending(false);
+        const placement = workspacePlacement(target, currentProject?.agent_mode ?? 'local');
+        if (placement.kind === 'absent') {
+          setMissingOnRemote(placement.missing);
+          return;
+        }
+        if (placement.kind === 'creating') {
+          toast.info(`'${pending.branch}' is still being created on ${placement.machineName}`);
+        }
+        selectWorkspace(pending.branch);
+        return;
+      }
+      if (target) {
         pendingWorkspaceRef.current = undefined;
         // Normally already applied by the render-phase switch, in which case
         // confirming it costs nothing but releasing the pins. Re-apply only if
@@ -655,7 +674,7 @@ export default function Home() {
       }
       selectWorkspace(worktrees[0].branch);
     }
-  }, [worktrees, worktreesLoading, worktreesStale, selectedBranch, urlSessionId, currentProject?.id, selectBranchSession, selectWorkspace]);
+  }, [worktrees, worktreesLoading, worktreesStale, selectedBranch, urlSessionId, currentProject?.id, currentProject?.agent_mode, selectBranchSession, selectWorkspace]);
 
   // Safety net for the Agent-tab pin. sessionNavPending only exists to bridge
   // the window between a cross-project session jump and its target being
@@ -852,38 +871,6 @@ export default function Home() {
     setActiveView("project-info");
   }, [projects, selectProject]);
 
-  const handleSwitcherWorkspace = useCallback(async (w: SearchResultWorkspace) => {
-    if (switcherNavigationInFlightRef.current) return;
-    switcherNavigationInFlightRef.current = true;
-    setSwitcherOpen(false);
-    try {
-      const project = await resolveProjectForTarget(w.projectId, w.targetId);
-      if (!project) return;
-      setActiveView("workspace");
-      if (project.id === currentProject?.id) {
-        // Same project: the render-phase branch reset only fires on a project
-        // *id* change, so setting the branch synchronously is safe.
-        selectWorkspace(w.branch);
-      } else {
-        // Cross-project: selectProject triggers the render-phase selection
-        // switch and a worktree refetch — setting the branch synchronously
-        // here would be overwritten by it. Stage the target instead (same
-        // mechanism as the notification deep-link); the switch applies it in
-        // the very render the project changes, and the worktrees-loaded effect
-        // validates it. Keep the agent hook suspended across that render
-        // anyway: nothing has confirmed the branch exists yet.
-        setBranchNavPending(true);
-        pendingWorkspaceRef.current = { projectId: project.id, branch: w.branch, sessionId: null };
-        selectProject(project);
-      }
-    } catch (error) {
-      console.error("Quick switcher navigation failed:", error);
-      toast.error("Failed to open workspace");
-    } finally {
-      switcherNavigationInFlightRef.current = false;
-    }
-  }, [currentProject?.id, resolveProjectForTarget, selectProject, selectWorkspace]);
-
   const handleSwitcherSession = useCallback(async (s: SearchResultSession) => {
     if (switcherNavigationInFlightRef.current) return;
     switcherNavigationInFlightRef.current = true;
@@ -959,21 +946,35 @@ export default function Home() {
   // only gets a word.
   const handleSidebarBranchChange = useCallback((branch: string | null) => {
     const worktree = branch === null ? undefined : worktrees.find((w) => w.branch === branch);
-    const currentId = currentProject?.agent_mode ?? 'local';
-    const current = worktree?.machines?.find((machine) => machine.serverId === currentId);
-    if (worktree?.branch && current?.state === 'absent') {
-      setMissingOnRemote({
-        branch: worktree.branch,
-        current,
-        presentOn: worktree.machines!.filter((machine) => machine.state === 'present'),
-      });
+    const placement = workspacePlacement(worktree, currentProject?.agent_mode ?? 'local');
+    if (placement.kind === 'absent') {
+      setMissingOnRemote(placement.missing);
       return;
     }
-    if (current?.state === 'creating') {
-      toast.info(`'${branch}' is still being created on ${current.name}`);
+    if (placement.kind === 'creating') {
+      toast.info(`'${branch}' is still being created on ${placement.machineName}`);
     }
     selectWorkspace(branch);
   }, [worktrees, currentProject?.agent_mode, selectWorkspace]);
+
+  // A workspace picked in the quick switcher opens exactly like its sidebar
+  // row: the project's current remote is left alone (a workspace checked out
+  // on several machines is one result, not one per machine). Cross-project
+  // there is no sidebar row yet: the jump is staged, and the placement check
+  // runs once the new project's worktrees load (the auto-select effect).
+  const handleSwitcherWorkspace = useCallback((w: SearchResultWorkspace) => {
+    setSwitcherOpen(false);
+    setActiveView("workspace");
+    if (w.projectId === currentProject?.id) {
+      handleSidebarBranchChange(w.branch);
+      return;
+    }
+    const target = projects.find((p) => p.id === w.projectId);
+    if (!target) return;
+    setBranchNavPending(true);
+    pendingWorkspaceRef.current = { projectId: w.projectId, branch: w.branch, sessionId: null, checkPlacement: true };
+    selectProject(target);
+  }, [currentProject?.id, projects, handleSidebarBranchChange, selectProject]);
 
   // Guard against double-click sending the same command twice: ignore a repeat
   // of the same content within a short window (a native double-click fires two

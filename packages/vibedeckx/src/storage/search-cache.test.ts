@@ -285,7 +285,15 @@ describe("searchCache", () => {
 
     it("main workspace round-trips: stored as '' but returned as null and matches 'main'", async () => {
       const res = await storage.searchCache.search({ query: "main", limitPerGroup: 10 });
-      expect(res.workspaces.some(w => w.branch === null && w.targetId === serverId)).toBe(true);
+      expect(res.workspaces.some(w => w.branch === null && w.projectId === "p1")).toBe(true);
+    });
+
+    it("returns a branch checked out on several remotes once", async () => {
+      const second = await storage.remoteServers.create({ name: "Worker 2", url: "http://w2" });
+      await storage.projectRemotes.add({ project_id: "p1", remote_server_id: second.id, remote_path: "/repo" });
+      await applySnapshot("p1", second.id, snap({ sessions: [] }));
+      const res = await storage.searchCache.search({ query: "dev", limitPerGroup: 10 });
+      expect(res.workspaces).toEqual([{ projectId: "p1", projectName: expect.any(String), branch: "dev" }]);
     });
 
     it("excludes rows from a remote no longer linked to the project", async () => {
