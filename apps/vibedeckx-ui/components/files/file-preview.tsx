@@ -650,7 +650,7 @@ export function FilePreview({
   if (loading) {
     return (
       <div className="flex flex-col h-full">
-        <div className="flex items-center justify-between px-4 py-2 border-b flex-shrink-0">
+        <div className="flex items-center justify-between px-4 h-10 border-b flex-shrink-0">
           <Skeleton className="h-4 w-48" />
         </div>
         <div className="flex-1 p-4">
@@ -697,7 +697,7 @@ export function FilePreview({
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2 border-b flex-shrink-0 gap-2">
+      <div className="flex items-center justify-between px-4 h-10 border-b flex-shrink-0 gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <span className="text-sm font-mono truncate">{filePath}</span>
           <span className="text-xs text-muted-foreground shrink-0">

@@ -202,8 +202,9 @@ export function FilesView({ projectId, project, selectedBranch, navRequest, sess
           {/* The search input lives inside <Command> so its keydown events bubble
               to cmdk, giving the results list free arrow-key nav + Enter-to-open. */}
           <Command shouldFilter={false} className="flex h-full flex-col bg-transparent">
-            <div className="border-b p-2">
-              <InputGroup>
+            {/* h-10 matches the FilePreview and Main Chat headers so their border-b lines align. */}
+            <div className="flex h-10 shrink-0 items-center border-b px-2">
+              <InputGroup className="h-8">
                 <InputGroupAddon>
                   <Search className="h-3.5 w-3.5" />
                 </InputGroupAddon>
