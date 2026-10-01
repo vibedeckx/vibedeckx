@@ -1250,7 +1250,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 </div>
               </ResizablePanel>
 
-              <ResizableHandle withHandle />
+              <ResizableHandle />
 
               {/* Right Panel: Agent/Executors/Diff/Terminal as tabs */}
               <ResizablePanel defaultSize={67} minSize={25}>

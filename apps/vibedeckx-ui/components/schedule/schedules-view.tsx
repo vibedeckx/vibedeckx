@@ -336,7 +336,7 @@ export function SchedulesView({
                 </div>
               </ResizablePanel>
 
-              <ResizableHandle withHandle />
+              <ResizableHandle />
 
               <ResizablePanel defaultSize={67} minSize={25}>
                 <div className="h-full overflow-auto px-5 py-4">

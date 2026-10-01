@@ -29,6 +29,11 @@ const ResizablePanelGroup = ({
 
 const ResizablePanel = ResizablePrimitive.Panel
 
+// No grip: the divider is a 1px line whose `::before` widens to a 2px accent
+// bar. Hover follows the library's own hit test (`data-resize-handle-state`)
+// and lights up after 300ms, like VS Code's sash, so passing the pointer
+// across doesn't flash; dragging or keyboard focus lights it up immediately.
+
 const ResizableHandle = ({
   withHandle,
   className,
@@ -38,7 +43,7 @@ const ResizableHandle = ({
 }) => (
   <ResizablePrimitive.PanelResizeHandle
     className={cn(
-      "relative flex w-px items-center justify-center bg-border/60 cursor-col-resize data-[panel-group-direction=vertical]:cursor-row-resize after:absolute after:inset-y-0 after:-left-1 after:-right-1 after:content-[''] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 data-[panel-group-direction=vertical]:h-px data-[panel-group-direction=vertical]:w-full data-[panel-group-direction=vertical]:after:inset-x-0 data-[panel-group-direction=vertical]:after:-top-1 data-[panel-group-direction=vertical]:after:-bottom-1 data-[panel-group-direction=vertical]:after:left-0 data-[panel-group-direction=vertical]:after:right-0 [&[data-resize-handle-active]]:bg-ring",
+      "relative flex w-px items-center justify-center bg-border/60 cursor-col-resize data-[panel-group-direction=vertical]:cursor-row-resize after:absolute after:inset-y-0 after:-left-1 after:-right-1 after:content-[''] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 data-[panel-group-direction=vertical]:h-px data-[panel-group-direction=vertical]:w-full data-[panel-group-direction=vertical]:after:inset-x-0 data-[panel-group-direction=vertical]:after:-top-1 data-[panel-group-direction=vertical]:after:-bottom-1 data-[panel-group-direction=vertical]:after:left-0 data-[panel-group-direction=vertical]:after:right-0 before:absolute before:z-10 before:inset-y-0 before:-left-px before:right-0 before:bg-transparent before:transition-colors before:duration-150 before:content-[''] data-[panel-group-direction=vertical]:before:inset-x-0 data-[panel-group-direction=vertical]:before:-top-px data-[panel-group-direction=vertical]:before:bottom-0 data-[resize-handle-state=hover]:before:bg-ring data-[resize-handle-state=hover]:before:delay-300 [&[data-resize-handle-active]]:before:bg-ring [&[data-resize-handle-active]]:before:delay-0",
       className
     )}
     {...props}

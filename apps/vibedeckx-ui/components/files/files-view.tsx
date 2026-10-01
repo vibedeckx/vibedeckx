@@ -302,7 +302,7 @@ export function FilesView({ projectId, project, selectedBranch, navRequest, sess
           </Command>
         </ResizablePanel>
 
-        <ResizableHandle withHandle disabled={!active} />
+        <ResizableHandle disabled={!active} />
 
         {/* File preview (right) */}
         <ResizablePanel defaultSize={67} minSize={25}>
