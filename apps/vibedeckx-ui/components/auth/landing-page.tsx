@@ -3,8 +3,10 @@
 import { useState } from "react";
 import { Copy, Check } from "lucide-react";
 import { Logo } from "@/components/brand/logo";
+import { DOCS_URL } from "@/components/layout/docs-button";
 
 const INSTALL_COMMAND = "npm install -g vibedeckx";
+const GITHUB_URL = "https://github.com/vibedeckx/vibedeckx";
 
 export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
   const [copied, setCopied] = useState(false);
@@ -29,17 +31,18 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
             <a href="#commander">Commander</a>
             <a href="#features">Features</a>
             <a href="#how">How it works</a>
+            <a href={DOCS_URL}>Docs</a>
             {/* TODO: re-enable once Pricing section is live */}
             {/* <a href="#pricing">Pricing</a> */}
             <a
-              href="https://github.com/vibedeckx-dev/vibedeckx"
+              href={GITHUB_URL}
               target="_blank"
               rel="noopener noreferrer"
             >
               Source
             </a>
             <a
-              href="https://github.com/vibedeckx-dev/vibedeckx/releases"
+              href={`${GITHUB_URL}/releases`}
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -916,7 +919,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
               Enter the cockpit
             </button>
             <a
-              href="https://github.com/vibedeckx-dev/vibedeckx"
+              href={GITHUB_URL}
               target="_blank"
               rel="noopener noreferrer"
               className="btn btn-lg btn-dark"
@@ -953,7 +956,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
                 </li>
                 <li>
                   <a
-                    href="https://github.com/vibedeckx-dev/vibedeckx/releases"
+                    href={`${GITHUB_URL}/releases`}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -975,7 +978,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
               <ul>
                 <li>
                   <a
-                    href="https://github.com/vibedeckx-dev/vibedeckx"
+                    href={GITHUB_URL}
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -983,13 +986,7 @@ export function LandingPage({ onSignIn }: { onSignIn: () => void }) {
                   </a>
                 </li>
                 <li>
-                  <a
-                    href="https://github.com/vibedeckx-dev/vibedeckx#readme"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    Docs
-                  </a>
+                  <a href={DOCS_URL}>Docs</a>
                 </li>
                 <li>
                   <a href="#how">CLI reference</a>
