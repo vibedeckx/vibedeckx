@@ -2,8 +2,10 @@ name: test
 
 on:
   pull_request:
+    paths-ignore: ["apps/docs/**"]
   push:
     branches: [main]
+    paths-ignore: ["apps/docs/**"]
 
 jobs:
   test:

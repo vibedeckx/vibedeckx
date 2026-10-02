@@ -1,0 +1,18 @@
+---
+title: Quickstart
+description: Run Vibedeckx on your own machine.
+---
+
+Vibedeckx ships as an npm package. Starting it serves both the API and the web UI:
+
+```bash
+npx vibedeckx
+```
+
+Then open [http://localhost:3000](http://localhost:3000). Pass `--port` to use a different port.
+
+By default the server binds to `127.0.0.1` only and stores its data in `~/.vibedeckx` (override with `--data-dir`).
+
+<Callout type="warn">
+  Only bind to `0.0.0.0` behind `--auth` or an authenticating proxy — anyone who can reach the server can run agents on this machine.
+</Callout>

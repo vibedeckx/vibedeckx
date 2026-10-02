@@ -1,0 +1,19 @@
+---
+title: Connect a machine
+description: Run agent sessions on your own hardware from vibedeckx.dev.
+---
+
+Agents run on machines you connect. The machine dials out to the Vibedeckx server, so it needs no open ports or public address.
+
+In **Settings → Remote Servers**, add a server for the machine and open its connect token. Copy the command shown there and run it on that machine — it looks like:
+
+```bash
+npx vibedeckx connect --connect-to https://vibedeckx.dev --token <token>
+```
+
+On Linux, add `--daemon` to keep it running in the background, and manage it with:
+
+```bash
+npx vibedeckx connect status
+npx vibedeckx connect stop
+```

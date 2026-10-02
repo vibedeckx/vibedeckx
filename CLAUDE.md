@@ -13,11 +13,13 @@ Vibedeckx is an AI-powered app generator with project management. It's a pnpm mo
 pnpm dev              # Frontend dev server (port 3000)
 pnpm dev:server       # Backend TypeScript watch mode
 pnpm dev:all          # Both concurrently (backend on 5173, frontend on 3000)
+pnpm dev:docs         # Public docs site (port 3002)
 
 # Build
 pnpm build            # Full production build (backend + frontend + copy)
 pnpm build:main       # Backend only (tsc)
 pnpm build:ui         # Frontend only (next build → static export)
+pnpm build:docs       # Docs site only (static export → apps/docs/out)
 
 # Run production
 pnpm start            # node packages/vibedeckx/dist/bin.js
@@ -38,6 +40,7 @@ pnpm --filter vibedeckx test
 - `packages/vibedeckx/` — Backend: Fastify server + CLI (`@stricli/core`), published as npm package
 - `packages/vibedeckx-ui-dist/` — Template for the `@vibedeckx/ui-dist` npm package (UI static assets, populated at release time from `apps/vibedeckx-ui/out`)
 - `apps/vibedeckx-ui/` — Frontend: Next.js 16 with React 19, static export (`output: "export"`)
+- `apps/docs/` — Public user docs (Fumadocs on Next.js, static export), deployed independently to `docs.vibedeckx.dev` by `.github/workflows/docs.yml`; not part of `pnpm build` or the npm package
 - Package manager: **pnpm** with workspaces (`pnpm-workspace.yaml`)
 
 ## Architecture
@@ -88,8 +91,15 @@ Workers run on user machines at arbitrarily old versions while the server deploy
 - Workers report `version`/`capabilities` in both handshake frames (`status` and `machine_auth` — the latter is the reliable carrier); the hub persists them on `remote_servers`.
 - Tools: `node scripts/classify-diff.mjs` buckets a diff by server/worker impact; `node scripts/cross-version-e2e.mjs <version>` smokes the branch server against a published worker (CI: `worker-compat.yml`). The `/compat-check` skill runs the whole local pre-CI flow and reports which branch of the §6.5 decision flow applies.
 
+### Public Docs (`apps/docs/`)
+
+- Two doc trees, don't mix them: repo-root `docs/` is **internal** (design docs, security notes, runbooks) and is never published; `apps/docs/content/docs/` is the **public** user documentation.
+- When a change alters user-visible behavior — CLI commands/flags, settings, the permission or access model, setup steps — update the matching page in `apps/docs/content/docs/` in the same change. Only document what has shipped to users.
+- The directory tree is the URL structure; `meta.json` orders the sidebar. Pages are also served as Markdown at `/llms.mdx/<slug>/content.md` plus `/llms.txt` and `/llms-full.txt`.
+
 ### Default Ports
 
 - Frontend dev: **3000**
+- Docs dev: **3002**
 - Backend dev: **5173**
 - Production: **3000** (configurable via `--port`)

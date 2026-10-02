@@ -1,0 +1,58 @@
+name: docs
+
+on:
+  pull_request:
+    paths: ["apps/docs/**", ".github/workflows/docs.yml"]
+  push:
+    branches: [main]
+    paths: ["apps/docs/**", ".github/workflows/docs.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --filter vibedeckx-docs...
+      - run: pnpm --filter vibedeckx-docs build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: docs-site
+          path: apps/docs/out
+          retention-days: 7
+
+  # Deploys apps/docs/out to the Cloudflare Pages project serving docs.vibedeckx.dev.
+  # Needs repo secrets CLOUDFLARE_API_TOKEN (Pages: Edit) and CLOUDFLARE_ACCOUNT_ID.
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: docs
+      url: https://docs.vibedeckx.dev
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: docs-site
+          path: out
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy out --project-name=vibedeckx-docs --branch=main
