@@ -23,6 +23,7 @@ import { Button } from '@/components/ui/button';
 import { AlertTriangle, PanelLeftClose, PanelLeftOpen, Plus, Search } from 'lucide-react';
 import { useAppConfig } from '@/hooks/use-app-config';
 import { DiscordButton } from '@/components/layout/discord-button';
+import { DocsButton } from '@/components/layout/docs-button';
 import { CreateProjectDialog } from '@/components/project/create-project-dialog';
 import { SettingsView } from '@/components/settings/settings-view';
 import { RemoteServersSettings } from '@/components/settings/remote-servers-settings';
@@ -1065,6 +1066,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
               <Search className="h-4 w-4" />
             </Button>
             <KeyboardShortcutsOverlay />
+            <DocsButton />
             <DiscordButton inviteUrl={config?.discordInviteUrl} />
             <ConnectionStatusIndicator />
             <CompletionNotificationsMenu
