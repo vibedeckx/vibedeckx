@@ -1,6 +1,6 @@
 # vibedeckx-docs
 
-Public user documentation, deployed to https://docs.vibedeckx.dev (Fumadocs on Next.js, static export).
+Public user documentation, deployed to https://docs.vibedeckx.dev (Fumadocs on Next.js, static export) as an assets-only Cloudflare Worker (`wrangler.jsonc`).
 
 ```bash
 pnpm --filter vibedeckx-docs dev     # http://localhost:3002

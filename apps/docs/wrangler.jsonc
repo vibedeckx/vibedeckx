@@ -1,0 +1,12 @@
+// Assets-only Worker serving the static export in out/ at docs.vibedeckx.dev.
+// Deployed by .github/workflows/docs.yml; the first deploy creates the Worker and binds the domain.
+{
+  "name": "vibedeckx-docs",
+  "compatibility_date": "2026-10-01",
+  "assets": {
+    "directory": "./out",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  },
+  "routes": [{ "pattern": "docs.vibedeckx.dev", "custom_domain": true }]
+}
