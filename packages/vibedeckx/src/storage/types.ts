@@ -1540,6 +1540,12 @@ export interface Storage {
       notificationSyncStart?: NotificationSyncStart;
     }) => Promise<void>;
     getAll: () => Promise<RemoteSessionMapping[]>;
+    /**
+     * Every mapping plus whether its project_remotes link (and that link's
+     * remote_servers row) still exists — the boot hydrate in one query
+     * instead of one projectRemotes lookup per mapping.
+     */
+    getAllWithLinkState: () => Promise<Array<RemoteSessionMapping & { linked: boolean }>>;
     /** Persisted remote mappings for exactly one project, capped in SQL. */
     listByProject: (projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer) => Promise<RemoteSessionMapping[]>;
     getByLocal: (localSessionId: string) => Promise<RemoteSessionMapping | undefined>;

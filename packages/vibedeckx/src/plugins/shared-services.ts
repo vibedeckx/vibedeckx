@@ -88,12 +88,8 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   // looked up from project_remotes (the authoritative source — no duplication).
   // Skip rows whose project_remotes row is gone (stale; will be cleaned up the
   // next time the user explicitly deletes the session).
-  for (const row of await opts.storage.remoteSessionMappings.getAll()) {
-    const remote = await opts.storage.projectRemotes.getByProjectAndServer(
-      row.project_id,
-      row.remote_server_id,
-    );
-    if (!remote) {
+  for (const row of await opts.storage.remoteSessionMappings.getAllWithLinkState()) {
+    if (!row.linked) {
       console.warn(`[SharedServices] Skipping remote_session_mappings row ${row.local_session_id}: project_remotes(${row.project_id}, ${row.remote_server_id}) not found`);
       continue;
     }

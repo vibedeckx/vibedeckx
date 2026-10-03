@@ -893,6 +893,19 @@ describe("agentSessions/remoteSessionMappings storage", () => {
       expect(await storage.remoteSessionMappings.isTitleResolved("l1")).toBe(true);
     });
 
+    it("getAllWithLinkState flags mappings whose project_remotes link is gone", async () => {
+      const server = await storage.remoteServers.create({ name: "worker" });
+      await storage.projectRemotes.add({ project_id: "p1", remote_server_id: server.id, remote_path: "/repo" });
+      await storage.remoteSessionMappings.upsert("linked", "p1", server.id, "r1", "dev");
+      await storage.remoteSessionMappings.upsert("stale", "p1", "gone-server", "r2", null);
+
+      const rows = await storage.remoteSessionMappings.getAllWithLinkState();
+      const byId = new Map(rows.map((r) => [r.local_session_id, r]));
+      expect(rows).toHaveLength(2);
+      expect(byId.get("linked")).toMatchObject({ remote_server_id: server.id, remote_session_id: "r1", branch: "dev", linked: true });
+      expect(byId.get("stale")).toMatchObject({ remote_session_id: "r2", linked: false });
+    });
+
     it("upsert accepts a null branch", async () => {
       await storage.remoteSessionMappings.upsert("l1", "p1", "rs1", "r1", null);
       const all = await storage.remoteSessionMappings.getAll();

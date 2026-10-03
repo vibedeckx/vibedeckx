@@ -1439,6 +1439,20 @@ export const createAgentSessionRepos = (
       return rows.map(mapRemoteSessionMapping);
     },
 
+    // Same link test as projectRemotes.getByProjectAndServer: the
+    // project_remotes row AND its remote_servers row (that lookup inner-joins).
+    getAllWithLinkState: async () => {
+      const rows = await kdb.selectFrom("remote_session_mappings as mapping")
+        .leftJoin("project_remotes as link", (join) => join
+          .onRef("link.project_id", "=", "mapping.project_id")
+          .onRef("link.remote_server_id", "=", "mapping.remote_server_id"))
+        .leftJoin("remote_servers as server", "server.id", "link.remote_server_id")
+        .selectAll("mapping")
+        .select("server.id as linked_server_id")
+        .execute();
+      return rows.map((row) => ({ ...mapRemoteSessionMapping(row), linked: row.linked_server_id != null }));
+    },
+
     listByProject: async (projectId, limit, consumer) => {
       const rows = await projectedRemoteMappingBase(kdb)
         .where(sql<boolean>`case when mapping.workspace_checkout_id is null then mapping.project_id else workspace.project_id end = ${projectId}`)
