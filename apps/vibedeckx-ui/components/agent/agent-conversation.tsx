@@ -1894,7 +1894,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   placeholder={
                     scheduleArmed
                       ? session
-                        ? "What should run, and how often? Leave empty to schedule what this conversation did"
+                        ? "Send to turn this session's work into a schedule. You can add requirements and when it should run"
                         : "What should run, and how often? e.g. every weekday at 9am, run the tests and report failures"
                       : session
                         ? "Ask the agent to help with your code..."
