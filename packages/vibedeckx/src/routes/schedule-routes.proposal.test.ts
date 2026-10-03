@@ -15,6 +15,8 @@ import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
 import type { SchedulerService } from "../scheduler.js";
 import type { GlobalEvent } from "../event-bus.js";
+import { RetentionHoldSync, scheduleHoldSource } from "../retention-holds.js";
+import type { ProxyResult } from "../utils/remote-proxy.js";
 
 /** Confirming an agent's propose_schedule card (see docs/schedule-proposal-tool-design.md §3.2). */
 describe("schedule create from an agent proposal", () => {
@@ -23,6 +25,11 @@ describe("schedule create from an agent proposal", () => {
   let dir: string;
   const reschedule = vi.fn(async () => {});
   let emitted: GlobalEvent[];
+  /** What the hub pushed to the worker, and how the worker answers. */
+  let pushed: Array<{ path: string; body: unknown }>;
+  let workerAnswer: () => ProxyResult;
+  /** Worker-side session ids the fake worker reports as holding. */
+  let heldOnWorker: string[];
 
   const body = (over: Record<string, unknown> = {}) => ({
     name: "Watch flakiness",
@@ -48,6 +55,9 @@ describe("schedule create from an agent proposal", () => {
     auth.currentUserId = "user-1";
     reschedule.mockClear();
     emitted = [];
+    pushed = [];
+    workerAnswer = () => ({ ok: true, status: 200, data: {} });
+    heldOnWorker = [];
     dir = mkdtempSync(path.join(tmpdir(), "vdx-schedule-proposal-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     await storage.projects.create({ id: "project-1", name: "Mine", path: "/tmp/mine" }, "user-1");
@@ -67,8 +77,18 @@ describe("schedule create from an agent proposal", () => {
     app = Fastify({ logger: false });
     app.decorate("authEnabled", true);
     app.decorate("storage", storage);
-    app.decorate("scheduler", { reschedule, nextRunAt: () => null, isRunning: () => false } as unknown as SchedulerService);
+    app.decorate("scheduler", { reschedule, unschedule: () => {}, nextRunAt: () => null, isRunning: () => false } as unknown as SchedulerService);
     app.decorate("eventBus", { emit: (e: GlobalEvent) => emitted.push(e) } as never);
+    app.decorate("retentionHolds", new RetentionHoldSync({
+      storage,
+      remoteSessionMap: new Map(),
+      sources: [scheduleHoldSource(storage)],
+      proxy: async (_server, method, apiPath, payload) => {
+        if (method === "GET") return { ok: true, status: 200, data: { sessionIds: heldOnWorker } };
+        pushed.push({ path: apiPath, body: payload });
+        return workerAnswer();
+      },
+    }));
     await app.register(scheduleRoutes);
     await app.ready();
   });
@@ -179,5 +199,120 @@ describe("schedule create from an agent proposal", () => {
   it("keeps rejecting an invalid cron even when it comes from a proposal", async () => {
     const res = await create(body({ cron_expr: "not a cron" }));
     expect(res.statusCode).toBe(400);
+  });
+
+  describe("retention hold on the source session", () => {
+    const remoteBody = (toolUseId = "toolu_r") => body({ source: { session_id: REMOTE_SESSION, tool_use_id: toolUseId } });
+    const del = (id: string) => app.inject({ method: "DELETE", url: `/api/schedules/${id}` });
+
+    it("holds a local source session for as long as a schedule points at it", async () => {
+      const a = (await create(body())).json().schedule;
+      const b = (await create(body({ source: { session_id: "sess-1", tool_use_id: "toolu_2" } }))).json().schedule;
+      expect((await storage.sessionRetentionHolds.list("sess-1")).map((h) => h.id).sort())
+        .toEqual([a.id, b.id].sort());
+
+      expect((await del(a.id)).statusCode).toBe(204);
+      expect(await storage.sessionRetentionHolds.list("sess-1")).toEqual([{ kind: "schedule", id: b.id }]);
+      expect((await del(b.id)).statusCode).toBe(204);
+      expect(await storage.sessionRetentionHolds.list("sess-1")).toEqual([]);
+    });
+
+    it("pushes a remote source session's whole hold set to its worker", async () => {
+      const res = await create(remoteBody());
+      expect(res.statusCode).toBe(201);
+      expect(pushed).toEqual([{
+        path: "/api/path/retention-holds/worker-side-id",
+        body: { holds: [{ kind: "schedule", id: res.json().schedule.id }] },
+      }]);
+    });
+
+    it("does not create the schedule when the worker can't be reached, and allows a retry", async () => {
+      workerAnswer = () => ({ ok: false, status: 0, data: { error: "Remote server is not connected" } });
+      const failed = await create(remoteBody());
+      expect(failed.statusCode).toBe(502);
+      expect(await storage.scheduledTasks.getBySource("project-1", REMOTE_SESSION, "toolu_r")).toBeUndefined();
+      expect(reschedule).not.toHaveBeenCalled();
+      expect(emitted).toEqual([]);
+
+      workerAnswer = () => ({ ok: true, status: 200, data: {} });
+      const retried = await create(remoteBody());
+      expect(retried.statusCode).toBe(201);
+      expect(pushed.at(-1)?.body).toMatchObject({ holds: [{ kind: "schedule", id: retried.json().schedule.id }] });
+    });
+
+    it("never deletes an existing schedule when a replayed confirmation fails to sync", async () => {
+      const first = (await create(remoteBody())).json().schedule;
+      workerAnswer = () => ({ ok: false, status: 0, data: {} });
+      const replay = await create(remoteBody());
+      expect(replay.statusCode).toBe(502);
+      expect(await storage.scheduledTasks.getById(first.id)).toBeDefined();
+    });
+
+    it("never answers a concurrent replay with a row the first confirmation rolls back", async () => {
+      // First push fails; everything after it succeeds.
+      let calls = 0;
+      workerAnswer = () => (++calls === 1
+        ? { ok: false, status: 0, data: {} }
+        : { ok: true, status: 200, data: {} });
+      const [a, b] = await Promise.all([create(remoteBody()), create(remoteBody())]);
+      expect(a.statusCode).toBe(502);
+      expect([200, 201]).toContain(b.statusCode);
+      expect(await storage.scheduledTasks.getById(b.json().schedule.id)).toBeDefined();
+      expect(pushed.at(-1)?.body).toMatchObject({ holds: [{ kind: "schedule", id: b.json().schedule.id }] });
+    });
+
+    it("deletes the schedule even when the hold can't be released", async () => {
+      const created = (await create(remoteBody())).json().schedule;
+      workerAnswer = () => ({ ok: false, status: 0, data: {} });
+      const res = await del(created.id);
+      expect(res.statusCode).toBe(204);
+      expect(await storage.scheduledTasks.getById(created.id)).toBeUndefined();
+    });
+
+    it("releases a hold that outlived its schedule once the worker reconnects", async () => {
+      const kept = (await create(remoteBody("toolu_keep"))).json().schedule;
+      const gone = (await create(remoteBody("toolu_gone"))).json().schedule;
+      workerAnswer = () => ({ ok: false, status: 0, data: {} });
+      await del(gone.id);
+      workerAnswer = () => ({ ok: true, status: 200, data: {} });
+      heldOnWorker = ["worker-side-id", "orphan-on-worker"];
+      pushed = [];
+      expect(await app.retentionHolds.releaseStale(remoteServerId)).toBe(0);
+      expect(pushed).toEqual([
+        { path: "/api/path/retention-holds/worker-side-id", body: { holds: [{ kind: "schedule", id: kept.id }] } },
+        // Unknown to the hub, so nothing can be holding it.
+        { path: "/api/path/retention-holds/orphan-on-worker", body: { holds: [] } },
+      ]);
+    });
+
+    it("links the source to its workspace's current branch, not the stale snapshot", async () => {
+      const registered = await storage.workspaceRegistry.registerReadyCheckout({
+        projectId: "project-1", branch: "feature-renamed", targetId: remoteServerId,
+        worktreePath: "/srv/mine-renamed", expectedBranch: "feature-renamed",
+      });
+      await storage.remoteSessionMappings.upsertBound({
+        localSessionId: REMOTE_SESSION, projectId: "project-1", remoteServerId,
+        remoteSessionId: "worker-side-id", branch: "feature-renamed", checkoutId: registered.checkout.id,
+      });
+      // A later unbound upsert rewrites the snapshot column but keeps the checkout.
+      await storage.remoteSessionMappings.upsert(
+        REMOTE_SESSION, "project-1", remoteServerId, "worker-side-id", "feature-x",
+      );
+      await create(remoteBody());
+      const res = await app.inject({ method: "GET", url: "/api/projects/project-1/schedules" });
+      expect(res.json().schedules[0].source_session).toMatchObject({ branch: "feature-renamed", exists: true });
+    });
+
+    it("lists each schedule's source session, including one that is gone", async () => {
+      await create(body());
+      await create(remoteBody());
+      await storage.agentSessions.delete("sess-1");
+      const res = await app.inject({ method: "GET", url: "/api/projects/project-1/schedules" });
+      const bySource = Object.fromEntries(
+        res.json().schedules.map((s: { source_session_id: string; source_session: unknown }) => [s.source_session_id, s.source_session]),
+      );
+      expect(bySource["sess-1"]).toEqual({ id: "sess-1", exists: false, branch: null, title: null });
+      expect(bySource[REMOTE_SESSION]).toMatchObject({ id: REMOTE_SESSION, exists: true, branch: "feature-x" });
+    });
   });
 });

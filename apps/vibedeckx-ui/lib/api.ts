@@ -645,9 +645,22 @@ export interface Schedule {
   created_at: string;
   updated_at: string;
   // Enriched by GET /api/projects/:id/schedules
+  /** The session behind source_session_id, resolved by the server; null for hand-made schedules. */
+  source_session?: SourceSessionSummary | null;
   last_run?: ScheduleRun | null;
   next_run_at?: string | null;
   running?: boolean;
+}
+
+/**
+ * The agent session something (a schedule today) was created from. `exists`
+ * goes false once the session is deleted; the link then has nowhere to go.
+ */
+export interface SourceSessionSummary {
+  id: string;
+  title: string | null;
+  branch: string | null;
+  exists: boolean;
 }
 
 export interface ScheduleInput {

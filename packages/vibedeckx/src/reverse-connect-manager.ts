@@ -127,6 +127,11 @@ export class ReverseConnectManager {
     this.connections.delete(remoteServerId);
   }
 
+  /** Ids of every worker currently connected. */
+  connectedServerIds(): string[] {
+    return [...this.connections.keys()];
+  }
+
   isConnected(remoteServerId: string): boolean {
     const conn = this.connections.get(this.resolveId(remoteServerId));
     return conn !== undefined && conn.ws.readyState === 1; // WebSocket.OPEN

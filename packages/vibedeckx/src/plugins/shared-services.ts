@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import type { Storage } from "../storage/types.js";
 import { ProcessManager } from "../process-manager.js";
+import { RetentionHoldSync, scheduleHoldSource } from "../retention-holds.js";
 import { AgentSessionManager } from "../agent-session-manager.js";
 import { ChatSessionManager } from "../chat-session-manager.js";
 import { ProjectChatManager } from "../project-chat-manager.js";
@@ -401,6 +402,30 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("reverseConnectManager", reverseConnectManager);
   fastify.decorate("browserManager", browserManager);
   fastify.decorate("scheduler", scheduler);
+  const retentionHolds = new RetentionHoldSync({
+    storage: opts.storage,
+    reverseConnectManager,
+    remoteSessionMap,
+    sources: [scheduleHoldSource(opts.storage)],
+  });
+  fastify.decorate("retentionHolds", retentionHolds);
+  // Frees sessions whose hold outlived its schedules (a release that failed or
+  // timed out): on connect, then hourly — well inside the worker's 6h sweep —
+  // so a connected worker doesn't wait for a reconnect. No ordering with the
+  // retention downlink is needed: this only ever removes holds, so running
+  // late just delays the sweep, never wrongs it.
+  const releaseStaleHolds = (remoteServerId: string) => {
+    void retentionHolds.releaseStale(remoteServerId).then((failed) => {
+      if (failed > 0) console.warn(`[RetentionHolds] ${failed} session(s) on ${remoteServerId} not re-synced`);
+    });
+  };
+  reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
+    if (status === "online") releaseStaleHolds(remoteServerId);
+  });
+  const retentionHoldTimer = setInterval(() => {
+    for (const remoteServerId of reverseConnectManager.connectedServerIds()) releaseStaleHolds(remoteServerId);
+  }, 60 * 60 * 1000);
+  retentionHoldTimer.unref();
   agentSessionManager.setEventBus(eventBus);
 
   // Startup sweep covers pending intents for remotes that are already
@@ -581,6 +606,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   // Graceful shutdown: kill child processes and clear timers when server closes
   fastify.addHook("onClose", async () => {
     memoryStatsReporter.close();
+    clearInterval(retentionHoldTimer);
     await sessionRetention.close();
     await remoteSessionReconciler.close();
     scheduler.shutdown();

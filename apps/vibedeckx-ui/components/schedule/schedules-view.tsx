@@ -21,6 +21,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { describeCron, formatNextRun } from "@/lib/schedule-cron";
 import { ScheduleFormDialog } from "./schedule-form-dialog";
+import { SourceSessionLink } from "@/components/agent/source-session-link";
 
 const STATUS_STYLES: Record<string, string> = {
   running: "bg-blue-500/15 text-blue-600",
@@ -72,6 +73,7 @@ export function SchedulesView({
   onCreateOpenChange,
   openRunId,
   onOpenRunHandled,
+  onOpenSourceSession,
 }: {
   projectId: string;
   /** Whether the project has a local path; SaaS projects are remote-only. */
@@ -89,6 +91,8 @@ export function SchedulesView({
   onCreateOpenChange: (open: boolean) => void;
   openRunId?: string | null;
   onOpenRunHandled?: (runId: string) => void;
+  /** Open the agent session a proposed schedule came from. */
+  onOpenSourceSession?: (branch: string | null, sessionId: string) => void;
 }) {
   const selected = schedules.find((s) => s.id === selectedId) ?? schedules[0] ?? null;
 
@@ -288,6 +292,12 @@ export function SchedulesView({
               <span className="text-muted-foreground">Timeout: </span>
               {Math.round(selected.timeout_seconds / 60)}m
             </div>
+            {selected.source_session && (
+              <div className="flex min-w-0 items-center gap-1.5">
+                <span className="shrink-0 text-muted-foreground">Created from: </span>
+                <SourceSessionLink source={selected.source_session} onOpen={onOpenSourceSession} />
+              </div>
+            )}
           </div>
 
           {actionError && <div className="mx-5 mt-3 text-sm text-destructive bg-destructive/10 px-3 py-2 rounded-md">{actionError}</div>}

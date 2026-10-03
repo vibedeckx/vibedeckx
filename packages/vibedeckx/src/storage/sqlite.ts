@@ -22,6 +22,7 @@ import { createWorkspaceRepos } from "./repositories/workspace.js";
 import { createCrossRemoteAuditRepo } from "./repositories/cross-remote-audit.js";
 import { createSessionRemoteGrantRepo } from "./repositories/session-remote-grants.js";
 import { createSessionRemoteTouchRepo } from "./repositories/session-remote-touches.js";
+import { createSessionRetentionHoldRepo } from "./repositories/session-retention-holds.js";
 import { createMergeTargetsRepo } from "./repositories/merge-targets.js";
 import { createSearchCacheRepos } from "./repositories/search-cache.js";
 import { createWorkflowRunRepos } from "./repositories/workflow-runs.js";
@@ -659,6 +660,20 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       user_id TEXT NOT NULL,
       last_used_at TEXT NOT NULL,
       PRIMARY KEY (session_id, remote_server_id)
+    );
+
+    -- What keeps a session out of the retention sweep besides a star: one row
+    -- per (session, holder) — today a schedule proposed from that session.
+    -- Owned by the machine the session lives on (the hub pushes the whole set
+    -- to a worker), since retention runs there. Retention-only: a manual
+    -- delete still goes through and removes the rows via deleteSessionSideRows.
+    -- No FK on session_id, for the same reason as the grants table.
+    CREATE TABLE IF NOT EXISTS agent_session_retention_holds (
+      session_id TEXT NOT NULL,
+      holder_kind TEXT NOT NULL,
+      holder_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (session_id, holder_kind, holder_id)
     );
   `);
 
@@ -2367,6 +2382,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createCrossRemoteAuditRepo(kdb),
     ...createSessionRemoteGrantRepo(kdb),
     ...createSessionRemoteTouchRepo(kdb),
+    ...createSessionRetentionHoldRepo(kdb),
     ...createMergeTargetsRepo(kdb),
     ...createSearchCacheRepos(kdb, h),
     ...createWorkflowRunRepos(kdb),

@@ -913,6 +913,11 @@ export interface WorkspaceBindingIssue {
   reason: WorkspaceBindingIssueReason;
 }
 
+export interface RetentionHold {
+  kind: string;
+  id: string;
+}
+
 export interface Storage {
   projects: {
     create: (opts: {
@@ -1068,6 +1073,20 @@ export interface Storage {
     /** Most recently used first. Unscoped by user in solo mode (`userId` absent). */
     list(sessionId: string, userId?: string, limit?: number): Promise<string[]>;
   };
+  /**
+   * Holders keeping a session out of the retention sweep (a schedule proposed
+   * from it, …). Rows live on the machine that owns the session; the hub
+   * computes the set and `replace`s it there. Retention-only — manual delete
+   * ignores holds, and every session delete path removes them
+   * (`deleteSessionSideRows`).
+   */
+  sessionRetentionHolds: {
+    list(sessionId: string): Promise<RetentionHold[]>;
+    /** Every session that currently has at least one hold. */
+    listSessionIds(): Promise<string[]>;
+    /** Whole-set replacement in one transaction; `[]` releases every hold. */
+    replace(sessionId: string, holds: RetentionHold[]): Promise<void>;
+  };
   crossRemoteAudit: {
     insert(entry: CrossRemoteAuditEntry): Promise<void>;
     listByTarget(targetRemoteId: string, limit?: number): Promise<CrossRemoteAuditRow[]>;
@@ -1156,6 +1175,8 @@ export interface Storage {
     create: (opts: { id: string; project_id: string; name: string; cron_expr: string; timezone: string; run_type: ScheduledTaskRunType; prompt_provider?: PromptProvider | null; content: string; cwd_mode: ScheduledTaskCwdMode; branch?: string | null; directory?: string | null; timeout_seconds?: number; enabled?: boolean; target?: string; source?: { session_id: string; tool_use_id: string } | null }) => Promise<ScheduledTask>;
     /** Project-scoped provenance lookup backing the proposal card's state recovery. */
     getBySource: (projectId: string, sessionId: string, toolUseId: string) => Promise<ScheduledTask | undefined>;
+    /** Ids of every schedule proposed from a session — its retention holders. */
+    listIdsBySourceSession: (sessionId: string) => Promise<string[]>;
     getByProjectId: (projectId: string) => Promise<ScheduledTask[]>;
     /** Stable project-scoped list capped in SQL. */
     listByProject: (projectId: string, limit: number) => Promise<ScheduledTask[]>;
@@ -1793,6 +1814,8 @@ export interface Storage {
     applyCatalogSnapshot(projectId: string, targetId: string, snapshot: SearchCatalogSnapshot, collectedAt?: number): Promise<void>;
     recordSyncFailure(projectId: string, targetId: string, error: string): Promise<void>;
     getSyncStates(projectIds: string[]): Promise<SearchSyncState[]>;
+    /** Cached titles of remote sessions (soft-deleted rows omitted), keyed by local id. */
+    getCachedSessionTitles(localSessionIds: readonly string[]): Promise<Map<string, string | null>>;
     updateCachedSessionTitle(localSessionId: string, title: string | null): Promise<void>;
     /**
      * Write-through for a star toggled through this server, so the Starred card

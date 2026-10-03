@@ -28,6 +28,7 @@ import {
   renameSession,
   deleteSession,
   setSessionFavorited,
+  api,
   type BranchSessionSummary,
 } from "@/lib/api";
 
@@ -81,6 +82,28 @@ export function SessionHistoryDropdown({
   // the id) so the dialog can keep showing its title while the row animates
   // out of the reloaded list underneath.
   const [pendingDelete, setPendingDelete] = useState<BranchSessionSummary | null>(null);
+  // Schedules proposed from the session awaiting delete, so the dialog can
+  // say they'll lose their source link. Retention holds don't block a manual
+  // delete — this is the only place the user hears about them.
+  const [pendingDeleteSchedules, setPendingDeleteSchedules] = useState<{ sessionId: string; count: number } | null>(null);
+  const pendingDeleteId = pendingDelete?.id ?? null;
+  useEffect(() => {
+    if (!pendingDeleteId) return;
+    let stale = false;
+    api.getSchedules(projectId).then(
+      (schedules) => {
+        if (stale) return;
+        const count = schedules.filter((s) => s.source_session_id === pendingDeleteId).length;
+        setPendingDeleteSchedules({ sessionId: pendingDeleteId, count });
+      },
+      () => undefined,
+    );
+    return () => {
+      stale = true;
+    };
+  }, [projectId, pendingDeleteId]);
+  const sourcedScheduleCount =
+    pendingDeleteSchedules?.sessionId === pendingDeleteId ? pendingDeleteSchedules.count : 0;
   // Sessions whose row has landed in the list but is still awaiting its AI
   // title — surfaced via the self-heal refetch below the moment we observe a
   // freshly-appeared, untitled row. Drives the "Generating title…" loader so
@@ -498,6 +521,13 @@ export function SessionHistoryDropdown({
                 </span>{" "}
                 and its message history will be permanently deleted. This cannot
                 be undone.
+                {sourcedScheduleCount > 0 && (
+                  <span className="mt-2 block">
+                    {sourcedScheduleCount === 1
+                      ? "1 scheduled task was created from this conversation. It keeps running, but will no longer link back here."
+                      : `${sourcedScheduleCount} scheduled tasks were created from this conversation. They keep running, but will no longer link back here.`}
+                  </span>
+                )}
               </>
             ) : null}
           </AlertDialogDescription>

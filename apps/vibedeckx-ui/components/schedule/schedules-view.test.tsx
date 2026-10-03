@@ -291,3 +291,51 @@ describe("schedule run split view", () => {
     expect(detailPanel.querySelector("pre")?.textContent).toBe("plain output");
   });
 });
+
+describe("source session link", () => {
+  const renderWithSource = (source: Schedule["source_session"], onOpenSourceSession = vi.fn()) => {
+    root.render(
+      <SchedulesView
+        projectId="project-1"
+        schedules={[{ ...schedule, source_session_id: "sess-1", source_session: source }]}
+        loading={false}
+        selectedId={schedule.id}
+        onSelect={vi.fn()}
+        worktrees={[]}
+        onCreate={vi.fn()}
+        onUpdate={vi.fn()}
+        onDelete={vi.fn()}
+        onRunNow={vi.fn()}
+        createOpen={false}
+        onCreateOpenChange={vi.fn()}
+        onOpenSourceSession={onOpenSourceSession}
+      />,
+    );
+    return onOpenSourceSession;
+  };
+
+  it("opens the session a proposed schedule came from", async () => {
+    let onOpen!: ReturnType<typeof vi.fn>;
+    await act(async () => {
+      onOpen = renderWithSource({ id: "sess-1", title: "Fix flaky suite", branch: "feature-x", exists: true });
+    });
+    await flush();
+    const link = [...container.querySelectorAll("button")].find((b) => b.textContent === "Fix flaky suite");
+    await click(link ?? null);
+    expect(onOpen).toHaveBeenCalledWith("feature-x", "sess-1");
+  });
+
+  it("says so when the source session is gone", async () => {
+    await act(async () => {
+      renderWithSource({ id: "sess-1", title: null, branch: null, exists: false });
+    });
+    await flush();
+    expect(container.textContent).toContain("Source session deleted");
+  });
+
+  it("shows nothing for a hand-made schedule", async () => {
+    await act(async () => renderView());
+    await flush();
+    expect(container.textContent).not.toContain("Created from");
+  });
+});

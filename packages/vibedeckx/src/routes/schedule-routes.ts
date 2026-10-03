@@ -29,6 +29,13 @@ interface ScheduleBody {
 
 const SOURCE_ID_MAX = 200;
 
+interface SourceSessionSummary {
+  id: string;
+  title: string | null;
+  branch: string | null;
+  exists: boolean;
+}
+
 const validSourceId = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= SOURCE_ID_MAX && value.trim() === value;
 
@@ -87,6 +94,39 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return schedule;
   };
 
+  // Where each proposed schedule came from, for the source link on the
+  // schedules page. A deleted source (manual delete, or retention before the
+  // hold existed) comes back with exists=false rather than disappearing, so
+  // the page can say so. Remote titles come from the search cache — the hub
+  // has no other copy, and a missing title just renders as "Untitled".
+  const resolveSourceSessions = async (ids: string[]): Promise<Map<string, SourceSessionSummary>> => {
+    const unique = [...new Set(ids)];
+    const remoteIds = unique.filter((id) => id.startsWith("remote-"));
+    const remoteTitles = await fastify.storage.searchCache.getCachedSessionTitles(remoteIds);
+    // Checkout-first branch, like the sidebar's projection: a re-anchored
+    // workspace moves its sessions, the snapshot branch column doesn't.
+    const branchOf = async (row: { branch: string | null; workspace_checkout_id?: string | null } | undefined) => {
+      if (!row) return null;
+      const registered = row.workspace_checkout_id
+        ? await fastify.storage.workspaceRegistry.getCheckoutById(row.workspace_checkout_id)
+        : undefined;
+      return (registered ? registered.workspace.branch : row.branch) || null;
+    };
+    const out = new Map<string, SourceSessionSummary>();
+    await Promise.all(unique.map(async (id) => {
+      if (id.startsWith("remote-")) {
+        const mapping = await fastify.storage.remoteSessionMappings.getByLocal(id);
+        out.set(id, {
+          id, exists: !!mapping, branch: await branchOf(mapping), title: remoteTitles.get(id) ?? null,
+        });
+        return;
+      }
+      const session = await fastify.storage.agentSessions.getById(id);
+      out.set(id, { id, exists: !!session, branch: await branchOf(session), title: session?.title ?? null });
+    }));
+    return out;
+  };
+
   fastify.get<{ Params: { projectId: string } }>(
     "/api/projects/:projectId/schedules",
     async (req, reply) => {
@@ -97,9 +137,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       const schedules = await fastify.storage.scheduledTasks.getByProjectId(req.params.projectId);
       const lastRuns = await fastify.storage.scheduledTaskRuns.getLastByScheduleIds(schedules.map((s) => s.id));
+      const sources = await resolveSourceSessions(
+        schedules.flatMap((s) => (s.source_session_id ? [s.source_session_id] : [])),
+      );
       return reply.code(200).send({
         schedules: schedules.map((s) => ({
           ...s,
+          source_session: s.source_session_id ? sources.get(s.source_session_id) ?? null : null,
           last_run: lastRuns[s.id] ?? null,
           next_run_at: fastify.scheduler.nextRunAt(s.id),
           running: fastify.scheduler.isRunning(s.id),
@@ -164,10 +208,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       const newId = randomUUID();
-      const schedule = await fastify.storage.scheduledTasks.create({
+      const name = b.name.trim();
+      const insert = () => fastify.storage.scheduledTasks.create({
         id: newId,
         project_id: req.params.projectId,
-        name: b.name.trim(),
+        name,
         cron_expr: resolved.cron_expr,
         timezone: resolved.timezone,
         run_type: resolved.run_type as ScheduledTaskRunType,
@@ -181,12 +226,46 @@ const routes: FastifyPluginAsync = async (fastify) => {
         target,
         source,
       });
-      await fastify.scheduler.reschedule(schedule.id);
       // A different id back means the source pair already had a schedule: this
       // is a replayed confirmation, not a new creation. 200 (not 201) says so,
       // and the edits carried by the replay are deliberately ignored — the
       // first confirmation wins, so the outcome doesn't depend on arrival order.
+      let schedule: ScheduledTask;
+      if (source) {
+        // The proposing session must be held out of retention before the
+        // schedule counts as created. The row goes in first because the sync
+        // derives the hold set from it; if the hold doesn't land (worker
+        // offline), undo only a row THIS request inserted — a replay found an
+        // existing schedule and must not delete it — and let the user retry
+        // from the card. The follow-up sync withdraws a hold that may have
+        // landed after all (timeout); best-effort for the same reason.
+        //
+        // All of it runs in the session's slot, so a concurrent replay waits
+        // for the rollback and then inserts afresh instead of returning a row
+        // this request is about to delete.
+        try {
+          schedule = await fastify.retentionHolds.exclusive(source.session_id, async (syncNow) => {
+            const row = await insert();
+            try {
+              await syncNow();
+              return row;
+            } catch (error) {
+              if (row.id === newId) {
+                await fastify.storage.scheduledTasks.delete(row.id);
+                await syncNow().catch(() => undefined);
+              }
+              throw error;
+            }
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return reply.code(502).send({ error: `Could not protect the source session from retention: ${message}` });
+        }
+      } else {
+        schedule = await insert();
+      }
       const created = schedule.id === newId;
+      await fastify.scheduler.reschedule(schedule.id);
       if (created) {
         fastify.eventBus.emit({
           type: "schedule:changed", projectId: req.params.projectId, scheduleId: schedule.id, change: "created",
@@ -272,6 +351,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
       fastify.eventBus.emit({
         type: "schedule:changed", projectId: existing.project_id, scheduleId: req.params.id, change: "deleted",
       });
+      // Releasing the source session's hold never blocks the delete, and a
+      // failure isn't the user's to act on: the stale hold is released when
+      // the worker next connects (RetentionHoldSync.releaseStale).
+      if (existing.source_session_id) {
+        await fastify.retentionHolds.sync(existing.source_session_id).catch((error) => {
+          console.warn(`[RetentionHolds] release for ${existing.source_session_id} deferred:`, error);
+        });
+      }
       return reply.code(204).send();
     }
   );

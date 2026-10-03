@@ -131,6 +131,16 @@ export const createScheduledRepos = (
         .executeTakeFirst();
       return row ? mapTask(row) : undefined;
     },
+    listIdsBySourceSession: async (sessionId) => {
+      const rows = await kdb.selectFrom("scheduled_tasks").select("id")
+        .where("source_session_id", "=", sessionId)
+        // Always true for a proposed schedule; stated so the partial
+        // idx_scheduled_tasks_source can serve the lookup.
+        .where("source_tool_use_id", "is not", null)
+        .orderBy("id", "asc")
+        .execute();
+      return rows.map((row) => row.id);
+    },
     getByProjectId: async (projectId) => {
       const rows = await kdb.selectFrom("scheduled_tasks").selectAll()
         .where("project_id", "=", projectId)

@@ -154,6 +154,10 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   // NOTHING, so an old worker can never look like it deleted its sessions.
   "http:PUT /api/settings/session-retention/apply": { since: "0.3.14", summary: "下发会话保留天数" },
   "http:GET /api/path/session-ids": { since: "0.3.14", summary: "会话 id 全量清单(对账用)" },
+  // Hub-computed hold set (schedules proposed from the session) that keeps a
+  // session out of the worker's own retention sweep — retention-holds.ts.
+  "http:PUT /api/path/retention-holds/:param": { since: "0.3.45", summary: "下发会话保留锁(防保留期清理)" },
+  "http:GET /api/path/retention-holds": { since: "0.3.45", summary: "列出持有保留锁的会话(释放过期锁)" },
 
   // --- Search / notifications / cross-remote ---
   "http:GET /api/path/search-catalog": { since: "0.2.0", summary: "搜索目录快照" },

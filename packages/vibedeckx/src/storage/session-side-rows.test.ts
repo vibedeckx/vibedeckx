@@ -7,7 +7,7 @@ import { createSqliteStorage } from "./sqlite.js";
 import type { Storage } from "./types.js";
 
 /**
- * Grants and touches key both local and `remote-` sessions, so no foreign key
+ * Grants, touches and retention holds key both local and `remote-` sessions, so no foreign key
  * can cascade them; every session delete path calls deleteSessionSideRows
  * instead (repositories/session-side-rows.ts). This drives each path once.
  * A new way of deleting sessions belongs here too.
@@ -30,18 +30,21 @@ describe("session side rows go with their session", () => {
     }
   };
 
-  /** Give a session both kinds of side row. */
+  /** Give a session every kind of side row. */
   const attach = async (sessionId: string) => {
     await storage.sessionRemoteGrants.replace(sessionId, "user-1", [machine]);
     await storage.sessionRemoteTouches.record(sessionId, "user-1", machine);
+    await storage.sessionRetentionHolds.replace(sessionId, [hold]);
   };
 
   const sideRows = async (sessionId: string) => ({
     grants: await storage.sessionRemoteGrants.list(sessionId),
     touches: await storage.sessionRemoteTouches.list(sessionId),
+    holds: await storage.sessionRetentionHolds.list(sessionId),
   });
-  const none = { grants: [], touches: [] };
-  const kept = () => ({ grants: [machine], touches: [machine] });
+  const hold = { kind: "schedule", id: "sch-1" };
+  const none = { grants: [], touches: [], holds: [] };
+  const kept = () => ({ grants: [machine], touches: [machine], holds: [hold] });
 
   const localSession = async (id: string) => {
     await storage.agentSessions.create({ id, project_id: "p1", branch: "" });
@@ -84,6 +87,8 @@ describe("session side rows go with their session", () => {
       raw("UPDATE agent_sessions SET activity_at = ? WHERE id = ?", Date.now() - 100 * DAY, id);
     }
     await storage.agentSessions.setFavorited("starred", true);
+    // A held session is never expired, so the deletable one must lose its hold.
+    await storage.sessionRetentionHolds.replace("old", []);
     const cutoff = Date.now() - 90 * DAY;
 
     expect(await storage.agentSessions.deleteIfExpired("old", cutoff)).toBe(true);

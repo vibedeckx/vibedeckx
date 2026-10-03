@@ -1400,6 +1400,10 @@ Please proceed step by step and let me know if there are any issues or conflicts
                   await deleteSchedule(id);
                   if (selectedScheduleId === id) setSelectedScheduleId(null);
                 }}
+                onOpenSourceSession={(branch, sessionId) => {
+                  setActiveView("workspace");
+                  selectBranchSession(branch, sessionId);
+                }}
                 onRunNow={runScheduleNow}
                 createOpen={scheduleCreateOpen}
                 onCreateOpenChange={setScheduleCreateOpen}

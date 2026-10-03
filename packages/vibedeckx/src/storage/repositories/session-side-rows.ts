@@ -17,4 +17,5 @@ export async function deleteSessionSideRows(trx: Kysely<DB>, sessionIds: readonl
   const ids = [...sessionIds];
   await trx.deleteFrom("agent_session_remote_grants").where("session_id", "in", ids).execute();
   await trx.deleteFrom("agent_session_remote_touches").where("session_id", "in", ids).execute();
+  await trx.deleteFrom("agent_session_retention_holds").where("session_id", "in", ids).execute();
 }

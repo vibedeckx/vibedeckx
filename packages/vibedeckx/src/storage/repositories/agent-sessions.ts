@@ -452,13 +452,19 @@ const touchActivityAt = () => sql<number>`max(activity_at, ${nowActivityAt()})`;
  * is load-bearing: `workflow_runs.source_session_id` / `reviewer_session_id`
  * carry no foreign key, and an active run's participants are routinely
  * `stopped` while waiting for the reviewer, so without it retention would
- * delete a session the engine is still delivering to.
+ * delete a session the engine is still delivering to. The holds clause is
+ * the generic counterpart of `favorited_at`: something outside the session
+ * (a schedule proposed from it) still points at it.
  */
 const retentionPredicate = (cutoff: number) => sql<SqlBool>`
   activity_at < ${cutoff}
   AND favorited_at IS NULL
   AND status <> 'running'
   AND ${visibleLifecycle}
+  AND NOT EXISTS (
+    SELECT 1 FROM agent_session_retention_holds h
+    WHERE h.session_id = agent_sessions.id
+  )
   AND NOT EXISTS (
     SELECT 1 FROM workflow_runs wr
     WHERE wr.status IN (${sql.join(WORKFLOW_ACTIVE_STATUSES.map((s) => sql`${s}`))})

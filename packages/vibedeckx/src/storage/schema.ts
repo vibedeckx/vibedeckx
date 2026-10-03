@@ -400,6 +400,20 @@ export interface AgentSessionRemoteTouchesTable {
   last_used_at: string;
 }
 
+/**
+ * Why a session must survive retention: one row per (session, holder), e.g. a
+ * schedule an agent proposed from that session. Lives on the machine that owns
+ * the session — the hub writes it locally or pushes the whole set to the
+ * worker — because retention runs where the sessions live. No FK, same reason
+ * as the grants table; every session delete path removes the rows.
+ */
+export interface AgentSessionRetentionHoldsTable {
+  session_id: string;
+  holder_kind: string;
+  holder_id: string;
+  created_at: string;
+}
+
 export interface RemoteSessionCreationIntentsTable {
   local_session_id: string;
   remote_session_id: string;
@@ -690,6 +704,7 @@ export interface DB {
   remote_session_creation_intents: RemoteSessionCreationIntentsTable;
   agent_session_remote_grants: AgentSessionRemoteGrantsTable;
   agent_session_remote_touches: AgentSessionRemoteTouchesTable;
+  agent_session_retention_holds: AgentSessionRetentionHoldsTable;
   remote_reviewer_creation_intents: RemoteReviewerCreationIntentsTable;
   notification_outbox: NotificationOutboxTable;
   notifications: NotificationsTable;

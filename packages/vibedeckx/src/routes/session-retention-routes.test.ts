@@ -169,4 +169,28 @@ describe("session retention routes", () => {
       expect(res.statusCode).toBe(400);
     });
   });
+
+  describe("retention holds (hub → worker)", () => {
+    const put = (sessionId: string, holds: unknown) => app.inject({
+      method: "PUT", url: `/api/path/retention-holds/${sessionId}`, payload: { holds },
+    });
+
+    it("replaces a session's holds and lists the sessions that have any", async () => {
+      await storage.agentSessions.create({ id: "s1", project_id: "p1", branch: "dev" });
+      await storage.agentSessions.create({ id: "s2", project_id: "p1", branch: "dev" });
+      expect((await put("s1", [{ kind: "schedule", id: "a" }])).statusCode).toBe(204);
+      expect((await put("s2", [{ kind: "schedule", id: "b" }])).statusCode).toBe(204);
+      expect((await put("s2", [])).statusCode).toBe(204);
+
+      const res = await app.inject({ method: "GET", url: "/api/path/retention-holds" });
+      expect(res.json()).toEqual({ sessionIds: ["s1"] });
+      expect(await storage.sessionRetentionHolds.list("s1")).toEqual([{ kind: "schedule", id: "a" }]);
+    });
+
+    it("404s an unknown session and 400s a malformed set", async () => {
+      await storage.agentSessions.create({ id: "s1", project_id: "p1", branch: "dev" });
+      expect((await put("missing", [])).statusCode).toBe(404);
+      expect((await put("s1", [{ kind: "schedule" }])).statusCode).toBe(400);
+    });
+  });
 });

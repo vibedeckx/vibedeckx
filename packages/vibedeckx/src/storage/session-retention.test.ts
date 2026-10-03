@@ -73,6 +73,30 @@ describe("session retention predicate", () => {
     expect(await storage.agentSessions.getById("old")).toBeDefined();
   });
 
+  it("exempts held sessions until the last hold is released", async () => {
+    await createExpired("old");
+    await storage.sessionRetentionHolds.replace("old", [
+      { kind: "schedule", id: "a" }, { kind: "schedule", id: "b" },
+    ]);
+    expect(await candidateIds()).toEqual([]);
+    expect(await storage.agentSessions.deleteIfExpired("old", cutoff)).toBe(false);
+
+    await storage.sessionRetentionHolds.replace("old", [{ kind: "schedule", id: "b" }]);
+    expect(await candidateIds()).toEqual([]);
+
+    await storage.sessionRetentionHolds.replace("old", []);
+    expect(await candidateIds()).toEqual(["old"]);
+    expect(await storage.agentSessions.deleteIfExpired("old", cutoff)).toBe(true);
+  });
+
+  it("does not let a hold block a manual delete", async () => {
+    await createExpired("old");
+    await storage.sessionRetentionHolds.replace("old", [{ kind: "schedule", id: "a" }]);
+    await storage.agentSessions.delete("old");
+    expect(await storage.agentSessions.getById("old")).toBeUndefined();
+    expect(await storage.sessionRetentionHolds.list("old")).toEqual([]);
+  });
+
   it("exempts running sessions", async () => {
     await createExpired("old");
     await storage.agentSessions.updateStatusPreservingTimestamp("old", "running");

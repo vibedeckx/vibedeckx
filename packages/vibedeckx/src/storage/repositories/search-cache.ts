@@ -526,6 +526,18 @@ export const createSearchCacheRepos = (
         .execute();
     },
 
+    getCachedSessionTitles: async (localSessionIds) => {
+      const titles = new Map<string, string | null>();
+      if (localSessionIds.length === 0) return titles;
+      const rows = await kdb.selectFrom("session_search_cache")
+        .select(["local_session_id", "title"])
+        .where("local_session_id", "in", [...localSessionIds])
+        .where("deleted_at", "is", null)
+        .execute();
+      for (const row of rows) titles.set(row.local_session_id, row.title);
+      return titles;
+    },
+
     // Opportunistic freshness: called where a title transits the server
     // anyway (remote title PATCH proxy + local AI title generation).
     // UPDATE-only — a title alone must not fabricate a session's existence.

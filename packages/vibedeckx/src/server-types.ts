@@ -14,6 +14,7 @@ import type { SchedulerService } from "./scheduler.js";
 import type { NotificationService } from "./notification-service.js";
 import type { RemoteNotificationSync } from "./remote-notification-sync.js";
 import type { SessionRetentionSweeper } from "./session-retention.js";
+import type { RetentionHoldSync } from "./retention-holds.js";
 import type { RemoteSessionReconciler } from "./remote-session-reconcile-service.js";
 import type { RemoteLivenessTracker } from "./remote-liveness-reconcile.js";
 import type { RemoteMcpSessionManager } from "./remote-mcp-session-manager.js";
@@ -59,6 +60,7 @@ declare module "fastify" {
     notificationService: NotificationService;
     remoteNotificationSync: RemoteNotificationSync;
     sessionRetention: SessionRetentionSweeper;
+    retentionHolds: RetentionHoldSync;
     agentSessionLifecycle: AgentSessionLifecycleService;
     remoteSessionReconciler: RemoteSessionReconciler;
     remoteMcpSessionManager: RemoteMcpSessionManager;
