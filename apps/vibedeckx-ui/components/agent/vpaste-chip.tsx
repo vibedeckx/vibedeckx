@@ -1,6 +1,6 @@
 "use client";
 
-import { FileText, Paperclip, Server } from "lucide-react";
+import { CalendarClock, FileText, Paperclip, Server } from "lucide-react";
 
 interface VPasteChipProps {
   path: string;
@@ -36,6 +36,20 @@ export function RemoteGrantMeta({ names }: { names: string }) {
     >
       <Server className="w-3 h-3 shrink-0 self-center" />
       <span className="truncate">{names}</span>
+    </span>
+  );
+}
+
+/**
+ * The Schedule chip's `<vschedule>` block, shown on the message header the same
+ * way: the instruction prose is for the agent, the user only needs to see that
+ * this message asked for a schedule.
+ */
+export function ScheduleIntentMeta() {
+  return (
+    <span className="flex shrink-0 items-baseline gap-1 text-xs font-normal text-muted-foreground">
+      <CalendarClock className="w-3 h-3 shrink-0 self-center" />
+      Schedule
     </span>
   );
 }

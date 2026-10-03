@@ -24,6 +24,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { translateText, type WorkflowRun } from "@/lib/api";
+import { SCHEDULE_INTENT_BLOCK } from "@/lib/schedule-intent";
 import { toast } from "sonner";
 import type { EnsuredAgentSession, PreparedConversation } from "@/hooks/use-agent-session";
 
@@ -324,6 +325,14 @@ function makeRun(status: WorkflowRun["status"]): WorkflowRun {
   };
 }
 
+/** The + menu's Translate item (the menu also holds Schedule). */
+function translateAction(container: HTMLElement): HTMLElement {
+  const item = Array.from(container.querySelectorAll<HTMLElement>('[data-testid="prompt-action"]'))
+    .find((el) => el.textContent === "Translate");
+  if (!item) throw new Error("Translate action not rendered");
+  return item;
+}
+
 function q(container: HTMLElement, testid: string): HTMLElement | null {
   return container.querySelector(`[data-testid="${testid}"]`);
 }
@@ -506,6 +515,110 @@ describe("AgentConversation pendingModel", () => {
       expect(draftState.set).toHaveBeenLastCalledWith("resend me");
     });
 
+    describe("Schedule chip", () => {
+      const scheduleAction = (container: HTMLElement) =>
+        Array.from(container.querySelectorAll<HTMLElement>('[data-testid="prompt-action"]'))
+          .find((el) => /schedule/i.test(el.textContent ?? ""))!;
+
+      it("sends an empty message as the bare instruction block, then disarms", async () => {
+        hookState.session = { id: "s1" };
+        hookState.status = "stopped";
+        hookState.messages = [{ type: "user" }];
+
+        await render("pA", "featA");
+        await act(async () => { scheduleAction(container).click(); });
+        expect(scheduleAction(container).textContent).toBe("Cancel schedule");
+        await act(async () => {
+          await promptState.submit!({ text: "", files: [] });
+        });
+
+        expect(sendMessage.mock.calls[0]?.[0]).toBe(SCHEDULE_INTENT_BLOCK);
+        expect(scheduleAction(container).textContent).toBe("Schedule");
+      });
+
+      it("appends the block after what was typed", async () => {
+        hookState.session = { id: "s1" };
+        hookState.status = "stopped";
+        hookState.messages = [{ type: "user" }];
+
+        await render("pA", "featA");
+        await act(async () => { scheduleAction(container).click(); });
+        await act(async () => {
+          await promptState.submit!({ text: "every weekday at 9", files: [] });
+        });
+
+        expect(sendMessage.mock.calls[0]?.[0]).toBe(`every weekday at 9\n\n${SCHEDULE_INTENT_BLOCK}`);
+      });
+
+      it("comes back with the draft when delivery fails", async () => {
+        hookState.session = { id: "s1" };
+        hookState.status = "stopped";
+        hookState.messages = [{ type: "user" }];
+        sendMessage.mockResolvedValueOnce(false);
+
+        await render("pA", "featA");
+        await act(async () => { scheduleAction(container).click(); });
+        await act(async () => {
+          await promptState.submit!({ text: "nightly", files: [] });
+        });
+
+        expect(scheduleAction(container).textContent).toBe("Cancel schedule");
+      });
+
+      it("stays with the latest session when New Conversation clears it (no URL session)", async () => {
+        hookState.session = { id: "s1" };
+        hookState.status = "stopped";
+        hookState.messages = [{ type: "user" }];
+
+        // No sessionId prop: the window shows the branch's latest session.
+        await render("pA", "featA", null);
+        await act(async () => { scheduleAction(container).click(); });
+        expect(scheduleAction(container).textContent).toBe("Cancel schedule");
+
+        // New Conversation: the hook drops its session, the URL stays empty.
+        hookState.session = null;
+        hookState.status = "idle";
+        hookState.messages = [];
+        await render("pA", "featA", null);
+
+        expect(scheduleAction(container).textContent).toBe("Schedule");
+      });
+
+      it("does not follow the user to another execution target", async () => {
+        hookState.session = { id: "s1" };
+        hookState.status = "stopped";
+        hookState.messages = [{ type: "user" }];
+        const renderOn = (agentMode: string) => act(async () => {
+          root.render(
+            <AgentConversation
+              projectId="pA"
+              branch="featA"
+              project={{ id: "pA", name: "pA", path: "/tmp/pA", agent_mode: agentMode } as never}
+            />,
+          );
+        });
+
+        await renderOn("local");
+        await act(async () => { scheduleAction(container).click(); });
+        expect(scheduleAction(container).textContent).toBe("Cancel schedule");
+        await renderOn("remote-1");
+
+        expect(scheduleAction(container).textContent).toBe("Schedule");
+      });
+
+      it("does not follow the user to another branch", async () => {
+        hookState.session = { id: "s1" };
+        hookState.status = "stopped";
+        hookState.messages = [{ type: "user" }];
+
+        await render("pA", "featA");
+        await act(async () => { scheduleAction(container).click(); });
+        await render("pA", "featB");
+
+        expect(scheduleAction(container).textContent).toBe("Schedule");
+      });
+    });
+
     it("leaves the composer empty when delivery succeeds", async () => {
       hookState.session = { id: "s1" };
       hookState.status = "stopped";
@@ -625,7 +738,7 @@ describe("AgentConversation pendingModel", () => {
       "does not start a session when translation fails (%s)",
       async (failure) => {
         await renderFirstSend();
-        await act(async () => { q(container, "prompt-action")!.click(); });
+        await act(async () => { translateAction(container).click(); });
         if (failure === "returned-error") {
           vi.mocked(translateText).mockResolvedValue({ translatedText: "", error: "failed" });
         } else {
@@ -689,7 +802,7 @@ describe("AgentConversation pendingModel", () => {
 
     it("restores the same branch draft and resets submit state after a session switch", async () => {
       await renderFirstSend();
-      await act(async () => { q(container, "prompt-action")!.click(); });
+      await act(async () => { translateAction(container).click(); });
       let rejectTranslation!: (error: Error) => void;
       vi.mocked(translateText).mockImplementationOnce(() => new Promise((_, reject) => {
         rejectTranslation = reject;
@@ -873,7 +986,7 @@ describe("AgentConversation pendingModel", () => {
 
       // Hold the submission open inside translation, the way a slow network
       // would.
-      await act(async () => { q(container, "prompt-action")!.click(); });
+      await act(async () => { translateAction(container).click(); });
       let rejectTranslation!: (error: Error) => void;
       vi.mocked(translateText).mockImplementationOnce(() => new Promise((_, reject) => {
         rejectTranslation = reject;

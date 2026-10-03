@@ -44,7 +44,8 @@ import {
 import type { AttachmentItem, PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
 import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, CalendarClock } from "lucide-react";
+import { appendScheduleIntent } from "@/lib/schedule-intent";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
   DropdownMenu,
@@ -405,6 +406,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       setPendingTitleSessionId(null);
     },
   });
+
+  // The Schedule chip applies to the next message of the conversation it was
+  // picked in, so it is held against that conversation — the one on screen,
+  // which without a URL session is the branch's latest — and its execution
+  // target: switching away, New Conversation, or the send itself leaves it
+  // behind instead of carrying it into another one.
+  const scheduleKey = `${projectId}::${branch}::${sessionTarget}::${session?.id ?? ""}`;
+  const [scheduleArmedFor, setScheduleArmedFor] = useState<string | null>(null);
+  const scheduleArmed = scheduleArmedFor === scheduleKey;
+
   // Older test doubles/plugins may not expose window metadata yet.
   const messageEntryIndices = loadedMessageEntryIndices ?? messages.map((_, index) => index);
 
@@ -1041,14 +1052,22 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     const hasFiles = message.files.length > 0;
     const hasPastes = pastes.length > 0;
     const trimmedRaw = rawText.trim();
-    if (!trimmedRaw && !hasFiles) return;
+    // With the Schedule chip on an existing conversation the message may be
+    // empty: "schedule what we just did" is the whole request.
+    const scheduling = scheduleArmed;
+    const scheduleFromHistory = scheduling && !!session;
+    if (!trimmedRaw && !hasFiles && !scheduleFromHistory) return;
 
     const submissionToken = Symbol("agent-submission");
     activeSubmissionRef.current = submissionToken;
     setIsSubmitting(true);
     try {
     setInput("");
-    inputHistory.push(trimmedRaw);
+    if (trimmedRaw) inputHistory.push(trimmedRaw);
+    if (scheduling) setScheduleArmedFor(null);
+    const restoreSchedule = () => {
+      if (scheduling) setScheduleArmedFor(scheduleKey);
+    };
 
     // Always overlay "working" — even when the session is already running, the
     // optimistic update overrides the "idle" overlay set by New Conversation
@@ -1128,6 +1147,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       if (isOriginDraftDisplayed(submissionOrigin)) {
         toast.error(title, { description: error.message });
         setInput(rawText);
+        restoreSchedule();
       }
       returnDetached();
       throw error;
@@ -1265,6 +1285,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       }
     }
 
+    // After translation: the block is written for the agent, not the user.
+    if (scheduling) content = appendScheduleIntent(content);
+
     if (!session) {
       // An identity prepared for an upload is activated with the instruction;
       // one left over from settings the user has since changed is dropped so
@@ -1300,6 +1323,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         // keeps the attachments (already uploaded) in the composer.
         if (isOriginDraftDisplayed(submissionOrigin)) {
           setInput(rawText);
+          restoreSchedule();
           setPastes(capturedPastes);
           setNextPasteId(capturedNextPasteId);
         }
@@ -1322,6 +1346,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         // draft has to come back so a retry doesn't need history recall.
         if (isOriginDraftDisplayed(submissionOrigin)) {
           setInput(rawText);
+          restoreSchedule();
           setPastes(capturedPastes);
           setNextPasteId(capturedNextPasteId);
         }
@@ -1816,6 +1841,20 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 </button>
               </div>
             )}
+            {/* Schedule badge row — only while armed; one-shot, cleared on send */}
+            {scheduleArmed && (
+              <div className="flex items-center pl-12 pr-2 pt-1.5 pb-0.5">
+                <button
+                  type="button"
+                  onClick={() => setScheduleArmedFor(null)}
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2.5 py-0.5 text-xs font-medium hover:bg-blue-500/20 transition-colors"
+                >
+                  <CalendarClock className="size-3" />
+                  Schedule
+                  <X className="size-3" />
+                </button>
+              </div>
+            )}
             {/* Input row: [+ button] [textarea] [submit button] */}
             <div className="flex w-full items-center">
               <PromptInputActionMenu>
@@ -1830,6 +1869,12 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       sourceRemoteId={sourceRemoteId}
                     />
                   )}
+                  <PromptInputActionMenuItem
+                    onSelect={() => setScheduleArmedFor(scheduleArmed ? null : scheduleKey)}
+                  >
+                    <CalendarClock className="mr-2 size-4" />
+                    {scheduleArmed ? "Cancel schedule" : "Schedule"}
+                  </PromptInputActionMenuItem>
                   <PromptInputActionMenuItem
                     onSelect={() => {
                       setTranslateEnabled(!translateEnabled);
@@ -1847,9 +1892,13 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   onPasteText={handlePasteText}
                   onKeyDown={inputHistory.handleKeyDown}
                   placeholder={
-                    session
-                      ? "Ask the agent to help with your code..."
-                      : "Type your first message to start..."
+                    scheduleArmed
+                      ? session
+                        ? "What should run, and how often? Leave empty to schedule what this conversation did"
+                        : "What should run, and how often? e.g. every weekday at 9am, run the tests and report failures"
+                      : session
+                        ? "Ask the agent to help with your code..."
+                        : "Type your first message to start..."
                   }
                   className="pr-12"
                   style={{ fontSize: "var(--conv-font-size, 14px)" }}
@@ -1867,7 +1916,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               >
                 <PromptInputSubmit
                   className="pointer-events-auto"
-                  disabled={(!input.trim() && !isLoading) || isTranslating || isSubmitting || uploads.pending}
+                  disabled={(!input.trim() && !(scheduleArmed && session) && !isLoading) || isTranslating || isSubmitting || uploads.pending}
                   status={isSubmitting || isTranslating || uploads.pending ? "submitted" : isLoading ? "streaming" : "ready"}
                 />
               </div>

@@ -8,6 +8,13 @@ import { stripRemoteGrantContext } from "../cross-remote-grant-context.js";
 type AnyLanguageModel = any;
 
 const TITLE_MAX_CHARS = 60;
+
+/**
+ * The composer's Schedule chip appends this block to the message it sends: an
+ * instruction for the agent to turn the conversation into a propose_schedule
+ * call. Machine-addressed like <vremotes>, so it never reaches a title.
+ */
+const VSCHEDULE_BLOCK_RE = /<vschedule(?:\s[^>]*)?>[\s\S]*?<\/vschedule>/g;
 const AI_TIMEOUT_MS = 15_000;
 const MAX_INPUT_CHARS = 2000;
 
@@ -48,8 +55,9 @@ export function extractUserText(content: string | ContentPart[]): string {
       .join(" ");
   // The hub appends a <vremotes> grant block to every user message of a
   // granted session. It is machine-addressed context, not something the user
-  // wrote — titles and review briefs must not see it.
-  return stripRemoteGrantContext(text);
+  // wrote — titles and review briefs must not see it. Same for the Schedule
+  // chip's instruction block.
+  return stripRemoteGrantContext(text.replace(VSCHEDULE_BLOCK_RE, ""));
 }
 
 /**

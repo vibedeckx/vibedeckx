@@ -39,7 +39,8 @@ import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./
 import { ZoomableImage } from "./zoomable-image";
 import { SpeakButton, speakOwnerKey } from "./speak-button";
 import { useTtsOwnedBy } from "@/lib/tts/tts-player";
-import { VPasteChip, RemoteGrantMeta, splitVPasteMarkers, takeRemotesMarker } from "./vpaste-chip";
+import { VPasteChip, RemoteGrantMeta, ScheduleIntentMeta, splitVPasteMarkers, takeRemotesMarker } from "./vpaste-chip";
+import { takeScheduleMarker } from "@/lib/schedule-intent";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
 interface AgentMessageProps {
@@ -151,6 +152,13 @@ function renderBody(message: AgentMessage, messageIndex: number, streaming: bool
   }
 }
 
+/** Take the `<vremotes>` and `<vschedule>` blocks out of user text for the header. */
+function takeHeaderBlocks(text: string): { text: string; remoteNames: string | null; scheduled: boolean } {
+  const remotes = takeRemotesMarker(text);
+  const schedule = takeScheduleMarker(remotes.text);
+  return { text: schedule.text, remoteNames: remotes.names, scheduled: schedule.found };
+}
+
 function renderTextWithVPaste(text: string) {
   const segments = splitVPasteMarkers(text);
   if (segments.length === 1 && segments[0].kind === "text") {
@@ -205,12 +213,15 @@ function UserMessage({
     );
   }
   // The hub appends a `<vremotes>` block to every message of a session with
-  // grants; it belongs in the header, so take it out of the body first.
+  // grants, and the Schedule chip a `<vschedule>` block; both belong in the
+  // header, so take them out of the body first.
   let remoteNames: string | null = null;
+  let scheduled = false;
   let body: string | ContentPart[];
   if (typeof content === "string") {
-    const taken = takeRemotesMarker(content);
-    remoteNames = taken.names;
+    const taken = takeHeaderBlocks(content);
+    remoteNames = taken.remoteNames;
+    scheduled = taken.scheduled;
     body = taken.text;
   } else {
     body = [];
@@ -219,10 +230,12 @@ function UserMessage({
         body.push(part);
         continue;
       }
-      const taken = takeRemotesMarker(part.text);
-      if (taken.names !== null) remoteNames = taken.names;
-      // A part that was only the block leaves nothing to render.
-      if (taken.names === null || taken.text.length > 0) body.push({ ...part, text: taken.text });
+      const taken = takeHeaderBlocks(part.text);
+      if (taken.remoteNames !== null) remoteNames = taken.remoteNames;
+      if (taken.scheduled) scheduled = true;
+      // A part that was only a block leaves nothing to render.
+      const hadBlock = taken.remoteNames !== null || taken.scheduled;
+      if (!hadBlock || taken.text.length > 0) body.push({ ...part, text: taken.text });
     }
   }
   return (
@@ -235,6 +248,12 @@ function UserMessage({
             line boxes, and centering them lifts the smaller text off the line. */}
         <p className="flex min-w-0 items-baseline gap-1.5 text-sm font-medium text-foreground mb-1">
           <span className="shrink-0">You</span>
+          {scheduled && (
+            <>
+              <span className="shrink-0 text-muted-foreground/60" aria-hidden>·</span>
+              <ScheduleIntentMeta />
+            </>
+          )}
           {remoteNames && (
             <>
               <span className="shrink-0 text-muted-foreground/60" aria-hidden>·</span>

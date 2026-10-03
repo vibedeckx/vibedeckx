@@ -100,4 +100,9 @@ describe("cross-remote grant context", () => {
     expect(extractUserText(delivered)).toBe("fix the build");
     expect(stripRemoteGrantContext("a\n<vremotes>\nx\n</vremotes>")).toBe("a");
   });
+
+  it("titles also skip the composer's Schedule chip block", () => {
+    expect(extractUserText("watch the build\n\n<vschedule>\ncall propose_schedule\n</vschedule>")).toBe("watch the build");
+    expect(extractUserText("<vschedule>\nx\n</vschedule>\n\n<vremotes names=\"a\">\ny\n</vremotes>")).toBe("");
+  });
 });
