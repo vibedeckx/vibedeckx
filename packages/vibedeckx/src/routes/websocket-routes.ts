@@ -9,8 +9,8 @@ import {
 } from "./executor-stream-handlers.js";
 import type { AgentWsInput } from "../agent-types.js";
 import { userOwnsProcess, userOwnsSession, verifyWsToken, authenticateWs, processOwnerScope } from "./ws-authz.js";
-import { connectPersistentRemoteWs } from "../remote-agent-sessions.js";
-import { reconcileRemoteLiveness } from "../remote-liveness-reconcile.js";
+import { connectPersistentRemoteWs, ensureRemoteAgentStream } from "../remote-agent-sessions.js";
+import { reconcileRemoteLiveness, type AliveAnswerSession } from "../remote-liveness-reconcile.js";
 import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { coverageAdmitsReplay } from "../remote-patch-cache.js";
 import { attachWsHeartbeat } from "../utils/ws-heartbeat.js";
@@ -28,6 +28,25 @@ export function resolveRemoteReplayCursor(
     epochMatches,
     replayAfter: epochMatches ? (afterEntryIndex ?? -1) : -1,
   };
+}
+
+/**
+ * After a tunnel-restore reconcile, reattach the stream of every session the
+ * worker reports as still running. Separate from the reconcile's status repair:
+ * a running turn needs its stream back so its eventual finish — status, and the
+ * taskCompleted that wakes commanders and workflows — is heard at all. Sessions
+ * with no hydrated mapping are skipped by `ensure` (ensureRemoteAgentStream
+ * no-ops), and those already streaming are left alone.
+ */
+export function restoreRunningRemoteStreams(
+  answers: Array<{ sessions: AliveAnswerSession[] }>,
+  ensure: (localSessionId: string) => void,
+): void {
+  for (const { sessions } of answers) {
+    for (const session of sessions) {
+      if (session.status === "running") ensure(session.localSessionId);
+    }
+  }
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -56,8 +75,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // Re-establishing the streams above recovers nothing the worker already
     // said while they were down: a subscribe replays history and status, never
     // a liveness snapshot, and sessions with no cache entry (nobody reopened
-    // them since this process started) get no stream at all. Ask the worker
-    // which sessions still hold a process and announce the deaths we missed.
+    // them since this process started — every session, after a hub restart)
+    // get no stream at all. Ask the worker which sessions still hold a process
+    // and what state each is in: the reconcile announces missed deaths and
+    // re-announces statuses, so a turn that ended unheard stops showing blue.
     void reconcileRemoteLiveness(remoteServerId, {
       tracker: fastify.remoteLiveness,
       proxy: (serverId, remotePath) => proxyToRemoteAuto(
@@ -67,7 +88,28 @@ const routes: FastifyPluginAsync = async (fastify) => {
         undefined,
         { reverseConnectManager: fastify.reverseConnectManager },
       ),
-    }).catch((error) => console.warn("[RemoteLiveness] reconcile failed:", error));
+      // Same scope as the project `/alive` route: projects whose agent runs on
+      // this worker. No user filter — this is server maintenance.
+      listProjects: async (serverId) => {
+        const projects = (await fastify.storage.projects.getAll())
+          .filter((project) => project.agent_mode === serverId);
+        const rows: Array<{ projectId: string; remotePath: string }> = [];
+        for (const project of projects) {
+          const remote = await fastify.storage.projectRemotes.getByProjectAndServer(project.id, serverId);
+          if (remote) rows.push({ projectId: project.id, remotePath: remote.remote_path });
+        }
+        return rows;
+      },
+    }).then(({ answers }) => restoreRunningRemoteStreams(answers, (localSessionId) =>
+      ensureRemoteAgentStream(localSessionId, {
+        remoteSessionMap: fastify.remoteSessionMap,
+        remotePatchCache: fastify.remotePatchCache,
+        reverseConnectManager: fastify.reverseConnectManager,
+        eventBus: fastify.eventBus,
+        agentSessionManager: fastify.agentSessionManager,
+        storage: fastify.storage,
+      }),
+    )).catch((error) => console.warn("[RemoteLiveness] reconcile failed:", error));
   });
 
   // WebSocket routes must be registered after the websocket plugin is ready

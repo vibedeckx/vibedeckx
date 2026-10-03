@@ -143,7 +143,7 @@ describe("reconcileRemoteLiveness", () => {
       tracker, proxy: async () => { throw new Error("tunnel gone"); },
     });
 
-    expect(result).toEqual({ projects: 0, dead: [] });
+    expect(result).toEqual({ projects: 0, dead: [], answers: [] });
     expect(emit).not.toHaveBeenCalled();
   });
 
@@ -215,5 +215,153 @@ describe("reconcileRemoteLiveness", () => {
     await reconcileRemoteLiveness(SERVER, { tracker, proxy: async () => aliveAnswer([{ id: "a" }]) });
     expect(emit).toHaveBeenCalledTimes(1);
     expect(emit.mock.calls[0][0]).toMatchObject({ sessionId: C.localSessionId });
+  });
+});
+
+// A hub restart empties the tracker and the patch cache together, and that is
+// exactly when every session loses its stream: a turn that ends afterwards is
+// announced to nobody, and the browser keeps a blue "running" dot forever.
+describe("reconcileRemoteLiveness after a hub restart", () => {
+  const withStatus = (rows: Array<{ id: string; branch?: string | null; status?: string }>): RemoteLivenessProxyResult => ({
+    ok: true,
+    status: 200,
+    data: { complete: true, sessions: rows.map((r) => ({ id: r.id, branch: r.branch ?? null, status: r.status })) },
+  });
+
+  function coldTracker() {
+    const { bus, emit } = busSpy();
+    return { tracker: new RemoteLivenessTracker(bus), emit };
+  }
+
+  it("queries persisted projects even though the tracker is empty", async () => {
+    const { tracker } = coldTracker();
+    const proxy = vi.fn(async () => withStatus([]));
+
+    const result = await reconcileRemoteLiveness(SERVER, {
+      tracker, proxy, listProjects: async () => [{ projectId: PROJECT, remotePath: PATH }],
+    });
+
+    expect(proxy).toHaveBeenCalledWith(SERVER, PATH);
+    expect(result.projects).toBe(1);
+  });
+
+  // The case the running-only plan missed: the turn ended during the outage,
+  // the process stays resident, so the alive answer lists it as `stopped`.
+  it("re-announces a turn that finished while unobserved, process still resident", async () => {
+    const { tracker, emit } = coldTracker();
+
+    await reconcileRemoteLiveness(SERVER, {
+      tracker,
+      proxy: async () => withStatus([{ id: "a", branch: "3004", status: "stopped" }, { id: "b", status: "running" }]),
+      listProjects: async () => [{ projectId: PROJECT, remotePath: PATH }],
+    });
+
+    expect(emit.mock.calls.map((c) => c[0])).toEqual([
+      { type: "session:status", projectId: PROJECT, branch: "3004", sessionId: "remote-srv1-p1-a", status: "stopped" },
+      { type: "session:status", projectId: PROJECT, branch: null, sessionId: "remote-srv1-p1-b", status: "running" },
+    ]);
+  });
+
+  it("returns each answer for the caller's stream restoration", async () => {
+    const { tracker } = coldTracker();
+
+    const result = await reconcileRemoteLiveness(SERVER, {
+      tracker,
+      proxy: async () => withStatus([{ id: "b", status: "running" }]),
+      listProjects: async () => [{ projectId: PROJECT, remotePath: PATH }],
+    });
+
+    expect(result.answers).toEqual([{
+      projectId: PROJECT,
+      sessions: [{ localSessionId: "remote-srv1-p1-b", remoteSessionId: "b", branch: null, status: "running" }],
+    }]);
+  });
+
+  // A cold reconcile must not invent a baseline the hub never served, nor
+  // declare anything dead from one.
+  it("declares no deaths for a project the hub never served", async () => {
+    const { tracker, emit } = coldTracker();
+
+    const result = await reconcileRemoteLiveness(SERVER, {
+      tracker,
+      proxy: async () => withStatus([]),
+      listProjects: async () => [{ projectId: PROJECT, remotePath: PATH }],
+    });
+
+    expect(result.dead).toEqual([]);
+    expect(emit).not.toHaveBeenCalled();
+    expect(tracker.entriesFor(SERVER)).toEqual([]);
+  });
+
+  it("announces nothing from an answer a newer browser read overtook", async () => {
+    const { tracker, emit } = coldTracker();
+    const proxy = vi.fn(async () => {
+      tracker.accept(PROJECT, SERVER, PATH, [A], tracker.nextReadSeq()); // browser read lands first
+      return withStatus([{ id: "a", status: "running" }]);
+    });
+
+    const result = await reconcileRemoteLiveness(SERVER, {
+      tracker, proxy, listProjects: async () => [{ projectId: PROJECT, remotePath: PATH }],
+    });
+
+    expect(emit).not.toHaveBeenCalled();
+    expect(result.answers).toEqual([]);
+  });
+
+  it("still reconciles tracked projects when the project listing fails", async () => {
+    const { tracker, emit } = trackerWith([A]);
+
+    await reconcileRemoteLiveness(SERVER, {
+      tracker,
+      proxy: async () => withStatus([]),
+      listProjects: async () => { throw new Error("db down"); },
+    });
+
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "session:process", sessionId: A.localSessionId }));
+  });
+
+  // Two tunnel restores back to back after a cold boot: the newer query
+  // answers first. The older one must not resurrect "running".
+  it("orders overlapping cold reconciles, so an older answer cannot undo a newer one", async () => {
+    const { tracker, emit } = coldTracker();
+    let releaseOlder!: () => void;
+    const olderGate = new Promise<void>((resolve) => { releaseOlder = resolve; });
+    let call = 0;
+    const proxy = vi.fn(async () => {
+      call += 1;
+      if (call === 1) {
+        await olderGate;
+        return withStatus([{ id: "a", status: "running" }]);
+      }
+      return withStatus([{ id: "a", status: "stopped" }]);
+    });
+    const listProjects = async () => [{ projectId: PROJECT, remotePath: PATH }];
+
+    const older = reconcileRemoteLiveness(SERVER, { tracker, proxy, listProjects });
+    await vi.waitFor(() => expect(proxy).toHaveBeenCalledTimes(1));
+    await reconcileRemoteLiveness(SERVER, { tracker, proxy, listProjects });
+    releaseOlder();
+    const olderResult = await older;
+
+    expect(emit.mock.calls.map((c) => c[0].status)).toEqual(["stopped"]);
+    expect(olderResult.answers).toEqual([]);
+  });
+
+  // The baseline is judged when the answer lands, not when the round began.
+  it("diffs deaths against a baseline a browser created while discovery was in flight", async () => {
+    const { tracker, emit } = coldTracker();
+
+    await reconcileRemoteLiveness(SERVER, {
+      tracker,
+      proxy: async () => withStatus([]),
+      listProjects: async () => {
+        tracker.accept(PROJECT, SERVER, PATH, [A], tracker.nextReadSeq()); // browser read
+        return [{ projectId: PROJECT, remotePath: PATH }];
+      },
+    });
+
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+      type: "session:process", sessionId: A.localSessionId, alive: false,
+    }));
   });
 });

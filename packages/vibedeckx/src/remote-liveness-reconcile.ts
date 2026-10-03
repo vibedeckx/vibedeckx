@@ -48,6 +48,12 @@ interface TrackedProject {
 
 export class RemoteLivenessTracker {
   private readonly byProject = new Map<string, TrackedProject>();
+  /**
+   * Newest read id whose answer was acted on, per project — baseline or not. A
+   * reconcile of a project the hub never served must still be ordered against
+   * an overlapping one, without inventing a death baseline for it.
+   */
+  private readonly answeredSeq = new Map<string, number>();
   private seqCounter = 0;
   private readonly eventBus: EventBus | null;
 
@@ -78,6 +84,7 @@ export class RemoteLivenessTracker {
     const previous = this.byProject.get(projectId);
     if (previous && seq < previous.seq) return []; // overtaken by a newer read
     this.byProject.set(projectId, { remoteServerId, remotePath, sessions, seq });
+    this.markAnswered(projectId, seq);
     if (!previous) return [];
 
     const live = new Set(sessions.map((session) => session.remoteSessionId));
@@ -120,6 +127,49 @@ export class RemoteLivenessTracker {
     return this.accept(projectId, remoteServerId, remotePath, sessions, seq);
   }
 
+  /**
+   * True when an answer claimed with `seq` has been overtaken by a newer
+   * accepted one for this project — it must decide nothing, deaths or status.
+   */
+  isOvertaken(projectId: string, seq: number): boolean {
+    const current = Math.max(this.byProject.get(projectId)?.seq ?? 0, this.answeredSeq.get(projectId) ?? 0);
+    return seq < current;
+  }
+
+  /** Record that the answer read with `seq` was acted on, without touching the baseline. */
+  markAnswered(projectId: string, seq: number): void {
+    if (seq > (this.answeredSeq.get(projectId) ?? 0)) this.answeredSeq.set(projectId, seq);
+  }
+
+  /** Whether a browser read has given this project a death baseline. */
+  hasBaseline(projectId: string): boolean {
+    return this.byProject.has(projectId);
+  }
+
+  /**
+   * Announce each session's current status as the worker reports it.
+   *
+   * The worker sends status changes only on each session's own stream, so a
+   * turn that ended while the hub held no stream for it (a hub restart, a
+   * tunnel outage) leaves every browser showing "running" forever. An
+   * authoritative alive answer carries the status, so re-announcing it repairs
+   * those rows. Deliberately independent of stream restoration: once status
+   * moves to a project-level channel this stays as the post-reconnect repair,
+   * while per-session streams only carry conversation content.
+   */
+  announceStatuses(projectId: string, sessions: AliveAnswerSession[]): void {
+    for (const session of sessions) {
+      if (!session.status) continue;
+      this.eventBus?.emit({
+        type: "session:status",
+        projectId,
+        branch: session.branch,
+        sessionId: session.localSessionId,
+        status: session.status,
+      });
+    }
+  }
+
   entriesFor(remoteServerId: string): Array<{ projectId: string } & TrackedProject> {
     const rows: Array<{ projectId: string } & TrackedProject> = [];
     for (const [projectId, tracked] of this.byProject) {
@@ -135,6 +185,23 @@ export interface RemoteLivenessProxyResult {
   data: unknown;
 }
 
+type AliveStatus = "running" | "stopped" | "error";
+
+interface AliveAnswerRow {
+  id: string;
+  branch: string | null;
+  /** Absent when the worker sent none or an unknown value: nothing to announce. */
+  status: AliveStatus | null;
+}
+
+/** One session of an accepted alive answer, resolved to the hub's local id. */
+export interface AliveAnswerSession {
+  localSessionId: string;
+  remoteSessionId: string;
+  branch: string | null;
+  status: AliveStatus | null;
+}
+
 export interface RemoteLivenessReconcileDeps {
   tracker: RemoteLivenessTracker;
   /**
@@ -143,21 +210,30 @@ export interface RemoteLivenessReconcileDeps {
    * registry can see it — this module only decides what to do with the answer.
    */
   proxy: (remoteServerId: string, remotePath: string) => Promise<RemoteLivenessProxyResult>;
+  /**
+   * The projects served from this worker, from persisted config. The tracker
+   * alone is not enough: it starts empty on every hub boot, and a restart is
+   * exactly when the sessions nobody has reopened lose their status changes.
+   */
+  listProjects?: (remoteServerId: string) => Promise<Array<{ projectId: string; remotePath: string }>>;
 }
 
-function parseAliveAnswer(data: unknown): Array<{ id: string; branch: string | null }> | null {
+function parseAliveAnswer(data: unknown): AliveAnswerRow[] | null {
   if (!data || typeof data !== "object") return null;
   const body = data as { sessions?: unknown; complete?: unknown };
   // `complete: false` is "this answer could not be enumerated" (a worker too
   // old to serve the route). Nothing may be declared dead from it.
   if (body.complete === false) return null;
   if (!Array.isArray(body.sessions)) return null;
-  const rows: Array<{ id: string; branch: string | null }> = [];
+  const rows: AliveAnswerRow[] = [];
   for (const entry of body.sessions) {
     if (!entry || typeof entry !== "object") continue;
-    const row = entry as { id?: unknown; branch?: unknown };
+    const row = entry as { id?: unknown; branch?: unknown; status?: unknown };
     if (typeof row.id !== "string") continue;
-    rows.push({ id: row.id, branch: typeof row.branch === "string" ? row.branch : null });
+    const status = row.status === "running" || row.status === "stopped" || row.status === "error"
+      ? row.status
+      : null;
+    rows.push({ id: row.id, branch: typeof row.branch === "string" ? row.branch : null, status });
   }
   return rows;
 }
@@ -166,42 +242,76 @@ function parseAliveAnswer(data: unknown): Array<{ id: string; branch: string | n
  * Re-ask one worker for its live sessions — the read nobody else is making.
  * A browser's own `/alive` repairs its project as it goes; this covers the
  * projects nobody has open when a tunnel comes back, which is exactly where a
- * death goes unheard.
+ * death or a finished turn goes unheard.
+ *
+ * Each accepted answer is used twice: deaths are diffed against the tracked
+ * baseline (only for projects the hub has served — a session it never reported
+ * alive is not its to declare dead), and every listed session's status is
+ * re-announced. The answers are also returned so the caller can restore
+ * streams; that is a separate concern and lives with the caller.
  *
  * Failure is never death: an offline worker, an error, or a `complete: false`
  * answer leaves that project's baseline untouched, so a transient tunnel
- * problem cannot blank the sidebar.
+ * problem cannot blank the sidebar. An answer overtaken by a newer read
+ * decides nothing at all.
  */
 export async function reconcileRemoteLiveness(
   remoteServerId: string,
   deps: RemoteLivenessReconcileDeps,
-): Promise<{ projects: number; dead: string[] }> {
+): Promise<{
+  projects: number;
+  dead: string[];
+  answers: Array<{ projectId: string; sessions: AliveAnswerSession[] }>;
+}> {
   const dead: string[] = [];
-  const tracked = deps.tracker.entriesFor(remoteServerId);
+  const answers: Array<{ projectId: string; sessions: AliveAnswerSession[] }> = [];
+  const targets = new Map<string, string>();
+  for (const entry of deps.tracker.entriesFor(remoteServerId)) targets.set(entry.projectId, entry.remotePath);
+  if (deps.listProjects) {
+    try {
+      for (const project of await deps.listProjects(remoteServerId)) {
+        if (!targets.has(project.projectId)) targets.set(project.projectId, project.remotePath);
+      }
+    } catch (error) {
+      console.warn(`[RemoteLiveness] project listing failed for ${remoteServerId}:`, error);
+    }
+  }
   let projects = 0;
 
-  for (const entry of tracked) {
-    if (entry.sessions.length === 0) continue;
+  for (const [projectId, remotePath] of targets) {
     const seq = deps.tracker.nextReadSeq();
     let result: RemoteLivenessProxyResult;
     try {
-      result = await deps.proxy(remoteServerId, entry.remotePath);
+      result = await deps.proxy(remoteServerId, remotePath);
     } catch (error) {
-      console.warn(`[RemoteLiveness] alive query failed for ${entry.projectId}:`, error);
+      console.warn(`[RemoteLiveness] alive query failed for ${projectId}:`, error);
       continue;
     }
     if (!result.ok) continue;
     const rows = parseAliveAnswer(result.data);
     if (!rows) continue;
+    if (deps.tracker.isOvertaken(projectId, seq)) continue;
 
     projects += 1;
-    dead.push(...deps.tracker.acceptRemoteIds(
-      entry.projectId, remoteServerId, entry.remotePath, rows, seq,
-    ));
+    const sessions: AliveAnswerSession[] = rows.map((row) => ({
+      localSessionId: `remote-${remoteServerId}-${projectId}-${row.id}`,
+      remoteSessionId: row.id,
+      branch: row.branch,
+      status: row.status,
+    }));
+    // Judged against the baseline as it is NOW: a browser read may have
+    // created one while this query was in flight.
+    if (deps.tracker.hasBaseline(projectId)) {
+      dead.push(...deps.tracker.acceptRemoteIds(projectId, remoteServerId, remotePath, rows, seq));
+    } else {
+      deps.tracker.markAnswered(projectId, seq);
+    }
+    deps.tracker.announceStatuses(projectId, sessions);
+    answers.push({ projectId, sessions });
   }
 
   if (dead.length > 0) {
     console.log(`[RemoteLiveness] ${remoteServerId}: ${dead.length} session(s) lost their process while unobserved`);
   }
-  return { projects, dead };
+  return { projects, dead, answers };
 }
