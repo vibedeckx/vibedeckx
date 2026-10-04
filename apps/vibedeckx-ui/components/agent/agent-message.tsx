@@ -40,7 +40,7 @@ import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./
 import { ZoomableImage } from "./zoomable-image";
 import { SpeakButton, speakOwnerKey } from "./speak-button";
 import { useTtsOwnedBy } from "@/lib/tts/tts-player";
-import { VPasteChip, RemoteGrantMeta, ScheduleIntentMeta, TaskIntentMeta, splitVPasteMarkers, takeRemotesMarker } from "./vpaste-chip";
+import { VPasteChip, VFileCard, RemoteGrantMeta, ScheduleIntentMeta, TaskIntentMeta, splitVPasteMarkers, takeRemotesMarker, type VPasteSegment } from "./vpaste-chip";
 import { takeScheduleMarker } from "@/lib/schedule-intent";
 import { takeTaskMarker } from "@/lib/task-intent";
 import { Fragment, useEffect, useMemo, useState } from "react";
@@ -167,23 +167,40 @@ function renderTextWithVPaste(text: string) {
   if (segments.length === 1 && segments[0].kind === "text") {
     return <span className="whitespace-pre-wrap break-words">{text ?? ""}</span>;
   }
+  // Files from Add files sit as a row of cards above the text. Pastes stay where
+  // they were pasted — the composer lets them sit mid-sentence.
+  const files: { path: string; size: number; name: string }[] = [];
+  const inline: Exclude<VPasteSegment, { kind: "remotes" }>[] = [];
+  for (const seg of segments) {
+    if (seg.kind === "chip" && seg.name !== undefined) files.push({ path: seg.path, size: seg.size, name: seg.name });
+    else if (seg.kind !== "remotes") inline.push(seg);
+    // UserMessage lifts the grant block into its header before rendering.
+  }
+  // Drop the blank lines left where file markers were taken out.
+  const first = inline[0];
+  if (first?.kind === "text") inline[0] = { ...first, text: first.text.trimStart() };
+  const last = inline[inline.length - 1];
+  if (last?.kind === "text") inline[inline.length - 1] = { ...last, text: last.text.trimEnd() };
+  const hasInline = inline.some((seg) => seg.kind === "chip" || seg.text.length > 0);
   return (
     <div
       className="text-foreground max-w-none break-words"
       style={{ fontSize: "var(--conv-font-size, 14px)" }}
     >
-      {segments.map((seg, i) => {
-        if (seg.kind === "text") {
-          return (
-            <span key={i} className="whitespace-pre-wrap break-words">
-              {seg.text}
-            </span>
-          );
-        }
-        // UserMessage lifts the grant block into its header before rendering.
-        if (seg.kind === "remotes") return null;
-        return <VPasteChip key={i} path={seg.path} size={seg.size} name={seg.name} />;
-      })}
+      {files.length > 0 && (
+        <div className={`flex flex-wrap gap-2${hasInline ? " mb-2" : ""}`}>
+          {files.map((file, i) => (
+            <VFileCard key={i} path={file.path} size={file.size} name={file.name} />
+          ))}
+        </div>
+      )}
+      {hasInline && (
+        <div className="whitespace-pre-wrap break-words">
+          {inline.map((seg, i) =>
+            seg.kind === "text" ? seg.text : <VPasteChip key={i} path={seg.path} size={seg.size} />
+          )}
+        </div>
+      )}
     </div>
   );
 }

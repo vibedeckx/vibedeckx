@@ -1,13 +1,6 @@
 "use client";
 
-import { CalendarClock, FileText, ListPlus, Paperclip, Server } from "lucide-react";
-
-interface VPasteChipProps {
-  path: string;
-  size: number;
-  /** Set for `<vfile/>` (uploaded attachment); absent for `<vpaste/>` (long paste). */
-  name?: string;
-}
+import { CalendarClock, ClipboardPaste, FileText, ListPlus, Server } from "lucide-react";
 
 function basename(p: string): string {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
@@ -77,16 +70,49 @@ export function takeRemotesMarker(text: string): { text: string; names: string |
   return found.names === null ? { text, names: null } : { text: stripped.trimEnd(), names: found.names };
 }
 
-export function VPasteChip({ path, size, name }: VPasteChipProps) {
-  const Icon = name === undefined ? FileText : Paperclip;
+/**
+ * A long paste, shown where it was pasted: the composer lets it sit mid-sentence,
+ * so it stays in the text flow as a pill sized to the line. Its file name is a
+ * generated temp name that means nothing to the user; the path is in the tooltip.
+ */
+export function VPasteChip({ path, size }: { path: string; size: number }) {
   return (
     <span
-      className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/60 px-1.5 py-0.5 text-xs font-mono align-baseline"
+      className="mx-0.5 inline-flex items-center gap-1 rounded-md border border-border bg-muted/50 px-1.5 align-[-0.2em] text-[0.85em] leading-[1.6]"
       title={path}
     >
-      <Icon className="w-3 h-3 text-muted-foreground shrink-0" />
-      <span className="truncate max-w-[18ch]">{name ?? basename(path)}</span>
+      <ClipboardPaste className="h-[1.05em] w-[1.05em] shrink-0 text-muted-foreground" />
+      <span className="font-medium">Pasted text</span>
       <span className="text-muted-foreground">{formatSize(size)}</span>
+    </span>
+  );
+}
+
+function extension(name: string): string | null {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toUpperCase() : null;
+}
+
+/**
+ * A file from Add files: an attachment card (icon tile, name, "type · size"),
+ * shown above the message text the way chat apps show attached files.
+ */
+export function VFileCard({ path, size, name }: { path: string; size: number; name: string }) {
+  const title = name || basename(path);
+  return (
+    <span
+      className="inline-flex max-w-[16rem] items-center gap-2.5 rounded-lg border border-border bg-muted/40 py-1.5 pl-1.5 pr-3"
+      title={path}
+    >
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-background">
+        <FileText className="h-4 w-4 text-muted-foreground" />
+      </span>
+      <span className="flex min-w-0 flex-col leading-tight">
+        <span className="truncate text-xs font-medium text-foreground">{title}</span>
+        <span className="truncate text-[11px] text-muted-foreground">
+          {extension(title) ?? "File"} · {formatSize(size)}
+        </span>
+      </span>
     </span>
   );
 }
