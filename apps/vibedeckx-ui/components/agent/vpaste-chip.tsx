@@ -1,6 +1,8 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { CalendarClock, ClipboardPaste, FileText, ListPlus, Server } from "lucide-react";
+import { useFileNavigation } from "./file-navigation-context";
 
 function basename(p: string): string {
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
@@ -77,14 +79,37 @@ export function takeRemotesMarker(text: string): { text: string; names: string |
  */
 export function VPasteChip({ path, size }: { path: string; size: number }) {
   return (
-    <span
+    <OpenInFiles
+      path={path}
       className="mx-0.5 inline-flex items-center gap-1 rounded-md border border-border bg-muted/50 px-1.5 align-[-0.2em] text-[0.85em] leading-[1.6]"
-      title={path}
     >
       <ClipboardPaste className="h-[1.05em] w-[1.05em] shrink-0 text-muted-foreground" />
       <span className="font-medium">Pasted text</span>
       <span className="text-muted-foreground">{formatSize(size)}</span>
-    </span>
+    </OpenInFiles>
+  );
+}
+
+/**
+ * Click opens the file in the Files tab, the way an absolute path the agent
+ * mentions does (file-ref-link.tsx): the path is on the agent's machine, and
+ * the Files tab resolves it through the conversation. Without a project open
+ * there is nowhere to open it, so the chip stays inert.
+ */
+function OpenInFiles({ path, className, children }: { path: string; className: string; children: ReactNode }) {
+  const { openFile, scope } = useFileNavigation();
+  if (!scope) {
+    return <span className={className} title={path}>{children}</span>;
+  }
+  return (
+    <button
+      type="button"
+      className={`${className} cursor-pointer text-left transition-colors hover:border-foreground/25 hover:bg-muted`}
+      title={`Open in Files — ${path}`}
+      onClick={() => openFile(path)}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -100,9 +125,9 @@ function extension(name: string): string | null {
 export function VFileCard({ path, size, name }: { path: string; size: number; name: string }) {
   const title = name || basename(path);
   return (
-    <span
+    <OpenInFiles
+      path={path}
       className="inline-flex max-w-[16rem] items-center gap-2.5 rounded-lg border border-border bg-muted/40 py-1.5 pl-1.5 pr-3"
-      title={path}
     >
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border/70 bg-background">
         <FileText className="h-4 w-4 text-muted-foreground" />
@@ -113,7 +138,7 @@ export function VFileCard({ path, size, name }: { path: string; size: number; na
           {extension(title) ?? "File"} · {formatSize(size)}
         </span>
       </span>
-    </span>
+    </OpenInFiles>
   );
 }
 
