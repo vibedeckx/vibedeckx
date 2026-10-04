@@ -105,7 +105,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // assigned to a branch, so a follow-up assigned to its source session's
       // branch would be marked done by that session's very next turn. The
       // user assigns a branch when they actually start on it.
-      // docs/session-task-proposal-design.md §4.1
       assigned_branch = null;
     }
 

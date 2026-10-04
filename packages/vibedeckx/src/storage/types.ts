@@ -260,7 +260,7 @@ export interface Task {
    * Provenance of an agent-proposed task (propose_task tool): the session, the
    * tool_use id and the item's index within that proposal. Null for hand-made
    * tasks. The triple is uniquely indexed — that makes confirming idempotent
-   * and lets the card recover its state. See docs/session-task-proposal-design.md §4.
+   * and lets the card recover its state.
    */
   source_session_id: string | null;
   source_tool_use_id: string | null;

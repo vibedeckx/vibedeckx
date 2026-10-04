@@ -17,7 +17,7 @@ import { EventBus, type GlobalEvent } from "../event-bus.js";
 import { RetentionHoldSync, scheduleHoldSource, subscribeTaskHoldSync, taskHoldSource } from "../retention-holds.js";
 import type { ProxyResult } from "../utils/remote-proxy.js";
 
-/** Confirming an agent's propose_task card (see docs/session-task-proposal-design.md §4–5). */
+/** Confirming an agent's propose_task card: provenance, idempotency, retention holds. */
 describe("task create from an agent proposal", () => {
   let app: FastifyInstance;
   let storage: Storage;

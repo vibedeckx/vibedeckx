@@ -27,7 +27,7 @@ export const PROPOSE_SCHEDULE_TOOL = "propose_schedule";
  */
 export const CANONICAL_PROPOSE_SCHEDULE_TOOL = `mcp__${SESSION_TOOLS_MCP_SERVER_NAME}__${PROPOSE_SCHEDULE_TOOL}`;
 
-/** Bare name of the record-for-later tool. See docs/session-task-proposal-design.md. */
+/** Bare name of the record-for-later tool: proposes project tasks for the user to confirm. */
 export const PROPOSE_TASK_TOOL = "propose_task";
 
 export const CANONICAL_PROPOSE_TASK_TOOL = `mcp__${SESSION_TOOLS_MCP_SERVER_NAME}__${PROPOSE_TASK_TOOL}`;
@@ -89,7 +89,8 @@ export const ARTIFACT_PATH_HINT =
 /**
  * Shared by the instructions and the system-prompt hint. Only routes an explicit
  * request: the agent must neither propose tasks unprompted nor remind the user
- * that it could (docs/session-task-proposal-design.md §1.1).
+ * that it could. Agents already list leftover work at the end of a turn; a
+ * "you could make this a task" nudge would only add noise to most replies.
  */
 const TASK_ROUTING_HINT =
   `Tasks: when the user asks to record something as a task or to-do for later, call \`${CANONICAL_PROPOSE_TASK_TOOL}\``

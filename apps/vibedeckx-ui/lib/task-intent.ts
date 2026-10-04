@@ -7,7 +7,7 @@ import type { ContentPart } from "@/hooks/use-agent-session";
  * block appended to the message text, shown as a header chip in the
  * transcript and stripped from titles by the hub. The one rule that matters
  * more here than for schedules: record the work, don't do it — "add error
- * handling to X" reads like an order. See docs/session-task-proposal-design.md §3.1.
+ * handling to X" reads like an order.
  */
 export const TASK_INTENT_BLOCK = [
   "<vtask>",

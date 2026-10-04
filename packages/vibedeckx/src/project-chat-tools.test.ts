@@ -275,7 +275,7 @@ describe("createProjectChatTools", () => {
 
   it("re-acquires a proposed task's hold when it reopens one, and leaves it closed when it can't", async () => {
     // Completed and released, then reopened from Project Chat: same contract as
-    // the task routes (docs/session-task-proposal-design.md §5).
+    // the task routes.
     const serverId = await linkedRemoteServer();
     await storage.remoteSessionMappings.upsert("remote-s1", "project-1", serverId, "worker-s1", "feat");
     await storage.tasks.create({

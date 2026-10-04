@@ -11,7 +11,7 @@ import { useGlobalEventStream } from "@/hooks/global-event-stream";
  * Same shape and reasoning as use-proposed-schedule: server state, so the card
  * survives a reload or another device; one fetch per project shared by every
  * card; refetched on task:* events so completing or deleting a task elsewhere
- * is reflected on the card. See docs/session-task-proposal-design.md §3.3.
+ * is reflected on the card.
  */
 const cache = new Map<string, Task[]>();
 const inFlight = new Map<string, Promise<Task[]>>();

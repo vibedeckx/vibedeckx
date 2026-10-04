@@ -67,7 +67,7 @@ function readProposal(input: unknown): ItemFields[] {
  * until the user confirms; the project and source session come from the
  * session this card lives in, never from the model. A confirmed row follows
  * its task — created, then done/cancelled — and returns to the editable state
- * if the task is deleted. See docs/session-task-proposal-design.md §3.3.
+ * if the task is deleted.
  */
 export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
   const { sessionId, projectId, openTask } = useAgentConversation();

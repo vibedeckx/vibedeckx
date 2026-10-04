@@ -190,7 +190,7 @@ export function scheduleHoldSource(storage: Storage): RetentionHoldSource {
 /**
  * A task proposed from a session holds it only while the task is open: once
  * it is done, cancelled or archived the session falls back to the normal
- * retention rules. See docs/session-task-proposal-design.md §5.
+ * retention rules.
  */
 export function taskHoldSource(storage: Storage): RetentionHoldSource {
   return {
