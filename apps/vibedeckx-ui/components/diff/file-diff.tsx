@@ -3,7 +3,9 @@
 import { useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, FileSymlink } from 'lucide-react';
+import { CopyPathButton } from '@/components/ui/copy-path-button';
+import { useFileNavigation } from '@/components/agent/file-navigation-context';
 import { DiffLine } from './diff-line';
 import { pathLabelParts } from './file-path-label';
 import type { FileDiff as FileDiffType } from '@/lib/api';
@@ -30,6 +32,8 @@ const statusLabels = {
 export function FileDiff({ file, defaultOpen = true }: FileDiffProps) {
   const [isOpen, setIsOpen] = useState(defaultOpen);
   const parts = pathLabelParts(file.path, file.status === 'renamed' ? file.oldPath : undefined);
+  const { openFile } = useFileNavigation();
+  const deleted = file.status === 'deleted';
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen} className="border border-border rounded-lg overflow-hidden">
@@ -38,7 +42,10 @@ export function FileDiff({ file, defaultOpen = true }: FileDiffProps) {
           `truncate` (nowrap) label reports its full text as min-content, so a
           long rename used to stretch every diff block off the right edge with
           no way to scroll back. A `minmax(0,1fr)` track pins that to zero. */}
-      <CollapsibleTrigger className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-4 py-2 bg-secondary border-b border-border w-full cursor-pointer hover:bg-muted transition-colors">
+      {/* The actions sit beside the trigger, not inside it: the trigger is a
+          <button>, and buttons can't nest. */}
+      <div className="group grid grid-cols-[minmax(0,1fr)_auto] items-center bg-secondary border-b border-border hover:bg-muted transition-colors">
+      <CollapsibleTrigger className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 pl-4 pr-2 py-2 w-full min-w-0 cursor-pointer">
         {isOpen ? (
           <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         ) : (
@@ -71,6 +78,21 @@ export function FileDiff({ file, defaultOpen = true }: FileDiffProps) {
           {statusLabels[file.status]}
         </Badge>
       </CollapsibleTrigger>
+        <div className="flex items-center gap-1 pr-3 opacity-60 group-hover:opacity-100 transition-opacity">
+          <CopyPathButton path={file.path} />
+          <button
+            type="button"
+            disabled={deleted}
+            // Land on the first change, not the top of the file.
+            onClick={() => openFile(file.path, file.hunks[0]?.newStart ?? null)}
+            className="p-0.5 rounded hover:bg-muted-foreground/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            title={deleted ? 'Deleted — not in the working tree' : 'Open in Files'}
+            aria-label="Open in Files"
+          >
+            <FileSymlink className="h-3 w-3 text-muted-foreground" />
+          </button>
+        </div>
+      </div>
       <CollapsibleContent>
         <div>
           {file.binary && (

@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { ChevronRight, ChevronDown, Folder, FolderOpen, File, FileCode, FileText, Loader2, Copy, Check, Trash2 } from "lucide-react";
+import { ChevronRight, ChevronDown, Folder, FolderOpen, File, FileCode, FileText, Loader2, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { buttonVariants } from "@/components/ui/button";
+import { CopyPathButton } from "@/components/ui/copy-path-button";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -75,31 +76,6 @@ function dragFiles(e: React.DragEvent): File[] {
     return files;
   }
   return Array.from(e.dataTransfer.files);
-}
-
-function CopyPathButton({ path }: { path: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation();
-    navigator.clipboard.writeText(path);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }, [path]);
-
-  return (
-    <button
-      onClick={handleCopy}
-      className="p-0.5 rounded hover:bg-muted-foreground/20 transition-colors"
-      title={`Copy path: ${path}`}
-    >
-      {copied ? (
-        <Check className="h-3 w-3 text-green-500" />
-      ) : (
-        <Copy className="h-3 w-3 text-muted-foreground" />
-      )}
-    </button>
-  );
 }
 
 function DeleteButton({
