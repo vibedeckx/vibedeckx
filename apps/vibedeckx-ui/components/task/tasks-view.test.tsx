@@ -104,6 +104,13 @@ describe("TasksView detail panel", () => {
     expect(panel()).toBeNull();
   });
 
+  it("opens the panel when the title text itself is clicked, with no inline editor", () => {
+    const title = Array.from(row("t2").querySelectorAll("span")).find((el) => el.textContent === "Second")!;
+    act(() => title.click());
+    expect(row("t2").querySelector("input")).toBeNull();
+    expect(panelTitle()).toBe("Second");
+  });
+
   it("steps through rows with arrow keys and closes on Escape", () => {
     act(() => row("t1").click());
     press("ArrowDown");

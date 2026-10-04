@@ -1,6 +1,5 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 import { TableCell, TableRow } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -39,31 +38,6 @@ interface TaskRowProps {
 }
 
 export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, archivedView, onClick, worktrees, assignedBranches, onAssign, onOpenSourceSession, selected, flash, compact }: TaskRowProps) {
-  const [editingTitle, setEditingTitle] = useState(false);
-  const [titleValue, setTitleValue] = useState(task.title);
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (editingTitle) {
-      inputRef.current?.focus();
-      inputRef.current?.select();
-    }
-  }, [editingTitle]);
-
-  useEffect(() => {
-    setTitleValue(task.title);
-  }, [task.title]);
-
-  const commitTitle = () => {
-    setEditingTitle(false);
-    const trimmed = titleValue.trim();
-    if (trimmed && trimmed !== task.title) {
-      onUpdate(task.id, { title: trimmed });
-    } else {
-      setTitleValue(task.title);
-    }
-  };
-
   const isDone = task.status === "done" || task.status === "cancelled";
 
   return (
@@ -84,45 +58,26 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
       {/* max-w-0: the title column takes the leftover width and truncates
           rather than pushing the table wider than its container. */}
       <TableCell className="font-medium w-full max-w-0">
-        {editingTitle ? (
-          <input
-            ref={inputRef}
-            className="w-full bg-transparent border-b border-primary outline-none text-sm py-0.5"
-            value={titleValue}
-            onChange={(e) => setTitleValue(e.target.value)}
-            onBlur={commitTitle}
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commitTitle();
-              if (e.key === "Escape") {
-                setTitleValue(task.title);
-                setEditingTitle(false);
-              }
-            }}
-          />
-        ) : (
-          <div>
-            <span
-              className={`inline-block max-w-full truncate align-bottom cursor-pointer hover:underline text-sm ${isDone ? "line-through text-muted-foreground" : ""}`}
-              onClick={(e) => { e.stopPropagation(); setEditingTitle(true); }}
-            >
-              {task.title}
-            </span>
-            {!compact && task.description && (
-              <p className="text-xs text-muted-foreground truncate max-w-[400px] mt-0.5">
-                {task.description.length > 80 ? task.description.slice(0, 80) + "..." : task.description}
-              </p>
-            )}
-            {!compact && task.source_session && (
-              <div className="mt-0.5 flex max-w-[400px] text-xs" onClick={(e) => e.stopPropagation()}>
-                <SourceSessionLink
-                  source={task.source_session}
-                  onOpen={onOpenSourceSession ? () => onOpenSourceSession(task) : undefined}
-                />
-              </div>
-            )}
-          </div>
-        )}
+        {/* Title is plain text: clicking it opens the row like anywhere else;
+            renaming happens in the detail panel. */}
+        <div>
+          <span className={`block truncate text-sm ${isDone ? "line-through text-muted-foreground" : ""}`}>
+            {task.title}
+          </span>
+          {!compact && task.description && (
+            <p className="text-xs text-muted-foreground truncate max-w-[400px] mt-0.5">
+              {task.description.length > 80 ? task.description.slice(0, 80) + "..." : task.description}
+            </p>
+          )}
+          {!compact && task.source_session && (
+            <div className="mt-0.5 flex max-w-[400px] text-xs" onClick={(e) => e.stopPropagation()}>
+              <SourceSessionLink
+                source={task.source_session}
+                onOpen={onOpenSourceSession ? () => onOpenSourceSession(task) : undefined}
+              />
+            </div>
+          )}
+        </div>
       </TableCell>
       <TableCell className="@max-md:hidden" onClick={(e) => e.stopPropagation()}>
         <DropdownMenu>
