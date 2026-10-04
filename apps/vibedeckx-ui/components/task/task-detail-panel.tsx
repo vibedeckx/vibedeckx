@@ -1,26 +1,11 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Archive, ArchiveRestore, GitBranch, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, Trash2, X } from "lucide-react";
 import { SourceSessionLink } from "@/components/agent/source-session-link";
-import {
-  statusConfig,
-  priorityConfig,
-  statusOptions,
-  priorityOptions,
-  assignableBranches,
-  branchLabel,
-} from "./task-utils";
+import { TaskProperties, Property, PANEL_FIELD_CLASS } from "./task-properties";
 
 interface TaskDetailPanelProps {
   task: Task;
@@ -81,78 +66,22 @@ export function TaskDetailPanel({
           onCommit={(value) => {
             const trimmed = value.trim();
             if (trimmed && trimmed !== task.title) onUpdate(task.id, { title: trimmed });
-            return trimmed || task.title;
           }}
           singleLine
           aria-label="Title"
           className="text-lg font-semibold leading-snug"
         />
 
-        <dl className="mt-4 grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2.5 text-xs">
-          <Property label="Status">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button className="focus:outline-none">
-                  <Badge variant="outline" className={`cursor-pointer text-xs ${statusConfig[task.status].color}`}>
-                    {statusConfig[task.status].label}
-                  </Badge>
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                {statusOptions.map((s) => (
-                  <DropdownMenuItem key={s} onClick={() => onUpdate(task.id, { status: s })}>
-                    <span className={`inline-block w-2 h-2 rounded-full mr-2 ${statusConfig[s].color}`} />
-                    {statusConfig[s].label}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </Property>
-          <Property label="Priority">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button className="focus:outline-none">
-                  <Badge variant="outline" className={`cursor-pointer text-xs ${priorityConfig[task.priority].color}`}>
-                    {priorityConfig[task.priority].label}
-                  </Badge>
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                {priorityOptions.map((p) => (
-                  <DropdownMenuItem key={p} onClick={() => onUpdate(task.id, { priority: p })}>
-                    <span className={`inline-block w-2 h-2 rounded-full mr-2 ${priorityConfig[p].color}`} />
-                    {priorityConfig[p].label}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </Property>
-          <Property label="Branch">
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <button className="focus:outline-none">
-                  <Badge variant="outline" className={`cursor-pointer text-xs font-mono ${task.assigned_branch !== null ? "bg-accent text-accent-foreground border-transparent" : "text-muted-foreground"}`}>
-                    <GitBranch className="h-3 w-3 mr-1" />
-                    {task.assigned_branch !== null ? branchLabel(task.assigned_branch) : "Unassigned"}
-                  </Badge>
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                {task.assigned_branch !== null && (
-                  <>
-                    <DropdownMenuItem onClick={() => onAssign(task.id, null)}>Unassign</DropdownMenuItem>
-                    <DropdownMenuSeparator />
-                  </>
-                )}
-                {assignableBranches(task, worktrees, assignedBranches).map(({ key, label }) => (
-                  <DropdownMenuItem key={key} onClick={() => onAssign(task.id, key)}>
-                    <GitBranch className="h-3 w-3 mr-2" />
-                    {label}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </Property>
+        <TaskProperties
+          status={task.status}
+          priority={task.priority}
+          assignedBranch={task.assigned_branch}
+          onStatusChange={(status) => onUpdate(task.id, { status })}
+          onPriorityChange={(priority) => onUpdate(task.id, { priority })}
+          onAssign={(branch) => onAssign(task.id, branch)}
+          worktrees={worktrees}
+          assignedBranches={assignedBranches}
+        >
           {task.source_session && (
             <Property label="From session">
               <div className="flex min-w-0">
@@ -169,7 +98,7 @@ export function TaskDetailPanel({
           <Property label="Updated">
             <span className="text-muted-foreground">{new Date(task.updated_at).toLocaleString()}</span>
           </Property>
-        </dl>
+        </TaskProperties>
 
         <div className="mt-5 border-t pt-4">
           <DraftField
@@ -185,15 +114,6 @@ export function TaskDetailPanel({
         </div>
       </div>
     </div>
-  );
-}
-
-function Property({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0">{children}</dd>
-    </>
   );
 }
 
@@ -237,7 +157,7 @@ function DraftField({
           e.currentTarget.blur();
         }
       }}
-      className={`field-sizing-content w-full resize-none rounded-md bg-transparent px-1.5 py-1 -mx-1.5 outline-none placeholder:text-muted-foreground/60 hover:bg-muted/40 focus:bg-muted/40 ${className ?? ""}`}
+      className={`${PANEL_FIELD_CLASS} ${className ?? ""}`}
       {...props}
     />
   );

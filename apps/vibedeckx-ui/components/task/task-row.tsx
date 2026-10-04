@@ -179,7 +179,7 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
                   <DropdownMenuSeparator />
                 </>
               )}
-              {assignableBranches(task, worktrees, assignedBranches).map(({ key, label }) => (
+              {assignableBranches(task.assigned_branch, worktrees, assignedBranches).map(({ key, label }) => (
                 <DropdownMenuItem key={key} onClick={() => onAssign(task.id, key)}>
                   <GitBranch className="h-3 w-3 mr-2" />
                   {label}
