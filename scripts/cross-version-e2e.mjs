@@ -88,6 +88,10 @@ const COVERED_BY = {
   // below, and the hub's refusal to clean anything on a 404 in
   // remote-session-reconcile.test.ts.
   "http:GET /api/path/session-ids": { file: "packages/vibedeckx/src/routes/session-retention-routes.test.ts", marker: "/api/path/session-ids" },
+  // Hub-managed retention holds: route tests cover replacement, release,
+  // listing, and invalid requests without requiring a live schedule here.
+  "http:PUT /api/path/retention-holds/:param": { file: "packages/vibedeckx/src/routes/session-retention-routes.test.ts", marker: "`/api/path/retention-holds/${sessionId}`" },
+  "http:GET /api/path/retention-holds": { file: "packages/vibedeckx/src/routes/session-retention-routes.test.ts", marker: '"/api/path/retention-holds"' },
 };
 
 // The irreducible remainder — no smoke and no existing test. Each reason names
