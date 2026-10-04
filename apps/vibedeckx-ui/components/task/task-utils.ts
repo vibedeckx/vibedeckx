@@ -1,4 +1,4 @@
-import type { TaskStatus, TaskPriority } from "@/lib/api";
+import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 
 export const statusConfig: Record<TaskStatus, { label: string; color: string }> = {
   todo: { label: "To Do", color: "bg-muted text-muted-foreground" },
@@ -16,3 +16,23 @@ export const priorityConfig: Record<TaskPriority, { label: string; color: string
 
 export const statusOptions: TaskStatus[] = ["todo", "in_progress", "done", "cancelled"];
 export const priorityOptions: TaskPriority[] = ["low", "medium", "high", "urgent"];
+
+/** Display name for an `assigned_branch` value ("" is the main workspace). */
+export function branchLabel(branch: string): string {
+  return branch === "" ? "main" : branch;
+}
+
+/**
+ * Worktrees `task` can be assigned to: every branch except its current one and
+ * those another task already holds. Keys map a worktree's branch to the
+ * `assigned_branch` encoding (null -> "").
+ */
+export function assignableBranches(
+  task: Task,
+  worktrees: Worktree[],
+  assignedBranches: Set<string | null>,
+): { key: string; label: string }[] {
+  return worktrees
+    .map((wt) => ({ key: wt.branch === null ? "" : wt.branch, label: wt.branch ?? "main" }))
+    .filter(({ key }) => task.assigned_branch !== key && !assignedBranches.has(key));
+}

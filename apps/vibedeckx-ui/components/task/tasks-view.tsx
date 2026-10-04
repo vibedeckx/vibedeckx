@@ -1,10 +1,12 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { TaskTable } from "./task-table";
 import { TaskForm } from "./task-form";
+import { TaskDetailPanel } from "./task-detail-panel";
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { PageHeader, FilterBar, FilterChip } from "@/components/layout";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 
@@ -20,6 +22,8 @@ const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
 ];
 
 interface TasksViewProps {
+  /** The view is kept mounted while hidden; only the visible one may own keys. */
+  active?: boolean;
   projectId: string | null;
   tasks: Task[];
   loading: boolean;
@@ -33,9 +37,19 @@ interface TasksViewProps {
   onOpenSourceSession?: (task: Task) => void;
 }
 
-export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession }: TasksViewProps) {
+export function TasksView({ active = true, projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession }: TasksViewProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // Keyed by project so switching projects closes the panel.
+  const [selection, setSelection] = useState<{ projectId: string | null; taskId: string } | null>(null);
+  const selectedTaskId = selection?.projectId === projectId ? selection.taskId : null;
+  // Looked up across all tasks, not the filtered list: archiving or re-statusing
+  // the open task from the panel keeps it open. A deleted task closes it.
+  const selectedTask = selectedTaskId ? tasks.find((t) => t.id === selectedTaskId) ?? null : null;
+  const selectTask = useCallback(
+    (taskId: string | null) => setSelection(taskId ? { projectId, taskId } : null),
+    [projectId],
+  );
 
   const handleAssign = (taskId: string, branch: string | null) => {
     onUpdateTask(taskId, { assigned_branch: branch });
@@ -58,6 +72,11 @@ export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, 
   }, [activeTasks, archivedTasks, statusFilter]);
 
   const archivedView = statusFilter === "archived";
+
+  const assignedBranches = useMemo(
+    () => new Set(tasks.filter((t) => t.assigned_branch !== null).map((t) => t.assigned_branch)),
+    [tasks]
+  );
 
   if (!projectId) {
     return (
@@ -98,24 +117,54 @@ export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, 
         ))}
       </FilterBar>
 
-      <div className="flex-1 overflow-auto px-5 edge-scrollbar">
-        {loading ? (
-          <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
-            Loading tasks...
-          </div>
-        ) : (
-          <TaskTable
-            tasks={filteredTasks}
-            onUpdate={onUpdateTask}
-            onDelete={onDeleteTask}
-            onArchive={onArchiveTask}
-            onUnarchive={onUnarchiveTask}
-            archivedView={archivedView}
-            worktrees={worktrees}
-            onAssign={handleAssign}
-            onOpenSourceSession={onOpenSourceSession}
-          />
-        )}
+      <div className="flex-1 min-h-0">
+        <ResizablePanelGroup direction="horizontal" autoSaveId="task-detail-panels">
+          <ResizablePanel id="task-list" order={1} minSize={30}>
+            <div className="h-full overflow-auto px-5 edge-scrollbar">
+              {loading ? (
+                <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
+                  Loading tasks...
+                </div>
+              ) : (
+                <TaskTable
+                  tasks={filteredTasks}
+                  onUpdate={onUpdateTask}
+                  onDelete={onDeleteTask}
+                  onArchive={onArchiveTask}
+                  onUnarchive={onUnarchiveTask}
+                  archivedView={archivedView}
+                  worktrees={worktrees}
+                  onAssign={handleAssign}
+                  onOpenSourceSession={onOpenSourceSession}
+                  selectedTaskId={selectedTask?.id ?? null}
+                  keyboardActive={active}
+                  onSelect={selectTask}
+                  assignedBranches={assignedBranches}
+                />
+              )}
+            </div>
+          </ResizablePanel>
+          {selectedTask && (
+            <>
+              <ResizableHandle />
+              <ResizablePanel id="task-detail" order={2} defaultSize={40} minSize={25}>
+                <TaskDetailPanel
+                  key={selectedTask.id}
+                  task={selectedTask}
+                  onUpdate={onUpdateTask}
+                  onAssign={handleAssign}
+                  onArchive={onArchiveTask}
+                  onUnarchive={onUnarchiveTask}
+                  onDelete={onDeleteTask}
+                  onClose={() => selectTask(null)}
+                  worktrees={worktrees}
+                  assignedBranches={assignedBranches}
+                  onOpenSourceSession={onOpenSourceSession}
+                />
+              </ResizablePanel>
+            </>
+          )}
+        </ResizablePanelGroup>
       </div>
 
       <TaskForm

@@ -1332,6 +1332,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
           {/* Tasks View — kept mounted, hidden via CSS */}
           <div className={(activeView !== 'tasks' || needsProject) ? 'hidden' : 'flex-1 overflow-hidden'}>
             <TasksView
+              active={activeView === 'tasks' && !needsProject}
               projectId={currentProject?.id ?? null}
               tasks={tasks}
               loading={tasksLoading}

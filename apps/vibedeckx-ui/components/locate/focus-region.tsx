@@ -44,7 +44,7 @@ const resolveRegion = (target: EventTarget | null): FocusRegion | null => {
 
 // Radix overlays close on Escape without preventDefault-ing the native event,
 // so "was Esc already spent on closing something?" needs a DOM probe.
-const hasOpenOverlay = () =>
+export const hasOpenOverlay = () =>
   document.querySelector(
     '[data-state="open"]:is([role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"])',
   ) !== null;

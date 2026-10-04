@@ -15,7 +15,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Trash2, GitBranch, Archive, ArchiveRestore } from "lucide-react";
 import { SourceSessionLink } from "@/components/agent/source-session-link";
-import { statusConfig, priorityConfig, statusOptions, priorityOptions } from "./task-utils";
+import { statusConfig, priorityConfig, statusOptions, priorityOptions, assignableBranches, branchLabel } from "./task-utils";
 
 interface TaskRowProps {
   task: Task;
@@ -29,9 +29,13 @@ interface TaskRowProps {
   assignedBranches: Set<string | null>;
   onAssign: (taskId: string, branch: string | null) => void;
   onOpenSourceSession?: (task: Task) => void;
+  /** This task is open in the detail panel. */
+  selected?: boolean;
+  /** Detail panel is open: drop what it already shows (description, assign, created). */
+  compact?: boolean;
 }
 
-export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, archivedView, onClick, worktrees, assignedBranches, onAssign, onOpenSourceSession }: TaskRowProps) {
+export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, archivedView, onClick, worktrees, assignedBranches, onAssign, onOpenSourceSession, selected, compact }: TaskRowProps) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleValue, setTitleValue] = useState(task.title);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -60,7 +64,12 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
   const isDone = task.status === "done" || task.status === "cancelled";
 
   return (
-    <TableRow className="group cursor-pointer" onClick={() => onClick?.(task)}>
+    <TableRow
+      className="group cursor-pointer"
+      data-task-id={task.id}
+      data-state={selected ? "selected" : undefined}
+      onClick={() => onClick?.(task)}
+    >
       <TableCell className="w-10" onClick={(e) => e.stopPropagation()}>
         <Checkbox
           checked={task.status === "done"}
@@ -94,12 +103,12 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
             >
               {task.title}
             </span>
-            {task.description && (
+            {!compact && task.description && (
               <p className="text-xs text-muted-foreground truncate max-w-[400px] mt-0.5">
                 {task.description.length > 80 ? task.description.slice(0, 80) + "..." : task.description}
               </p>
             )}
-            {task.source_session && (
+            {!compact && task.source_session && (
               <div className="mt-0.5 flex max-w-[400px] text-xs" onClick={(e) => e.stopPropagation()}>
                 <SourceSessionLink
                   source={task.source_session}
@@ -148,53 +157,41 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
           </DropdownMenuContent>
         </DropdownMenu>
       </TableCell>
-      <TableCell onClick={(e) => e.stopPropagation()}>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button className="focus:outline-none">
-              <Badge variant="outline" className={`cursor-pointer text-xs font-mono ${task.assigned_branch !== null ? "bg-accent text-accent-foreground border-transparent" : "text-muted-foreground"}`}>
-                <GitBranch className="h-3 w-3 mr-1" />
-                {task.assigned_branch !== null
-                  ? (task.assigned_branch === "" ? "main" : task.assigned_branch)
-                  : "Unassigned"}
-              </Badge>
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {task.assigned_branch !== null && (
-              <>
-                <DropdownMenuItem onClick={() => onAssign(task.id, null)}>
-                  Unassign
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-              </>
-            )}
-            {worktrees
-              .filter((wt) => {
-                // Map worktree branch to assigned_branch value: null -> "", string -> string
-                const branchKey = wt.branch === null ? "" : wt.branch;
-                // Skip if this is already the assigned branch
-                if (task.assigned_branch === branchKey) return false;
-                // Skip if another task already has this branch assigned
-                if (assignedBranches.has(branchKey)) return false;
-                return true;
-              })
-              .map((wt) => {
-                const branchKey = wt.branch === null ? "" : wt.branch;
-                const displayName = wt.branch ?? "main";
-                return (
-                  <DropdownMenuItem key={branchKey} onClick={() => onAssign(task.id, branchKey)}>
-                    <GitBranch className="h-3 w-3 mr-2" />
-                    {displayName}
+      {!compact && (
+        <TableCell onClick={(e) => e.stopPropagation()}>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className="focus:outline-none">
+                <Badge variant="outline" className={`cursor-pointer text-xs font-mono ${task.assigned_branch !== null ? "bg-accent text-accent-foreground border-transparent" : "text-muted-foreground"}`}>
+                  <GitBranch className="h-3 w-3 mr-1" />
+                  {task.assigned_branch !== null ? branchLabel(task.assigned_branch) : "Unassigned"}
+                </Badge>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              {task.assigned_branch !== null && (
+                <>
+                  <DropdownMenuItem onClick={() => onAssign(task.id, null)}>
+                    Unassign
                   </DropdownMenuItem>
-                );
-              })}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </TableCell>
-      <TableCell className="text-muted-foreground text-[10.5px] font-mono">
-        {new Date(task.created_at).toLocaleDateString()}
-      </TableCell>
+                  <DropdownMenuSeparator />
+                </>
+              )}
+              {assignableBranches(task, worktrees, assignedBranches).map(({ key, label }) => (
+                <DropdownMenuItem key={key} onClick={() => onAssign(task.id, key)}>
+                  <GitBranch className="h-3 w-3 mr-2" />
+                  {label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </TableCell>
+      )}
+      {!compact && (
+        <TableCell className="text-muted-foreground text-[10.5px] font-mono">
+          {new Date(task.created_at).toLocaleDateString()}
+        </TableCell>
+      )}
       <TableCell className="w-10" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center gap-0.5">
           {archivedView ? (
