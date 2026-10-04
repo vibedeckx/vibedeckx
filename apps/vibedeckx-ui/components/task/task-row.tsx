@@ -78,7 +78,9 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
           }}
         />
       </TableCell>
-      <TableCell className="font-medium">
+      {/* max-w-0: the title column takes the leftover width and truncates
+          rather than pushing the table wider than its container. */}
+      <TableCell className="font-medium w-full max-w-0">
         {editingTitle ? (
           <input
             ref={inputRef}
@@ -98,7 +100,7 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
         ) : (
           <div>
             <span
-              className={`cursor-pointer hover:underline text-sm ${isDone ? "line-through text-muted-foreground" : ""}`}
+              className={`inline-block max-w-full truncate align-bottom cursor-pointer hover:underline text-sm ${isDone ? "line-through text-muted-foreground" : ""}`}
               onClick={(e) => { e.stopPropagation(); setEditingTitle(true); }}
             >
               {task.title}
@@ -119,7 +121,7 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
           </div>
         )}
       </TableCell>
-      <TableCell onClick={(e) => e.stopPropagation()}>
+      <TableCell className="@max-md:hidden" onClick={(e) => e.stopPropagation()}>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button className="focus:outline-none">
@@ -138,7 +140,7 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
           </DropdownMenuContent>
         </DropdownMenu>
       </TableCell>
-      <TableCell onClick={(e) => e.stopPropagation()}>
+      <TableCell className="@max-lg:hidden" onClick={(e) => e.stopPropagation()}>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button className="focus:outline-none">

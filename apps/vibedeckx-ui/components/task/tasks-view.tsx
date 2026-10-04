@@ -120,7 +120,9 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
       <div className="flex-1 min-h-0">
         <ResizablePanelGroup direction="horizontal" autoSaveId="task-detail-panels">
           <ResizablePanel id="task-list" order={1} minSize={30}>
-            <div className="h-full overflow-auto px-5 edge-scrollbar">
+            {/* Container for the table's width queries: as the panel is dragged
+                wider, Priority then Status drop out instead of scrolling sideways. */}
+            <div className="@container h-full overflow-y-auto overflow-x-hidden px-5 edge-scrollbar">
               {loading ? (
                 <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
                   Loading tasks...

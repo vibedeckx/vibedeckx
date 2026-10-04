@@ -124,10 +124,10 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
           <TableHead className="cursor-pointer select-none" onClick={() => toggleSort("title")}>
             Title{sortIndicator("title")}
           </TableHead>
-          <TableHead className="cursor-pointer select-none w-32" onClick={() => toggleSort("status")}>
+          <TableHead className="cursor-pointer select-none w-32 @max-md:hidden" onClick={() => toggleSort("status")}>
             Status{sortIndicator("status")}
           </TableHead>
-          <TableHead className="cursor-pointer select-none w-28" onClick={() => toggleSort("priority")}>
+          <TableHead className="cursor-pointer select-none w-28 @max-lg:hidden" onClick={() => toggleSort("priority")}>
             Priority{sortIndicator("priority")}
           </TableHead>
           {!compact && <TableHead className="w-32">Assign</TableHead>}
