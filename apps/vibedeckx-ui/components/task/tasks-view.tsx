@@ -1,16 +1,21 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { TaskTable } from "./task-table";
-import { TaskForm } from "./task-form";
 import { TaskDetailPanel } from "./task-detail-panel";
+import { TaskDraftPanel, EMPTY_TASK_DRAFT, isDraftEmpty, type TaskDraft } from "./task-draft-panel";
+import type { PendingTask } from "./task-row";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { PageHeader, FilterBar, FilterChip } from "@/components/layout";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 
 type StatusFilter = "all" | TaskStatus | "archived";
+
+type Panel = { kind: "task"; taskId: string } | { kind: "draft" };
+
+const CREATE_MORE_KEY = "vibedeckx:tasks:create-more";
 
 const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -28,7 +33,7 @@ interface TasksViewProps {
   tasks: Task[];
   loading: boolean;
   worktrees: Worktree[];
-  onCreateTask: (opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority }) => Promise<Task | null>;
+  onCreateTask: (opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task | null>;
   onUpdateTask: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task | null>;
   onDeleteTask: (id: string) => Promise<void>;
   onArchiveTask: (id: string) => Promise<void>;
@@ -38,18 +43,97 @@ interface TasksViewProps {
 }
 
 export function TasksView({ active = true, projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession }: TasksViewProps) {
-  const [formOpen, setFormOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
-  // Keyed by project so switching projects closes the panel.
-  const [selection, setSelection] = useState<{ projectId: string | null; taskId: string } | null>(null);
-  const selectedTaskId = selection?.projectId === projectId ? selection.taskId : null;
+  // Panel, draft, pending creates and the flash are all keyed by project, so
+  // switching projects closes the panel and drops the draft.
+  const [panelState, setPanelState] = useState<{ projectId: string | null; panel: Panel } | null>(null);
+  const panel = panelState?.projectId === projectId ? panelState.panel : null;
+  const selectedTaskId = panel?.kind === "task" ? panel.taskId : null;
   // Looked up across all tasks, not the filtered list: archiving or re-statusing
   // the open task from the panel keeps it open. A deleted task closes it.
   const selectedTask = selectedTaskId ? tasks.find((t) => t.id === selectedTaskId) ?? null : null;
+  const draftOpen = panel?.kind === "draft";
   const selectTask = useCallback(
-    (taskId: string | null) => setSelection(taskId ? { projectId, taskId } : null),
+    (taskId: string | null) => setPanelState(taskId ? { projectId, panel: { kind: "task", taskId } } : null),
     [projectId],
   );
+
+  // The draft outlives a closed panel (✕ / Esc / opening a task) until it is
+  // created or discarded.
+  const [draftState, setDraftState] = useState<{ projectId: string | null; draft: TaskDraft } | null>(null);
+  const draft = draftState?.projectId === projectId ? draftState.draft : EMPTY_TASK_DRAFT;
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [focusNonce, setFocusNonce] = useState(0);
+  const [createMore, setCreateMore] = useState(
+    () => typeof window !== "undefined" && window.localStorage.getItem(CREATE_MORE_KEY) === "1",
+  );
+  const [pending, setPending] = useState<(PendingTask & { projectId: string | null })[]>([]);
+  const [flash, setFlash] = useState<{ projectId: string | null; taskId: string } | null>(null);
+  const flashTaskId = flash?.projectId === projectId ? flash.taskId : null;
+  const pendingKey = useRef(0);
+
+  useEffect(() => {
+    if (!flash) return;
+    const timer = setTimeout(() => setFlash(null), 1600);
+    return () => clearTimeout(timer);
+  }, [flash]);
+
+  const openDraft = () => {
+    setPanelState({ projectId, panel: { kind: "draft" } });
+    setFocusNonce((n) => n + 1);
+  };
+
+  const updateDraft = (patch: Partial<TaskDraft>) =>
+    setDraftState({ projectId, draft: { ...draft, ...patch } });
+
+  const handleCreateMoreChange = (value: boolean) => {
+    setCreateMore(value);
+    window.localStorage.setItem(CREATE_MORE_KEY, value ? "1" : "0");
+  };
+
+  const handleCreate = async () => {
+    const snapshot = draft;
+    const description = snapshot.description.trim();
+    if (!description) return;
+    const createProjectId = projectId;
+    const key = `pending-${++pendingKey.current}`;
+    const title = snapshot.title.trim() || null;
+    setPending((prev) => [...prev, { key, projectId: createProjectId, title, description, status: snapshot.status, priority: snapshot.priority }]);
+    setCreateError(null);
+    setDraftState(null);
+    // Create more keeps the panel on a fresh draft; otherwise the panel closes
+    // and the new row in the list is the confirmation.
+    if (createMore) setFocusNonce((n) => n + 1);
+    else setPanelState(null);
+
+    const task = await onCreateTask({
+      title: title ?? undefined,
+      description,
+      status: snapshot.status,
+      priority: snapshot.priority,
+      assigned_branch: snapshot.assigned_branch,
+    });
+    setPending((prev) => prev.filter((p) => p.key !== key));
+    if (task) {
+      setFlash({ projectId: createProjectId, taskId: task.id });
+      return;
+    }
+    // Put the draft back (unless a newer one is already being written) and
+    // reopen it with the error, so nothing typed is lost.
+    setDraftState((current) =>
+      current && current.projectId === createProjectId && !isDraftEmpty(current.draft)
+        ? current
+        : { projectId: createProjectId, draft: snapshot },
+    );
+    setPanelState((current) => current ?? { projectId: createProjectId, panel: { kind: "draft" } });
+    setCreateError("Couldn't create the task. Your draft is restored, try again.");
+  };
+
+  const handleDiscard = () => {
+    setDraftState(null);
+    setCreateError(null);
+    setPanelState(null);
+  };
 
   const handleAssign = (taskId: string, branch: string | null) => {
     onUpdateTask(taskId, { assigned_branch: branch });
@@ -72,6 +156,11 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
   }, [activeTasks, archivedTasks, statusFilter]);
 
   const archivedView = statusFilter === "archived";
+
+  const visiblePending = useMemo(
+    () => pending.filter((p) => p.projectId === projectId && (statusFilter === "all" || statusFilter === p.status)),
+    [pending, projectId, statusFilter],
+  );
 
   const assignedBranches = useMemo(
     () => new Set(tasks.filter((t) => t.assigned_branch !== null).map((t) => t.assigned_branch)),
@@ -97,7 +186,7 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
         title="Tasks"
         count={activeTasks.length}
         actions={
-          <Button size="sm" onClick={() => setFormOpen(true)} className="shadow-sm">
+          <Button size="sm" onClick={openDraft} className="shadow-sm">
             <Plus className="h-3.5 w-3.5 mr-1.5" />
             New Task
           </Button>
@@ -138,14 +227,37 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
                   worktrees={worktrees}
                   onAssign={handleAssign}
                   onOpenSourceSession={onOpenSourceSession}
+                  panelOpen={selectedTask !== null || draftOpen}
                   selectedTaskId={selectedTask?.id ?? null}
                   keyboardActive={active}
                   onSelect={selectTask}
+                  pendingTasks={visiblePending}
+                  flashTaskId={flashTaskId}
                   assignedBranches={assignedBranches}
                 />
               )}
             </div>
           </ResizablePanel>
+          {draftOpen && (
+            <>
+              <ResizableHandle />
+              <ResizablePanel id="task-detail" order={2} defaultSize={40} minSize={25}>
+                <TaskDraftPanel
+                  draft={draft}
+                  onChange={updateDraft}
+                  onCreate={handleCreate}
+                  onDiscard={handleDiscard}
+                  onClose={() => selectTask(null)}
+                  createMore={createMore}
+                  onCreateMoreChange={handleCreateMoreChange}
+                  error={createError}
+                  focusNonce={focusNonce}
+                  worktrees={worktrees}
+                  assignedBranches={assignedBranches}
+                />
+              </ResizablePanel>
+            </>
+          )}
           {selectedTask && (
             <>
               <ResizableHandle />
@@ -168,12 +280,6 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
           )}
         </ResizablePanelGroup>
       </div>
-
-      <TaskForm
-        open={formOpen}
-        onOpenChange={setFormOpen}
-        onSubmit={onCreateTask}
-      />
     </div>
   );
 }

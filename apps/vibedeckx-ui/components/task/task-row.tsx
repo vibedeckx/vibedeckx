@@ -14,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Trash2, GitBranch, Archive, ArchiveRestore } from "lucide-react";
+import { Skeleton } from "@/components/ui/skeleton";
 import { SourceSessionLink } from "@/components/agent/source-session-link";
 import { statusConfig, priorityConfig, statusOptions, priorityOptions, assignableBranches, branchLabel } from "./task-utils";
 
@@ -31,11 +32,13 @@ interface TaskRowProps {
   onOpenSourceSession?: (task: Task) => void;
   /** This task is open in the detail panel. */
   selected?: boolean;
+  /** Just created: play the one-shot highlight. */
+  flash?: boolean;
   /** Detail panel is open: drop what it already shows (description, assign, created). */
   compact?: boolean;
 }
 
-export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, archivedView, onClick, worktrees, assignedBranches, onAssign, onOpenSourceSession, selected, compact }: TaskRowProps) {
+export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, archivedView, onClick, worktrees, assignedBranches, onAssign, onOpenSourceSession, selected, flash, compact }: TaskRowProps) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleValue, setTitleValue] = useState(task.title);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -65,7 +68,7 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
 
   return (
     <TableRow
-      className="group cursor-pointer"
+      className={`group cursor-pointer ${flash ? "animate-task-row-flash" : ""}`}
       data-task-id={task.id}
       data-state={selected ? "selected" : undefined}
       onClick={() => onClick?.(task)}
@@ -228,6 +231,66 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
           </Button>
         </div>
       </TableCell>
+    </TableRow>
+  );
+}
+
+/** A create in flight (the server may still be generating its title). */
+export interface PendingTask {
+  key: string;
+  /** null until the server generates one. */
+  title: string | null;
+  description: string;
+  status: TaskStatus;
+  priority: TaskPriority;
+}
+
+/**
+ * Inert placeholder row for a task being created, matching TaskRow's columns.
+ * Only what isn't known yet is a skeleton — the title while the server
+ * generates it, and the row's own controls; the rest shows as entered.
+ */
+export function PendingTaskRow({ pending, compact }: { pending: PendingTask; compact: boolean }) {
+  return (
+    <TableRow data-pending-task aria-busy className="hover:bg-transparent">
+      {/* pr-0 like the checkbox cell it stands in for, so the column keeps its width. */}
+      <TableCell className="w-10 pr-0">
+        <Skeleton className="size-4 rounded-[4px]" />
+      </TableCell>
+      <TableCell className="w-full max-w-0">
+        {pending.title !== null ? (
+          <span className="block truncate text-sm">{pending.title}</span>
+        ) : (
+          <>
+            <Skeleton className="h-4 w-2/5 max-w-64 my-0.5" />
+            <span className="sr-only">Generating title…</span>
+          </>
+        )}
+        {!compact && (
+          <p className="text-xs text-muted-foreground truncate max-w-[400px] mt-0.5">{pending.description}</p>
+        )}
+      </TableCell>
+      <TableCell className="@max-md:hidden">
+        <Badge variant="outline" className={`text-xs opacity-60 ${statusConfig[pending.status].color}`}>
+          {statusConfig[pending.status].label}
+        </Badge>
+      </TableCell>
+      <TableCell className="@max-lg:hidden">
+        <Badge variant="outline" className={`text-xs opacity-60 ${priorityConfig[pending.priority].color}`}>
+          {priorityConfig[pending.priority].label}
+        </Badge>
+      </TableCell>
+      {!compact && (
+        <TableCell>
+          <Skeleton className="h-5 w-24 rounded-full" />
+        </TableCell>
+      )}
+      {!compact && (
+        <TableCell>
+          <Skeleton className="h-3.5 w-16" />
+        </TableCell>
+      )}
+      <TableCell className="w-10" />
     </TableRow>
   );
 }

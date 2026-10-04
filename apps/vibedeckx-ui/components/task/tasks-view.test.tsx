@@ -37,6 +37,9 @@ const tasks = [task("t1", "First", "Long first description"), task("t2", "Second
 let container: HTMLDivElement;
 let root: Root;
 let onUpdateTask: ReturnType<typeof vi.fn<(id: string, opts: object) => Promise<Task | null>>>;
+let onCreateTask: ReturnType<typeof vi.fn<(opts: object) => Promise<Task | null>>>;
+let currentTasks: Task[];
+let active: boolean;
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
@@ -44,19 +47,23 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   onUpdateTask = vi.fn(async () => null);
+  onCreateTask = vi.fn(async () => null);
+  currentTasks = tasks;
+  window.localStorage.clear();
   render(true);
 });
 
-function render(active: boolean) {
+function render(nextActive = active) {
+  active = nextActive;
   act(() => {
     root.render(
       <TasksView
         active={active}
         projectId="project-1"
-        tasks={tasks}
+        tasks={currentTasks}
         loading={false}
         worktrees={[]}
-        onCreateTask={vi.fn(async () => null)}
+        onCreateTask={onCreateTask}
         onUpdateTask={onUpdateTask}
         onDeleteTask={vi.fn(async () => {})}
         onArchiveTask={vi.fn(async () => {})}
@@ -153,5 +160,105 @@ describe("TasksView detail panel", () => {
       title.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     });
     expect(onUpdateTask).toHaveBeenCalledWith("t1", { title: "第一" });
+  });
+});
+
+describe("TasksView new-task draft", () => {
+  const draftPanel = () => container.querySelector('[data-panel="task-detail"]');
+  const field = (label: string) =>
+    draftPanel()!.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`)!;
+  const button = (text: string) =>
+    Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent?.trim().startsWith(text))!;
+  const openDraft = () => act(() => button("New Task").click());
+  const pendingRows = () => container.querySelectorAll("[data-pending-task]");
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => { resolve = r; });
+    return { promise, resolve };
+  }
+
+  it("opens an empty draft with Create disabled until there is a description", () => {
+    openDraft();
+    expect(container.textContent).toContain("New task");
+    expect(document.activeElement).toBe(field("Title"));
+    expect(button("Create").disabled).toBe(true);
+    setTextareaValue(field("Description"), "Write it");
+    expect(button("Create").disabled).toBe(false);
+  });
+
+  it("creates, closes the panel, shows a pending row, then flashes the real task", async () => {
+    const created = task("t9", "Generated", "Write it");
+    const result = deferred<Task | null>();
+    onCreateTask.mockReturnValue(result.promise);
+    openDraft();
+    setTextareaValue(field("Description"), "  Write it  ");
+    act(() => button("Create").click());
+
+    expect(onCreateTask).toHaveBeenCalledWith({
+      title: undefined,
+      description: "Write it",
+      status: "todo",
+      priority: "medium",
+      assigned_branch: null,
+    });
+    expect(draftPanel()).toBeNull();
+    expect(pendingRows()).toHaveLength(1);
+    expect(pendingRows()[0].textContent).toContain("Generating title…");
+
+    currentTasks = [...tasks, created];
+    render();
+    await act(async () => result.resolve(created));
+    expect(pendingRows()).toHaveLength(0);
+    expect(row("t9").className).toContain("animate-task-row-flash");
+  });
+
+  it("restores the draft with an error when create fails", async () => {
+    openDraft();
+    setTextareaValue(field("Title"), "Mine");
+    setTextareaValue(field("Description"), "Body");
+    await act(async () => button("Create").click());
+    expect(pendingRows()).toHaveLength(0);
+    expect(field("Title").value).toBe("Mine");
+    expect(field("Description").value).toBe("Body");
+    expect(container.textContent).toContain("Couldn't create the task");
+  });
+
+  it("submits on Cmd/Ctrl+Enter and stays on a fresh draft with Create more", async () => {
+    onCreateTask.mockResolvedValue(task("t9", "First task", "First"));
+    openDraft();
+    const checkbox = draftPanel()!.querySelector<HTMLButtonElement>('button[role="checkbox"]')!;
+    act(() => checkbox.click());
+    setTextareaValue(field("Description"), "First");
+    await act(async () => {
+      field("Description").dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }));
+    });
+    expect(onCreateTask).toHaveBeenCalledWith(expect.objectContaining({ description: "First" }));
+    expect(draftPanel()).not.toBeNull();
+    expect(field("Description").value).toBe("");
+    expect(window.localStorage.getItem("vibedeckx:tasks:create-more")).toBe("1");
+  });
+
+  it("keeps the draft across Esc but clears it on Discard", () => {
+    openDraft();
+    setTextareaValue(field("Description"), "Half written");
+    act(() => field("Description").blur());
+    press("Escape");
+    expect(draftPanel()).toBeNull();
+    openDraft();
+    expect(field("Description").value).toBe("Half written");
+    act(() => button("Discard").click());
+    expect(draftPanel()).toBeNull();
+    openDraft();
+    expect(field("Description").value).toBe("");
+  });
+
+  it("New Task while the draft is open refocuses the title instead of resetting", () => {
+    openDraft();
+    setTextareaValue(field("Description"), "Keep me");
+    act(() => field("Description").focus());
+    openDraft();
+    expect(document.activeElement).toBe(field("Title"));
+    expect(field("Description").value).toBe("Keep me");
   });
 });

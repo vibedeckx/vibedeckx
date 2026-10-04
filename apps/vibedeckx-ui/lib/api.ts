@@ -2442,7 +2442,7 @@ export const api = {
 
   async createTask(
     projectId: string,
-    opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; source?: TaskSourceInput }
+    opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; source?: TaskSourceInput }
   ): Promise<Task> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/tasks`, {
       method: "POST",

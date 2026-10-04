@@ -29,7 +29,7 @@ export function useTasks(projectId: string | null) {
   }, [fetchTasks]);
 
   const createTask = useCallback(
-    async (opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority }) => {
+    async (opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => {
       if (!projectId) return null;
 
       try {

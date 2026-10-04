@@ -9,7 +9,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { TaskRow } from "./task-row";
+import { TaskRow, PendingTaskRow, type PendingTask } from "./task-row";
 import { isEditableTarget } from "@/lib/editable-target";
 import { hasOpenOverlay } from "@/components/locate/focus-region";
 
@@ -29,20 +29,27 @@ interface TaskTableProps {
   worktrees: Worktree[];
   onAssign: (taskId: string, branch: string | null) => void;
   onOpenSourceSession?: (task: Task) => void;
-  /** Task open in the detail panel; ↑↓ step through the sorted rows, Esc closes. */
+  /** The side panel is open (a task or the new-task draft): rows go compact, Esc closes it. */
+  panelOpen: boolean;
+  /** Task open in the detail panel; ↑↓ step through the sorted rows. */
   selectedTaskId: string | null;
+  /** null closes the panel. */
   onSelect: (taskId: string | null) => void;
+  /** Creates still in flight, shown as placeholder rows after the real ones. */
+  pendingTasks: PendingTask[];
+  /** Just-created task: scrolled into view and briefly highlighted. */
+  flashTaskId: string | null;
   /** False while the Tasks view is hidden: its panel keys must not fire. */
   keyboardActive: boolean;
   /** Branch occupancy across all of the project's tasks, not just the visible ones. */
   assignedBranches: Set<string | null>;
 }
 
-export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign, onOpenSourceSession, selectedTaskId, onSelect, keyboardActive, assignedBranches }: TaskTableProps) {
+export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign, onOpenSourceSession, panelOpen, selectedTaskId, onSelect, pendingTasks, flashTaskId, keyboardActive, assignedBranches }: TaskTableProps) {
   const [sortField, setSortField] = useState<SortField | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const tableRef = useRef<HTMLTableElement>(null);
-  const compact = selectedTaskId !== null;
+  const compact = panelOpen;
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -82,7 +89,7 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
   // handler would also release the region; typing, open menus/dialogs and an
   // active type-to-locate query (which prevents default) all keep their keys.
   useEffect(() => {
-    if (selectedTaskId === null || !keyboardActive) return;
+    if (!panelOpen || !keyboardActive) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
       if (isEditableTarget(event.target) || hasOpenOverlay()) return;
@@ -92,6 +99,7 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
         return;
       }
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      if (selectedTaskId === null) return;
       const rows = sorted;
       if (rows.length === 0) return;
       event.preventDefault();
@@ -106,15 +114,16 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [selectedTaskId, onSelect, sorted, keyboardActive]);
+  }, [panelOpen, selectedTaskId, onSelect, sorted, keyboardActive]);
 
+  const revealId = flashTaskId ?? selectedTaskId;
   useEffect(() => {
-    if (selectedTaskId === null) return;
+    if (revealId === null) return;
     const rows = tableRef.current?.querySelectorAll<HTMLElement>("[data-task-id]") ?? [];
     Array.from(rows)
-      .find((row) => row.dataset.taskId === selectedTaskId)
+      .find((row) => row.dataset.taskId === revealId)
       ?.scrollIntoView({ block: "nearest" });
-  }, [selectedTaskId]);
+  }, [revealId]);
 
   return (
     <Table ref={tableRef}>
@@ -151,6 +160,7 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
             archivedView={archivedView}
             onClick={(t) => onSelect(t.id === selectedTaskId ? null : t.id)}
             selected={task.id === selectedTaskId}
+            flash={task.id === flashTaskId}
             compact={compact}
             worktrees={worktrees}
             assignedBranches={assignedBranches}
@@ -158,7 +168,10 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
             onOpenSourceSession={onOpenSourceSession}
           />
         ))}
-        {tasks.length === 0 && (
+        {pendingTasks.map((pending) => (
+          <PendingTaskRow key={pending.key} pending={pending} compact={compact} />
+        ))}
+        {tasks.length === 0 && pendingTasks.length === 0 && (
           <TableRow>
             <td colSpan={compact ? 5 : 7} className="text-center text-muted-foreground py-12 text-sm">
               <div className="flex flex-col items-center gap-1">
