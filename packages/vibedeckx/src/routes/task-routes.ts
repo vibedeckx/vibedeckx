@@ -5,9 +5,25 @@ import { generateText } from "ai";
 import { resolveFastChatModel } from "../utils/chat-model.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
+import { isProjectSourceSession, resolveSourceSessions, validSourceId } from "./source-sessions.js";
+import type { Task, TaskSource } from "../storage/types.js";
+import { applyTaskChange, revertTaskPatch } from "../retention-holds.js";
 import "../server-types.js";
 
+/** Far above PROPOSE_TASK_MAX_ITEMS; only bounds what a caller can claim. */
+const SOURCE_ITEM_INDEX_MAX = 100;
+
+interface SourceBody { session_id?: unknown; tool_use_id?: unknown; item_index?: unknown }
+
 const routes: FastifyPluginAsync = async (fastify) => {
+  const applyHoldingChange = (
+    taskId: string,
+    apply: () => Promise<Task | undefined>,
+    revert: (before: Task) => Promise<unknown>,
+  ) => applyTaskChange(fastify, taskId, apply, revert);
+  const holdFailed = (error: unknown) =>
+    `Could not protect the source session from retention: ${error instanceof Error ? error.message : String(error)}`;
+
   // List tasks for a project (ordered by position)
   fastify.get<{ Params: { projectId: string }; Querystring: { includeArchived?: string } }>(
     "/api/projects/:projectId/tasks",
@@ -21,7 +37,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
       const includeArchived = req.query.includeArchived === "true";
       const tasks = await fastify.storage.tasks.getByProjectId(req.params.projectId, { includeArchived });
-      return reply.code(200).send({ tasks });
+      const sources = await resolveSourceSessions(
+        fastify.storage,
+        tasks.flatMap((t) => (t.source_session_id ? [t.source_session_id] : [])),
+      );
+      return reply.code(200).send({
+        tasks: tasks.map((t) => ({
+          ...t,
+          source_session: t.source_session_id ? sources.get(t.source_session_id) ?? null : null,
+        })),
+      });
     }
   );
 
@@ -45,7 +70,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Create task
   fastify.post<{
     Params: { projectId: string };
-    Body: { title?: string; description: string; status?: string; priority?: string; assigned_branch?: string | null };
+    Body: {
+      title?: string; description: string; status?: string; priority?: string; assigned_branch?: string | null;
+      /** Provenance of an agent proposal (propose_task); makes create idempotent. */
+      source?: SourceBody | null;
+    };
   }>("/api/projects/:projectId/tasks", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -54,9 +83,30 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { title: providedTitle, description, status, priority, assigned_branch } = req.body;
+    const { title: providedTitle, description, status, priority } = req.body;
+    let { assigned_branch } = req.body;
     if (!description) {
       return reply.code(400).send({ error: "description is required" });
+    }
+
+    let source: TaskSource | null = null;
+    if (req.body.source) {
+      const { session_id, tool_use_id, item_index } = req.body.source;
+      if (!validSourceId(session_id) || !validSourceId(tool_use_id)
+        || typeof item_index !== "number" || !Number.isInteger(item_index)
+        || item_index < 0 || item_index > SOURCE_ITEM_INDEX_MAX) {
+        return reply.code(400).send({ error: "Invalid source" });
+      }
+      if (!(await isProjectSourceSession(fastify.storage, session_id, req.params.projectId))) {
+        return reply.code(400).send({ error: "Invalid source" });
+      }
+      source = { session_id, tool_use_id, item_index };
+      // Never pre-assigned: turn-end auto-complete closes the first task
+      // assigned to a branch, so a follow-up assigned to its source session's
+      // branch would be marked done by that session's very next turn. The
+      // user assigns a branch when they actually start on it.
+      // docs/session-task-proposal-design.md §4.1
+      assigned_branch = null;
     }
 
     let title = providedTitle;
@@ -82,17 +132,51 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const id = randomUUID();
-    const task = await fastify.storage.tasks.create({
+    const insert = () => fastify.storage.tasks.create({
       id,
       project_id: req.params.projectId,
-      title,
+      title: title!,
       description,
       status: status as 'todo' | 'in_progress' | 'done' | 'cancelled' | undefined,
       priority: priority as 'low' | 'medium' | 'high' | 'urgent' | undefined,
       assigned_branch,
+      source,
     });
 
-    return reply.code(201).send({ task });
+    // Same shape as the schedule proposal create: the source session must be
+    // held out of retention before the task counts as created, so insert +
+    // hold sync (+ rollback of a row THIS request inserted) share the
+    // session's slot. A different id back is a replayed confirmation — 200,
+    // first confirmation's fields win.
+    let task: Task;
+    if (source) {
+      const sourceSessionId = source.session_id;
+      try {
+        task = await fastify.retentionHolds.exclusive(sourceSessionId, async (syncNow) => {
+          const row = await insert();
+          try {
+            await syncNow();
+            return row;
+          } catch (error) {
+            if (row.id === id) {
+              await fastify.storage.tasks.delete(row.id);
+              await syncNow().catch(() => undefined);
+            }
+            throw error;
+          }
+        });
+      } catch (error) {
+        return reply.code(502).send({ error: holdFailed(error) });
+      }
+    } else {
+      task = await insert();
+    }
+
+    const created = task.id === id;
+    if (created) {
+      fastify.eventBus.emit({ type: "task:created", projectId: req.params.projectId, task: { ...task } });
+    }
+    return reply.code(created ? 201 : 200).send({ task });
   });
 
   // Update task
@@ -111,14 +195,26 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Task not found" });
     }
 
-    const task = await fastify.storage.tasks.update(req.params.id, {
+    const patch = {
       title: req.body.title,
       description: req.body.description,
       status: req.body.status as 'todo' | 'in_progress' | 'done' | 'cancelled' | undefined,
       priority: req.body.priority as 'low' | 'medium' | 'high' | 'urgent' | undefined,
       assigned_branch: req.body.assigned_branch,
       position: req.body.position,
-    });
+    };
+    let task: Task | undefined;
+    try {
+      task = await applyHoldingChange(
+        req.params.id,
+        () => fastify.storage.tasks.update(req.params.id, patch),
+        revertTaskPatch(fastify.storage, req.params.id, patch),
+      );
+    } catch (error) {
+      return reply.code(502).send({ error: holdFailed(error) });
+    }
+    // Also re-derives a proposed task's retention hold (shared-services listener).
+    if (task) fastify.eventBus.emit({ type: "task:updated", projectId: existing.project_id, task: { ...task } });
     return reply.code(200).send({ task });
   });
 
@@ -136,6 +232,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     await fastify.storage.tasks.delete(req.params.id);
+    fastify.eventBus.emit({ type: "task:deleted", projectId: existing.project_id, taskId: req.params.id });
+    // Never blocks the delete; a failed remote release is retried by releaseStale.
+    if (existing.source_session_id) {
+      await fastify.retentionHolds.sync(existing.source_session_id).catch((error) => {
+        console.warn(`[RetentionHolds] release for ${existing.source_session_id} deferred:`, error);
+      });
+    }
     return reply.code(200).send({ success: true });
   });
 
@@ -153,6 +256,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const task = await fastify.storage.tasks.archive(req.params.id);
+    if (task) fastify.eventBus.emit({ type: "task:updated", projectId: existing.project_id, task: { ...task } });
     return reply.code(200).send({ task });
   });
 
@@ -169,7 +273,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Task not found" });
     }
 
-    const task = await fastify.storage.tasks.unarchive(req.params.id);
+    let task: Task | undefined;
+    try {
+      task = await applyHoldingChange(
+        req.params.id,
+        () => fastify.storage.tasks.unarchive(req.params.id),
+        () => fastify.storage.tasks.archive(req.params.id),
+      );
+    } catch (error) {
+      return reply.code(502).send({ error: holdFailed(error) });
+    }
+    if (task) fastify.eventBus.emit({ type: "task:updated", projectId: existing.project_id, task: { ...task } });
     return reply.code(200).send({ task });
   });
 

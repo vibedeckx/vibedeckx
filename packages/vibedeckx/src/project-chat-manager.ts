@@ -12,12 +12,14 @@ import type {
   Storage,
 } from "./storage/types.js";
 import { resolveChatModel } from "./utils/chat-model.js";
+import { revertTaskPatch } from "./retention-holds.js";
 import { generateConversationTitle, snippetTitle } from "./utils/conversation-title.js";
 import {
   listProjectChatPublicContextRefs,
   type ProjectChatPublicContextRef,
 } from "./project-chat-context.js";
 import {
+  applyTaskChangeDirectly,
   createProjectChatTools,
   projectChatPublicOperationContent,
   type CreateProjectChatToolsOptions,
@@ -100,7 +102,7 @@ export interface ProjectChatManagerOptions {
   recoveryPageSize?: number;
   maxConcurrentTurns?: number;
   maxConcurrentTurnsPerUser?: number;
-  toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions" | "mutationServices">;
+  toolDependencies?: Pick<CreateProjectChatToolsOptions, "agentSessionManager" | "remoteSessions" | "mutationServices" | "applyTaskChange">;
   eventBus?: EventBus;
   titleGenerator?: typeof generateConversationTitle;
 }
@@ -1152,9 +1154,16 @@ export class ProjectChatManager {
         }
         try {
           const { assignedBranch, ...patch } = payload.patch;
-          const updated = await this.storage.tasks.update(payload.taskId, {
+          const storagePatch = {
             ...patch, ...(assignedBranch !== undefined ? { assigned_branch: assignedBranch } : {}),
-          });
+          };
+          // Same hold handling as the tool's first attempt: a reopen whose hold
+          // can't land is reverted and stays retryable.
+          const updated = await (this.toolDependencies?.applyTaskChange ?? applyTaskChangeDirectly)(
+            payload.taskId,
+            () => this.storage.tasks.update(payload.taskId, storagePatch),
+            revertTaskPatch(this.storage, payload.taskId, storagePatch),
+          );
           if (!updated) throw new Error("Task update failed");
         } catch (error) {
           console.warn(`[ProjectChat] task update ${operation.id} remains retryable:`, boundedStreamError(error).message);

@@ -12,9 +12,13 @@ import { startStubMcpServer } from "./stub-mcp-server.js";
 import { buildCodexAppServerSpawnConfig } from "../codex/cli.js";
 import {
   CANONICAL_PROPOSE_SCHEDULE_TOOL,
+  CANONICAL_PROPOSE_TASK_TOOL,
   PROPOSE_SCHEDULE_DESCRIPTION,
   PROPOSE_SCHEDULE_INPUT_SCHEMA,
   PROPOSE_SCHEDULE_TOOL,
+  PROPOSE_TASK_DESCRIPTION,
+  PROPOSE_TASK_INPUT_SCHEMA,
+  PROPOSE_TASK_TOOL,
   canonicalizeSessionToolName,
 } from "../../session-tools-mcp.js";
 
@@ -231,6 +235,38 @@ describe.skipIf(!available)("codex live probes (session tools MCP)", () => {
         canonicalizeSessionToolName(reported),
         `codex reported the tool as ${JSON.stringify(reported)}, which the provider does not canonicalize`,
       ).toBe(CANONICAL_PROPOSE_SCHEDULE_TOOL);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  /** CX-SM1 for propose_task: same naming contract, nested-array arguments. */
+  it("CX-SM2: reports propose_task under a name the provider canonicalizes", async () => {
+    const stub = await startStubMcpServer({
+      name: PROPOSE_TASK_TOOL,
+      description: PROPOSE_TASK_DESCRIPTION,
+      inputSchema: PROPOSE_TASK_INPUT_SCHEMA,
+    });
+    try {
+      const spawnConfig = buildCodexAppServerSpawnConfig(
+        detectBinary("codex"), undefined, undefined, { url: stub.url, token: "session-probe-token" },
+      );
+      const r = await runCodexAppServer({
+        turns: [
+          "Call the propose_task MCP tool exactly once with one task: title=\"Cover remote path\", "
+          + "description=\"Add the remote retention test\". Then reply DONE. Do not run any commands.",
+        ],
+        spawnOverride: { command: spawnConfig.command, args: spawnConfig.args, env: spawnConfig.env },
+        timeoutMs: 120_000,
+        recordAs: "cxsm2-session-mcp-task",
+      });
+
+      expect(r.outcome).toBe("ok");
+      expect(stub.toolCalls, "codex never invoked the MCP tool").toBeGreaterThan(0);
+      const calls = items(r.incoming, "mcpToolCall");
+      expect(calls.length, "no mcpToolCall item — item shape drifted?").toBeGreaterThan(0);
+      const reported = String(calls[0].tool ?? "");
+      expect(canonicalizeSessionToolName(reported, String(calls[0].server ?? ""))).toBe(CANONICAL_PROPOSE_TASK_TOOL);
     } finally {
       await stub.close();
     }

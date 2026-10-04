@@ -14,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Trash2, GitBranch, Archive, ArchiveRestore } from "lucide-react";
+import { SourceSessionLink } from "@/components/agent/source-session-link";
 import { statusConfig, priorityConfig, statusOptions, priorityOptions } from "./task-utils";
 
 interface TaskRowProps {
@@ -27,9 +28,10 @@ interface TaskRowProps {
   worktrees: Worktree[];
   assignedBranches: Set<string | null>;
   onAssign: (taskId: string, branch: string | null) => void;
+  onOpenSourceSession?: (task: Task) => void;
 }
 
-export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, archivedView, onClick, worktrees, assignedBranches, onAssign }: TaskRowProps) {
+export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, archivedView, onClick, worktrees, assignedBranches, onAssign, onOpenSourceSession }: TaskRowProps) {
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleValue, setTitleValue] = useState(task.title);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -96,6 +98,14 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
               <p className="text-xs text-muted-foreground truncate max-w-[400px] mt-0.5">
                 {task.description.length > 80 ? task.description.slice(0, 80) + "..." : task.description}
               </p>
+            )}
+            {task.source_session && (
+              <div className="mt-0.5 flex max-w-[400px] text-xs" onClick={(e) => e.stopPropagation()}>
+                <SourceSessionLink
+                  source={task.source_session}
+                  onOpen={onOpenSourceSession ? () => onOpenSourceSession(task) : undefined}
+                />
+              </div>
             )}
           </div>
         )}

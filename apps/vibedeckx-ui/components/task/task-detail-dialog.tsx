@@ -8,15 +8,18 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
+import { SourceSessionLink } from "@/components/agent/source-session-link";
 import { statusConfig, priorityConfig } from "./task-utils";
 
 interface TaskDetailDialogProps {
   task: Task | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Jump to the conversation a proposed task came from. */
+  onOpenSourceSession?: (task: Task) => void;
 }
 
-export function TaskDetailDialog({ task, open, onOpenChange }: TaskDetailDialogProps) {
+export function TaskDetailDialog({ task, open, onOpenChange, onOpenSourceSession }: TaskDetailDialogProps) {
   if (!task) return null;
 
   return (
@@ -36,6 +39,18 @@ export function TaskDetailDialog({ task, open, onOpenChange }: TaskDetailDialogP
           </div>
           {task.description && (
             <p className="text-sm text-foreground whitespace-pre-wrap">{task.description}</p>
+          )}
+          {task.source_session && (
+            <div className="flex min-w-0 items-center gap-2 text-xs">
+              <span className="shrink-0 text-muted-foreground">From session</span>
+              <SourceSessionLink
+                source={task.source_session}
+                onOpen={onOpenSourceSession ? () => {
+                  onOpenChange(false);
+                  onOpenSourceSession(task);
+                } : undefined}
+              />
+            </div>
           )}
           <div className="flex gap-4 text-xs text-muted-foreground pt-2 border-t">
             <span>Created: {new Date(task.created_at).toLocaleString()}</span>

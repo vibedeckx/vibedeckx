@@ -254,7 +254,7 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     expect(config.args).not.toContain("--allowedTools");
   });
 
-  it("carries both MCP servers in one --mcp-config and allowlists the session tool", () => {
+  it("carries both MCP servers in one --mcp-config and allowlists the session tools", () => {
     const config = new ClaudeCodeProvider().buildSpawnConfig(
       "/tmp",
       "plan",
@@ -267,7 +267,8 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     expect(Object.keys(blob.mcpServers).sort()).toEqual(["cross-remote", "vibedeckx"]);
     expect(blob.mcpServers.vibedeckx.url).toBe("http://127.0.0.1:5173/api/session-mcp");
     expect(blob.mcpServers.vibedeckx.headers.Authorization).toBe("Bearer session-tok");
-    expect(config.args[config.args.indexOf("--allowedTools") + 1]).toBe("mcp__vibedeckx__propose_schedule");
+    expect(config.args[config.args.indexOf("--allowedTools") + 1])
+      .toBe("mcp__vibedeckx__propose_schedule,mcp__vibedeckx__propose_task");
   });
 
   it("injects the session tools alone when there is no cross-remote config", () => {

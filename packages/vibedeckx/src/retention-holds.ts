@@ -1,11 +1,12 @@
-import type { RetentionHold, Storage } from "./storage/types.js";
+import type { RetentionHold, Storage, Task } from "./storage/types.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import type { RemoteSessionInfo } from "./server-types.js";
 import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
+import type { EventBus } from "./event-bus.js";
 
 /**
- * Retention holds: things outside a session that point at it — today a
- * schedule proposed from it — keep it out of the retention sweep. Manual
+ * Retention holds: things outside a session that point at it — a schedule
+ * proposed from it, or a task still open — keep it out of the retention sweep. Manual
  * delete ignores them, exactly like a star.
  *
  * The holders live on the hub (scheduled_tasks.source_session_id), but the
@@ -27,7 +28,7 @@ import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
  * slot, so a concurrent replay can't pick up a row about to be rolled back.
  */
 
-/** One feature whose rows can hold a session (schedules now, tasks later). */
+/** One feature whose rows can hold a session (proposed schedules and tasks). */
 export interface RetentionHoldSource {
   kind: string;
   listHolders(sessionId: string): Promise<string[]>;
@@ -184,4 +185,91 @@ export function scheduleHoldSource(storage: Storage): RetentionHoldSource {
     kind: "schedule",
     listHolders: (sessionId) => storage.scheduledTasks.listIdsBySourceSession(sessionId),
   };
+}
+
+/**
+ * A task proposed from a session holds it only while the task is open: once
+ * it is done, cancelled or archived the session falls back to the normal
+ * retention rules. See docs/session-task-proposal-design.md §5.
+ */
+export function taskHoldSource(storage: Storage): RetentionHoldSource {
+  return {
+    kind: "task",
+    listHolders: (sessionId) => storage.tasks.listOpenIdsBySourceSession(sessionId),
+  };
+}
+
+/**
+ * A proposed task's hold follows its status, and status changes come from
+ * several places (task routes, turn-end auto-complete), all of which announce
+ * themselves with task:updated. Best-effort like the schedule delete release:
+ * a failed remote release is retried by releaseStale.
+ */
+export function subscribeTaskHoldSync(eventBus: EventBus, holds: RetentionHoldSync): () => void {
+  return eventBus.subscribe((event) => {
+    if (event.type !== "task:updated") return;
+    const sourceSessionId = event.task.source_session_id;
+    if (typeof sourceSessionId !== "string" || !sourceSessionId) return;
+    void holds.sync(sourceSessionId).catch((error) => {
+      console.warn(`[RetentionHolds] task hold sync for ${sourceSessionId} deferred:`, error);
+    });
+  });
+}
+
+/** Whether `task` holds its source session out of retention (mirrors listOpenIdsBySourceSession). */
+export function taskHoldsSource(task: Task): boolean {
+  return !!task.source_session_id && !!task.source_tool_use_id && task.archived_at === null
+    && (task.status === "todo" || task.status === "in_progress");
+}
+
+/**
+ * Apply a change to a task that may (re)acquire its source session's hold —
+ * reopening it, unarchiving it — from any writer (task routes, Project Chat).
+ * Unlike a release, a failed acquire can't be left to releaseStale: that only
+ * revisits sessions that still have holds, and this one may have none. So,
+ * like the create route, the change and the sync share the session's slot and
+ * the change is reverted (then the error rethrown) when the hold doesn't land.
+ *
+ * Every change to a proposed task takes the slot, not just ones that look
+ * like acquires from outside it: otherwise an edit landing while a reopen's
+ * sync is pending would be erased by that reopen's revert. For the same reason
+ * the snapshot `revert` restores from is read inside the slot. Changes that
+ * don't acquire a hold just apply; their release (if any) follows from
+ * task:updated where the writer emits it.
+ */
+export async function applyTaskChange(
+  deps: { storage: Storage; retentionHolds: RetentionHoldSync },
+  taskId: string,
+  apply: () => Promise<Task | undefined>,
+  revert: (before: Task) => Promise<unknown>,
+): Promise<Task | undefined> {
+  const existing = await deps.storage.tasks.getById(taskId);
+  if (!existing?.source_session_id) return apply();
+  return deps.retentionHolds.exclusive(existing.source_session_id, async (syncNow) => {
+    const before = await deps.storage.tasks.getById(taskId);
+    if (!before) return undefined;
+    const task = await apply();
+    if (!task || taskHoldsSource(before) || !taskHoldsSource(task)) return task;
+    try {
+      await syncNow();
+      return task;
+    } catch (error) {
+      await revert(before);
+      await syncNow().catch(() => undefined);
+      throw error;
+    }
+  });
+}
+
+/** Revert for a field patch: put back only the fields the patch set. */
+export function revertTaskPatch(
+  storage: Storage,
+  taskId: string,
+  patch: Parameters<Storage["tasks"]["update"]>[1],
+): (before: Task) => Promise<unknown> {
+  return (before) => storage.tasks.update(taskId, Object.fromEntries(
+    (Object.keys(patch) as Array<keyof typeof patch>)
+      .filter((key) => patch[key] !== undefined)
+      .map((key) => [key, before[key]]),
+  ));
 }

@@ -5,6 +5,7 @@ import path from "path";
 import type { PromptProvider, ScheduledTask, ScheduledTaskRunRequest, ScheduledTaskRunType, ScheduledTaskCwdMode } from "../storage/types.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import { validateCron } from "../scheduler.js";
+import { isProjectSourceSession, resolveSourceSessions, validSourceId } from "./source-sessions.js";
 import "../server-types.js";
 
 const RUN_TYPES: ScheduledTaskRunType[] = ["command", "prompt"];
@@ -26,18 +27,6 @@ interface ScheduleBody {
   /** Provenance of an agent proposal (propose_schedule); makes create idempotent. */
   source?: { session_id?: string; tool_use_id?: string } | null;
 }
-
-const SOURCE_ID_MAX = 200;
-
-interface SourceSessionSummary {
-  id: string;
-  title: string | null;
-  branch: string | null;
-  exists: boolean;
-}
-
-const validSourceId = (value: unknown): value is string =>
-  typeof value === "string" && value.length > 0 && value.length <= SOURCE_ID_MAX && value.trim() === value;
 
 interface ManualRunBody {
   requestId?: string;
@@ -94,39 +83,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
     return schedule;
   };
 
-  // Where each proposed schedule came from, for the source link on the
-  // schedules page. A deleted source (manual delete, or retention before the
-  // hold existed) comes back with exists=false rather than disappearing, so
-  // the page can say so. Remote titles come from the search cache — the hub
-  // has no other copy, and a missing title just renders as "Untitled".
-  const resolveSourceSessions = async (ids: string[]): Promise<Map<string, SourceSessionSummary>> => {
-    const unique = [...new Set(ids)];
-    const remoteIds = unique.filter((id) => id.startsWith("remote-"));
-    const remoteTitles = await fastify.storage.searchCache.getCachedSessionTitles(remoteIds);
-    // Checkout-first branch, like the sidebar's projection: a re-anchored
-    // workspace moves its sessions, the snapshot branch column doesn't.
-    const branchOf = async (row: { branch: string | null; workspace_checkout_id?: string | null } | undefined) => {
-      if (!row) return null;
-      const registered = row.workspace_checkout_id
-        ? await fastify.storage.workspaceRegistry.getCheckoutById(row.workspace_checkout_id)
-        : undefined;
-      return (registered ? registered.workspace.branch : row.branch) || null;
-    };
-    const out = new Map<string, SourceSessionSummary>();
-    await Promise.all(unique.map(async (id) => {
-      if (id.startsWith("remote-")) {
-        const mapping = await fastify.storage.remoteSessionMappings.getByLocal(id);
-        out.set(id, {
-          id, exists: !!mapping, branch: await branchOf(mapping), title: remoteTitles.get(id) ?? null,
-        });
-        return;
-      }
-      const session = await fastify.storage.agentSessions.getById(id);
-      out.set(id, { id, exists: !!session, branch: await branchOf(session), title: session?.title ?? null });
-    }));
-    return out;
-  };
-
   fastify.get<{ Params: { projectId: string } }>(
     "/api/projects/:projectId/schedules",
     async (req, reply) => {
@@ -138,6 +94,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       const schedules = await fastify.storage.scheduledTasks.getByProjectId(req.params.projectId);
       const lastRuns = await fastify.storage.scheduledTaskRuns.getLastByScheduleIds(schedules.map((s) => s.id));
       const sources = await resolveSourceSessions(
+        fastify.storage,
         schedules.flatMap((s) => (s.source_session_id ? [s.source_session_id] : [])),
       );
       return reply.code(200).send({
@@ -186,23 +143,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (!validSourceId(b.source.session_id) || !validSourceId(b.source.tool_use_id)) {
           return reply.code(400).send({ error: "Invalid source" });
         }
-        // The source pair is the GLOBAL idempotency key, so the caller must own
-        // the session it names. Otherwise one project could squat the key that
-        // another project's confirmation needs: its insert would hit the unique
-        // index, find no row of its own, and fail — the real proposal could
-        // never be accepted.
-        //
-        // Both kinds of session must be checked. A local session is a row in
-        // agent_sessions; a remote one is not — the server holds it as a
-        // remote_session_mappings row keyed by the `remote-` local id, resolved
-        // here through the project-scoped lookup. A source that resolves to
-        // neither is rejected rather than trusted.
-        const sourceSession = await fastify.storage.agentSessions.getById(b.source.session_id);
-        const owned = sourceSession
-          ? sourceSession.project_id === req.params.projectId
-          : !!(await fastify.storage.remoteSessionMappings.getAuthorizedByLocal(
-            b.source.session_id, req.params.projectId,
-          ));
+        // Must name a session of this project: see isProjectSourceSession.
+        const owned = await isProjectSourceSession(fastify.storage, b.source.session_id, req.params.projectId);
         if (!owned) return reply.code(400).send({ error: "Invalid source" });
         source = { session_id: b.source.session_id, tool_use_id: b.source.tool_use_id };
       }

@@ -25,7 +25,7 @@ export const createWorkspaceRepos = (
   h: DialectHelpers,
 ): Pick<Storage, "tasks" | "rules" | "commands"> => ({
   tasks: {
-    create: async ({ id, project_id, title, description, status, priority, assigned_branch }) => {
+    create: async ({ id, project_id, title, description, status, priority, assigned_branch, source }) => {
       // Position assignment pushed into the INSERT itself (a
       // `coalesce(max(position), -1) + 1` subquery scoped to the project)
       // instead of a JS-side "read max, then write" — same technique as
@@ -43,10 +43,39 @@ export const createWorkspaceRepos = (
         position: eb.selectFrom("tasks")
           .select(sql<number>`coalesce(max(position), -1) + 1`.as("next_position"))
           .where("project_id", "=", project_id),
-      })).execute();
+        source_session_id: source?.session_id ?? null,
+        source_tool_use_id: source?.tool_use_id ?? null,
+        source_item_index: source?.item_index ?? null,
+      // DO NOTHING only for a proposal, so a concurrent replay races into
+      // idx_tasks_source and is resolved below (same argument as
+      // scheduledTasks.create); a plain insert keeps failing loudly.
+      })).$if(!!source, (qb) => qb.onConflict((oc) => oc.doNothing())).execute();
 
-      const row = await kdb.selectFrom("tasks").selectAll().where("id", "=", id).executeTakeFirstOrThrow();
-      return mapTask(row);
+      const row = await kdb.selectFrom("tasks").selectAll().where("id", "=", id).executeTakeFirst();
+      if (row) return mapTask(row);
+
+      if (source) {
+        const existing = await kdb.selectFrom("tasks").selectAll()
+          .where("project_id", "=", project_id)
+          .where("source_session_id", "=", source.session_id)
+          .where("source_tool_use_id", "=", source.tool_use_id)
+          .where("source_item_index", "=", source.item_index)
+          .executeTakeFirst();
+        if (existing) return mapTask(existing);
+      }
+      throw new Error(`Failed to create task ${id}`);
+    },
+
+    listOpenIdsBySourceSession: async (sessionId) => {
+      const rows = await kdb.selectFrom("tasks").select("id")
+        .where("source_session_id", "=", sessionId)
+        // Always true for a proposed task; stated so idx_tasks_source can serve it.
+        .where("source_tool_use_id", "is not", null)
+        .where("archived_at", "is", null)
+        .where("status", "in", ["todo", "in_progress"])
+        .orderBy("id", "asc")
+        .execute();
+      return rows.map((row) => row.id);
     },
 
     getByProjectId: async (projectId, opts) => {

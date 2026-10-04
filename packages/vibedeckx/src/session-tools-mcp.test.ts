@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
   CANONICAL_PROPOSE_SCHEDULE_TOOL,
+  CANONICAL_PROPOSE_TASK_TOOL,
+  PROPOSE_TASK_MAX_ITEMS,
   SESSION_TOOLS_MCP_PATH,
   canonicalizeSessionToolName,
   mintSessionToolsMcpConfig,
   parseProposeScheduleArgs,
+  parseProposeTaskArgs,
 } from "./session-tools-mcp.js";
 import { verifySessionToolsToken } from "./utils/session-tools-token.js";
 
@@ -69,6 +72,38 @@ describe("parseProposeScheduleArgs", () => {
   });
 });
 
+describe("parseProposeTaskArgs", () => {
+  const item = { title: " Cover remote path ", description: "Add the remote retention test" };
+
+  it("accepts and trims items, defaulting priority to medium", () => {
+    expect(parseProposeTaskArgs({ tasks: [item, { ...item, priority: "High" }] })).toEqual({
+      ok: true,
+      value: [
+        { title: "Cover remote path", description: "Add the remote retention test", priority: "medium" },
+        { title: "Cover remote path", description: "Add the remote retention test", priority: "high" },
+      ],
+    });
+  });
+
+  it("rejects an empty, missing or oversized list", () => {
+    expect(parseProposeTaskArgs({}).ok).toBe(false);
+    expect(parseProposeTaskArgs({ tasks: [] }).ok).toBe(false);
+    expect(parseProposeTaskArgs({ tasks: Array(PROPOSE_TASK_MAX_ITEMS + 1).fill(item) }).ok).toBe(false);
+  });
+
+  it("rejects items without a title or description, or with an unknown priority", () => {
+    expect(parseProposeTaskArgs({ tasks: [{ ...item, title: "  " }] }).ok).toBe(false);
+    expect(parseProposeTaskArgs({ tasks: [{ title: "x" }] }).ok).toBe(false);
+    expect(parseProposeTaskArgs({ tasks: ["x"] }).ok).toBe(false);
+    expect(parseProposeTaskArgs({ tasks: [{ ...item, priority: "critical" }] }).ok).toBe(false);
+  });
+
+  it("caps field lengths", () => {
+    expect(parseProposeTaskArgs({ tasks: [{ ...item, title: "x".repeat(201) }] }).ok).toBe(false);
+    expect(parseProposeTaskArgs({ tasks: [{ ...item, description: "x".repeat(20_001) }] }).ok).toBe(false);
+  });
+});
+
 describe("canonicalizeSessionToolName", () => {
   it("maps every shape the CLIs are known to report onto one name", () => {
     for (const reported of [
@@ -82,6 +117,14 @@ describe("canonicalizeSessionToolName", () => {
     ]) {
       expect(canonicalizeSessionToolName(reported), reported).toBe(CANONICAL_PROPOSE_SCHEDULE_TOOL);
     }
+  });
+
+  it("maps propose_task's shapes onto its own canonical name", () => {
+    for (const reported of ["propose_task", "vibedeckx.propose_task", "mcp__vibedeckx__propose_task"]) {
+      expect(canonicalizeSessionToolName(reported), reported).toBe(CANONICAL_PROPOSE_TASK_TOOL);
+    }
+    expect(canonicalizeSessionToolName("propose_task", "vibedeckx")).toBe(CANONICAL_PROPOSE_TASK_TOOL);
+    expect(canonicalizeSessionToolName("propose_task", "elsewhere")).toBe("propose_task");
   });
 
   it("leaves other tools alone, including a same-named tool from another server", () => {

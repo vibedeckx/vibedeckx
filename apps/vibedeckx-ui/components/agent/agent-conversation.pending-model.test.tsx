@@ -25,6 +25,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { translateText, type WorkflowRun } from "@/lib/api";
 import { SCHEDULE_INTENT_BLOCK } from "@/lib/schedule-intent";
+import { TASK_INTENT_BLOCK } from "@/lib/task-intent";
 import { toast } from "sonner";
 import type { EnsuredAgentSession, PreparedConversation } from "@/hooks/use-agent-session";
 
@@ -616,6 +617,61 @@ describe("AgentConversation pendingModel", () => {
         await render("pA", "featB");
 
         expect(scheduleAction(container).textContent).toBe("Schedule");
+      });
+    });
+
+    describe("Task chip", () => {
+      const action = (container: HTMLElement, re: RegExp) =>
+        Array.from(container.querySelectorAll<HTMLElement>('[data-testid="prompt-action"]'))
+          .find((el) => re.test(el.textContent ?? ""))!;
+      const taskAction = (container: HTMLElement) => action(container, /task$/i);
+      const scheduleAction = (container: HTMLElement) => action(container, /schedule/i);
+
+      it("appends the <vtask> block and disarms after sending", async () => {
+        hookState.session = { id: "s1" };
+        hookState.status = "stopped";
+        hookState.messages = [{ type: "user" }];
+
+        await render("pA", "featA");
+        await act(async () => { taskAction(container).click(); });
+        expect(taskAction(container).textContent).toBe("Cancel task");
+        await act(async () => {
+          await promptState.submit!({ text: "the skipped remote test", files: [] });
+        });
+
+        expect(sendMessage.mock.calls[0]?.[0]).toBe(`the skipped remote test\n\n${TASK_INTENT_BLOCK}`);
+        expect(taskAction(container).textContent).toBe("Task");
+      });
+
+      it("sends an empty message as the bare block on an existing conversation", async () => {
+        hookState.session = { id: "s1" };
+        hookState.status = "stopped";
+        hookState.messages = [{ type: "user" }];
+
+        await render("pA", "featA");
+        await act(async () => { taskAction(container).click(); });
+        await act(async () => {
+          await promptState.submit!({ text: "", files: [] });
+        });
+
+        expect(sendMessage.mock.calls[0]?.[0]).toBe(TASK_INTENT_BLOCK);
+      });
+
+      it("is exclusive with the Schedule chip", async () => {
+        hookState.session = { id: "s1" };
+        hookState.status = "stopped";
+        hookState.messages = [{ type: "user" }];
+
+        await render("pA", "featA");
+        await act(async () => { scheduleAction(container).click(); });
+        await act(async () => { taskAction(container).click(); });
+        expect(taskAction(container).textContent).toBe("Cancel task");
+        expect(scheduleAction(container).textContent).toBe("Schedule");
+
+        await act(async () => {
+          await promptState.submit!({ text: "x", files: [] });
+        });
+        expect(sendMessage.mock.calls[0]?.[0]).toBe(`x\n\n${TASK_INTENT_BLOCK}`);
       });
     });
 

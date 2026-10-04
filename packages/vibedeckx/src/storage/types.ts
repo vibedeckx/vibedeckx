@@ -256,8 +256,23 @@ export interface Task {
   assigned_branch: string | null;
   position: number;
   archived_at: number | null;
+  /**
+   * Provenance of an agent-proposed task (propose_task tool): the session, the
+   * tool_use id and the item's index within that proposal. Null for hand-made
+   * tasks. The triple is uniquely indexed — that makes confirming idempotent
+   * and lets the card recover its state. See docs/session-task-proposal-design.md §4.
+   */
+  source_session_id: string | null;
+  source_tool_use_id: string | null;
+  source_item_index: number | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface TaskSource {
+  session_id: string;
+  tool_use_id: string;
+  item_index: number;
 }
 
 export type ProjectChatMessageType =
@@ -2103,7 +2118,13 @@ export interface Storage {
     }) => Promise<{ operation: ProjectChatOperation; message: ProjectChatMessage; changed: boolean } | undefined>;
   };
   tasks: {
-    create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task>;
+    /**
+     * With `source`, idempotent on it: a proposal item that already has a task
+     * returns that task (a different id than `id` tells the caller so).
+     */
+    create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; source?: TaskSource | null }) => Promise<Task>;
+    /** Open (todo / in_progress), unarchived tasks proposed from `sessionId` — its retention holders. */
+    listOpenIdsBySourceSession: (sessionId: string) => Promise<string[]>;
     getByProjectId: (projectId: string, opts?: { includeArchived?: boolean }) => Promise<Task[]>;
     /** Project-scoped, SQL-bounded task lookup for read-only assistant tools. */
     queryByProject: (projectId: string, opts: { query?: string; status?: TaskStatus; limit: number }) => Promise<Task[]>;

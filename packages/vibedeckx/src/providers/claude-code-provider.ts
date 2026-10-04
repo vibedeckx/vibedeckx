@@ -4,6 +4,7 @@ import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-prov
 import { type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import {
   CANONICAL_PROPOSE_SCHEDULE_TOOL,
+  CANONICAL_PROPOSE_TASK_TOOL,
   SESSION_TOOLS_MCP_SERVER_NAME,
   SESSION_TOOLS_SYSTEM_PROMPT_HINT,
   type SessionToolsMcpConfig,
@@ -64,7 +65,7 @@ export class ClaudeCodeProvider implements AgentProvider {
       permissionMode,
       Object.keys(mcpServers).length > 0 ? buildClaudeMcpConfigArg(mcpServers) : undefined,
       model,
-      sessionToolsMcp ? [CANONICAL_PROPOSE_SCHEDULE_TOOL] : undefined,
+      sessionToolsMcp ? [CANONICAL_PROPOSE_SCHEDULE_TOOL, CANONICAL_PROPOSE_TASK_TOOL] : undefined,
       sessionToolsMcp ? SESSION_TOOLS_SYSTEM_PROMPT_HINT : undefined,
     );
   }

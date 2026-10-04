@@ -4,8 +4,8 @@ import { MessageSquare } from "lucide-react";
 import type { SourceSessionSummary } from "@/lib/api";
 
 /**
- * Link back to the agent session something was created from (a schedule
- * proposed via propose_schedule). A deleted source stays visible as plain
+ * Link back to the agent session something was created from (a schedule or
+ * task an agent proposed there). A deleted source stays visible as plain
  * muted text — the provenance is still true, there is just nowhere to go.
  */
 export function SourceSessionLink({

@@ -44,8 +44,9 @@ import {
 import type { AttachmentItem, PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
 import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, CalendarClock } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, CalendarClock, ListPlus } from "lucide-react";
 import { appendScheduleIntent } from "@/lib/schedule-intent";
+import { appendTaskIntent } from "@/lib/task-intent";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
   DropdownMenu,
@@ -72,7 +73,7 @@ import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
 import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
 import { useAgentTabFocus } from "@/hooks/agent-tab-focus-context";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
-import type { Project, ExecutionMode, AgentType, AgentProviderInfo, WorkflowRun } from "@/lib/api";
+import type { Project, ExecutionMode, AgentType, AgentProviderInfo, WorkflowRun, Task } from "@/lib/api";
 import { getAgentProviders, translateText, branchAgentSession, sendAgentSessionMessage, api } from "@/lib/api";
 import { toast } from "sonner";
 import { UserInputMarkers } from "./user-input-markers";
@@ -173,6 +174,8 @@ interface AgentConversationContextValue {
   targetLabel: string;
   /** Navigate to the Schedules view (a specific schedule, or the list). */
   openSchedule?: (scheduleId: string | null) => void;
+  /** Show a task created from a propose_task card. */
+  openTask?: (task: Task) => void;
 }
 
 const AgentConversationContext = createContext<AgentConversationContextValue | null>(null);
@@ -228,6 +231,7 @@ interface AgentConversationProps {
   onNewConversation?: () => void;
   /** Open the Schedules view — a specific schedule, or the list when null. */
   onOpenSchedule?: (scheduleId: string | null) => void;
+  onOpenTask?: (task: Task) => void;
   /**
    * The project's preparing reviews (hooks/preparing-reviews.ts). Drives the
    * banner shown on the SOURCE conversation while its review is still
@@ -291,7 +295,7 @@ function pasteTokenFor(id: number, bytes: number): string {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onActiveSessionResultAtChange, onActiveSessionTurnEndAtChange, onOpenSchedule, preparingReviews, onReviewStarted, onViewPreparingReview }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onActiveSessionResultAtChange, onActiveSessionTurnEndAtChange, onOpenSchedule, onOpenTask, preparingReviews, onReviewStarted, onViewPreparingReview }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
@@ -407,14 +411,19 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     },
   });
 
-  // The Schedule chip applies to the next message of the conversation it was
-  // picked in, so it is held against that conversation — the one on screen,
-  // which without a URL session is the branch's latest — and its execution
-  // target: switching away, New Conversation, or the send itself leaves it
-  // behind instead of carrying it into another one.
-  const scheduleKey = `${projectId}::${branch}::${sessionTarget}::${session?.id ?? ""}`;
-  const [scheduleArmedFor, setScheduleArmedFor] = useState<string | null>(null);
-  const scheduleArmed = scheduleArmedFor === scheduleKey;
+  // The Schedule and Task chips apply to the next message of the conversation
+  // they were picked in, so they are held against that conversation — the one
+  // on screen, which without a URL session is the branch's latest — and its
+  // execution target: switching away, New Conversation, or the send itself
+  // leaves them behind instead of carrying them into another one. At most one
+  // is armed: each asks the agent for a different kind of proposal.
+  const intentKey = `${projectId}::${branch}::${sessionTarget}::${session?.id ?? ""}`;
+  const [armedIntent, setArmedIntent] = useState<{ key: string; kind: "schedule" | "task" } | null>(null);
+  const activeIntent = armedIntent?.key === intentKey ? armedIntent.kind : null;
+  const scheduleArmed = activeIntent === "schedule";
+  const taskArmed = activeIntent === "task";
+  const toggleIntent = (kind: "schedule" | "task") =>
+    setArmedIntent(activeIntent === kind ? null : { key: intentKey, kind });
 
   // Older test doubles/plugins may not expose window metadata yet.
   const messageEntryIndices = loadedMessageEntryIndices ?? messages.map((_, index) => index);
@@ -1052,11 +1061,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     const hasFiles = message.files.length > 0;
     const hasPastes = pastes.length > 0;
     const trimmedRaw = rawText.trim();
-    // With the Schedule chip on an existing conversation the message may be
-    // empty: "schedule what we just did" is the whole request.
-    const scheduling = scheduleArmed;
-    const scheduleFromHistory = scheduling && !!session;
-    if (!trimmedRaw && !hasFiles && !scheduleFromHistory) return;
+    // With the Schedule or Task chip on an existing conversation the message
+    // may be empty: "schedule / record what we just did" is the whole request.
+    const intent = activeIntent;
+    const intentFromHistory = intent !== null && !!session;
+    if (!trimmedRaw && !hasFiles && !intentFromHistory) return;
 
     const submissionToken = Symbol("agent-submission");
     activeSubmissionRef.current = submissionToken;
@@ -1064,9 +1073,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     try {
     setInput("");
     if (trimmedRaw) inputHistory.push(trimmedRaw);
-    if (scheduling) setScheduleArmedFor(null);
-    const restoreSchedule = () => {
-      if (scheduling) setScheduleArmedFor(scheduleKey);
+    if (intent) setArmedIntent(null);
+    const restoreIntent = () => {
+      if (intent) setArmedIntent({ key: intentKey, kind: intent });
     };
 
     // Always overlay "working" — even when the session is already running, the
@@ -1147,7 +1156,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
       if (isOriginDraftDisplayed(submissionOrigin)) {
         toast.error(title, { description: error.message });
         setInput(rawText);
-        restoreSchedule();
+        restoreIntent();
       }
       returnDetached();
       throw error;
@@ -1286,7 +1295,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     }
 
     // After translation: the block is written for the agent, not the user.
-    if (scheduling) content = appendScheduleIntent(content);
+    if (intent === "schedule") content = appendScheduleIntent(content);
+    if (intent === "task") content = appendTaskIntent(content);
 
     if (!session) {
       // An identity prepared for an upload is activated with the instruction;
@@ -1323,7 +1333,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         // keeps the attachments (already uploaded) in the composer.
         if (isOriginDraftDisplayed(submissionOrigin)) {
           setInput(rawText);
-          restoreSchedule();
+          restoreIntent();
           setPastes(capturedPastes);
           setNextPasteId(capturedNextPasteId);
         }
@@ -1346,7 +1356,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
         // draft has to come back so a retry doesn't need history recall.
         if (isOriginDraftDisplayed(submissionOrigin)) {
           setInput(rawText);
-          restoreSchedule();
+          restoreIntent();
           setPastes(capturedPastes);
           setNextPasteId(capturedNextPasteId);
         }
@@ -1686,7 +1696,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 )}
               </div>
             ) : (
-              <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode: session?.permissionMode ?? permissionMode, agentType: session?.agentType ?? agentType, sessionId: session?.id ?? null, projectId, branch, target: sessionTarget, targetLabel: sessionTargetLabel, openSchedule: onOpenSchedule }}>
+              <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode: session?.permissionMode ?? permissionMode, agentType: session?.agentType ?? agentType, sessionId: session?.id ?? null, projectId, branch, target: sessionTarget, targetLabel: sessionTargetLabel, openSchedule: onOpenSchedule, openTask: onOpenTask }}>
                 <div
                   className="space-y-1 outline-none"
                   ref={messagesRef}
@@ -1841,16 +1851,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 </button>
               </div>
             )}
-            {/* Schedule badge row — only while armed; one-shot, cleared on send */}
-            {scheduleArmed && (
+            {/* Schedule / Task badge row — only while armed; one-shot, cleared on send */}
+            {activeIntent && (
               <div className="flex items-center pl-12 pr-2 pt-1.5 pb-0.5">
                 <button
                   type="button"
-                  onClick={() => setScheduleArmedFor(null)}
+                  onClick={() => setArmedIntent(null)}
                   className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2.5 py-0.5 text-xs font-medium hover:bg-blue-500/20 transition-colors"
                 >
-                  <CalendarClock className="size-3" />
-                  Schedule
+                  {scheduleArmed ? <CalendarClock className="size-3" /> : <ListPlus className="size-3" />}
+                  {scheduleArmed ? "Schedule" : "Task"}
                   <X className="size-3" />
                 </button>
               </div>
@@ -1870,10 +1880,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     />
                   )}
                   <PromptInputActionMenuItem
-                    onSelect={() => setScheduleArmedFor(scheduleArmed ? null : scheduleKey)}
+                    onSelect={() => toggleIntent("schedule")}
                   >
                     <CalendarClock className="mr-2 size-4" />
                     {scheduleArmed ? "Cancel schedule" : "Schedule"}
+                  </PromptInputActionMenuItem>
+                  <PromptInputActionMenuItem
+                    onSelect={() => toggleIntent("task")}
+                  >
+                    <ListPlus className="mr-2 size-4" />
+                    {taskArmed ? "Cancel task" : "Task"}
                   </PromptInputActionMenuItem>
                   <PromptInputActionMenuItem
                     onSelect={() => {
@@ -1896,6 +1912,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       ? session
                         ? "Send to turn this session's work into a schedule. You can add requirements and when it should run"
                         : "What should run, and how often? e.g. every weekday at 9am, run the tests and report failures"
+                      : taskArmed
+                        ? session
+                          ? "Send to record follow-up work from this session as a task. You can say what to include"
+                          : "What should be recorded as a task for later?"
                       : session
                         ? "Ask the agent to help with your code..."
                         : "Type your first message to start..."
@@ -1916,7 +1936,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               >
                 <PromptInputSubmit
                   className="pointer-events-auto"
-                  disabled={(!input.trim() && !(scheduleArmed && session) && !isLoading) || isTranslating || isSubmitting || uploads.pending}
+                  disabled={(!input.trim() && !(activeIntent && session) && !isLoading) || isTranslating || isSubmitting || uploads.pending}
                   status={isSubmitting || isTranslating || uploads.pending ? "submitted" : isLoading ? "streaming" : "ready"}
                 />
               </div>

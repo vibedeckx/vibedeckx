@@ -45,6 +45,7 @@ import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
 import { TasksView } from '@/components/task';
 import { TaskDetailDialog } from '@/components/task/task-detail-dialog';
+import { requestProposalCardFocus } from '@/lib/proposal-card-focus';
 import { api, type ExecutionMode, type Task, type Worktree, type SearchResultWorkspace, type SearchResultSession } from '@/lib/api';
 import { QuickSwitcher } from '@/components/search/quick-switcher';
 import { touchRecentSessionOpen, touchSessionStarted, updateCachedSessionTitle } from '@/lib/quick-switcher-cache';
@@ -1317,6 +1318,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                           setSelectedScheduleId(scheduleId);
                           setActiveView("schedules");
                         }}
+                        onOpenTask={setProjectChatContextTask}
                       />
                         </div>
                       </>
@@ -1339,6 +1341,12 @@ Please proceed step by step and let me know if there are any issues or conflicts
               onDeleteTask={deleteTask}
               onArchiveTask={archive}
               onUnarchiveTask={unarchive}
+              onOpenSourceSession={(task) => {
+                if (!task.source_session_id) return;
+                if (task.source_tool_use_id) requestProposalCardFocus(task.source_tool_use_id);
+                setActiveView("workspace");
+                selectBranchSession(task.source_session?.branch ?? null, task.source_session_id);
+              }}
             />
           </div>
 

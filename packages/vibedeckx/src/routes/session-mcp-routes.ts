@@ -10,9 +10,14 @@ import {
   PROPOSE_SCHEDULE_DESCRIPTION,
   PROPOSE_SCHEDULE_INPUT_SCHEMA,
   PROPOSE_SCHEDULE_TOOL,
+  PROPOSE_TASK_ACK,
+  PROPOSE_TASK_DESCRIPTION,
+  PROPOSE_TASK_INPUT_SCHEMA,
+  PROPOSE_TASK_TOOL,
   SESSION_TOOLS_MCP_INSTRUCTIONS,
   SESSION_TOOLS_MCP_PATH,
   parseProposeScheduleArgs,
+  parseProposeTaskArgs,
 } from "../session-tools-mcp.js";
 import { validateCron } from "../scheduler.js";
 import "../server-types.js";
@@ -32,6 +37,11 @@ const TOOLS = [
     description: PROPOSE_SCHEDULE_DESCRIPTION,
     inputSchema: PROPOSE_SCHEDULE_INPUT_SCHEMA,
   },
+  {
+    name: PROPOSE_TASK_TOOL,
+    description: PROPOSE_TASK_DESCRIPTION,
+    inputSchema: PROPOSE_TASK_INPUT_SCHEMA,
+  },
 ];
 
 const textResult = (text: string, isError = false) => ({
@@ -41,7 +51,7 @@ const textResult = (text: string, isError = false) => ({
 
 /**
  * The agent-facing tool endpoint. Fire-and-forget by design: propose_schedule
- * validates and returns, leaving the tool_use message in the conversation as
+ * (and propose_task) validates and returns, leaving the tool_use message in the conversation as
  * the only artifact. The user confirms it in the UI, which calls the hub's
  * existing create-schedule REST — so nothing here ever touches storage or the
  * reverse-connect tunnel. See docs/schedule-proposal-tool-design.md §3.
@@ -71,6 +81,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
   };
 
   const callTool = (toolName: string, args: Record<string, unknown>) => {
+    if (toolName === PROPOSE_TASK_TOOL) {
+      const parsed = parseProposeTaskArgs(args);
+      return parsed.ok ? textResult(PROPOSE_TASK_ACK) : textResult(parsed.error, true);
+    }
     if (toolName !== PROPOSE_SCHEDULE_TOOL) return textResult(`Unknown tool: ${toolName}`, true);
 
     const parsed = parseProposeScheduleArgs(args);

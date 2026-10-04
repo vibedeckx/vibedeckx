@@ -2,7 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import type { Storage } from "../storage/types.js";
 import { ProcessManager } from "../process-manager.js";
-import { RetentionHoldSync, scheduleHoldSource } from "../retention-holds.js";
+import { RetentionHoldSync, applyTaskChange, scheduleHoldSource, subscribeTaskHoldSync, taskHoldSource } from "../retention-holds.js";
 import { AgentSessionManager } from "../agent-session-manager.js";
 import { ChatSessionManager } from "../chat-session-manager.js";
 import { ProjectChatManager } from "../project-chat-manager.js";
@@ -131,6 +131,13 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   }
 
   const reverseConnectManager = new ReverseConnectManager();
+  // Built early: Project Chat's task tools take holds too (applyTaskChange).
+  const retentionHolds = new RetentionHoldSync({
+    storage: opts.storage,
+    reverseConnectManager,
+    remoteSessionMap,
+    sources: [scheduleHoldSource(opts.storage), taskHoldSource(opts.storage)],
+  });
   const browserManager = new BrowserManager();
   // Watches remote executor processes for completion independently of any
   // frontend log-proxy subscription (see RemoteExecutorMonitor). Shared across
@@ -166,6 +173,8 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     toolDependencies: {
       agentSessionManager,
       remoteSessions: projectChatRemoteSessions,
+      applyTaskChange: (taskId, apply, revert) =>
+        applyTaskChange({ storage: opts.storage, retentionHolds }, taskId, apply, revert),
       mutationServices: {
         // Prepared-session lifecycle §10.3: one `start` under the operation's
         // own idempotency key. A replay of the same operation returns the
@@ -402,13 +411,8 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("reverseConnectManager", reverseConnectManager);
   fastify.decorate("browserManager", browserManager);
   fastify.decorate("scheduler", scheduler);
-  const retentionHolds = new RetentionHoldSync({
-    storage: opts.storage,
-    reverseConnectManager,
-    remoteSessionMap,
-    sources: [scheduleHoldSource(opts.storage)],
-  });
   fastify.decorate("retentionHolds", retentionHolds);
+  subscribeTaskHoldSync(eventBus, retentionHolds);
   // Frees sessions whose hold outlived its schedules (a release that failed or
   // timed out): on connect, then hourly — well inside the worker's 6h sweep —
   // so a connected worker doesn't wait for a reconnect. No ordering with the

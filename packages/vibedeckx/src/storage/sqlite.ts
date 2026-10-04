@@ -1040,6 +1040,19 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     db.exec("ALTER TABLE tasks ADD COLUMN archived_at INTEGER DEFAULT NULL");
   }
 
+  // Migration: provenance of an agent-proposed task (propose_task card).
+  // source_item_index picks the item within one multi-task proposal.
+  const taskSourceInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+  if (!taskSourceInfo.some((col) => col.name === "source_session_id")) {
+    db.exec("ALTER TABLE tasks ADD COLUMN source_session_id TEXT");
+  }
+  if (!taskSourceInfo.some((col) => col.name === "source_tool_use_id")) {
+    db.exec("ALTER TABLE tasks ADD COLUMN source_tool_use_id TEXT");
+  }
+  if (!taskSourceInfo.some((col) => col.name === "source_item_index")) {
+    db.exec("ALTER TABLE tasks ADD COLUMN source_item_index INTEGER");
+  }
+
   // Migration: rename worktree_path to branch in agent_sessions
   const sessionTableInfo = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
   const hasWorktreePathColumn = sessionTableInfo.some((col) => col.name === "worktree_path");
@@ -2040,6 +2053,12 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
 
   // Composite access paths used by bounded, deterministic Project Commander lists.
   db.exec(`
+    -- Idempotency for agent-proposed tasks, one row per proposed item; same
+    -- reasoning as idx_scheduled_tasks_source. Also serves the retention-hold
+    -- lookup by source session.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_source
+      ON tasks(source_session_id, source_tool_use_id, source_item_index)
+      WHERE source_tool_use_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_tasks_project_archived_position_id
       ON tasks(project_id, archived_at, position ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_tasks_project_archived_status_position_id

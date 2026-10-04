@@ -29,9 +29,11 @@ interface TasksViewProps {
   onDeleteTask: (id: string) => Promise<void>;
   onArchiveTask: (id: string) => Promise<void>;
   onUnarchiveTask: (id: string) => Promise<void>;
+  /** Jump to the conversation a proposed task came from, at its card. */
+  onOpenSourceSession?: (task: Task) => void;
 }
 
-export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask }: TasksViewProps) {
+export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession }: TasksViewProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
 
@@ -111,6 +113,7 @@ export function TasksView({ projectId, tasks, loading, worktrees, onCreateTask, 
             archivedView={archivedView}
             worktrees={worktrees}
             onAssign={handleAssign}
+            onOpenSourceSession={onOpenSourceSession}
           />
         )}
       </div>

@@ -580,8 +580,22 @@ export interface Task {
   assigned_branch: string | null;
   position: number;
   archived_at: number | null;
+  /** Set when this task came from an agent's propose_task card. */
+  source_session_id?: string | null;
+  source_tool_use_id?: string | null;
+  /** Which item of that proposal's `tasks[]` this is. */
+  source_item_index?: number | null;
+  /** Enriched by GET /api/projects/:id/tasks; null for hand-made tasks. */
+  source_session?: SourceSessionSummary | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Provenance sent when confirming a propose_task card; makes create idempotent. */
+export interface TaskSourceInput {
+  session_id: string;
+  tool_use_id: string;
+  item_index: number;
 }
 
 export interface Rule {
@@ -653,7 +667,7 @@ export interface Schedule {
 }
 
 /**
- * The agent session something (a schedule today) was created from. `exists`
+ * The agent session something (a schedule or a task) was created from. `exists`
  * goes false once the session is deleted; the link then has nowhere to go.
  */
 export interface SourceSessionSummary {
@@ -2428,7 +2442,7 @@ export const api = {
 
   async createTask(
     projectId: string,
-    opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority }
+    opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; source?: TaskSourceInput }
   ): Promise<Task> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/tasks`, {
       method: "POST",

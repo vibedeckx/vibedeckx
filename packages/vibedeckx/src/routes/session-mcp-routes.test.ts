@@ -7,7 +7,7 @@ import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
 import { getSessionToolsSecret, signSessionToolsToken } from "../utils/session-tools-token.js";
 import { getCrossRemoteSecret, signCrossRemoteToken } from "../utils/cross-remote-token.js";
-import { CANONICAL_PROPOSE_SCHEDULE_TOOL, PROPOSE_SCHEDULE_TOOL } from "../session-tools-mcp.js";
+import { CANONICAL_PROPOSE_SCHEDULE_TOOL, PROPOSE_SCHEDULE_TOOL, PROPOSE_TASK_TOOL } from "../session-tools-mcp.js";
 import sessionMcpRoutes from "./session-mcp-routes.js";
 
 describe("session tools MCP endpoint", () => {
@@ -78,14 +78,38 @@ describe("session tools MCP endpoint", () => {
     expect((await rpc(tokenFor(), { jsonrpc: "2.0", id: 1, method: "tools/list" })).statusCode).toBe(401);
   });
 
-  it("lists only propose_schedule", async () => {
+  it("lists propose_schedule and propose_task", async () => {
     const res = await rpc(tokenFor(), { jsonrpc: "2.0", id: 1, method: "tools/list" });
     expect(res.statusCode).toBe(200);
     const tools = res.json().result.tools as Array<{ name: string; description: string }>;
-    expect(tools.map((t) => t.name)).toEqual([PROPOSE_SCHEDULE_TOOL]);
+    expect(tools.map((t) => t.name)).toEqual([PROPOSE_SCHEDULE_TOOL, PROPOSE_TASK_TOOL]);
     // The description is the only place the agent learns it must not claim the
     // schedule was created — a regression there is silent otherwise.
     expect(tools[0].description).toMatch(/SUGGESTED/);
+    // Same for tasks, plus the two rules the design hinges on: only on request,
+    // and record — don't do — the work.
+    expect(tools[1].description).toMatch(/only when the user asks/);
+    expect(tools[1].description).toMatch(/Do not do the work/);
+  });
+
+  it("acknowledges a valid task proposal without creating anything", async () => {
+    const res = await rpc(tokenFor(), {
+      jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: PROPOSE_TASK_TOOL, arguments: { tasks: [{ title: "Cover remote path", description: "Add a test" }] } },
+    });
+    const result = res.json().result;
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toMatch(/Do not start working on it/);
+    expect(await storage.tasks.getByProjectId("p1")).toEqual([]);
+  });
+
+  it("rejects a malformed task proposal so the agent can fix it", async () => {
+    for (const args of [{}, { tasks: [] }, { tasks: [{ title: "No description" }] }]) {
+      const res = await rpc(tokenFor(), {
+        jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: PROPOSE_TASK_TOOL, arguments: args },
+      });
+      expect(res.json().result.isError, JSON.stringify(args)).toBe(true);
+    }
   });
 
   it("answers initialize and ping", async () => {
@@ -94,6 +118,7 @@ describe("session tools MCP endpoint", () => {
     // Server instructions reach the system prompt, so the scheduling rule lands
     // even when the model never reads the tool list.
     expect(init.json().result.instructions).toContain("propose_schedule");
+    expect(init.json().result.instructions).toContain("propose_task");
     expect((await rpc(tokenFor(), { jsonrpc: "2.0", id: 2, method: "ping" })).json().result).toEqual({});
   });
 

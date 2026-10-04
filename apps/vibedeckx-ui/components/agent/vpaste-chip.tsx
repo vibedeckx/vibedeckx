@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarClock, FileText, Paperclip, Server } from "lucide-react";
+import { CalendarClock, FileText, ListPlus, Paperclip, Server } from "lucide-react";
 
 interface VPasteChipProps {
   path: string;
@@ -50,6 +50,16 @@ export function ScheduleIntentMeta() {
     <span className="flex shrink-0 items-baseline gap-1 text-xs font-normal text-muted-foreground">
       <CalendarClock className="w-3 h-3 shrink-0 self-center" />
       Schedule
+    </span>
+  );
+}
+
+/** The Task chip's `<vtask>` block, shown on the message header like Schedule. */
+export function TaskIntentMeta() {
+  return (
+    <span className="flex shrink-0 items-baseline gap-1 text-xs font-normal text-muted-foreground">
+      <ListPlus className="w-3 h-3 shrink-0 self-center" />
+      Task
     </span>
   );
 }

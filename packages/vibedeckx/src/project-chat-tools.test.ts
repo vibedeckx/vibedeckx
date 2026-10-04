@@ -11,6 +11,8 @@ import {
 } from "./project-chat-tools.js";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import type { Storage } from "./storage/types.js";
+import { RetentionHoldSync, applyTaskChange, taskHoldSource } from "./retention-holds.js";
+import type { ProxyResult } from "./utils/remote-proxy.js";
 
 describe("createProjectChatTools", () => {
   let dir: string;
@@ -269,6 +271,39 @@ describe("createProjectChatTools", () => {
     for (const message of messages.filter(({ type }) => type === "operation")) {
       expect(JSON.parse(message.content)).toMatchObject({ version: 1, status: "completed" });
     }
+  });
+
+  it("re-acquires a proposed task's hold when it reopens one, and leaves it closed when it can't", async () => {
+    // Completed and released, then reopened from Project Chat: same contract as
+    // the task routes (docs/session-task-proposal-design.md §5).
+    const serverId = await linkedRemoteServer();
+    await storage.remoteSessionMappings.upsert("remote-s1", "project-1", serverId, "worker-s1", "feat");
+    await storage.tasks.create({
+      id: "proposed", project_id: "project-1", title: "Follow-up", description: "x", status: "done",
+      source: { session_id: "remote-s1", tool_use_id: "toolu_1", item_index: 0 },
+    });
+    const pushed: unknown[] = [];
+    let answer: ProxyResult = { ok: false, status: 0, data: {} };
+    const holds = new RetentionHoldSync({
+      storage, remoteSessionMap: new Map(), sources: [taskHoldSource(storage)],
+      proxy: async (_server, _method, _path, body) => { pushed.push(body); return answer; },
+    });
+    const surface = await createProjectChatTools({
+      projectId: "project-1", threadId: "thread-1", userId: "user-1", storage,
+      agentSessionManager: { loadMessages: localMessages, getSessionProcessAlive: localAlive },
+      remoteSessions: remote,
+      mutationServices: { createAgentSession, sendAgentInstruction, runScheduleNow },
+      applyTaskChange: (taskId, apply, revert) => applyTaskChange({ storage, retentionHolds: holds }, taskId, apply, revert),
+    });
+
+    await expect(surface.update_task.execute({ taskId: "proposed", status: "todo" }))
+      .resolves.toMatchObject({ ok: false, status: "failed" });
+    expect((await storage.tasks.getById("proposed"))?.status).toBe("done");
+
+    answer = { ok: true, status: 200, data: {} };
+    await expect(surface.update_task.execute({ taskId: "proposed", status: "todo" }))
+      .resolves.toMatchObject({ ok: true, status: "completed" });
+    expect(pushed.at(-1)).toEqual({ holds: [{ kind: "task", id: "proposed" }] });
   });
 
   it("revalidates assigned task branches against current authorized workspaces and allows null clears", async () => {

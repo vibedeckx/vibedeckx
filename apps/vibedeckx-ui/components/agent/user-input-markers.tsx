@@ -5,6 +5,7 @@ import type { AgentMessage } from "@/hooks/use-agent-session";
 import { findScrollParent } from "@/lib/scroll";
 import { VREMOTES_MARKER_RE } from "./vpaste-chip";
 import { VSCHEDULE_MARKER_RE } from "@/lib/schedule-intent";
+import { VTASK_MARKER_RE } from "@/lib/task-intent";
 
 function getMessagePreview(msg: AgentMessage): string {
   if (msg.type !== "user") return "";
@@ -19,12 +20,15 @@ function getMessagePreview(msg: AgentMessage): string {
   const hasImages =
     typeof content !== "string" && content.some((p) => p.type === "image");
   // The hub appends a <vremotes> grant block to every message of a granted
-  // session (and the Schedule chip a <vschedule> block); a marker's preview
+  // session (and the Schedule / Task chips a <vschedule> / <vtask> block); a marker's preview
   // should show what the user wrote.
-  const firstLine = text.replace(VREMOTES_MARKER_RE, "").replace(VSCHEDULE_MARKER_RE, "").trim().split("\n")[0] ?? "";
+  const firstLine = text.replace(VREMOTES_MARKER_RE, "").replace(VSCHEDULE_MARKER_RE, "").replace(VTASK_MARKER_RE, "")
+    .trim().split("\n")[0] ?? "";
   const truncated =
     firstLine.length > 80 ? firstLine.slice(0, 77) + "..." : firstLine;
-  return truncated || (hasImages ? "(Image)" : text.includes("<vschedule>") ? "(Schedule)" : "");
+  return truncated || (hasImages ? "(Image)"
+    : text.includes("<vschedule>") ? "(Schedule)"
+    : text.includes("<vtask>") ? "(Task)" : "");
 }
 
 interface MarkerData {

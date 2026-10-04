@@ -27,6 +27,11 @@ export const PROPOSE_SCHEDULE_TOOL = "propose_schedule";
  */
 export const CANONICAL_PROPOSE_SCHEDULE_TOOL = `mcp__${SESSION_TOOLS_MCP_SERVER_NAME}__${PROPOSE_SCHEDULE_TOOL}`;
 
+/** Bare name of the record-for-later tool. See docs/session-task-proposal-design.md. */
+export const PROPOSE_TASK_TOOL = "propose_task";
+
+export const CANONICAL_PROPOSE_TASK_TOOL = `mcp__${SESSION_TOOLS_MCP_SERVER_NAME}__${PROPOSE_TASK_TOOL}`;
+
 export interface SessionToolsMcpConfig {
   url: string;
   token: string;
@@ -81,11 +86,22 @@ export const ARTIFACT_PATH_HINT =
  * check" reads as an engineering task, so the agent writes a cron job instead of
  * looking for a tool. Kept short; the tool description carries the detail.
  */
+/**
+ * Shared by the instructions and the system-prompt hint. Only routes an explicit
+ * request: the agent must neither propose tasks unprompted nor remind the user
+ * that it could (docs/session-task-proposal-design.md §1.1).
+ */
+const TASK_ROUTING_HINT =
+  `Tasks: when the user asks to record something as a task or to-do for later, call \`${CANONICAL_PROPOSE_TASK_TOOL}\``
+  + " to propose it, and do not do the work itself now. Never call it, or suggest creating a task, unless the user asks.";
+
 export const SESSION_TOOLS_MCP_INSTRUCTIONS = [
   `\`${PROPOSE_SCHEDULE_TOOL}\` is the only way to schedule work in this environment.`,
   "When the user asks for anything recurring — nightly, hourly, every morning, on a cron, \"keep",
   "watching\" — call it instead of writing a crontab entry, systemd timer, or setInterval loop.",
   "Scheduling inside the user's own product remains ordinary coding work.",
+  "",
+  TASK_ROUTING_HINT,
   "",
   ARTIFACT_PATH_HINT,
 ].join("\n");
@@ -100,6 +116,7 @@ export const SESSION_TOOLS_SYSTEM_PROMPT_HINT = [
   `morning, on a cron, "keep watching"), call the \`${CANONICAL_PROPOSE_SCHEDULE_TOOL}\` tool. That`,
   "is the only way to schedule work here — do not hand-roll a crontab entry, systemd timer, or",
   "setInterval loop for it. Writing scheduling into the user's own project is still normal coding.",
+  TASK_ROUTING_HINT,
   ARTIFACT_PATH_HINT,
 ].join(" ");
 
@@ -173,6 +190,97 @@ export function parseProposeScheduleArgs(
   return { ok: true, value: { name, cron_expr: cronExpr, run_type, content, ...(timezone ? { timezone } : {}) } };
 }
 
+export const PROPOSE_TASK_DESCRIPTION = [
+  "Propose one or more tasks for the project's task list: work to be done LATER, recorded so it",
+  "isn't lost. Call this only when the user asks to record work as a task (\"make this a task\",",
+  "\"add a to-do for the skipped test\"). Never call it on your own initiative.",
+  "",
+  "Do not do the work. Even when the task reads like an instruction (\"add error handling to X\"),",
+  "the user is asking you to write it down, not to carry it out now.",
+  "",
+  "The proposal is shown to the user as a confirmation card; it does NOT create anything by itself",
+  "and this call does not wait for the user. Say you have proposed the task (never that you created",
+  "it) and continue.",
+  "",
+  "Each description must be self-contained: the task may be picked up later in a fresh session with",
+  "none of this conversation's context. Cover the background, the relevant files, what remains to",
+  "be done, and how to tell it is finished. Propose several tasks in one call when the user asks to",
+  "split the work.",
+  "",
+  "Project and source session are taken from this session — do not describe them here.",
+].join("\n");
+
+export const PROPOSE_TASK_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    tasks: {
+      type: "array",
+      minItems: 1,
+      maxItems: 5,
+      description: "The tasks to propose, usually one.",
+      items: {
+        type: "object",
+        properties: {
+          title: { type: "string", description: "Short, specific title, e.g. \"Cover remote path in retention-hold tests\"" },
+          description: { type: "string", description: "Self-contained description: background, relevant files, remaining work, definition of done." },
+          priority: { type: "string", enum: ["low", "medium", "high", "urgent"], description: "Optional; defaults to medium." },
+        },
+        required: ["title", "description"],
+      },
+    },
+  },
+  required: ["tasks"],
+} as const;
+
+export const PROPOSE_TASK_ACK =
+  "Proposal shown to the user as a confirmation card. Nothing has been created yet — the user "
+  + "decides whether to accept it. Tell the user you PROPOSED the task and that they can confirm it "
+  + "on the card above. Do not start working on it.";
+
+export type ProposedTaskPriority = "low" | "medium" | "high" | "urgent";
+
+export interface ProposedTask {
+  title: string;
+  description: string;
+  priority: ProposedTaskPriority;
+}
+
+export const PROPOSE_TASK_MAX_ITEMS = 5;
+export const TASK_TITLE_MAX = 200;
+export const TASK_DESCRIPTION_MAX = 20_000;
+const TASK_PRIORITIES: readonly ProposedTaskPriority[] = ["low", "medium", "high", "urgent"];
+
+/** Shape validation only; nothing is stored until the user confirms the card. */
+export function parseProposeTaskArgs(
+  args: Record<string, unknown>,
+): { ok: true; value: ProposedTask[] } | { ok: false; error: string } {
+  const raw = args.tasks;
+  if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: "tasks must be a non-empty array" };
+  if (raw.length > PROPOSE_TASK_MAX_ITEMS) {
+    return { ok: false, error: `propose at most ${PROPOSE_TASK_MAX_ITEMS} tasks at a time` };
+  }
+  const tasks: ProposedTask[] = [];
+  for (const [i, item] of raw.entries()) {
+    const obj = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+    const title = str(obj.title);
+    if (!title) return { ok: false, error: `tasks[${i}].title is required` };
+    if (title.length > TASK_TITLE_MAX) {
+      return { ok: false, error: `tasks[${i}].title must be at most ${TASK_TITLE_MAX} characters` };
+    }
+    const description = str(obj.description);
+    if (!description) return { ok: false, error: `tasks[${i}].description is required` };
+    if (description.length > TASK_DESCRIPTION_MAX) {
+      return { ok: false, error: `tasks[${i}].description must be at most ${TASK_DESCRIPTION_MAX} characters` };
+    }
+    const priorityRaw = str(obj.priority)?.toLowerCase();
+    if (priorityRaw && !TASK_PRIORITIES.includes(priorityRaw as ProposedTaskPriority)) {
+      return { ok: false, error: `tasks[${i}].priority must be one of: ${TASK_PRIORITIES.join(", ")}` };
+    }
+    tasks.push({ title, description, priority: (priorityRaw || "medium") as ProposedTaskPriority });
+  }
+  return { ok: true, value: tasks };
+}
+
 /**
  * Every shape the two CLIs are known to report our MCP tool under, mapped onto
  * the canonical name. Claude Code prefixes `mcp__<server>__`. Codex (verified
@@ -182,16 +290,21 @@ export function parseProposeScheduleArgs(
  * tolerated in case that changes. An unrecognized shape simply renders as an
  * ordinary tool call instead of a card.
  */
-const PROPOSE_SCHEDULE_ALIASES = new Set(
+const aliasesOf = (tool: string, canonical: string): Set<string> => new Set(
   [
-    PROPOSE_SCHEDULE_TOOL,
-    CANONICAL_PROPOSE_SCHEDULE_TOOL,
-    `${SESSION_TOOLS_MCP_SERVER_NAME}.${PROPOSE_SCHEDULE_TOOL}`,
-    `${SESSION_TOOLS_MCP_SERVER_NAME}/${PROPOSE_SCHEDULE_TOOL}`,
-    `${SESSION_TOOLS_MCP_SERVER_NAME}__${PROPOSE_SCHEDULE_TOOL}`,
-    `${SESSION_TOOLS_MCP_SERVER_NAME}-${PROPOSE_SCHEDULE_TOOL}`,
+    tool,
+    canonical,
+    `${SESSION_TOOLS_MCP_SERVER_NAME}.${tool}`,
+    `${SESSION_TOOLS_MCP_SERVER_NAME}/${tool}`,
+    `${SESSION_TOOLS_MCP_SERVER_NAME}__${tool}`,
+    `${SESSION_TOOLS_MCP_SERVER_NAME}-${tool}`,
   ].map((n) => n.toLowerCase()),
 );
+
+const SESSION_TOOL_ALIASES: ReadonlyArray<[Set<string>, string]> = [
+  [aliasesOf(PROPOSE_SCHEDULE_TOOL, CANONICAL_PROPOSE_SCHEDULE_TOOL), CANONICAL_PROPOSE_SCHEDULE_TOOL],
+  [aliasesOf(PROPOSE_TASK_TOOL, CANONICAL_PROPOSE_TASK_TOOL), CANONICAL_PROPOSE_TASK_TOOL],
+];
 
 /**
  * Normalizes a provider-reported MCP tool name onto the canonical name the UI
@@ -203,9 +316,8 @@ const PROPOSE_SCHEDULE_ALIASES = new Set(
  */
 export function canonicalizeSessionToolName(tool: string, server?: string): string {
   if (server !== undefined && server.trim().toLowerCase() !== SESSION_TOOLS_MCP_SERVER_NAME) return tool;
-  return PROPOSE_SCHEDULE_ALIASES.has(tool.trim().toLowerCase())
-    ? CANONICAL_PROPOSE_SCHEDULE_TOOL
-    : tool;
+  const key = tool.trim().toLowerCase();
+  return SESSION_TOOL_ALIASES.find(([aliases]) => aliases.has(key))?.[1] ?? tool;
 }
 
 /**

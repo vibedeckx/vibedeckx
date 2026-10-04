@@ -27,9 +27,10 @@ interface TaskTableProps {
   archivedView: boolean;
   worktrees: Worktree[];
   onAssign: (taskId: string, branch: string | null) => void;
+  onOpenSourceSession?: (task: Task) => void;
 }
 
-export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign }: TaskTableProps) {
+export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign, onOpenSourceSession }: TaskTableProps) {
   const [sortField, setSortField] = useState<SortField | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
@@ -109,6 +110,7 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
             worktrees={worktrees}
             assignedBranches={assignedBranches}
             onAssign={onAssign}
+            onOpenSourceSession={onOpenSourceSession}
           />
         ))}
         {tasks.length === 0 && (
@@ -123,7 +125,12 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
         )}
       </TableBody>
     </Table>
-    <TaskDetailDialog task={selectedTask} open={detailOpen} onOpenChange={setDetailOpen} />
+    <TaskDetailDialog
+      task={selectedTask}
+      open={detailOpen}
+      onOpenChange={setDetailOpen}
+      onOpenSourceSession={onOpenSourceSession}
+    />
     </>
   );
 }

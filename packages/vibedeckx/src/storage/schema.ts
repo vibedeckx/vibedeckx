@@ -235,6 +235,12 @@ export interface TasksTable {
   assigned_branch: string | null;
   position: Generated<number>;
   archived_at: number | null;
+  /** Agent session that proposed this task (propose_task tool); null for hand-made ones. */
+  source_session_id: string | null;
+  /** tool_use id of the proposal — with the session and item index, the idempotency key. */
+  source_tool_use_id: string | null;
+  /** Index of this task within the proposal's `tasks[]`. */
+  source_item_index: number | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

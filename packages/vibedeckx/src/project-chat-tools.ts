@@ -8,6 +8,7 @@ import type {
 export { projectChatPublicOperationContent } from "./project-chat-public-operation.js";
 import { projectChatPublicOperationContent } from "./project-chat-public-operation.js";
 import { sanitizeProjectChatPublicError } from "./project-chat-public-error.js";
+import { revertTaskPatch } from "./retention-holds.js";
 
 const LIST_LIMIT = 20;
 const TRANSCRIPT_ENTRY_LIMIT = 20;
@@ -220,6 +221,15 @@ export interface ProjectChatMutationServices {
   >;
 }
 
+export type TaskChangeApplier = (
+  taskId: string,
+  apply: () => Promise<import("./storage/types.js").Task | undefined>,
+  revert: (before: import("./storage/types.js").Task) => Promise<unknown>,
+) => Promise<import("./storage/types.js").Task | undefined>;
+
+/** Plain update when no applier is configured (tests, hosts without holds). */
+export const applyTaskChangeDirectly: TaskChangeApplier = (_taskId, apply) => apply();
+
 export interface CreateProjectChatToolsOptions {
   projectId: string;
   threadId: string;
@@ -228,6 +238,12 @@ export interface CreateProjectChatToolsOptions {
   agentSessionManager: ProjectAgentSessionReader;
   remoteSessions?: RemoteProjectSessionReader;
   mutationServices?: ProjectChatMutationServices;
+  /**
+   * Runs a task update so a reopened proposed task re-acquires its source
+   * session's retention hold, reverting the update when the hold can't land
+   * (retention-holds.ts applyTaskChange). Absent = plain update.
+   */
+  applyTaskChange?: TaskChangeApplier;
   /** Best-effort live projection after the operation message is durable. */
   onOperationMessage?: (message: import("./storage/types.js").ProjectChatMessage) => Promise<void> | void;
 }
@@ -735,9 +751,14 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
           const current = await storage.tasks.getById(taskId);
           if (!current || current.project_id !== projectId) throw new Error("Task is no longer authorized");
           await validateAssignedBranch(assignedBranch);
-          const updated = await storage.tasks.update(taskId, {
+          const storagePatch = {
             ...patch, ...(assignedBranch !== undefined ? { assigned_branch: assignedBranch } : {}),
-          });
+          };
+          const updated = await (options.applyTaskChange ?? applyTaskChangeDirectly)(
+            taskId,
+            () => storage.tasks.update(taskId, storagePatch),
+            revertTaskPatch(storage, taskId, storagePatch),
+          );
           if (!updated) throw new Error("Task update failed");
           await touch("task", taskId);
           await finishOperation(operation, "completed", { taskId, title: updated.title });

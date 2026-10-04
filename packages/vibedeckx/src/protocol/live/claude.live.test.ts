@@ -7,9 +7,13 @@ import { startStubMcpServer } from "./stub-mcp-server.js";
 import { ClaudeCodeProvider } from "../../providers/claude-code-provider.js";
 import {
   CANONICAL_PROPOSE_SCHEDULE_TOOL,
+  CANONICAL_PROPOSE_TASK_TOOL,
   PROPOSE_SCHEDULE_DESCRIPTION,
   PROPOSE_SCHEDULE_INPUT_SCHEMA,
   PROPOSE_SCHEDULE_TOOL,
+  PROPOSE_TASK_DESCRIPTION,
+  PROPOSE_TASK_INPUT_SCHEMA,
+  PROPOSE_TASK_TOOL,
 } from "../../session-tools-mcp.js";
 
 const MODEL_ARGS = ["--model", "claude-haiku-4-5-20251001"];
@@ -203,6 +207,43 @@ describe.skipIf(!available)("claude live probes (mcp-config)", () => {
         toolNames,
         `claude reported MCP tools as ${JSON.stringify(toolNames)} — the card matches only the canonical name`,
       ).toContain(CANONICAL_PROPOSE_SCHEDULE_TOOL);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  /** CC-7b for propose_task: same naming contract, nested-array arguments. */
+  it("CC-7c: reports propose_task under its canonical name with its tasks[] arguments", async () => {
+    const stub = await startStubMcpServer({
+      name: PROPOSE_TASK_TOOL,
+      description: PROPOSE_TASK_DESCRIPTION,
+      inputSchema: PROPOSE_TASK_INPUT_SCHEMA,
+    });
+    try {
+      const config = new ClaudeCodeProvider().buildSpawnConfig("/tmp", "edit", undefined, null, {
+        url: stub.url,
+        token: "session-probe-token",
+      });
+      const r = await runClaudeSession({
+        turns: [
+          'Call the propose_task MCP tool exactly once with one task: title="Cover remote path", '
+          + 'description="Add the remote retention test". Then reply DONE.',
+        ],
+        spawnOverride: { command: config.command, args: config.args },
+        extraArgs: MODEL_ARGS,
+        recordAs: "cc7c-session-mcp-task",
+      });
+
+      expect(r.outcome).toBe("ok");
+      expect(stub.toolCalls, "claude never invoked the MCP tool").toBeGreaterThan(0);
+      const toolUses = r.messages.flatMap((m) => {
+        const am = m as { type: string; message?: { content?: Array<{ type: string; name?: string; input?: unknown }> } };
+        if (am.type !== "assistant" || !Array.isArray(am.message?.content)) return [];
+        return am.message.content.filter((b) => b.type === "tool_use");
+      });
+      const call = toolUses.find((b) => b.name === CANONICAL_PROPOSE_TASK_TOOL);
+      expect(call, `claude reported ${JSON.stringify(toolUses.map((b) => b.name))}`).toBeDefined();
+      expect((call!.input as { tasks?: unknown[] }).tasks?.length).toBe(1);
     } finally {
       await stub.close();
     }

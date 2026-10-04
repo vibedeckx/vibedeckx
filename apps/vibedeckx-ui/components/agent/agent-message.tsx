@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye, CalendarClock, Copy, Check } from "lucide-react";
+import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye, CalendarClock, Copy, Check, ListPlus } from "lucide-react";
 import type { AgentMessage, ContentPart } from "@/hooks/use-agent-session";
 import { AgentMarkdown } from "./agent-markdown";
 import { useAgentConversation } from "./agent-conversation";
@@ -35,12 +35,14 @@ import { SkillToolUseUI, SkillToolResultUI } from "./skill-tools";
 import { TaskOutputToolUseUI, TaskOutputToolResultUI } from "./task-output-tools";
 import { FileChangeToolUseUI, FileChangeToolResultUI } from "./file-change-tools";
 import { PROPOSE_SCHEDULE_TOOL, ScheduleProposalUI } from "./schedule-proposal";
+import { PROPOSE_TASK_TOOL, TaskProposalUI } from "./task-proposal";
 import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./cross-remote-tools";
 import { ZoomableImage } from "./zoomable-image";
 import { SpeakButton, speakOwnerKey } from "./speak-button";
 import { useTtsOwnedBy } from "@/lib/tts/tts-player";
-import { VPasteChip, RemoteGrantMeta, ScheduleIntentMeta, splitVPasteMarkers, takeRemotesMarker } from "./vpaste-chip";
+import { VPasteChip, RemoteGrantMeta, ScheduleIntentMeta, TaskIntentMeta, splitVPasteMarkers, takeRemotesMarker } from "./vpaste-chip";
 import { takeScheduleMarker } from "@/lib/schedule-intent";
+import { takeTaskMarker } from "@/lib/task-intent";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
 interface AgentMessageProps {
@@ -152,11 +154,12 @@ function renderBody(message: AgentMessage, messageIndex: number, streaming: bool
   }
 }
 
-/** Take the `<vremotes>` and `<vschedule>` blocks out of user text for the header. */
-function takeHeaderBlocks(text: string): { text: string; remoteNames: string | null; scheduled: boolean } {
+/** Take the `<vremotes>`, `<vschedule>` and `<vtask>` blocks out of user text for the header. */
+function takeHeaderBlocks(text: string): { text: string; remoteNames: string | null; scheduled: boolean; tasked: boolean } {
   const remotes = takeRemotesMarker(text);
   const schedule = takeScheduleMarker(remotes.text);
-  return { text: schedule.text, remoteNames: remotes.names, scheduled: schedule.found };
+  const task = takeTaskMarker(schedule.text);
+  return { text: task.text, remoteNames: remotes.names, scheduled: schedule.found, tasked: task.found };
 }
 
 function renderTextWithVPaste(text: string) {
@@ -213,15 +216,17 @@ function UserMessage({
     );
   }
   // The hub appends a `<vremotes>` block to every message of a session with
-  // grants, and the Schedule chip a `<vschedule>` block; both belong in the
-  // header, so take them out of the body first.
+  // grants, and the Schedule / Task chips a `<vschedule>` / `<vtask>` block;
+  // all belong in the header, so take them out of the body first.
   let remoteNames: string | null = null;
   let scheduled = false;
+  let tasked = false;
   let body: string | ContentPart[];
   if (typeof content === "string") {
     const taken = takeHeaderBlocks(content);
     remoteNames = taken.remoteNames;
     scheduled = taken.scheduled;
+    tasked = taken.tasked;
     body = taken.text;
   } else {
     body = [];
@@ -233,8 +238,9 @@ function UserMessage({
       const taken = takeHeaderBlocks(part.text);
       if (taken.remoteNames !== null) remoteNames = taken.remoteNames;
       if (taken.scheduled) scheduled = true;
+      if (taken.tasked) tasked = true;
       // A part that was only a block leaves nothing to render.
-      const hadBlock = taken.remoteNames !== null || taken.scheduled;
+      const hadBlock = taken.remoteNames !== null || taken.scheduled || taken.tasked;
       if (!hadBlock || taken.text.length > 0) body.push({ ...part, text: taken.text });
     }
   }
@@ -252,6 +258,12 @@ function UserMessage({
             <>
               <span className="shrink-0 text-muted-foreground/60" aria-hidden>·</span>
               <ScheduleIntentMeta />
+            </>
+          )}
+          {tasked && (
+            <>
+              <span className="shrink-0 text-muted-foreground/60" aria-hidden>·</span>
+              <TaskIntentMeta />
             </>
           )}
           {remoteNames && (
@@ -417,6 +429,20 @@ function ToolUseMessage({ tool, input, messageIndex, toolUseId }: { tool: string
         <div className="flex-1 min-w-0 overflow-hidden">
           <p className="text-sm font-medium text-amber-500 mb-1">Suggested scheduled check</p>
           <ScheduleProposalUI input={input} toolUseId={toolUseId} />
+        </div>
+      </div>
+    );
+  }
+
+  if (tool === PROPOSE_TASK_TOOL) {
+    return (
+      <div className="flex gap-3 py-3">
+        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-violet-500/10 flex items-center justify-center">
+          <ListPlus className="w-4 h-4 text-violet-500" />
+        </div>
+        <div className="flex-1 min-w-0 overflow-hidden">
+          <p className="text-sm font-medium text-violet-500 mb-1">Proposed task</p>
+          <TaskProposalUI input={input} toolUseId={toolUseId} />
         </div>
       </div>
     );
@@ -699,7 +725,7 @@ function ToolUseMessage({ tool, input, messageIndex, toolUseId }: { tool: string
 function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
   // The proposal's result is a fixed acknowledgement written for the agent, not
   // for the user — the card above already says everything a reader needs.
-  if (tool === PROPOSE_SCHEDULE_TOOL) return null;
+  if (tool === PROPOSE_SCHEDULE_TOOL || tool === PROPOSE_TASK_TOOL) return null;
 
   // The screenshot the agent just looked at (Read/ImageView on an image) —
   // shown inline regardless of tool name, so the user sees what the agent saw.
