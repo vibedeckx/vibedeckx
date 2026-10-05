@@ -59,6 +59,18 @@ describe("settings routes: per-user scoping", () => {
     expect(getB.json().chatFontSize).toBe(15); // default
   });
 
+  it("tasksFontSize persists, keeps other fields, and rejects out-of-range values", async () => {
+    await app.inject({ method: "PUT", url: "/api/settings/conversation", payload: { chatFontSize: 18 } });
+    const put = await app.inject({ method: "PUT", url: "/api/settings/conversation", payload: { tasksFontSize: 16 } });
+    expect(put.statusCode).toBe(200);
+
+    const get = await app.inject({ method: "GET", url: "/api/settings/conversation" });
+    expect(get.json()).toMatchObject({ tasksFontSize: 16, chatFontSize: 18 });
+
+    const bad = await app.inject({ method: "PUT", url: "/api/settings/conversation", payload: { tasksFontSize: 40 } });
+    expect(bad.statusCode).toBe(400);
+  });
+
   it("chat-provider API keys never leak across users", async () => {
     auth.currentUserId = "user-1";
     const put = await app.inject({

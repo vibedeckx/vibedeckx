@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { TaskTable } from "./task-table";
@@ -10,6 +10,7 @@ import type { PendingTask } from "./task-row";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { PageHeader, FilterBar, FilterChip } from "@/components/layout";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
+import { useConversationSettings } from "@/hooks/use-conversation-settings";
 
 type StatusFilter = "all" | TaskStatus | "archived";
 
@@ -49,6 +50,7 @@ interface TasksViewProps {
 }
 
 export function TasksView({ active = true, projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession }: TasksViewProps) {
+  const { settings: convSettings } = useConversationSettings();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   // Panel, draft, pending creates and the flash are all keyed by project, so
   // switching projects closes the panel and drops the draft.
@@ -279,7 +281,11 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
               >
                 {/* Inert while closing: the stale copy can't be edited, and a
                     focused field blurs (and saves) right away. */}
-                <div className="h-full" inert={closing}>
+                <div
+                  className="h-full"
+                  inert={closing}
+                  style={{ "--task-body-font-size": `${convSettings.tasksFontSize}px` } as CSSProperties}
+                >
                   {shownPanel.kind === "draft" ? (
                     <TaskDraftPanel
                       draft={shownPanel.draft}

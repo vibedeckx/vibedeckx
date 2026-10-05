@@ -5,7 +5,7 @@ import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Archive, ArchiveRestore, Trash2, X } from "lucide-react";
 import { SourceSessionLink } from "@/components/agent/source-session-link";
-import { TaskProperties, Property, PANEL_FIELD_CLASS } from "./task-properties";
+import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
 
 interface TaskDetailPanelProps {
   task: Task;
@@ -109,7 +109,7 @@ export function TaskDetailPanel({
             }}
             placeholder="Add a description…"
             aria-label="Description"
-            className="min-h-32 text-sm leading-relaxed"
+            className={PANEL_BODY_CLASS}
           />
         </div>
       </div>

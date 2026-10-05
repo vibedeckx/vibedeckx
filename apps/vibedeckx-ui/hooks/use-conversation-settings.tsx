@@ -26,6 +26,7 @@ interface ConversationSettingsContextValue {
   setChatFontSize: (px: number) => void;
   setFilesTreeFontSize: (px: number) => void;
   setFilesContentFontSize: (px: number) => void;
+  setTasksFontSize: (px: number) => void;
   refresh: () => Promise<void>;
 }
 
@@ -117,6 +118,14 @@ export function ConversationSettingsProvider({ children }: { children: ReactNode
     [scheduleSave],
   );
 
+  const setTasksFontSize = useCallback(
+    (px: number) => {
+      setSettings((prev) => ({ ...prev, tasksFontSize: px }));
+      scheduleSave({ tasksFontSize: px });
+    },
+    [scheduleSave],
+  );
+
   // Flush any pending save on unmount so a drag-then-navigate doesn't drop the write.
   useEffect(() => {
     return () => {
@@ -143,6 +152,7 @@ export function ConversationSettingsProvider({ children }: { children: ReactNode
       setChatFontSize,
       setFilesTreeFontSize,
       setFilesContentFontSize,
+      setTasksFontSize,
       refresh,
     }),
     [
@@ -152,6 +162,7 @@ export function ConversationSettingsProvider({ children }: { children: ReactNode
       setChatFontSize,
       setFilesTreeFontSize,
       setFilesContentFontSize,
+      setTasksFontSize,
       refresh,
     ],
   );
@@ -173,6 +184,7 @@ export function useConversationSettings(): ConversationSettingsContextValue {
       setChatFontSize: () => {},
       setFilesTreeFontSize: () => {},
       setFilesContentFontSize: () => {},
+      setTasksFontSize: () => {},
       refresh: async () => {},
     };
   }

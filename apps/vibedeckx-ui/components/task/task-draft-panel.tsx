@@ -5,7 +5,7 @@ import type { TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { X } from "lucide-react";
-import { TaskProperties, PANEL_FIELD_CLASS } from "./task-properties";
+import { TaskProperties, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
 
 export interface TaskDraft {
   title: string;
@@ -130,7 +130,7 @@ export function TaskDraftPanel({
             onChange={(e) => onChange({ description: e.target.value })}
             placeholder="Describe the task…"
             aria-label="Description"
-            className={`${PANEL_FIELD_CLASS} min-h-32 text-sm leading-relaxed`}
+            className={`${PANEL_FIELD_CLASS} ${PANEL_BODY_CLASS}`}
           />
         </div>
 

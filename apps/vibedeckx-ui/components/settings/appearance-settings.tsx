@@ -29,6 +29,7 @@ export function AppearanceSettings() {
     setChatFontSize,
     setFilesTreeFontSize,
     setFilesContentFontSize,
+    setTasksFontSize,
   } = useConversationSettings();
 
   const handleReset = () => {
@@ -36,6 +37,7 @@ export function AppearanceSettings() {
     setChatFontSize(DEFAULT_CONVERSATION_SETTINGS.chatFontSize);
     setFilesTreeFontSize(DEFAULT_CONVERSATION_SETTINGS.filesTreeFontSize);
     setFilesContentFontSize(DEFAULT_CONVERSATION_SETTINGS.filesContentFontSize);
+    setTasksFontSize(DEFAULT_CONVERSATION_SETTINGS.tasksFontSize);
   };
 
   return (
@@ -84,6 +86,17 @@ export function AppearanceSettings() {
             onChange={setFilesContentFontSize}
           />
         </div>
+      </SettingsField>
+
+      <SettingsField
+        label="Tasks font size"
+        hint="Body text in the Tasks side panel — the description of an open task or a new draft."
+      >
+        <FontSizeRow
+          label="Task description"
+          value={settings.tasksFontSize}
+          onChange={setTasksFontSize}
+        />
       </SettingsField>
 
       <SettingsActions>

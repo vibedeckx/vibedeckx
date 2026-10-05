@@ -1241,6 +1241,7 @@ export interface ConversationSettings {
   chatFontSize: number;
   filesTreeFontSize: number;
   filesContentFontSize: number;
+  tasksFontSize: number;
 }
 
 export const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
@@ -1248,6 +1249,7 @@ export const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
   chatFontSize: 15,
   filesTreeFontSize: 14,
   filesContentFontSize: 14,
+  tasksFontSize: 14,
 };
 
 export const CONVERSATION_SETTINGS_LIMITS = {
