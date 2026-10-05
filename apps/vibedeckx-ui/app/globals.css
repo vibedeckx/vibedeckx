@@ -90,41 +90,47 @@
   --shadow-lg-app: 0 12px 32px oklch(0.2 0.02 260 / 0.10), 0 2px 6px oklch(0.2 0.02 260 / 0.05);
 }
 
+/* Dark palette sits between Notion and the docs site (Fumadocs neutral): a
+   neutral #161616 page with the sidebar one step LIGHTER (#1D1D1D), body text
+   at #DCDCDC rather than pure white, hover/selected as a faint neutral lift
+   instead of a brand tint, hairline white-alpha dividers, and menus raised by
+   a lighter surface plus layered shadow. Brand indigo is reserved for primary
+   actions and focus. */
 .dark {
-  --background: oklch(0.155 0.012 260);
-  --foreground: oklch(0.96 0.005 260);
-  --card: oklch(0.185 0.014 260);
-  --card-foreground: oklch(0.96 0.005 260);
-  --popover: oklch(0.185 0.014 260);
-  --popover-foreground: oklch(0.96 0.005 260);
-  --primary: oklch(0.65 0.20 268);
+  --background: oklch(0.2 0 0);
+  --foreground: oklch(0.894 0 0);
+  --card: oklch(0.231 0 0);
+  --card-foreground: oklch(0.894 0 0);
+  --popover: oklch(0.252 0 0);
+  --popover-foreground: oklch(0.894 0 0);
+  --primary: oklch(0.62 0.15 268);
   --primary-foreground: oklch(0.99 0 0);
-  --secondary: oklch(0.165 0.014 260);
-  --secondary-foreground: oklch(0.84 0.006 260);
-  --muted: oklch(0.215 0.014 260);
-  --muted-foreground: oklch(0.62 0.012 260);
-  --accent: oklch(0.28 0.08 268);
-  --accent-foreground: oklch(0.65 0.20 268);
-  --destructive: oklch(0.68 0.20 22);
-  --border: oklch(0.28 0.012 260);
-  --input: oklch(0.28 0.012 260);
-  --ring: oklch(0.65 0.20 268);
-  --chart-1: oklch(0.65 0.20 268);
-  --chart-2: oklch(0.7 0.16 152);
-  --chart-3: oklch(0.7 0.15 240);
-  --chart-4: oklch(0.78 0.16 75);
-  --chart-5: oklch(0.68 0.20 22);
-  --sidebar: oklch(0.135 0.012 260);
-  --sidebar-foreground: oklch(0.96 0.005 260);
-  --sidebar-primary: oklch(0.65 0.20 268);
+  --secondary: oklch(0.222 0 0);
+  --secondary-foreground: oklch(0.82 0 0);
+  --muted: oklch(0.264 0 0);
+  --muted-foreground: oklch(0.693 0 0);
+  --accent: oklch(0.281 0 0);
+  --accent-foreground: oklch(0.943 0 0);
+  --destructive: oklch(0.66 0.17 25);
+  --border: oklch(1 0 0 / 0.094);
+  --input: oklch(1 0 0 / 0.13);
+  --ring: oklch(0.62 0.15 268);
+  --chart-1: oklch(0.62 0.15 268);
+  --chart-2: oklch(0.68 0.13 152);
+  --chart-3: oklch(0.66 0.13 240);
+  --chart-4: oklch(0.76 0.14 75);
+  --chart-5: oklch(0.66 0.17 25);
+  --sidebar: oklch(0.231 0 0);
+  --sidebar-foreground: oklch(0.87 0 0);
+  --sidebar-primary: oklch(0.62 0.15 268);
   --sidebar-primary-foreground: oklch(0.99 0 0);
-  --sidebar-accent: oklch(0.28 0.08 268);
-  --sidebar-accent-foreground: oklch(0.65 0.20 268);
-  --sidebar-border: oklch(0.28 0.012 260);
-  --sidebar-ring: oklch(0.65 0.20 268);
-  --shadow-sm-app: 0 1px 2px oklch(0 0 0 / 0.4);
-  --shadow-md-app: 0 4px 12px oklch(0 0 0 / 0.4);
-  --shadow-lg-app: 0 12px 32px oklch(0 0 0 / 0.5);
+  --sidebar-accent: oklch(0.281 0 0);
+  --sidebar-accent-foreground: oklch(0.943 0 0);
+  --sidebar-border: oklch(1 0 0 / 0.06);
+  --sidebar-ring: oklch(0.62 0.15 268);
+  --shadow-sm-app: 0 0 0 1px oklch(0 0 0 / 0.2), 0 1px 2px oklch(0 0 0 / 0.3);
+  --shadow-md-app: 0 0 0 1px oklch(0 0 0 / 0.1), 0 3px 6px oklch(0 0 0 / 0.2), 0 9px 24px oklch(0 0 0 / 0.4);
+  --shadow-lg-app: 0 0 0 1px oklch(0 0 0 / 0.1), 0 5px 10px oklch(0 0 0 / 0.2), 0 15px 40px oklch(0 0 0 / 0.4);
 }
 
 @layer base {
