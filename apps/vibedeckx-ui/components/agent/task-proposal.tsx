@@ -167,7 +167,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
                   onValueChange={(v) => setFields((f) => f.map((x, i) => (i === index ? { ...x, priority: v as TaskPriority } : x)))}
                   disabled={busy}
                 >
-                  <SelectTrigger className="h-8 w-28 shrink-0 text-xs" aria-label="Task priority">
+                  <SelectTrigger size="sm" className="w-28 shrink-0 text-xs" aria-label="Task priority">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
