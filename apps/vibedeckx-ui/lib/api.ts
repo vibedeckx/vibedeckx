@@ -1686,7 +1686,18 @@ export async function getAgentProcessSettings(): Promise<AgentProcessSettings> {
   return res.json();
 }
 
-export async function updateAgentProcessSettings(settings: AgentProcessSettings): Promise<AgentProcessSettings> {
+export interface AgentProcessWorkerResult {
+  remoteServerId: string;
+  name: string;
+  /** offline = re-pushed automatically on reconnect; error = save again to retry. */
+  status: "applied" | "offline" | "error";
+  detail?: string;
+}
+
+/** `workers` is absent when the server is itself a reverse-connect worker. */
+export async function updateAgentProcessSettings(
+  settings: AgentProcessSettings,
+): Promise<AgentProcessSettings & { workers?: AgentProcessWorkerResult[] }> {
   const res = await authFetch(`${getApiBase()}/api/settings/agent-processes`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },

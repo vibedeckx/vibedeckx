@@ -29,6 +29,7 @@ import { AgentSessionLifecycleService } from "../agent-session-lifecycle.js";
 import { RemoteSessionLifecycleAdapter } from "../remote-session-lifecycle.js";
 import { readRetentionDays } from "../session-retention-config.js";
 import { pushRetentionToWorker } from "../session-retention-downlink.js";
+import { pushAgentProcessSettingsToWorker, readUserAgentProcessSettings } from "../agent-process-downlink.js";
 import { RemoteSessionReconciler } from "../remote-session-reconcile-service.js";
 import { RemoteLivenessTracker } from "../remote-liveness-reconcile.js";
 import { MemoryStatsReporter } from "../memory-stats.js";
@@ -38,6 +39,8 @@ import "../server-types.js";
 interface SharedServicesOptions {
   storage: Storage;
   authEnabled?: boolean;
+  /** `vibedeckx connect` mode — see the isReverseConnectWorker decoration. */
+  isReverseConnectWorker?: boolean;
 }
 
 /**
@@ -71,6 +74,7 @@ function assertProjectChatStarted(result: { kind: string; errorCode?: string; de
 const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify, opts) => {
   const processManager = new ProcessManager(opts.storage);
   const agentSessionManager = new AgentSessionManager(opts.storage);
+  agentSessionManager.residentLimitIsMachineWide = opts.isReverseConnectWorker ?? false;
   // Lifecycle recovery runs BEFORE restore (design §8.3): a pending row whose
   // entries prove the agent ran is promoted to active here, and only then is
   // it visible to `restoreSessionsFromDb` — the other order would leave it
@@ -567,8 +571,9 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("remoteSessionReconciler", remoteSessionReconciler);
   remoteSessionReconciler.start();
 
-  // A worker that was offline when the window was last changed — or that has
-  // never heard it at all — gets the current value the moment it connects.
+  // A worker that was offline when the window (or the agent process limit) was
+  // last changed — or that has never heard it at all — gets the current value
+  // the moment it connects.
   // Idempotent, so re-sending on every reconnect costs nothing.
   reverseConnectManager.setStatusChangeHandler((remoteServerId, status) => {
     if (status !== "online") return;
@@ -583,6 +588,16 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
         console.warn(`[SessionRetention] worker ${result.name} is too old to receive the retention window`);
       }
     })().catch((error) => console.warn("[SessionRetention] downlink on connect failed:", error));
+    // Same catch-up for the resident agent process limit — the server owner's
+    // own value only, never another user's.
+    void (async () => {
+      const server = await opts.storage.remoteServers.getById(remoteServerId);
+      const ownerId = await opts.storage.remoteServers.getOwnerId(remoteServerId);
+      if (!server || !ownerId) return;
+      const settings = await readUserAgentProcessSettings(opts.storage, ownerId);
+      if (!settings) return;
+      await pushAgentProcessSettingsToWorker({ storage: opts.storage, reverseConnectManager }, server, settings);
+    })().catch((error) => console.warn("[AgentProcesses] downlink on connect failed:", error));
   });
 
   // Startup drain closes the crash window: a milestone committed just before the

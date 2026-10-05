@@ -11,6 +11,12 @@ vi.mock("@clerk/fastify", () => ({
   clerkClient: {},
 }));
 
+const downlink = vi.hoisted(() => ({ push: vi.fn(async () => [] as unknown[]) }));
+vi.mock("../agent-process-downlink.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../agent-process-downlink.js")>()),
+  pushAgentProcessSettingsToWorkers: downlink.push,
+}));
+
 import settingsRoutes from "./settings-routes.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
@@ -105,5 +111,75 @@ describe("settings routes: per-user scoping", () => {
     const get = await app.inject({ method: "GET", url: "/api/settings/terminal" });
     expect(get.json().fontSize).toBe(22);
     expect(await storage.userSettings.get("local", "terminal")).toBeDefined();
+  });
+});
+
+describe("settings routes: agent-process limit downlink", () => {
+  let dir: string;
+  let storage: Storage;
+
+  async function makeApp(isReverseConnectWorker: boolean): Promise<FastifyInstance> {
+    const app = Fastify();
+    app.decorate("authEnabled", true);
+    app.decorate("isReverseConnectWorker", isReverseConnectWorker);
+    app.decorate("storage", storage);
+    await app.register(settingsRoutes);
+    await app.ready();
+    return app;
+  }
+
+  const put = (app: FastifyInstance, n: number) =>
+    app.inject({ method: "PUT", url: "/api/settings/agent-processes", payload: { maxResidentAgentProcesses: n } });
+  const get = (app: FastifyInstance) => app.inject({ method: "GET", url: "/api/settings/agent-processes" });
+
+  beforeEach(async () => {
+    auth.currentUserId = "user-1";
+    downlink.push.mockReset();
+    downlink.push.mockResolvedValue([{ remoteServerId: "r1", name: "worker3", status: "applied" }]);
+    dir = mkdtempSync(path.join(tmpdir(), "vdx-settings-downlink-"));
+    storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
+  });
+
+  afterEach(async () => {
+    await storage.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("a hub saves the limit per user and pushes it to that user's workers only", async () => {
+    const app = await makeApp(false);
+    const res = await put(app, 5);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({
+      maxResidentAgentProcesses: 5,
+      workers: [{ remoteServerId: "r1", name: "worker3", status: "applied" }],
+    });
+    expect(downlink.push).toHaveBeenCalledWith(expect.anything(), "user-1", { maxResidentAgentProcesses: 5 });
+    expect(await storage.userSettings.get("user-1", "agentProcesses")).toBe(JSON.stringify({ maxResidentAgentProcesses: 5 }));
+    expect(await storage.settings.get("agentProcesses")).toBeUndefined();
+
+    expect((await get(app)).json()).toEqual({ maxResidentAgentProcesses: 5 });
+    auth.currentUserId = "user-2";
+    expect((await get(app)).json()).toEqual({ maxResidentAgentProcesses: 3 });
+    await app.close();
+  });
+
+  it("a hub user without their own value sees the legacy machine-wide one", async () => {
+    await storage.settings.set("agentProcesses", JSON.stringify({ maxResidentAgentProcesses: 7 }));
+    const app = await makeApp(false);
+    expect((await get(app)).json()).toEqual({ maxResidentAgentProcesses: 7 });
+    await put(app, 4);
+    expect((await get(app)).json()).toEqual({ maxResidentAgentProcesses: 4 });
+    await app.close();
+  });
+
+  it("a reverse-connect worker stores the pushed limit machine-wide without pushing onward", async () => {
+    const app = await makeApp(true);
+    const res = await put(app, 5);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ maxResidentAgentProcesses: 5 });
+    expect(downlink.push).not.toHaveBeenCalled();
+    expect(await storage.settings.get("agentProcesses")).toBe(JSON.stringify({ maxResidentAgentProcesses: 5 }));
+    expect((await get(app)).json()).toEqual({ maxResidentAgentProcesses: 5 });
+    await app.close();
   });
 });

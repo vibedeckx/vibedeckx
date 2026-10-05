@@ -159,6 +159,11 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:PUT /api/path/retention-holds/:param": { since: "0.3.45", summary: "下发会话保留锁(防保留期清理)" },
   "http:GET /api/path/retention-holds": { since: "0.3.45", summary: "列出持有保留锁的会话(释放过期锁)" },
 
+  // Resident agent process limit downlink (agent-process-downlink.ts). Reuses
+  // the operator PUT that has existed since the resident pool shipped, so no
+  // worker release is needed; the worker skips onward fan-out by process mode.
+  "http:PUT /api/settings/agent-processes": { since: "0.1.30", summary: "下发常驻 agent 进程上限" },
+
   // --- Search / notifications / cross-remote ---
   "http:GET /api/path/search-catalog": { since: "0.2.0", summary: "搜索目录快照" },
   // Empirically probed: 0.2.15 → 404, 0.2.16 → 400 (route exists).

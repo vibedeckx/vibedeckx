@@ -27,6 +27,19 @@ export function normalizeAgentProcessSettings(value: unknown): AgentProcessSetti
   return { maxResidentAgentProcesses };
 }
 
+/** Settings key, in `settings` (machine-wide) and `user_settings` (per user). */
+export const AGENT_PROCESS_SETTING_KEY = "agentProcesses";
+
+/** A stored settings value, or null when absent or unparseable. */
+export function parseStoredAgentProcessSettings(saved: string | undefined): AgentProcessSettings | null {
+  if (!saved) return null;
+  try {
+    return normalizeAgentProcessSettings(JSON.parse(saved));
+  } catch {
+    return null;
+  }
+}
+
 export interface ResidentProcessCandidate {
   id: string;
   projectId: string;

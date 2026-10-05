@@ -17,8 +17,10 @@ import { resolveUserId } from "../utils/resolve-user-id.js";
 import "../server-types.js";
 import type { FastifyRequest, FastifyReply } from "fastify";
 import {
+  AGENT_PROCESS_SETTING_KEY,
   AGENT_PROCESS_SETTINGS_LIMITS,
-  normalizeAgentProcessSettings,
+  DEFAULT_AGENT_PROCESS_SETTINGS,
+  parseStoredAgentProcessSettings,
   type AgentProcessSettings,
 } from "../resident-agent-processes.js";
 import {
@@ -29,6 +31,10 @@ import {
   SESSION_RETENTION_SUGGESTED_DAYS,
 } from "../session-retention-config.js";
 import { pushRetentionToWorkers } from "../session-retention-downlink.js";
+import {
+  pushAgentProcessSettingsToWorkers,
+  resolveUserAgentProcessSettings,
+} from "../agent-process-downlink.js";
 
 /** Thrown by the chat-provider PUT handler's merge callback to abort the
  * atomic settings.update() write and surface a 400 with the given message. */
@@ -71,15 +77,6 @@ const DEFAULT_CONVERSATION_SETTINGS: ConversationSettings = {
 
 const CONV_FONT_SIZE_MIN = 12;
 const CONV_FONT_SIZE_MAX = 22;
-
-function readStoredAgentProcessSettings(saved: string | undefined): AgentProcessSettings {
-  if (!saved) return normalizeAgentProcessSettings(undefined);
-  try {
-    return normalizeAgentProcessSettings(JSON.parse(saved));
-  } catch {
-    return normalizeAgentProcessSettings(undefined);
-  }
-}
 
 function validateConvFontSize(value: unknown, field: string): string | null {
   if (typeof value !== "number" || !Number.isFinite(value)) {
@@ -147,14 +144,23 @@ function requireSettingsUser(req: FastifyRequest, reply: FastifyReply): string |
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  // Resident agent process limit. On a hub it is per user, and saving pushes
+  // it to that user's own workers, where the processes actually run. A
+  // reverse-connect worker belongs to one user, so it keeps the value
+  // machine-wide — that is what its ensureResidentCapacity reads.
   fastify.get("/api/settings/agent-processes", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
-    const saved = await fastify.storage.settings.get("agentProcesses");
-    return reply.code(200).send(readStoredAgentProcessSettings(saved));
+    const auth = requireAuth(req, reply);
+    if (auth === null) return;
+    if (fastify.isReverseConnectWorker) {
+      const saved = await fastify.storage.settings.get(AGENT_PROCESS_SETTING_KEY);
+      return reply.code(200).send(parseStoredAgentProcessSettings(saved) ?? DEFAULT_AGENT_PROCESS_SETTINGS);
+    }
+    return reply.code(200).send(await resolveUserAgentProcessSettings(fastify.storage, resolveUserId(auth)));
   });
 
   fastify.put<{ Body: AgentProcessSettings }>("/api/settings/agent-processes", async (req, reply) => {
-    if (requireAuth(req, reply) === null) return;
+    const auth = requireAuth(req, reply);
+    if (auth === null) return;
     const value = req.body?.maxResidentAgentProcesses;
     if (
       typeof value !== "number" ||
@@ -167,8 +173,22 @@ const routes: FastifyPluginAsync = async (fastify) => {
       });
     }
     const config = { maxResidentAgentProcesses: value };
-    await fastify.storage.settings.set("agentProcesses", JSON.stringify(config));
-    return reply.code(200).send(config);
+
+    // A worker receiving the hub's push stores it and stops here — it must not
+    // push onward to remotes of its own.
+    if (fastify.isReverseConnectWorker) {
+      await fastify.storage.settings.set(AGENT_PROCESS_SETTING_KEY, JSON.stringify(config));
+      return reply.code(200).send(config);
+    }
+
+    const userId = resolveUserId(auth);
+    await fastify.storage.userSettings.set(userId, AGENT_PROCESS_SETTING_KEY, JSON.stringify(config));
+    const workers = await pushAgentProcessSettingsToWorkers(
+      { storage: fastify.storage, reverseConnectManager: fastify.reverseConnectManager },
+      userId,
+      config,
+    );
+    return reply.code(200).send({ ...config, workers });
   });
 
   // ---- Session retention ----

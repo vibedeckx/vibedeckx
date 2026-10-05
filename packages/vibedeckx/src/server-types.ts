@@ -53,6 +53,8 @@ declare module "fastify" {
     reverseConnectManager: ReverseConnectManager;
     authEnabled: boolean;
     noLocalProjects: boolean;
+    /** True in `vibedeckx connect` (reverse-connect worker) mode; false on a hub. */
+    isReverseConnectWorker: boolean;
     /** Build fingerprint of the UI assets this server serves; undefined = API-only or pre-build-id bundle. */
     uiBuildId: string | undefined;
     browserManager: BrowserManager;

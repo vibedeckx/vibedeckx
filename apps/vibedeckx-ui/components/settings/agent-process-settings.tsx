@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Bot, CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Loader2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -9,6 +9,7 @@ import {
   DEFAULT_AGENT_PROCESS_SETTINGS,
   getAgentProcessSettings,
   updateAgentProcessSettings,
+  type AgentProcessWorkerResult,
 } from "@/lib/api";
 import {
   SettingsActions,
@@ -23,6 +24,7 @@ export function AgentProcessSettingsSection() {
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [workers, setWorkers] = useState<AgentProcessWorkerResult[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -49,11 +51,13 @@ export function AgentProcessSettingsSection() {
     if (!valid) return;
     setSaving(true);
     setSaveMessage(null);
+    setWorkers([]);
     try {
       const saved = await updateAgentProcessSettings({
         maxResidentAgentProcesses: numericValue,
       });
       setValue(String(saved.maxResidentAgentProcesses));
+      setWorkers(saved.workers ?? []);
       setSaveMessage("Settings saved");
       setTimeout(() => setSaveMessage(null), 2000);
     } catch (error) {
@@ -62,6 +66,8 @@ export function AgentProcessSettingsSection() {
       setSaving(false);
     }
   };
+
+  const problemWorkers = workers.filter((w) => w.status !== "applied");
 
   if (!loaded) {
     return (
@@ -78,7 +84,7 @@ export function AgentProcessSettingsSection() {
         mono
         hint={
           <span>
-            Live local or remote agent processes per server.{" "}
+            Live agent processes per workspace, applied to all of your machines.{" "}
             <span className="font-mono text-foreground/70">{min}–{max}</span>
             {" · default "}
             <span className="font-mono text-foreground/70">
@@ -116,6 +122,27 @@ export function AgentProcessSettingsSection() {
         >
           {saveMessage}
         </SettingsStatus>
+      )}
+
+      {/* Machines that did not take the value. The limit is enforced on each
+          machine, so say which ones still run the old one and whether the
+          user has to act: an offline machine gets it on reconnect, a failed
+          one only if the user saves again — nothing retries in the background. */}
+      {problemWorkers.length > 0 && (
+        <div className="space-y-1.5">
+          {problemWorkers.map((worker) => (
+            <SettingsStatus
+              key={worker.remoteServerId}
+              variant="default"
+              icon={<AlertTriangle className="h-3.5 w-3.5" />}
+            >
+              {worker.name}:{" "}
+              {worker.status === "offline"
+                ? "offline — it will pick this up when it reconnects"
+                : `not applied (${worker.detail ?? "failed"}) — save again later to retry`}
+            </SettingsStatus>
+          ))}
+        </div>
       )}
 
       <SettingsActions>

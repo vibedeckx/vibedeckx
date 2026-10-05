@@ -208,6 +208,19 @@ private async hibernateSession(sessionId): Promise<void>
 settings（默认 3）。第一期不做本地 UI 配置远端上限；如需要，follow-up 走现有
 proxy 到远端的 settings 路由（受 VIBEDECKX_API_KEY 门控）按 remote server 逐台配置。
 
+> **2026-10-05 更新：改为按用户设置、由 hub 下发。** hub 上的值存在 `user_settings`
+> （每人一份）；保存后只经隧道推给该用户自己的 remote server（`remoteServers.getAll(userId)`），
+> 调的是 worker 上 0.1.30 起就有的同一条 `PUT /api/settings/agent-processes`，不需要发 worker。
+> worker 上线时 hub 按 remote server 的 owner 补推一次；owner 从没存过值就不推，不会把
+> worker 本地值重置成默认。worker 进程（`vibedeckx connect`，`isReverseConnectWorker`）
+> 只属于一个用户，收到后存进本机 `settings`，不再往下推，执行时也只读本机值。hub 自己执行
+> 时读项目 owner 的值，没有则回落到旧的全局值（老的 solo 配置不丢），再没有用默认 3。
+> 口径是每个 workspace（project + branch）最多 N 个，不是整台机器。
+> 不做后台自动重试：保存结果当场列出没生效的机器——隧道不在（`network_error`）提示重连后
+> 自动同步；隧道在但超时/报错提示用户稍后再保存一次。理由：后台重试的结果用户看不到，
+> 离开设置页时的心理预期会和实际不一致。follow-up：Remote Servers 页显示每台机器本地的
+> 实际配置，作为对账入口。
+
 ## 5. 前端设计
 
 ### 5.1 New Conversation 流程改动

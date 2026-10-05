@@ -43,8 +43,11 @@ import {
   type BranchActivityState,
 } from "./branch-activity.js";
 import {
-  normalizeAgentProcessSettings,
+  AGENT_PROCESS_SETTING_KEY,
+  DEFAULT_AGENT_PROCESS_SETTINGS,
+  parseStoredAgentProcessSettings,
   pickIdleResidentEvictionCandidate,
+  type AgentProcessSettings,
   ResidentProcessLimitError,
   type AliveAgentSession,
   type ResidentProcessScope,
@@ -1039,15 +1042,34 @@ export class AgentSessionManager {
       .sort((a, b) => a.lastActiveAt - b.lastActiveAt);
   }
 
-  private async getMaxResidentAgentProcesses(): Promise<number> {
-    const saved = await this.storage.settings.get("agentProcesses");
-    if (!saved) return normalizeAgentProcessSettings(undefined).maxResidentAgentProcesses;
-    try {
-      return normalizeAgentProcessSettings(JSON.parse(saved)).maxResidentAgentProcesses;
-    } catch {
-      return normalizeAgentProcessSettings(undefined).maxResidentAgentProcesses;
+  /**
+   * Where the resident limit is read from. A hub keeps it per user and applies
+   * the project owner's value; a reverse-connect worker (set by
+   * shared-services) belongs to one user and reads the machine-wide value the
+   * hub pushed into its `settings`.
+   */
+  residentLimitIsMachineWide = false;
+
+  private async getMaxResidentAgentProcesses(projectId: string): Promise<number> {
+    const machineWide = async () =>
+      parseStoredAgentProcessSettings(await this.storage.settings.get(AGENT_PROCESS_SETTING_KEY));
+    let settings: AgentProcessSettings | null = null;
+    if (!this.residentLimitIsMachineWide) {
+      try {
+        const ownerId = (await this.storage.projects.getOwnerId(projectId)) ?? "local";
+        settings = parseStoredAgentProcessSettings(
+          await this.storage.userSettings.get(ownerId, AGENT_PROCESS_SETTING_KEY),
+        );
+      } catch (error) {
+        console.warn("[AgentSession] reading the owner's resident limit failed:", error);
+      }
     }
+    // Machine-wide value: the worker's pushed limit, or on a hub the
+    // pre-per-user setting so an existing solo setup keeps its number.
+    settings ??= await machineWide();
+    return (settings ?? DEFAULT_AGENT_PROCESS_SETTINGS).maxResidentAgentProcesses;
   }
+
 
   private async withCapacityLock<T>(work: () => Promise<T>): Promise<T> {
     const previous = this.capacityQueue;
@@ -1068,7 +1090,7 @@ export class AgentSessionManager {
     options?: { force?: boolean; excludeSessionId?: string },
   ): Promise<void> {
     await this.withCapacityLock(async () => {
-      const maxResidentAgentProcesses = await this.getMaxResidentAgentProcesses();
+      const maxResidentAgentProcesses = await this.getMaxResidentAgentProcesses(scope.projectId);
       const live = [...this.sessions.values()].filter(
         (session) =>
           session.id !== options?.excludeSessionId &&

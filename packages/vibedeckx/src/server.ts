@@ -243,6 +243,11 @@ export const createServer = async (opts: {
   // Decorate noLocalProjects so project routes can reject local-path creation
   server.decorate("noLocalProjects", noLocalProjects);
 
+  // Only `vibedeckx connect` sets acceptRemote, so it doubles as "this process
+  // is a reverse-connect worker, not a hub" — settings routes use it to skip
+  // fanning values out to remotes a worker should never push to.
+  server.decorate("isReverseConnectWorker", acceptRemote);
+
   // Trace context — must be the first onRequest hook. The gates below return
   // 404 before any later hook runs, and a rejected request is exactly the kind
   // worth tracing.
@@ -341,7 +346,7 @@ export const createServer = async (opts: {
   }));
 
   // Register plugins and routes
-  server.register(sharedServices, { storage: opts.storage, authEnabled });
+  server.register(sharedServices, { storage: opts.storage, authEnabled, isReverseConnectWorker: acceptRemote });
   server.register(fastifyWebsocket);
   // Multipart uploads (Files page drag-and-drop). 50MB per-file cap; the
   // remote-upload path is further bounded by the 16MB JSON bodyLimit.
