@@ -950,7 +950,7 @@ export function CreateWorktreeDialog({
                   ? "Adopt & Create"
                   : "Create"}
             {!loading && (
-              <kbd className="rounded border border-primary-foreground/30 bg-primary-foreground/15 px-1 font-mono text-[10px] leading-4">
+              <kbd className="rounded border border-background/30 bg-background/15 px-1 font-mono text-[10px] leading-4">
                 ⌘⏎
               </kbd>
             )}

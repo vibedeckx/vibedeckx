@@ -149,7 +149,7 @@ export function TaskDraftPanel({
         </Button>
         <Button size="sm" onClick={onCreate} disabled={!canCreate}>
           Create
-          <kbd className="ml-1.5 rounded bg-primary-foreground/15 px-1 font-sans text-[10px]">⌘↵</kbd>
+          <kbd className="ml-1.5 rounded bg-background/15 px-1 font-sans text-[10px]">⌘↵</kbd>
         </Button>
       </div>
     </div>

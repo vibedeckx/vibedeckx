@@ -505,7 +505,7 @@ export function ScheduleFormDialog({
                 {editing ? <Check className="size-3" /> : <Plus className="size-3" />}
                 {submitLabel}
                 <kbd
-                  className="rounded border border-primary-foreground/30 bg-primary-foreground/15 px-1 font-mono text-[10px] leading-[1.4] text-primary-foreground/90"
+                  className="rounded border border-background/30 bg-background/15 px-1 font-mono text-[10px] leading-[1.4] text-background/90"
                   title={isMac ? "Command+Enter" : "Ctrl+Enter"}
                 >
                   {isMac ? "⌘⏎" : "Ctrl⏎"}
