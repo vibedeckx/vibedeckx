@@ -41,7 +41,7 @@ export function TaskOutputToolUseUI({ input }: { input: unknown }) {
 
   return (
     <div className="flex items-center gap-2 flex-wrap">
-      <code className="text-sm bg-muted/50 px-1.5 py-0.5 rounded">{task_id}</code>
+      <code className="conv-text-sm bg-muted/50 px-1.5 py-0.5 rounded">{task_id}</code>
       {badges.map((b, i) => (
         <Badge key={i} variant="outline" className="text-xs shrink-0">
           {b.label}
@@ -54,7 +54,7 @@ export function TaskOutputToolUseUI({ input }: { input: unknown }) {
 export function TaskOutputToolResultUI({ output }: { output: string }) {
   if (!output || output.trim() === "") {
     return (
-      <p className="text-xs text-muted-foreground italic">No output</p>
+      <p className="conv-text-xs text-muted-foreground italic">No output</p>
     );
   }
 
@@ -62,7 +62,7 @@ export function TaskOutputToolResultUI({ output }: { output: string }) {
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Task output ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
       <pre

@@ -77,14 +77,14 @@ export function TodoWriteUI({ input }: { input: unknown }) {
           <div className="min-w-0">
             <span
               className={cn(
-                "text-sm break-words",
+                "conv-text-sm break-words",
                 todo.status === "completed" && "line-through text-muted-foreground"
               )}
             >
               {todo.subject ?? todo.content ?? "Untitled task"}
             </span>
             {todo.status === "in_progress" && todo.activeForm && (
-              <span className="block text-xs italic text-cyan-500">{todo.activeForm}</span>
+              <span className="block conv-text-xs italic text-cyan-500">{todo.activeForm}</span>
             )}
           </div>
         </div>
@@ -112,9 +112,9 @@ export function TaskCreateUI({ input }: { input: unknown }) {
     <div className="mt-2 flex items-start gap-2">
       <PlusCircle className="h-4 w-4 text-cyan-500 mt-0.5 flex-shrink-0" />
       <div className="min-w-0">
-        <span className="text-sm font-medium break-words">{parsed.subject}</span>
+        <span className="conv-text-sm font-medium break-words">{parsed.subject}</span>
         {parsed.description && (
-          <span className="block text-xs text-muted-foreground mt-0.5 break-words">
+          <span className="block conv-text-xs text-muted-foreground mt-0.5 break-words">
             {parsed.description.length > 200
               ? parsed.description.substring(0, 200) + "..."
               : parsed.description}
@@ -149,7 +149,7 @@ export function TaskUpdateUI({ input }: { input: unknown }) {
       ) : (
         <ArrowRight className="h-4 w-4 text-cyan-500 mt-0.5 flex-shrink-0" />
       )}
-      <span className="text-sm break-words">
+      <span className="conv-text-sm break-words">
         Task #{parsed.taskId}
         {parsed.status && (
           <> <ArrowRight className="inline h-3 w-3 text-muted-foreground mx-0.5" /> {parsed.status}</>
@@ -186,7 +186,7 @@ export function TaskUpdateUI({ input }: { input: unknown }) {
 
 export function TaskListUI() {
   return (
-    <div className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
+    <div className="mt-2 flex items-center gap-2 conv-text-sm text-muted-foreground">
       <Loader2 className="h-4 w-4 animate-spin text-cyan-500" />
       <span>Listing tasks...</span>
     </div>
@@ -201,7 +201,7 @@ export function TaskGetUI({ input }: { input: unknown }) {
   if (!parsed) return <FallbackJSON input={input} />;
 
   return (
-    <div className="mt-2 flex items-center gap-2 text-sm text-muted-foreground">
+    <div className="mt-2 flex items-center gap-2 conv-text-sm text-muted-foreground">
       <Loader2 className="h-4 w-4 animate-spin text-cyan-500" />
       <span>Fetching task #{parsed.taskId}...</span>
     </div>
@@ -228,10 +228,10 @@ export function TaskListResultUI({ output }: { output: string }) {
         <div key={item.id} className="flex items-start gap-2 py-0.5">
           <StatusIcon status={item.status} className="mt-0.5 flex-shrink-0" />
           <div className="min-w-0 flex items-center gap-1.5 flex-wrap">
-            <span className="text-xs text-muted-foreground">#{item.id}</span>
+            <span className="conv-text-xs text-muted-foreground">#{item.id}</span>
             <span
               className={cn(
-                "text-sm break-words",
+                "conv-text-sm break-words",
                 item.status === "completed" && "line-through text-muted-foreground"
               )}
             >

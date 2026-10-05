@@ -52,11 +52,11 @@ export function WebFetchToolUseUI({ input }: { input: unknown }) {
         href={href}
         target="_blank"
         rel="noopener noreferrer"
-        className="block text-xs font-mono text-blue-500 hover:underline truncate"
+        className="block conv-text-xs font-mono text-blue-500 hover:underline truncate"
       >
         {display}
       </a>
-      <p className="text-xs text-muted-foreground">
+      <p className="conv-text-xs text-muted-foreground">
         &quot;{promptPreview}&quot;
       </p>
     </div>
@@ -66,7 +66,7 @@ export function WebFetchToolUseUI({ input }: { input: unknown }) {
 export function WebFetchToolResultUI({ output }: { output: string }) {
   if (!output || output.trim() === "") {
     return (
-      <p className="text-xs text-muted-foreground italic">No content fetched</p>
+      <p className="conv-text-xs text-muted-foreground italic">No content fetched</p>
     );
   }
 
@@ -74,7 +74,7 @@ export function WebFetchToolResultUI({ output }: { output: string }) {
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Response ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
       <pre

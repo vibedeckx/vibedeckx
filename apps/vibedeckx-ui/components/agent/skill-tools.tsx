@@ -32,9 +32,9 @@ export function SkillToolUseUI({ input }: { input: unknown }) {
 
   return (
     <div className="space-y-1">
-      <p className="text-xs font-mono text-pink-500">{parsed.skill}</p>
+      <p className="conv-text-xs font-mono text-foreground">{parsed.skill}</p>
       {parsed.args && (
-        <p className="text-xs text-muted-foreground truncate">
+        <p className="conv-text-xs text-muted-foreground truncate">
           args: {parsed.args}
         </p>
       )}
@@ -45,7 +45,7 @@ export function SkillToolUseUI({ input }: { input: unknown }) {
 export function SkillToolResultUI({ output }: { output: string }) {
   if (!output || output.trim() === "") {
     return (
-      <p className="text-xs text-muted-foreground italic">No output</p>
+      <p className="conv-text-xs text-muted-foreground italic">No output</p>
     );
   }
 
@@ -53,7 +53,7 @@ export function SkillToolResultUI({ output }: { output: string }) {
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Loaded ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
       <pre

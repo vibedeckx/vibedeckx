@@ -40,6 +40,7 @@ import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./
 import { ZoomableImage } from "./zoomable-image";
 import { SpeakButton, speakOwnerKey } from "./speak-button";
 import { useTtsOwnedBy } from "@/lib/tts/tts-player";
+import { MessageRow } from "./message-row";
 import { VPasteChip, VFileCard, RemoteGrantMeta, ScheduleIntentMeta, TaskIntentMeta, splitVPasteMarkers, takeRemotesMarker, type VPasteSegment } from "./vpaste-chip";
 import { takeScheduleMarker } from "@/lib/schedule-intent";
 import { takeTaskMarker } from "@/lib/task-intent";
@@ -77,7 +78,7 @@ export function AgentMessageItem({ message, messageIndex, entryIndex, streaming 
   return (
     <div className="group relative">
       {body}
-      <span className="pointer-events-none absolute right-0 top-3 text-xs tabular-nums text-muted-foreground opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+      <span className="pointer-events-none absolute right-0 top-3 conv-text-xs tabular-nums text-muted-foreground opacity-0 transition-opacity duration-150 group-hover:opacity-100">
         {formatTimestamp(message.timestamp)}
       </span>
     </div>
@@ -120,30 +121,22 @@ function renderBody(message: AgentMessage, messageIndex: number, streaming: bool
 
     case "approval_request":
       return (
-        <div className="flex gap-3 py-3">
-          <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-amber-500/10 flex items-center justify-center">
-            <ShieldAlert className="w-4 h-4 text-amber-500" />
-          </div>
-          <div className="flex-1 min-w-0 overflow-hidden">
-            <p className="text-sm font-medium text-amber-500 mb-1">
-              {message.requestType === "command" ? "Command Approval" : "File Change Approval"}
-            </p>
-            {message.requestType === "command" ? (
-              <CommandApprovalUI
-                requestId={message.requestId}
-                command={message.command}
-                cwd={message.cwd}
-                messageIndex={messageIndex}
-              />
-            ) : (
-              <FileChangeApprovalUI
-                requestId={message.requestId}
-                changes={message.changes}
-                messageIndex={messageIndex}
-              />
-            )}
-          </div>
-        </div>
+        <MessageRow color="amber" icon={ShieldAlert} title={message.requestType === "command" ? "Command Approval" : "File Change Approval"}>
+          {message.requestType === "command" ? (
+            <CommandApprovalUI
+              requestId={message.requestId}
+              command={message.command}
+              cwd={message.cwd}
+              messageIndex={messageIndex}
+            />
+          ) : (
+            <FileChangeApprovalUI
+              requestId={message.requestId}
+              changes={message.changes}
+              messageIndex={messageIndex}
+            />
+          )}
+        </MessageRow>
       );
 
     case "turn_end":
@@ -216,20 +209,14 @@ function UserMessage({
   // such, visually distinct from what the user actually typed.
   if (origin === "workflow" && typeof content === "string") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
-          <Workflow className="w-3.5 h-3.5 text-sky-500" />
+      <MessageRow color="sky" icon={Workflow} title="Workflow">
+        <div
+          className="text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
+          style={{ fontSize: "var(--conv-font-size, 14px)" }}
+        >
+          <AgentMarkdown>{content}</AgentMarkdown>
         </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-sky-500 mb-1">Workflow</p>
-          <div
-            className="text-foreground prose prose-sm dark:prose-invert max-w-none break-words [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_code]:break-all [&_p]:break-words"
-            style={{ fontSize: "var(--conv-font-size, 14px)" }}
-          >
-            <AgentMarkdown>{content}</AgentMarkdown>
-          </div>
-        </div>
-      </div>
+      </MessageRow>
     );
   }
   // The hub appends a `<vremotes>` block to every message of a session with
@@ -264,12 +251,12 @@ function UserMessage({
   return (
     <div className="flex gap-3 py-3">
       <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-primary/10 flex items-center justify-center">
-        <User className="w-3.5 h-3.5 text-primary" />
+        <User className="w-4 h-4 text-primary" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         {/* Baseline, not center: "You" and the smaller grant text have different
             line boxes, and centering them lifts the smaller text off the line. */}
-        <p className="flex min-w-0 items-baseline gap-1.5 text-sm font-medium text-foreground mb-1">
+        <p className="flex min-w-0 items-baseline gap-1.5 conv-text-sm font-medium text-foreground mb-1">
           <span className="shrink-0">You</span>
           {scheduled && (
             <>
@@ -362,9 +349,10 @@ function AssistantMessage({
   const agentType = messageAgentType ?? currentAgentType;
   const isCodex = agentType === "codex";
   const label = isCodex ? "Codex" : "Claude";
+  // The agent's colour lives on its avatar only; the name stays body text like
+  // every other row title.
   const iconBg = isCodex ? "bg-green-500/10" : "bg-violet-500/10";
   const iconColor = isCodex ? "text-green-500" : "text-violet-500";
-  const textColor = isCodex ? "text-green-500" : "text-violet-500";
 
   // Debug aid: toggle a single message between rendered markdown and its raw
   // source (the exact string fed to the renderer). Per-message, default rendered.
@@ -391,11 +379,11 @@ function AssistantMessage({
   return (
     <div className="group flex gap-3 py-3" data-speak-message="">
       <div className={`flex-shrink-0 w-7 h-7 rounded-lg ${iconBg} flex items-center justify-center`}>
-        <Bot className={`w-3.5 h-3.5 ${iconColor}`} />
+        <Bot className={`w-4 h-4 ${iconColor}`} />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <div className="flex items-center gap-2 mb-1">
-          <p className={`text-sm font-medium ${textColor}`}>{label}</p>
+          <p className="conv-text-sm font-medium text-foreground">{label}</p>
           <button
             type="button"
             onClick={() => setShowSource((v) => !v)}
@@ -439,29 +427,17 @@ function ToolUseMessage({ tool, input, messageIndex, toolUseId }: { tool: string
   // normalizes onto it), so one branch serves both.
   if (tool === PROPOSE_SCHEDULE_TOOL) {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-amber-500/10 flex items-center justify-center">
-          <CalendarClock className="w-4 h-4 text-amber-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-amber-500 mb-1">Suggested scheduled check</p>
-          <ScheduleProposalUI input={input} toolUseId={toolUseId} />
-        </div>
-      </div>
+      <MessageRow color="amber" icon={CalendarClock} title="Suggested scheduled check">
+        <ScheduleProposalUI input={input} toolUseId={toolUseId} />
+      </MessageRow>
     );
   }
 
   if (tool === PROPOSE_TASK_TOOL) {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-violet-500/10 flex items-center justify-center">
-          <ListPlus className="w-4 h-4 text-violet-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-violet-500 mb-1">Proposed task</p>
-          <TaskProposalUI input={input} toolUseId={toolUseId} />
-        </div>
-      </div>
+      <MessageRow color="violet" icon={ListPlus} title="Proposed task">
+        <TaskProposalUI input={input} toolUseId={toolUseId} />
+      </MessageRow>
     );
   }
 
@@ -471,48 +447,30 @@ function ToolUseMessage({ tool, input, messageIndex, toolUseId }: { tool: string
         ? input.path
         : "";
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
-          <Eye className="w-4 h-4 text-sky-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-sky-500 mb-1">View Image</p>
-          <p
-            className="font-mono text-muted-foreground break-all"
-            style={{ fontSize: "var(--conv-font-size, 12px)" }}
-          >
-            {path}
-          </p>
-        </div>
-      </div>
+      <MessageRow color="sky" icon={Eye} title="View Image">
+        <p
+          className="font-mono text-muted-foreground break-all"
+          style={{ fontSize: "var(--conv-font-size, 12px)" }}
+        >
+          {path}
+        </p>
+      </MessageRow>
     );
   }
 
   if (tool === "AskUserQuestion") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-violet-500/10 flex items-center justify-center">
-          <HelpCircle className="w-4 h-4 text-violet-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-violet-500 mb-1">Question</p>
-          <AskUserQuestion input={input} messageIndex={messageIndex} />
-        </div>
-      </div>
+      <MessageRow color="violet" icon={HelpCircle} title="Question">
+        <AskUserQuestion input={input} messageIndex={messageIndex} />
+      </MessageRow>
     );
   }
 
   if (tool === "ExitPlanMode") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-green-500/10 flex items-center justify-center">
-          <FileCheck className="w-4 h-4 text-green-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-green-500 mb-1">Plan Ready</p>
-          <ExitPlanModeUI input={input} messageIndex={messageIndex} />
-        </div>
-      </div>
+      <MessageRow color="green" icon={FileCheck} title="Plan Ready">
+        <ExitPlanModeUI input={input} messageIndex={messageIndex} />
+      </MessageRow>
     );
   }
 
@@ -528,183 +486,105 @@ function ToolUseMessage({ tool, input, messageIndex, toolUseId }: { tool: string
   const taskTool = taskToolLabels[tool];
   if (taskTool) {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-cyan-500/10 flex items-center justify-center">
-          <ListTodo className="w-4 h-4 text-cyan-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-cyan-500 mb-1">{taskTool.label}</p>
-          {taskTool.ui}
-        </div>
-      </div>
+      <MessageRow color="cyan" icon={ListTodo} title={taskTool.label}>
+        {taskTool.ui}
+      </MessageRow>
     );
   }
 
   if (tool === "Read") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
-          <FileText className="w-4 h-4 text-sky-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-sky-500 mb-1">Read File</p>
-          <ReadToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="sky" icon={FileText} title="Read File">
+        <ReadToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "Edit") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
-          <FilePenLine className="w-4 h-4 text-sky-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-sky-500 mb-1">Edit File</p>
-          <EditToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="sky" icon={FilePenLine} title="Edit File">
+        <EditToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "Write") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
-          <FilePlus2 className="w-4 h-4 text-sky-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-sky-500 mb-1">Write File</p>
-          <WriteToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="sky" icon={FilePlus2} title="Write File">
+        <WriteToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "Bash") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-emerald-500/10 flex items-center justify-center">
-          <Terminal className="w-4 h-4 text-emerald-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-emerald-500 mb-1">Run Command</p>
-          <BashToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="emerald" icon={Terminal} title="Run Command">
+        <BashToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "Grep") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-orange-500/10 flex items-center justify-center">
-          <Search className="w-4 h-4 text-orange-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-orange-500 mb-1">Search</p>
-          <GrepToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="orange" icon={Search} title="Search">
+        <GrepToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "Glob") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-teal-500/10 flex items-center justify-center">
-          <FolderSearch className="w-4 h-4 text-teal-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-teal-500 mb-1">Glob</p>
-          <GlobToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="teal" icon={FolderSearch} title="Glob">
+        <GlobToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "Task" || tool === "Agent") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-purple-500/10 flex items-center justify-center">
-          <Workflow className="w-4 h-4 text-purple-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-purple-500 mb-1">Agent</p>
-          <SubagentToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="purple" icon={Workflow} title="Agent">
+        <SubagentToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "TaskOutput") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-purple-500/10 flex items-center justify-center">
-          <Workflow className="w-4 h-4 text-purple-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-purple-500 mb-1">Task Output</p>
-          <TaskOutputToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="purple" icon={Workflow} title="Task Output">
+        <TaskOutputToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "WebFetch") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-blue-500/10 flex items-center justify-center">
-          <Globe className="w-4 h-4 text-blue-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-blue-500 mb-1">Fetch Web Page</p>
-          <WebFetchToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="blue" icon={Globe} title="Fetch Web Page">
+        <WebFetchToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "WebSearch") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-indigo-500/10 flex items-center justify-center">
-          <Globe2 className="w-4 h-4 text-indigo-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-indigo-500 mb-1">Web Search</p>
-          <WebSearchToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="indigo" icon={Globe2} title="Web Search">
+        <WebSearchToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "Skill") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-pink-500/10 flex items-center justify-center">
-          <Sparkles className="w-4 h-4 text-pink-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-pink-500 mb-1">Skill</p>
-          <SkillToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="pink" icon={Sparkles} title="Skill">
+        <SkillToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
   if (tool === "FileChange") {
     return (
-      <div className="flex gap-3 py-3">
-        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-sky-500/10 flex items-center justify-center">
-          <FilePenLine className="w-4 h-4 text-sky-500" />
-        </div>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-sm font-medium text-sky-500 mb-1">File Changes</p>
-          <FileChangeToolUseUI input={input} />
-        </div>
-      </div>
+      <MessageRow color="sky" icon={FilePenLine} title="File Changes">
+        <FileChangeToolUseUI input={input} />
+      </MessageRow>
     );
   }
 
@@ -717,25 +597,19 @@ function ToolUseMessage({ tool, input, messageIndex, toolUseId }: { tool: string
   const inputStr = typeof input === "string" ? input : JSON.stringify(input, null, 2);
 
   return (
-    <div className="flex gap-3 py-3">
-      <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-amber-500/10 flex items-center justify-center">
-        <Wrench className="w-4 h-4 text-amber-500" />
-      </div>
-      <div className="flex-1 min-w-0 overflow-hidden">
-        <p className="text-sm font-medium text-amber-500 mb-1 break-words">Tool: {tool}</p>
-        <details open>
-          <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
-            Input
-          </summary>
-          <pre
-            className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all"
-            style={{ fontSize: "var(--conv-font-size, 12px)" }}
-          >
-            {inputStr.length > 500 ? inputStr.substring(0, 500) + "..." : inputStr}
-          </pre>
-        </details>
-      </div>
-    </div>
+    <MessageRow color="amber" icon={Wrench} title={`Tool: ${tool}`} titleClassName="break-words">
+      <details open>
+        <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+          Input
+        </summary>
+        <pre
+          className="mt-1 bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all"
+          style={{ fontSize: "var(--conv-font-size, 12px)" }}
+        >
+          {inputStr.length > 500 ? inputStr.substring(0, 500) + "..." : inputStr}
+        </pre>
+      </details>
+    </MessageRow>
   );
 }
 
@@ -764,10 +638,10 @@ function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
     return (
       <div className="flex gap-3 py-3 pl-11">
         <div className="flex-1 min-w-0 overflow-hidden">
-          <p className="text-xs text-muted-foreground mb-1">Result ({tool})</p>
+          <p className="conv-text-xs text-muted-foreground mb-1">Result ({tool})</p>
           {taskListResult || (
             <details>
-              <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+              <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
                 Output
               </summary>
               <pre
@@ -918,9 +792,9 @@ function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
   return (
     <div className="flex gap-3 py-3 pl-11">
       <div className="flex-1 min-w-0 overflow-hidden">
-        <p className="text-xs text-muted-foreground mb-1">Result{tool ? ` (${tool})` : ""}</p>
+        <p className="conv-text-xs text-muted-foreground mb-1">Result{tool ? ` (${tool})` : ""}</p>
         <details className={cn(!isLong && "open")}>
-          <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+          <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
             Output
           </summary>
           <pre
@@ -944,15 +818,15 @@ function ThinkingMessage({ content }: { content: string }) {
   return (
     <div className="flex gap-3 py-3">
       <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-blue-500/10 flex items-center justify-center">
-        <Brain className="w-3.5 h-3.5 text-blue-500" />
+        <Brain className="w-4 h-4 text-blue-500" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <details>
-          <summary className="text-xs font-medium text-blue-500 cursor-pointer hover:underline">
+          <summary className="conv-text-sm font-medium text-foreground cursor-pointer hover:underline">
             Thinking...
           </summary>
           <div
-            className={`mt-2 whitespace-pre-wrap break-words bg-blue-500/5 p-2 rounded-md overflow-hidden ${
+            className={`mt-2 whitespace-pre-wrap break-words bg-muted/50 p-2 rounded-md overflow-hidden ${
               hasContent ? "text-muted-foreground" : "text-muted-foreground/70 italic"
             }`}
             style={{ fontSize: "var(--conv-font-size, 12px)" }}
@@ -967,28 +841,22 @@ function ThinkingMessage({ content }: { content: string }) {
 
 function ErrorMessage({ message }: { message: string }) {
   return (
-    <div className="flex gap-3 py-3">
-      <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-red-500/10 flex items-center justify-center">
-        <AlertCircle className="w-3.5 h-3.5 text-red-500" />
-      </div>
-      <div className="flex-1 min-w-0 overflow-hidden">
-        <p className="text-sm font-medium text-red-500 mb-1">Error</p>
-        <p
-          className="text-red-500/80 break-words whitespace-pre-wrap"
-          style={{ fontSize: "var(--conv-font-size, 14px)" }}
-        >
-          {message}
-        </p>
-      </div>
-    </div>
+    <MessageRow color="red" icon={AlertCircle} title="Error">
+      <p
+        className="text-destructive/80 break-words whitespace-pre-wrap"
+        style={{ fontSize: "var(--conv-font-size, 14px)" }}
+      >
+        {message}
+      </p>
+    </MessageRow>
   );
 }
 
 function SystemMessage({ content }: { content: string }) {
   return (
     <div className="flex gap-3 py-2">
-      <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-gray-500/10 flex items-center justify-center">
-        <Info className="w-3.5 h-3.5 text-gray-500" />
+      <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-muted flex items-center justify-center">
+        <Info className="w-4 h-4 text-muted-foreground" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <p

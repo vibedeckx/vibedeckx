@@ -152,7 +152,7 @@ export function CrossRemoteToolUse({ tool, input }: { tool: string; input: unkno
         <Cloud className="w-4 h-4 text-violet-500" />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
-        <p className="text-sm font-medium text-violet-500 mb-1 break-words">
+        <p className="conv-text-sm font-medium text-foreground mb-1 break-words">
           {TOOL_LABELS[bare] ?? bare}
           {label && (
             <>
@@ -219,7 +219,7 @@ function unwrapMcpContent(value: unknown): string | null {
 }
 
 function PlainText({ text }: { text: string }) {
-  return <p className="text-xs text-muted-foreground break-words whitespace-pre-wrap">{text}</p>;
+  return <p className="conv-text-xs text-muted-foreground break-words whitespace-pre-wrap">{text}</p>;
 }
 
 /**

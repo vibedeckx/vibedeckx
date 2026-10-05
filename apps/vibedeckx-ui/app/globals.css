@@ -157,6 +157,21 @@
   }
 }
 
+/* Conversation text sizes, scaled off the user's conversation font size
+   (--conv-font-size) by Tailwind's own text-sm / text-xs ratios, so labels,
+   paths and captions grow with the body instead of staying fixed. Not named
+   text-* on purpose: tailwind-merge would read that as a text colour and drop
+   the real colour class next to it. */
+@utility conv-text-sm {
+  font-size: calc(var(--conv-font-size, 14px) * 0.875);
+  line-height: 1.43;
+}
+
+@utility conv-text-xs {
+  font-size: calc(var(--conv-font-size, 14px) * 0.75);
+  line-height: 1.33;
+}
+
 /* One-shot highlight on a just-created task row (Tasks page). */
 @keyframes task-row-flash {
   0%, 35% { background-color: color-mix(in oklab, var(--primary) 14%, transparent); }

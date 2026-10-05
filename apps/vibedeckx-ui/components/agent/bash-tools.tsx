@@ -46,7 +46,7 @@ export function BashToolUseUI({ input }: { input: unknown }) {
   return (
     <div className="space-y-1">
       {description && (
-        <p className="text-xs text-muted-foreground">{description}</p>
+        <p className="conv-text-xs text-muted-foreground">{description}</p>
       )}
       <div className="flex items-start gap-2">
         <pre
@@ -68,7 +68,7 @@ export function BashToolUseUI({ input }: { input: unknown }) {
 export function BashToolResultUI({ output }: { output: string }) {
   if (!output || output.trim() === "") {
     return (
-      <p className="text-xs text-muted-foreground italic">No output</p>
+      <p className="conv-text-xs text-muted-foreground italic">No output</p>
     );
   }
 
@@ -76,7 +76,7 @@ export function BashToolResultUI({ output }: { output: string }) {
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Output ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
       <pre

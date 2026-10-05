@@ -72,7 +72,7 @@ export function SubagentToolUseUI({ input }: { input: unknown }) {
   return (
     <div className="space-y-1">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-sm">{description}</span>
+        <span className="conv-text-sm">{description}</span>
         {badges.map((b, i) => (
           <Badge key={i} variant="outline" className="text-xs shrink-0">
             {b.label}
@@ -81,7 +81,7 @@ export function SubagentToolUseUI({ input }: { input: unknown }) {
       </div>
       {prompt && (
         <details>
-          <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+          <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
             Prompt ({prompt.length > 1000 ? `${Math.round(prompt.length / 1000)}k chars` : `${prompt.length} chars`})
           </summary>
           <pre
@@ -99,7 +99,7 @@ export function SubagentToolUseUI({ input }: { input: unknown }) {
 export function SubagentToolResultUI({ output }: { output: string }) {
   if (!output || output.trim() === "") {
     return (
-      <p className="text-xs text-muted-foreground italic">No output</p>
+      <p className="conv-text-xs text-muted-foreground italic">No output</p>
     );
   }
 
@@ -107,7 +107,7 @@ export function SubagentToolResultUI({ output }: { output: string }) {
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Agent result ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
       <pre

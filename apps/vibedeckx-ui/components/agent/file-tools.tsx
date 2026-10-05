@@ -53,9 +53,9 @@ export function ReadToolUseUI({ input }: { input: unknown }) {
   return (
     <div className="flex items-center gap-2 flex-wrap">
       <div className="min-w-0">
-        <span className="text-sm font-medium break-all">{basename}</span>
+        <span className="conv-text-sm font-medium break-all">{basename}</span>
         {directory && (
-          <p className="text-xs text-muted-foreground truncate" title={file_path}>
+          <p className="conv-text-xs text-muted-foreground truncate" title={file_path}>
             {directory}
           </p>
         )}
@@ -118,7 +118,7 @@ export function ReadToolResultUI({ output }: { output: string }) {
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         File contents ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
       <pre
@@ -172,15 +172,15 @@ export function WriteToolUseUI({ input }: { input: unknown }) {
   return (
     <div className="space-y-1">
       <div className="min-w-0">
-        <span className="text-sm font-medium break-all">{basename}</span>
+        <span className="conv-text-sm font-medium break-all">{basename}</span>
         {directory && (
-          <p className="text-xs text-muted-foreground truncate" title={file_path}>
+          <p className="conv-text-xs text-muted-foreground truncate" title={file_path}>
             {directory}
           </p>
         )}
       </div>
       <details>
-        <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+        <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
           Content ({lineCount} {lineCount === 1 ? "line" : "lines"})
         </summary>
         <pre
@@ -197,13 +197,13 @@ export function WriteToolUseUI({ input }: { input: unknown }) {
 export function WriteToolResultUI({ output }: { output: string }) {
   if (!output || output.trim() === "") {
     return (
-      <p className="text-xs text-muted-foreground italic">File written</p>
+      <p className="conv-text-xs text-muted-foreground italic">File written</p>
     );
   }
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Result
       </summary>
       <pre

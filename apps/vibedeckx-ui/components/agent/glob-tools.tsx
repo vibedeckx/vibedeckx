@@ -56,7 +56,7 @@ export function GlobToolUseUI({ input }: { input: unknown }) {
 export function GlobToolResultUI({ output }: { output: string }) {
   if (!output || output.trim() === "") {
     return (
-      <p className="text-xs text-muted-foreground italic">No matches</p>
+      <p className="conv-text-xs text-muted-foreground italic">No matches</p>
     );
   }
 
@@ -65,7 +65,7 @@ export function GlobToolResultUI({ output }: { output: string }) {
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         {fileCount} {fileCount === 1 ? "file" : "files"} found
       </summary>
       <pre

@@ -30,7 +30,7 @@ export function FileChangeToolUseUI({ input }: { input: unknown }) {
   const changes: FileChange[] = (parsed as { changes?: FileChange[] })?.changes ?? [];
 
   if (changes.length === 0) {
-    return <p className="text-xs text-muted-foreground">No file changes</p>;
+    return <p className="conv-text-xs text-muted-foreground">No file changes</p>;
   }
 
   return (
@@ -39,14 +39,14 @@ export function FileChangeToolUseUI({ input }: { input: unknown }) {
         <div key={i}>
           <div className="flex items-center gap-2">
             <FileText className="h-3 w-3 text-muted-foreground flex-shrink-0" />
-            <code className="text-xs break-all">{change.path}</code>
+            <code className="conv-text-xs break-all">{change.path}</code>
             <Badge variant="secondary" className={`text-[10px] ${kindBadgeColor(change.kind)}`}>
               {kindLabel(change.kind)}
             </Badge>
           </div>
           {change.diff && (
             <details className="mt-1">
-              <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+              <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
                 View diff
               </summary>
               <pre
@@ -76,7 +76,7 @@ export function FileChangeToolResultUI({ output }: { output: string }) {
   else if (lower.includes("declined") || lower.includes("denied")) color = "text-amber-600 dark:text-amber-400";
 
   return (
-    <p className={`text-xs ${color}`}>{output}</p>
+    <p className={`conv-text-xs ${color}`}>{output}</p>
   );
 }
 

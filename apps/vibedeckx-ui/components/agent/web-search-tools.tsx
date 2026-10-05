@@ -35,12 +35,12 @@ export function WebSearchToolUseUI({ input }: { input: unknown }) {
 
   return (
     <div className="space-y-1.5">
-      <p className="text-xs font-mono bg-muted/50 px-2 py-1 rounded break-words">
+      <p className="conv-text-xs font-mono bg-muted/50 px-2 py-1 rounded break-words">
         {parsed.query}
       </p>
       {parsed.allowed_domains && parsed.allowed_domains.length > 0 && (
         <div className="flex items-center gap-1 flex-wrap">
-          <span className="text-xs text-muted-foreground">only:</span>
+          <span className="conv-text-xs text-muted-foreground">only:</span>
           {parsed.allowed_domains.map((d) => (
             <Badge key={d} variant="secondary" className="text-[10px] px-1.5 py-0">
               {d}
@@ -50,7 +50,7 @@ export function WebSearchToolUseUI({ input }: { input: unknown }) {
       )}
       {parsed.blocked_domains && parsed.blocked_domains.length > 0 && (
         <div className="flex items-center gap-1 flex-wrap">
-          <span className="text-xs text-muted-foreground">exclude:</span>
+          <span className="conv-text-xs text-muted-foreground">exclude:</span>
           {parsed.blocked_domains.map((d) => (
             <Badge key={d} variant="outline" className="text-[10px] px-1.5 py-0">
               {d}
@@ -65,7 +65,7 @@ export function WebSearchToolUseUI({ input }: { input: unknown }) {
 export function WebSearchToolResultUI({ output }: { output: string }) {
   if (!output || output.trim() === "") {
     return (
-      <p className="text-xs text-muted-foreground italic">No search results</p>
+      <p className="conv-text-xs text-muted-foreground italic">No search results</p>
     );
   }
 
@@ -73,7 +73,7 @@ export function WebSearchToolResultUI({ output }: { output: string }) {
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Results ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
       <pre

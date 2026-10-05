@@ -56,9 +56,9 @@ export function EditToolUseUI({ input }: { input: unknown }) {
     <div className="space-y-1">
       <div className="flex items-center gap-2 flex-wrap">
         <div className="min-w-0">
-          <span className="text-sm font-medium break-all">{basename}</span>
+          <span className="conv-text-sm font-medium break-all">{basename}</span>
           {directory && (
-            <p className="text-xs text-muted-foreground truncate" title={file_path}>
+            <p className="conv-text-xs text-muted-foreground truncate" title={file_path}>
               {directory}
             </p>
           )}
@@ -75,10 +75,10 @@ export function EditToolUseUI({ input }: { input: unknown }) {
         )}
       </div>
       <details>
-        <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+        <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
           Diff
         </summary>
-        <div className="mt-1 text-xs rounded overflow-x-auto max-h-48 overflow-y-auto scrollbar-none max-w-full">
+        <div className="mt-1 conv-text-xs rounded overflow-x-auto max-h-48 overflow-y-auto scrollbar-none max-w-full">
           <pre
             className="bg-red-500/10 p-1.5 rounded-t whitespace-pre-wrap break-all"
             style={{ fontSize: "var(--conv-font-size, 12px)" }}
@@ -100,14 +100,14 @@ export function EditToolUseUI({ input }: { input: unknown }) {
 export function EditToolResultUI({ output }: { output: string }) {
   if (!output || output.trim() === "") {
     return (
-      <p className="text-xs text-muted-foreground italic">No output</p>
+      <p className="conv-text-xs text-muted-foreground italic">No output</p>
     );
   }
 
   // Edit results are typically short success messages
   if (output.length <= 200) {
     return (
-      <p className="text-xs text-muted-foreground">{output}</p>
+      <p className="conv-text-xs text-muted-foreground">{output}</p>
     );
   }
 
@@ -115,7 +115,7 @@ export function EditToolResultUI({ output }: { output: string }) {
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Result ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
       <pre

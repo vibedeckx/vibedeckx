@@ -85,7 +85,7 @@ export function GrepToolUseUI({ input }: { input: unknown }) {
 export function GrepToolResultUI({ output }: { output: string }) {
   if (!output || output.trim() === "") {
     return (
-      <p className="text-xs text-muted-foreground italic">No matches</p>
+      <p className="conv-text-xs text-muted-foreground italic">No matches</p>
     );
   }
 
@@ -93,7 +93,7 @@ export function GrepToolResultUI({ output }: { output: string }) {
 
   return (
     <details>
-      <summary className="text-xs text-muted-foreground cursor-pointer hover:text-foreground">
+      <summary className="conv-text-xs text-muted-foreground cursor-pointer hover:text-foreground">
         Results ({lineCount} {lineCount === 1 ? "line" : "lines"})
       </summary>
       <pre
