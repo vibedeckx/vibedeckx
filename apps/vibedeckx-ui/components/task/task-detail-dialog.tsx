@@ -9,7 +9,9 @@ import {
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { SourceSessionLink } from "@/components/agent/source-session-link";
+import { Streamdown } from "streamdown";
 import { statusConfig, priorityConfig } from "./task-utils";
+import { TASK_MARKDOWN_CLASS } from "./task-properties";
 
 interface TaskDetailDialogProps {
   task: Task | null;
@@ -38,7 +40,9 @@ export function TaskDetailDialog({ task, open, onOpenChange, onOpenSourceSession
             </Badge>
           </div>
           {task.description && (
-            <p className="text-sm text-foreground whitespace-pre-wrap">{task.description}</p>
+            <Streamdown mode="static" className={`text-sm text-foreground ${TASK_MARKDOWN_CLASS}`}>
+              {task.description}
+            </Streamdown>
           )}
           {task.source_session && (
             <div className="flex min-w-0 items-center gap-2 text-xs">

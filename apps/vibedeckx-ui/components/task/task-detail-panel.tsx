@@ -1,11 +1,14 @@
 "use client";
 
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
+import type { Ref } from "react";
+import { Streamdown } from "streamdown";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Archive, ArchiveRestore, Trash2, X } from "lucide-react";
 import { SourceSessionLink } from "@/components/agent/source-session-link";
-import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
+import { caretClientY, scrollParent, sourceOffsetAt } from "./markdown-caret";
+import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS, TASK_MARKDOWN_CLASS } from "./task-properties";
 
 interface TaskDetailPanelProps {
   task: Task;
@@ -101,7 +104,7 @@ export function TaskDetailPanel({
         </TaskProperties>
 
         <div className="mt-5 border-t pt-4">
-          <DraftField
+          <MarkdownField
             value={task.description ?? ""}
             onCommit={(value) => {
               const next = value.trim() ? value : null;
@@ -118,20 +121,113 @@ export function TaskDetailPanel({
 }
 
 /**
+ * Markdown body shown rendered; a click (outside links, buttons and a text
+ * selection) or Enter swaps in the raw-source DraftField, and blur (Esc blurs
+ * via focus-region) commits and swaps back. An empty value goes straight to
+ * the textarea so the placeholder stays clickable.
+ *
+ * Entering must not move the page: a click puts the caret at the matching
+ * source offset and scrolls so that line sits where the pointer was (Enter
+ * keeps the scroll position). Leaving just swaps back.
+ */
+function MarkdownField({
+  value,
+  onCommit,
+  className,
+  ...props
+}: {
+  value: string;
+  onCommit: (value: string) => void;
+  className?: string;
+  placeholder?: string;
+  "aria-label": string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const swapRef = useRef<{ caret: number | null; clientY: number | null; scroller: HTMLElement | null; scrollTop: number } | null>(null);
+
+  const startEditing = (el: HTMLElement, at?: { x: number; y: number }) => {
+    const scroller = scrollParent(el);
+    swapRef.current = {
+      caret: at ? sourceOffsetAt(el, at.x, at.y, value) : null,
+      clientY: at?.y ?? null,
+      scroller,
+      scrollTop: scroller?.scrollTop ?? 0,
+    };
+    setEditing(true);
+  };
+
+  // Layout effect: settle focus, caret and scroll before the swap paints.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    const swap = swapRef.current;
+    swapRef.current = null;
+    if (!editing || !el) return;
+    const caret = swap?.caret ?? el.value.length;
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(caret, caret);
+    if (!swap?.scroller) return;
+    swap.scroller.scrollTop = swap.scrollTop;
+    if (swap.caret !== null && swap.clientY !== null) swap.scroller.scrollTop += caretClientY(el, caret) - swap.clientY;
+  }, [editing]);
+
+  if (!editing && value.trim()) {
+    return (
+      <div
+        tabIndex={0}
+        data-markdown-field={props["aria-label"]}
+        title="Click to edit"
+        onClick={(e) => {
+          if ((e.target as Element).closest("a, button")) return;
+          if (!window.getSelection()?.isCollapsed) return;
+          startEditing(e.currentTarget, { x: e.clientX, y: e.clientY });
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" || e.target !== e.currentTarget) return;
+          e.preventDefault();
+          startEditing(e.currentTarget);
+        }}
+        className={`-mx-1.5 cursor-text rounded-md px-1.5 py-1 outline-none focus-visible:bg-muted/40 ${className ?? ""}`}
+      >
+        <Streamdown mode="static" className={TASK_MARKDOWN_CLASS}>
+          {value}
+        </Streamdown>
+      </div>
+    );
+  }
+
+  return (
+    <DraftField
+      ref={textareaRef}
+      value={value}
+      onCommit={onCommit}
+      onDone={() => setEditing(false)}
+      className={className}
+      {...props}
+    />
+  );
+}
+
+/**
  * Borderless auto-growing textarea that edits a draft and saves on blur. The
  * draft exists only while focused: unfocused it shows `value`, so outside
  * changes land right away but never clobber what is being typed. Saves are
  * optimistic upstream, so dropping the draft on blur doesn't flash the old text.
  */
 function DraftField({
+  ref,
   value,
   onCommit,
+  onDone,
   singleLine,
   className,
   ...props
 }: {
+  ref?: Ref<HTMLTextAreaElement>;
   value: string;
   onCommit: (value: string) => void;
+  /** Called after the blur that ends an edit. */
+  onDone?: () => void;
   singleLine?: boolean;
   className?: string;
   placeholder?: string;
@@ -141,6 +237,7 @@ function DraftField({
 
   return (
     <textarea
+      ref={ref}
       rows={1}
       value={draft ?? value}
       onFocus={() => setDraft(value)}
@@ -148,6 +245,7 @@ function DraftField({
       onBlur={() => {
         if (draft !== null) onCommit(draft);
         setDraft(null);
+        onDone?.();
       }}
       onKeyDown={(e) => {
         // An IME Enter confirms a candidate, not the field (229: legacy signal).

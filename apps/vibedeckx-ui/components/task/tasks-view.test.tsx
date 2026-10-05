@@ -131,9 +131,13 @@ describe("TasksView detail panel", () => {
 
   it("saves an edited description on blur, clearing to null when emptied", () => {
     act(() => row("t1").click());
+    const rendered = panel()!.querySelector<HTMLElement>('[data-markdown-field="Description"]')!;
+    expect(rendered.textContent).toContain("Long first description");
+    expect(panel()!.querySelector('textarea[aria-label="Description"]')).toBeNull();
+    act(() => rendered.click());
     const description = panel()!.querySelector<HTMLTextAreaElement>('textarea[aria-label="Description"]')!;
     expect(description.value).toBe("Long first description");
-    act(() => description.focus());
+    expect(document.activeElement).toBe(description);
     setTextareaValue(description, "   ");
     act(() => description.blur());
     expect(onUpdateTask).toHaveBeenCalledWith("t1", { description: null });

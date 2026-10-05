@@ -27,6 +27,14 @@ export const PANEL_FIELD_CLASS =
 /** Description body; its size follows the Tasks font size setting via `--task-body-font-size`. */
 export const PANEL_BODY_CLASS = "min-h-32 text-[length:var(--task-body-font-size,14px)] leading-relaxed";
 
+/**
+ * Streamdown wrapper for task descriptions. globals.css has no `@source` for
+ * streamdown, so its own `list-inside list-decimal` classes never get
+ * generated; restate them here or ordered lists lose their numbers.
+ */
+export const TASK_MARKDOWN_CLASS =
+  "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_ol]:list-inside [&_ol]:list-decimal [&_ul]:list-inside";
+
 interface TaskPropertiesProps {
   status: TaskStatus;
   priority: TaskPriority;
