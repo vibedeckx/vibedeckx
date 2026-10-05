@@ -22,7 +22,7 @@ import {
 
 /** Borderless auto-growing textarea look shared by the side panels' text fields. */
 export const PANEL_FIELD_CLASS =
-  "field-sizing-content w-full resize-none rounded-md bg-transparent px-1.5 py-1 -mx-1.5 outline-none placeholder:text-muted-foreground/60 hover:bg-muted/40 focus:bg-muted/40";
+  "field-sizing-content w-full resize-none rounded-md bg-transparent px-1.5 py-1 -mx-1.5 outline-none placeholder:text-muted-foreground/60";
 
 /** Description body; its size follows the Tasks font size setting via `--task-body-font-size`. */
 export const PANEL_BODY_CLASS = "min-h-32 text-[length:var(--task-body-font-size,14px)] leading-relaxed";
