@@ -14,6 +14,7 @@ import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 type StatusFilter = "all" | TaskStatus | "archived";
 
 type Panel = { kind: "task"; taskId: string } | { kind: "draft" };
+type ShownPanel = { kind: "task"; task: Task } | { kind: "draft"; draft: TaskDraft };
 
 const CREATE_MORE_KEY = "vibedeckx:tasks:create-more";
 
@@ -25,6 +26,11 @@ const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "cancelled", label: "Cancelled" },
   { value: "archived", label: "Archived" },
 ];
+
+const motionAllowed = () =>
+  typeof window !== "undefined" &&
+  typeof window.matchMedia === "function" &&
+  !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 interface TasksViewProps {
   /** The view is kept mounted while hidden; only the visible one may own keys. */
@@ -162,6 +168,26 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
     [pending, projectId, statusFilter],
   );
 
+  // What the side panel shows. After it closes, the last content stays
+  // mounted (as a snapshot) while the panel animates shut.
+  const openPanel = useMemo<ShownPanel | null>(
+    () => (draftOpen ? { kind: "draft", draft } : selectedTask ? { kind: "task", task: selectedTask } : null),
+    [draftOpen, draft, selectedTask],
+  );
+  const [exitingPanel, setExitingPanel] = useState<ShownPanel | null>(null);
+  if (openPanel && openPanel !== exitingPanel) setExitingPanel(openPanel);
+  // Nothing animates without motion (or matchMedia), so drop the snapshot at once.
+  else if (!openPanel && exitingPanel && !motionAllowed()) setExitingPanel(null);
+  const closing = !openPanel && exitingPanel !== null;
+  const shownPanel = openPanel ?? exitingPanel;
+
+  // Backstop for an animationend that never comes.
+  useEffect(() => {
+    if (!closing) return;
+    const timer = setTimeout(() => setExitingPanel(null), 400);
+    return () => clearTimeout(timer);
+  }, [closing]);
+
   const assignedBranches = useMemo(
     () => new Set(tasks.filter((t) => t.assigned_branch !== null).map((t) => t.assigned_branch)),
     [tasks]
@@ -238,43 +264,52 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
               )}
             </div>
           </ResizablePanel>
-          {draftOpen && (
+          {shownPanel && (
             <>
               <ResizableHandle />
-              <ResizablePanel id="task-detail" order={2} defaultSize={40} minSize={25}>
-                <TaskDraftPanel
-                  draft={draft}
-                  onChange={updateDraft}
-                  onCreate={handleCreate}
-                  onDiscard={handleDiscard}
-                  onClose={() => selectTask(null)}
-                  createMore={createMore}
-                  onCreateMoreChange={handleCreateMoreChange}
-                  error={createError}
-                  focusNonce={focusNonce}
-                  worktrees={worktrees}
-                  assignedBranches={assignedBranches}
-                />
-              </ResizablePanel>
-            </>
-          )}
-          {selectedTask && (
-            <>
-              <ResizableHandle />
-              <ResizablePanel id="task-detail" order={2} defaultSize={40} minSize={25}>
-                <TaskDetailPanel
-                  key={selectedTask.id}
-                  task={selectedTask}
-                  onUpdate={onUpdateTask}
-                  onAssign={handleAssign}
-                  onArchive={onArchiveTask}
-                  onUnarchive={onUnarchiveTask}
-                  onDelete={onDeleteTask}
-                  onClose={() => selectTask(null)}
-                  worktrees={worktrees}
-                  assignedBranches={assignedBranches}
-                  onOpenSourceSession={onOpenSourceSession}
-                />
+              <ResizablePanel
+                id="task-detail"
+                order={2}
+                defaultSize={40}
+                minSize={25}
+                className={closing ? "motion-safe:animate-side-panel-out" : "motion-safe:animate-side-panel-in"}
+                onAnimationEnd={(e) => {
+                  if (e.target === e.currentTarget && closing) setExitingPanel(null);
+                }}
+              >
+                {/* Inert while closing: the stale copy can't be edited, and a
+                    focused field blurs (and saves) right away. */}
+                <div className="h-full" inert={closing}>
+                  {shownPanel.kind === "draft" ? (
+                    <TaskDraftPanel
+                      draft={shownPanel.draft}
+                      onChange={updateDraft}
+                      onCreate={handleCreate}
+                      onDiscard={handleDiscard}
+                      onClose={() => selectTask(null)}
+                      createMore={createMore}
+                      onCreateMoreChange={handleCreateMoreChange}
+                      error={createError}
+                      focusNonce={focusNonce}
+                      worktrees={worktrees}
+                      assignedBranches={assignedBranches}
+                    />
+                  ) : (
+                    <TaskDetailPanel
+                      key={shownPanel.task.id}
+                      task={shownPanel.task}
+                      onUpdate={onUpdateTask}
+                      onAssign={handleAssign}
+                      onArchive={onArchiveTask}
+                      onUnarchive={onUnarchiveTask}
+                      onDelete={onDeleteTask}
+                      onClose={() => selectTask(null)}
+                      worktrees={worktrees}
+                      assignedBranches={assignedBranches}
+                      onOpenSourceSession={onOpenSourceSession}
+                    />
+                  )}
+                </div>
               </ResizablePanel>
             </>
           )}
