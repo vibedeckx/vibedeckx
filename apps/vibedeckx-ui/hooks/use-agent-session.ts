@@ -621,13 +621,20 @@ function updateCachedSessionMetadata(
   cacheSessionSnapshot(projectId, branch, requestedSessionId, session, cached.history);
 }
 
+// Only a 404 means the session is gone. Anything else (a 5xx, or a Cloudflare
+// 52x when the origin handshake fails mid-restart) is transient and must not
+// read as a missing session.
+function sessionLoadError(sessionId: string, status: number): Error {
+  return new Error(status === 404
+    ? `Session ${sessionId} not found`
+    : `Failed to load session ${sessionId} (HTTP ${status})`);
+}
+
 async function getHistoryWindow(sessionId: string, before?: number | null): Promise<SessionHistoryWindow> {
   const params = new URLSearchParams({ turns: String(INITIAL_HISTORY_TURNS) });
   if (before !== undefined && before !== null) params.set("before", String(before));
   const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/history-window?${params}`);
-  if (!response.ok) {
-    throw new Error(`Session ${sessionId} not found`);
-  }
+  if (!response.ok) throw sessionLoadError(sessionId, response.status);
   const data = await response.json() as Partial<SessionHistoryWindow> & {
     messages?: AgentMessage[];
     session?: AgentSession;
@@ -662,7 +669,7 @@ function getLatestHistoryWindow(sessionId: string): Promise<SessionHistoryWindow
 
 async function getHistoryHead(sessionId: string): Promise<SessionHistoryHead> {
   const response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/history-head`);
-  if (!response.ok) throw new Error(`Session ${sessionId} not found`);
+  if (!response.ok) throw sessionLoadError(sessionId, response.status);
   const data = await response.json() as Partial<SessionHistoryHead> & {
     messages?: AgentMessage[];
     session?: AgentSession;
@@ -1603,7 +1610,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       let initialMessages: AgentMessage[];
       let historyWindow: SessionHistoryWindow | undefined;
       if (explicitSessionId) {
-        const head = cached ? await getHistoryHead(explicitSessionId) : null;
+        // The head only validates the cached snapshot; if it fails, fall
+        // through to a full window fetch instead of failing the open.
+        const head = cached ? await getHistoryHead(explicitSessionId).catch(() => null) : null;
         const cacheIsCurrent = cached && head
           && head.status === "stopped"
           && head.historyEpoch === cached.history.historyEpoch

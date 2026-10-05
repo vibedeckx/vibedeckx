@@ -162,6 +162,34 @@ describe("agent session window cache", () => {
     expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain("cache-session-a/history-head");
   });
 
+  // The head only validates a cached snapshot. A transient failure there (a
+  // Cloudflare 525 while the hub restarts) must fall through to a full window
+  // fetch, not fail the open with a bogus "Session … not found".
+  it("falls back to a full window fetch when the head revalidation fails", async () => {
+    await render("cache-session-a");
+    await render("cache-session-b");
+
+    fetchMock.mockImplementation(async (url) => {
+      const id = String(url).match(/agent-sessions\/(cache-session-[ab])/)?.[1] ?? "unknown";
+      if (String(url).endsWith("/history-head")) {
+        return { ok: false, status: 525, json: async () => ({}) } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          session: { id, projectId: "cache-project", branch: "main", status: "stopped" },
+          messages: [{ type: "assistant", content: `fresh-${id}`, timestamp: 1 }],
+        }),
+      } as Response;
+    });
+    await render("cache-session-a");
+
+    expect(latest!.error).toBeNull();
+    expect(latest!.session?.id).toBe("cache-session-a");
+    expect(latest!.messages).toMatchObject([{ content: "fresh-cache-session-a" }]);
+    expect(String(fetchMock.mock.calls.at(-1)?.[0])).toContain("cache-session-a/history-window");
+  });
+
   it("uses the warm cache on ordinary workspace navigation after a head check", async () => {
     fetchMock.mockImplementation(async (url, init) => {
       if (String(url).endsWith("/history-head")) {
