@@ -14,7 +14,7 @@ vi.mock("@/components/ui/resizable", () => {
   };
 });
 
-import { TasksView } from "./tasks-view";
+import { TasksView, type TasksOpenRequest } from "./tasks-view";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -40,6 +40,8 @@ let onUpdateTask: ReturnType<typeof vi.fn<(id: string, opts: object) => Promise<
 let onCreateTask: ReturnType<typeof vi.fn<(opts: object) => Promise<Task | null>>>;
 let currentTasks: Task[];
 let active: boolean;
+let openRequest: TasksOpenRequest | null;
+let onSelectedTaskChange: ReturnType<typeof vi.fn<(id: string | null) => void>>;
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
@@ -49,6 +51,8 @@ beforeEach(() => {
   onUpdateTask = vi.fn(async () => null);
   onCreateTask = vi.fn(async () => null);
   currentTasks = tasks;
+  openRequest = null;
+  onSelectedTaskChange = vi.fn();
   window.localStorage.clear();
   render(true);
 });
@@ -68,6 +72,8 @@ function render(nextActive = active) {
         onDeleteTask={vi.fn(async () => {})}
         onArchiveTask={vi.fn(async () => {})}
         onUnarchiveTask={vi.fn(async () => {})}
+        openRequest={openRequest}
+        onSelectedTaskChange={onSelectedTaskChange}
       />,
     );
   });
@@ -267,5 +273,41 @@ describe("TasksView new-task draft", () => {
     openDraft();
     expect(document.activeElement).toBe(field("Title"));
     expect(field("Description").value).toBe("Keep me");
+  });
+});
+
+describe("TasksView open requests from the sidebar", () => {
+  const chip = (label: string) =>
+    Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent?.trim().startsWith(label))!;
+
+  it("opens the requested task, widening a filter that hides it, and reports the selection", () => {
+    act(() => chip("Done").click());
+    expect(container.querySelector('[data-task-id="t1"]')).toBeNull();
+
+    openRequest = { kind: "task", taskId: "t1", status: "todo" };
+    render();
+    expect(panelTitle()).toBe("First");
+    expect(row("t1").dataset.state).toBe("selected");
+    expect(onSelectedTaskChange).toHaveBeenLastCalledWith("t1");
+
+    press("Escape");
+    expect(onSelectedTaskChange).toHaveBeenLastCalledWith(null);
+  });
+
+  it("re-opens on a new request object for the same task", () => {
+    openRequest = { kind: "task", taskId: "t2", status: "todo" };
+    render();
+    press("Escape");
+    expect(panel()).toBeNull();
+    openRequest = { kind: "task", taskId: "t2", status: "todo" };
+    render();
+    expect(panelTitle()).toBe("Second");
+  });
+
+  it("opens the draft panel", () => {
+    openRequest = { kind: "draft" };
+    render();
+    expect(panel()?.querySelector('textarea[aria-label="Description"]')).not.toBeNull();
+    expect(container.textContent).toContain("New task");
   });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Anchor, AlertTriangle, Columns3, ListTodo, FolderOpen, Plus, Globe, Settings, WifiOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
@@ -13,7 +13,7 @@ import { useLocateScope, useLocateEngagement } from "@/components/locate/locate-
 import { LocateMatchText } from "@/components/locate/locate-highlight";
 import { useFocusRegion } from "@/components/locate/focus-region";
 
-import type { Worktree, Project, Schedule } from "@/lib/api";
+import type { Worktree, Project, Schedule, Task } from "@/lib/api";
 import type { WorkspaceStatus } from "@/app/page";
 import type { ResidentSidebarSession } from "@/hooks/use-resident-sessions";
 import { effectiveTarget, type BranchMergeInfo } from "@/hooks/use-merge-status";
@@ -68,6 +68,12 @@ interface AppSidebarProps {
   selectedScheduleId?: string | null;
   onScheduleSelect?: (id: string) => void;
   onCreateScheduleOpen?: () => void;
+  tasks?: Task[];
+  /** Task open in the Tasks view's side panel. */
+  selectedTaskId?: string | null;
+  onTasksOpen?: () => void;
+  onTaskSelect?: (task: Task) => void;
+  onCreateTaskOpen?: () => void;
 }
 
 function StatusDot({ status }: { status?: WorkspaceStatus }) {
@@ -255,9 +261,23 @@ export function AppSidebar({
   selectedScheduleId,
   onScheduleSelect,
   onCreateScheduleOpen,
+  tasks,
+  selectedTaskId,
+  onTasksOpen,
+  onTaskSelect,
+  onCreateTaskOpen,
 }: AppSidebarProps) {
   const selectedProjectRef = useRef<HTMLButtonElement | null>(null);
   const selectedScheduleRef = useRef<HTMLButtonElement | null>(null);
+
+  // Only in-progress tasks get rows; the backlog lives in the Tasks view.
+  const { inProgressTasks, openTaskCount } = useMemo(() => {
+    const active = (tasks ?? []).filter((t) => t.archived_at === null);
+    return {
+      inProgressTasks: active.filter((t) => t.status === "in_progress"),
+      openTaskCount: active.filter((t) => t.status === "todo" || t.status === "in_progress").length,
+    };
+  }, [tasks]);
 
   // Type-to-locate over the workspace list, enabled only while the default
   // region holds the keyboard. When the right panel is focused, typing
@@ -367,22 +387,77 @@ export function AppSidebar({
         )}
       </SidebarSection>
 
-      {/* Navigation Section */}
+      {/* Tasks Section — in-progress tasks, then the way into the full list */}
       <SidebarSection>
-        <SectionLabel>Navigation</SectionLabel>
-        <div className="flex flex-col gap-0.5 mt-0.5">
-          <NavItem
-            icon={<ListTodo className="h-3.5 w-3.5" />}
-            label="Tasks"
-            active={activeView === "tasks" && hasProject}
-            disabled={!hasProject}
-            onClick={() => {
-              if (!hasProject) return;
-              onBranchChange?.(null);
-              onViewChange("tasks");
-            }}
-          />
-        </div>
+        <SectionLabel
+          action={
+            hasProject ? (
+              <button
+                onClick={() => {
+                  onBranchChange?.(null);
+                  onCreateTaskOpen?.();
+                }}
+                className="p-0.5 rounded hover:bg-muted hover:text-foreground transition-colors text-muted-foreground"
+                title="Create task"
+              >
+                <Plus className="h-3 w-3" />
+              </button>
+            ) : undefined
+          }
+        >
+          Tasks
+        </SectionLabel>
+        {hasProject && inProgressTasks.length > 0 && (
+          <div className="flex flex-col gap-px max-h-40 overflow-y-auto">
+            {inProgressTasks.map((t) => {
+              const isActive = activeView === "tasks" && selectedTaskId === t.id;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => {
+                    onBranchChange?.(null);
+                    onTaskSelect?.(t);
+                  }}
+                  title={t.title}
+                  className={cn(
+                    "w-full min-w-0 flex items-center gap-2 rounded-[5px] px-2 py-1 text-[11.5px] transition-colors overflow-hidden",
+                    !isActive && "text-foreground/80 hover:bg-muted",
+                    isActive && "bg-accent text-accent-foreground font-medium"
+                  )}
+                >
+                  <span className="h-[7px] w-[7px] rounded-full shrink-0 bg-blue-500" />
+                  <span className="truncate text-left flex-1">{t.title}</span>
+                  {t.assigned_branch !== null && (
+                    <span className="shrink-0 max-w-[64px] truncate font-mono text-[10px] text-muted-foreground">
+                      {t.assigned_branch === "" ? "main" : t.assigned_branch}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <button
+          onClick={() => {
+            if (!hasProject) return;
+            onBranchChange?.(null);
+            onTasksOpen?.();
+          }}
+          disabled={!hasProject}
+          className={cn(
+            "w-full flex items-center gap-2 rounded-[5px] px-2 py-1 text-[11.5px] transition-colors",
+            !hasProject && "text-muted-foreground/40 cursor-not-allowed",
+            hasProject && activeView === "tasks" && !selectedTaskId
+              ? "bg-accent text-accent-foreground font-medium"
+              : hasProject && "text-muted-foreground hover:bg-muted hover:text-foreground"
+          )}
+        >
+          <ListTodo className="h-3 w-3 shrink-0" />
+          <span className="flex-1 text-left">All tasks</span>
+          {hasProject && openTaskCount > 0 && (
+            <span className="tabular-nums text-[10.5px] text-muted-foreground">{openTaskCount}</span>
+          )}
+        </button>
       </SidebarSection>
 
       {/* Schedule Section — cron tasks for the current project */}

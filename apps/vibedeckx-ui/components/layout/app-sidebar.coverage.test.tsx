@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Project, Worktree } from "@/lib/api";
+import type { Project, Task, Worktree } from "@/lib/api";
 import type { BranchMergeInfo } from "@/hooks/use-merge-status";
 
 import { AppSidebar } from "./app-sidebar";
@@ -237,5 +237,92 @@ describe("AppSidebar workspace coverage", () => {
 
     render([{ branch: null }, partial]);
     expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+});
+
+describe("AppSidebar tasks section", () => {
+  let container: HTMLElement;
+  let root: Root;
+  const onTaskSelect = vi.fn();
+  const onTasksOpen = vi.fn();
+  const onCreateTaskOpen = vi.fn();
+
+  const task = (id: string, status: Task["status"], extra?: Partial<Task>): Task => ({
+    id,
+    project_id: "p1",
+    title: `Task ${id}`,
+    description: null,
+    status,
+    priority: "medium",
+    assigned_branch: null,
+    position: 0,
+    archived_at: null,
+    created_at: "2026-10-01T00:00:00Z",
+    updated_at: "2026-10-01T00:00:00Z",
+    ...extra,
+  });
+
+  const render = (tasks: Task[], selectedTaskId: string | null = null) =>
+    act(() => {
+      root.render(
+        <AppSidebar
+          activeView="tasks"
+          onViewChange={() => {}}
+          worktrees={[]}
+          currentProject={project}
+          tasks={tasks}
+          selectedTaskId={selectedTaskId}
+          onTaskSelect={onTaskSelect}
+          onTasksOpen={onTasksOpen}
+          onCreateTaskOpen={onCreateTaskOpen}
+        />,
+      );
+    });
+
+  const buttonByText = (text: string) =>
+    Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent?.includes(text));
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("lists only active in-progress tasks and counts open ones on All tasks", () => {
+    render([
+      task("a", "in_progress", { assigned_branch: "dev" }),
+      task("b", "todo"),
+      task("c", "done"),
+      task("d", "in_progress", { archived_at: 1 }),
+    ]);
+    expect(container.textContent).not.toContain("Navigation");
+    expect(buttonByText("Task a")?.textContent).toContain("dev");
+    expect(buttonByText("Task b")).toBeUndefined();
+    expect(buttonByText("Task c")).toBeUndefined();
+    expect(buttonByText("Task d")).toBeUndefined();
+    expect(buttonByText("All tasks")?.textContent).toBe("All tasks2");
+  });
+
+  it("routes row, All tasks and + clicks", () => {
+    const a = task("a", "in_progress");
+    render([a]);
+    act(() => buttonByText("Task a")!.click());
+    expect(onTaskSelect).toHaveBeenCalledWith(a);
+    act(() => buttonByText("All tasks")!.click());
+    expect(onTasksOpen).toHaveBeenCalled();
+    act(() => container.querySelector<HTMLButtonElement>('button[title="Create task"]')!.click());
+    expect(onCreateTaskOpen).toHaveBeenCalled();
+  });
+
+  it("highlights the selected task instead of All tasks", () => {
+    render([task("a", "in_progress")], "a");
+    expect(buttonByText("Task a")!.className).toContain("bg-accent");
+    expect(buttonByText("All tasks")!.className).not.toContain("bg-accent");
   });
 });

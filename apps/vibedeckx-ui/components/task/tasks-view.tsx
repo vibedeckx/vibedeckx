@@ -47,9 +47,15 @@ interface TasksViewProps {
   onUnarchiveTask: (id: string) => Promise<void>;
   /** Jump to the conversation a proposed task came from, at its card. */
   onOpenSourceSession?: (task: Task) => void;
+  /** Open a task or the draft from outside (the sidebar); a new object re-opens. */
+  openRequest?: TasksOpenRequest | null;
+  /** Reports the task open in the side panel, for the sidebar highlight. */
+  onSelectedTaskChange?: (taskId: string | null) => void;
 }
 
-export function TasksView({ active = true, projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession }: TasksViewProps) {
+export type TasksOpenRequest = { kind: "task"; taskId: string; status: TaskStatus } | { kind: "draft" };
+
+export function TasksView({ active = true, projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession, openRequest, onSelectedTaskChange }: TasksViewProps) {
   const { settings: convSettings } = useConversationSettings();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   // Panel, draft, pending creates and the flash are all keyed by project, so
@@ -90,6 +96,27 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
     setPanelState({ projectId, panel: { kind: "draft" } });
     setFocusNonce((n) => n + 1);
   };
+
+  useEffect(() => {
+    if (!openRequest) return;
+    if (openRequest.kind === "draft") {
+      setPanelState({ projectId, panel: { kind: "draft" } });
+      setFocusNonce((n) => n + 1);
+      return;
+    }
+    setPanelState({ projectId, panel: { kind: "task", taskId: openRequest.taskId } });
+    // Make sure the row is in the list, or the table can't show it as selected.
+    const { status } = openRequest;
+    setStatusFilter((f) => (f === "all" || f === status ? f : "all"));
+    // projectId is deliberately not a dep: a project switch must not replay
+    // the last request into the new project.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openRequest]);
+
+  const selectedTaskIdShown = selectedTask?.id ?? null;
+  useEffect(() => {
+    onSelectedTaskChange?.(selectedTaskIdShown);
+  }, [selectedTaskIdShown, onSelectedTaskChange]);
 
   const updateDraft = (patch: Partial<TaskDraft>) =>
     setDraftState({ projectId, draft: { ...draft, ...patch } });

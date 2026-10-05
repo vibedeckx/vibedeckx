@@ -43,7 +43,7 @@ import { MainConversation, type MainConversationHandle } from '@/components/conv
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from '@/components/ui/resizable';
 import type { ImperativePanelHandle } from 'react-resizable-panels';
 import { AppSidebar, PageHeader, type ActiveView } from '@/components/layout';
-import { TasksView } from '@/components/task';
+import { TasksView, type TasksOpenRequest } from '@/components/task';
 import { TaskDetailDialog } from '@/components/task/task-detail-dialog';
 import { requestProposalCardFocus } from '@/lib/proposal-card-focus';
 import { api, type ExecutionMode, type Task, type Worktree, type SearchResultWorkspace, type SearchResultSession } from '@/lib/api';
@@ -283,6 +283,8 @@ export default function Home() {
     runNow: runScheduleNow,
   } = useSchedules(currentProject?.id ?? null);
   const [selectedScheduleId, setSelectedScheduleId] = useState<string | null>(null);
+  const [taskOpenRequest, setTaskOpenRequest] = useState<TasksOpenRequest | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedScheduleRunId, setSelectedScheduleRunId] = useState<string | null>(null);
   const [scheduleCreateOpen, setScheduleCreateOpen] = useState(false);
   const [projectChatContextTask, setProjectChatContextTask] = useState<Task | null>(null);
@@ -1154,6 +1156,17 @@ Please proceed step by step and let me know if there are any issues or conflicts
               setActiveView("schedules");
               setScheduleCreateOpen(true);
             }}
+            tasks={tasks}
+            selectedTaskId={selectedTaskId}
+            onTasksOpen={() => setActiveView("tasks")}
+            onTaskSelect={(task) => {
+              setTaskOpenRequest({ kind: "task", taskId: task.id, status: task.status });
+              setActiveView("tasks");
+            }}
+            onCreateTaskOpen={() => {
+              setTaskOpenRequest({ kind: "draft" });
+              setActiveView("tasks");
+            }}
           />
 
           {/* Welcome state — shown for project-dependent views when no project exists */}
@@ -1348,6 +1361,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 setActiveView("workspace");
                 selectBranchSession(task.source_session?.branch ?? null, task.source_session_id);
               }}
+              openRequest={taskOpenRequest}
+              onSelectedTaskChange={setSelectedTaskId}
             />
           </div>
 
