@@ -118,6 +118,39 @@ describe("TaskProposalUI", () => {
     expect(buttons("Create all 2")).toHaveLength(1);
   });
 
+  const descriptionEditor = () => container.querySelector<HTMLTextAreaElement>("textarea[aria-label='Task description']");
+  const typeInto = (el: HTMLTextAreaElement, value: string) =>
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(el, value);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+  it("shows the description rendered and edits it in place on click", async () => {
+    await render({ input: { tasks: [{ title: "T", description: "Add **the** test" }] }, toolUseId: "toolu_1" });
+    const rendered = container.querySelector<HTMLElement>("[data-markdown-field='Task description']")!;
+    expect(rendered.textContent).toContain("Add the test");
+    expect(descriptionEditor()).toBeNull();
+
+    act(() => rendered.click());
+    const editor = descriptionEditor()!;
+    expect(document.activeElement).toBe(editor);
+    typeInto(editor, "Add **the** test, then ship");
+    act(() => editor.blur());
+    expect(descriptionEditor()).toBeNull();
+
+    await act(async () => { buttons("Create task")[0].click(); });
+    expect(apiMock.createTask.mock.calls[0][1]).toMatchObject({ description: "Add **the** test, then ship" });
+  });
+
+  it("keeps an initially empty description in the editor while typing", async () => {
+    await render({ input: { tasks: [{ title: "T", description: "" }] }, toolUseId: "toolu_1" });
+    const editor = descriptionEditor()!;
+    act(() => editor.focus());
+    typeInto(editor, "Now it has text");
+    expect(descriptionEditor()).toBe(editor);
+    expect(document.activeElement).toBe(editor);
+  });
+
   it("accepts a JSON-encoded input payload", async () => {
     await render({ input: JSON.stringify(PROPOSAL), toolUseId: "toolu_1" });
     expect(titles()).toEqual(["Cover remote path", "Drop legacy flag"]);

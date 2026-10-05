@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import { noteTaskCreated, useProposedTasks } from "@/hooks/use-proposed-tasks";
 import { takeProposalCardFocus } from "@/lib/proposal-card-focus";
 import { priorityConfig, priorityOptions } from "@/components/task/task-utils";
+import { MarkdownField } from "@/components/task/markdown-field";
 import { useAgentConversation } from "./agent-conversation";
 
 /**
@@ -177,14 +178,20 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
                   </SelectContent>
                 </Select>
               </div>
-              <Textarea
+              <MarkdownField
                 value={item.description}
-                onChange={(e) => setFields((f) => f.map((x, i) => (i === index ? { ...x, description: e.target.value } : x)))}
-                placeholder="What's left to do, and how to tell it's done"
-                className="min-h-24 text-xs"
-                aria-label="Task description"
-                disabled={busy}
-              />
+                label="Task description"
+                className="min-h-24 rounded-md border border-input px-3 py-2 text-xs"
+              >
+                <Textarea
+                  value={item.description}
+                  onChange={(e) => setFields((f) => f.map((x, i) => (i === index ? { ...x, description: e.target.value } : x)))}
+                  placeholder="What's left to do, and how to tell it's done"
+                  className="min-h-24 text-xs"
+                  aria-label="Task description"
+                  disabled={busy}
+                />
+              </MarkdownField>
             </div>
             {error && <p className="mt-2 text-xs text-red-500 break-words">{error}</p>}
             <div className="mt-3 flex items-center gap-2">
