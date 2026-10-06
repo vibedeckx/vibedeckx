@@ -2,6 +2,10 @@
   "name": "@vibedeckx/darwin-arm64",
   "version": "0.1.0",
   "description": "Vibedeckx platform binaries for macOS ARM64",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wjx/vibedeckx.git"
+  },
   "os": ["darwin"],
   "cpu": ["arm64"],
   "type": "module",

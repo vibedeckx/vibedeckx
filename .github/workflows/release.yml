@@ -242,9 +242,16 @@ jobs:
           generate_release_notes: true
           append_body: true
 
+  # Authenticates via npm Trusted Publishing (OIDC): each package lists this
+  # workflow as its trusted publisher on npmjs.com, so no NPM_TOKEN is needed
+  # and npm attaches provenance automatically. Every published package.json
+  # must carry a repository.url matching this GitHub repo or npm rejects it.
   publish-npm:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
@@ -256,6 +263,19 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # Trusted Publishing needs npm >= 11.5.1; Node 22 bundles npm 10.
+      - run: npm install -g npm@11
+
+      # npm 11 refuses to publish a prerelease without an explicit --tag, and
+      # prereleases must not take over `latest` anyway.
+      - name: Resolve dist-tag
+        run: |
+          if [[ "${GITHUB_REF_NAME#v}" == *-* ]]; then
+            echo "NPM_DIST_TAG=next" >> "$GITHUB_ENV"
+          else
+            echo "NPM_DIST_TAG=latest" >> "$GITHUB_ENV"
+          fi
+
       - name: Download platform npm packages
         uses: actions/download-artifact@v4
         with:
@@ -265,29 +285,21 @@ jobs:
       # Publish the UI package first: the platform packages' runtime download
       # expects @vibedeckx/ui-dist@<version> to exist once they are installable.
       - name: Publish @vibedeckx/ui-dist
-        run: npm publish --access public
+        run: npm publish --access public --tag "$NPM_DIST_TAG"
         working-directory: npm-packages/npm-ui-dist
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Publish each platform package
       - name: Publish @vibedeckx/linux-x64
-        run: npm publish --access public
+        run: npm publish --access public --tag "$NPM_DIST_TAG"
         working-directory: npm-packages/npm-linux-x64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @vibedeckx/darwin-arm64
-        run: npm publish --access public
+        run: npm publish --access public --tag "$NPM_DIST_TAG"
         working-directory: npm-packages/npm-darwin-arm64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @vibedeckx/win32-x64
-        run: npm publish --access public
+        run: npm publish --access public --tag "$NPM_DIST_TAG"
         working-directory: npm-packages/npm-win32-x64
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # Publish the main thin wrapper package
       - name: Prepare main package for npm
@@ -310,6 +322,7 @@ jobs:
               description: 'AI-powered app generator with project management',
               bin: { vibedeckx: './bin/vibedeckx.mjs' },
               files: ['bin'],
+              repository: pkg.repository,
               engines: { node: '>=22' },
               optionalDependencies: {
                 '@vibedeckx/linux-x64': version,
@@ -321,7 +334,5 @@ jobs:
           "
 
       - name: Publish vibedeckx
-        run: npm publish --access public
+        run: npm publish --access public --tag "$NPM_DIST_TAG"
         working-directory: packages/vibedeckx
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

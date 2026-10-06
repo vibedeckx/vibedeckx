@@ -2,6 +2,10 @@
   "name": "@vibedeckx/win32-x64",
   "version": "0.1.0",
   "description": "Vibedeckx platform binaries for Windows x64",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wjx/vibedeckx.git"
+  },
   "os": ["win32"],
   "cpu": ["x64"],
   "type": "module",

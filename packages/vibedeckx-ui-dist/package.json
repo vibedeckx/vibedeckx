@@ -2,6 +2,10 @@
   "name": "@vibedeckx/ui-dist",
   "version": "0.1.0",
   "description": "Vibedeckx web UI static assets (served by the vibedeckx server; not needed on remote workers)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wjx/vibedeckx.git"
+  },
   "type": "module",
   "files": ["ui"]
 }
