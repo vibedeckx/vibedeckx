@@ -241,6 +241,7 @@ jobs:
           files: artifacts/*
           generate_release_notes: true
           append_body: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
 
   # Authenticates via npm Trusted Publishing (OIDC): each package lists this
   # workflow as its trusted publisher on npmjs.com, so no NPM_TOKEN is needed
