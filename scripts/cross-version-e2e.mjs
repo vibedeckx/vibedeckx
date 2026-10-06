@@ -542,6 +542,25 @@ await smoke("retention-downlink", ["http:PUT /api/settings/session-retention/app
     await api("PUT", "/api/settings/session-retention", { days: null }).catch(() => { /* best effort */ });
   }
 });
+await smoke("agent-process-downlink", ["http:PUT /api/settings/agent-processes"], async () => {
+  // Same shape as retention: the hub's PUT reuses the worker's own settings
+  // PUT over the tunnel and reports one row per worker. Read the value back
+  // from the worker directly so "applied" can't hide a no-op. Restored to the
+  // default afterwards.
+  try {
+    const r = await api("PUT", "/api/settings/agent-processes", { maxResidentAgentProcesses: 4 });
+    const row = (r.workers ?? []).find((w) => w.remoteServerId === record.id);
+    assert(row, `no downlink result for ${record.id}: ${JSON.stringify(r).slice(0, 150)}`);
+    if (row.status === "error" && row.detail === "worker responded 404") {
+      throw new HttpError("PUT", "/api/settings/agent-processes", 404, "worker predates agent-process settings");
+    }
+    assert(row.status === "applied", `downlink status ${row.status}: ${row.detail ?? ""}`);
+    const onWorker = await request("GET", "/api/settings/agent-processes", undefined, `http://127.0.0.1:${WORKER_PORT}`);
+    assert(onWorker.json?.maxResidentAgentProcesses === 4, `worker reports ${JSON.stringify(onWorker.json).slice(0, 150)}`);
+  } finally {
+    await api("PUT", "/api/settings/agent-processes", { maxResidentAgentProcesses: 3 }).catch(() => { /* best effort */ });
+  }
+});
 
 // --- agent-session round, driven by the PATH-stub `claude` on the worker ---
 await smoke("session-find", ["http:POST /api/path/agent-sessions"], async () => {
