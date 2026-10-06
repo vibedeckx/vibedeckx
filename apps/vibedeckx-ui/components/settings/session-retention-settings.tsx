@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, CalendarClock, CheckCircle2, Infinity as InfinityIcon, Loader2, XCircle } from "lucide-react";
+import { CalendarClock, CheckCircle2, Infinity as InfinityIcon, Loader2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -15,9 +15,24 @@ import {
   SettingsField,
   SettingsRadioCards,
   SettingsStatus,
+  SettingsWorkerIssues,
 } from "./settings-shell";
 
 type Mode = "off" | "on";
+
+function summarizeProblemWorkers(workers: SessionRetentionWorkerResult[]): string {
+  const offline = workers.filter((w) => w.status === "unreachable").length;
+  const outdated = workers.filter((w) => w.status === "needs_upgrade").length;
+  const failed = workers.length - offline - outdated;
+  if (offline === workers.length) return `${offline} machines offline — they will pick this up when they reconnect`;
+  if (outdated === workers.length) return `${outdated} machines need a worker update to apply the retention window`;
+  const parts = [
+    offline > 0 && `${offline} offline`,
+    outdated > 0 && `${outdated} need update`,
+    failed > 0 && `${failed} failed`,
+  ].filter(Boolean);
+  return `${workers.length} machines did not apply this yet (${parts.join(", ")})`;
+}
 
 /**
  * Session retention. Off by default and never silently enabled: turning this
@@ -165,24 +180,19 @@ export function SessionRetentionSettingsSection() {
       {/* Workers that did not take the value. A worker predating this feature
           keeps its own sessions forever until it is updated — say so rather
           than letting the setting look global when it isn't yet. */}
-      {problemWorkers.length > 0 && (
-        <div className="space-y-1.5">
-          {problemWorkers.map((worker) => (
-            <SettingsStatus
-              key={worker.remoteServerId}
-              variant="default"
-              icon={<AlertTriangle className="h-3.5 w-3.5" />}
-            >
-              {worker.name}:{" "}
-              {worker.status === "needs_upgrade"
-                ? "update this worker to apply the retention window"
-                : worker.status === "unreachable"
-                  ? "offline — it will pick this up when it reconnects"
-                  : worker.detail ?? "could not apply the retention window"}
-            </SettingsStatus>
-          ))}
-        </div>
-      )}
+      <SettingsWorkerIssues
+        issues={problemWorkers.map((worker) => ({
+          id: worker.remoteServerId,
+          name: worker.name,
+          message:
+            worker.status === "needs_upgrade"
+              ? "update this worker to apply the retention window"
+              : worker.status === "unreachable"
+                ? "offline — it will pick this up when it reconnects"
+                : worker.detail ?? "could not apply the retention window",
+        }))}
+        summary={summarizeProblemWorkers(problemWorkers)}
+      />
 
       <SettingsActions>
         <Button size="sm" onClick={handleSave} disabled={saving || !valid}>

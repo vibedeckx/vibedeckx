@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, Bot, CheckCircle2, Loader2, XCircle } from "lucide-react";
+import { Bot, CheckCircle2, Loader2, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -15,9 +15,18 @@ import {
   SettingsActions,
   SettingsField,
   SettingsStatus,
+  SettingsWorkerIssues,
 } from "./settings-shell";
 
 const { min, max } = AGENT_PROCESS_SETTINGS_LIMITS;
+
+function summarizeProblemWorkers(workers: AgentProcessWorkerResult[]): string {
+  const offline = workers.filter((w) => w.status === "offline").length;
+  const failed = workers.length - offline;
+  if (failed === 0) return `${offline} machines offline — they will pick this up when they reconnect`;
+  if (offline === 0) return `${failed} machines did not apply this — save again later to retry`;
+  return `${workers.length} machines did not apply this yet (${offline} offline, ${failed} failed)`;
+}
 
 export function AgentProcessSettingsSection() {
   const [value, setValue] = useState(String(DEFAULT_AGENT_PROCESS_SETTINGS.maxResidentAgentProcesses));
@@ -128,22 +137,17 @@ export function AgentProcessSettingsSection() {
           machine, so say which ones still run the old one and whether the
           user has to act: an offline machine gets it on reconnect, a failed
           one only if the user saves again — nothing retries in the background. */}
-      {problemWorkers.length > 0 && (
-        <div className="space-y-1.5">
-          {problemWorkers.map((worker) => (
-            <SettingsStatus
-              key={worker.remoteServerId}
-              variant="default"
-              icon={<AlertTriangle className="h-3.5 w-3.5" />}
-            >
-              {worker.name}:{" "}
-              {worker.status === "offline"
-                ? "offline — it will pick this up when it reconnects"
-                : `not applied (${worker.detail ?? "failed"}) — save again later to retry`}
-            </SettingsStatus>
-          ))}
-        </div>
-      )}
+      <SettingsWorkerIssues
+        issues={problemWorkers.map((worker) => ({
+          id: worker.remoteServerId,
+          name: worker.name,
+          message:
+            worker.status === "offline"
+              ? "offline — it will pick this up when it reconnects"
+              : `not applied (${worker.detail ?? "failed"}) — save again later to retry`,
+        }))}
+        summary={summarizeProblemWorkers(problemWorkers)}
+      />
 
       <SettingsActions>
         <Button

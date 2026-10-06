@@ -1,6 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { AlertTriangle, Info } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 // Section primitives implementing the design's `meta-section-title` /
@@ -195,12 +202,15 @@ export function SettingsRadioCards<T extends string>({
 interface SettingsStatusProps {
   variant?: "default" | "success" | "error";
   icon?: React.ReactNode;
+  /** Rendered right after the (truncating) text, so it never gets clipped. */
+  trailing?: React.ReactNode;
   children: React.ReactNode;
 }
 
 export function SettingsStatus({
   variant = "default",
   icon,
+  trailing,
   children,
 }: SettingsStatusProps) {
   return (
@@ -216,7 +226,68 @@ export function SettingsStatus({
     >
       {icon && <span className="shrink-0">{icon}</span>}
       <span className="truncate">{children}</span>
+      {trailing && <span className="shrink-0 inline-flex">{trailing}</span>}
     </div>
+  );
+}
+
+// Machines that did not take a per-user setting. One machine reads fine as a
+// single line; several would stack into a wall of near-identical rows, so
+// they collapse into one summary line with the per-machine detail behind an
+// info icon.
+export interface SettingsWorkerIssue {
+  id: string;
+  name: string;
+  message: string;
+}
+
+export function SettingsWorkerIssues({
+  issues,
+  summary,
+}: {
+  issues: SettingsWorkerIssue[];
+  summary: string;
+}) {
+  if (issues.length === 0) return null;
+  const icon = <AlertTriangle className="h-3.5 w-3.5" />;
+  if (issues.length === 1) {
+    const [issue] = issues;
+    return (
+      <SettingsStatus icon={icon}>
+        {issue.name}: {issue.message}
+      </SettingsStatus>
+    );
+  }
+  return (
+    <SettingsStatus
+      icon={icon}
+      trailing={
+        <TooltipProvider>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label="Show affected machines"
+                className="rounded-sm text-muted-foreground/80 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+              >
+                <Info className="h-3.5 w-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top" className="max-w-sm text-left text-pretty">
+              <ul className="space-y-1">
+                {issues.map((issue) => (
+                  <li key={issue.id}>
+                    <span className="font-medium">{issue.name}</span>: {issue.message}
+                  </li>
+                ))}
+              </ul>
+            </TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      }
+    >
+      {summary}
+    </SettingsStatus>
   );
 }
 
