@@ -15,6 +15,14 @@ import { useFileRefIndex } from '@/hooks/use-file-ref-index';
 import { AgentTabFocusProvider } from '@/hooks/agent-tab-focus-context';
 import { useFocusRegion } from '@/components/locate/focus-region';
 
+/** A repo file to open in `branch`'s Files tab; bump `nonce` to ask again. */
+export interface FileOpenRequest {
+  branch: string | null;
+  path: string;
+  line: number | null;
+  nonce: number;
+}
+
 interface RightPanelProps {
   projectId: string | null;
   selectedBranch?: string | null;
@@ -26,6 +34,8 @@ interface RightPanelProps {
   diffCompareNonce?: number;
   /** Open the Terminal tab with a shell on this machine; bump `nonce` to ask again. */
   terminalRequest?: { targetId: string; nonce: number } | null;
+  /** Open a file in the Files tab once `branch` is the selected workspace. */
+  fileOpenRequest?: FileOpenRequest | null;
   mergeTarget?: string | null;
   // True while a session-targeted navigation is still resolving (notably a
   // cross-project jump, where the project switches and worktrees reload before
@@ -100,6 +110,7 @@ export function RightPanel({
   activateAgentTabNonce,
   diffCompareNonce,
   terminalRequest,
+  fileOpenRequest,
   mergeTarget,
   forceAgentTab = false,
   active = true,
@@ -227,6 +238,20 @@ export function RightPanel({
     [projectId, selectedBranch, target, agentSessionId],
   );
   const navValue = useMemo(() => ({ openFile, index, scope }), [openFile, index, scope]);
+
+  // A file asked for from outside the workspace view. The page switches the
+  // workspace in the same update, but the request is held until selectedBranch
+  // actually matches — consumed earlier, it would open in the workspace being
+  // left. A layout effect declared after usePersistedTab's, so the Files tab
+  // wins over the new workspace's restored tab in the same commit.
+  const consumedFileOpenNonceRef = useRef(fileOpenRequest?.nonce);
+  useIsomorphicLayoutEffect(() => {
+    if (!fileOpenRequest) return;
+    if (consumedFileOpenNonceRef.current === fileOpenRequest.nonce) return;
+    if ((selectedBranch ?? null) !== fileOpenRequest.branch) return;
+    consumedFileOpenNonceRef.current = fileOpenRequest.nonce;
+    openFile(fileOpenRequest.path, fileOpenRequest.line);
+  }, [fileOpenRequest, selectedBranch, openFile]);
 
   const agentTabFocus = useMemo(
     () => ({

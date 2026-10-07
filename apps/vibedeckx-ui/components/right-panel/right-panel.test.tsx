@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, useEffect, useRef, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { RightPanel } from "./right-panel";
+import { RightPanel, type FileOpenRequest } from "./right-panel";
 import { useAgentTabFocus } from "@/hooks/agent-tab-focus-context";
 import { FocusRegionProvider } from "@/components/locate/focus-region";
 
@@ -26,8 +26,12 @@ vi.mock("@/components/preview", () => ({
   PreviewPanel: () => <div>Browser panel</div>,
 }));
 
+const filesNav = vi.hoisted(() => ({ requests: [] as Array<{ path: string; line: number | null; nonce: number } | null | undefined> }));
 vi.mock("@/components/files", () => ({
-  FilesView: () => <div>Files panel</div>,
+  FilesView: ({ navRequest }: { navRequest?: { path: string; line: number | null; nonce: number } | null }) => {
+    filesNav.requests.push(navRequest);
+    return <div>Files panel</div>;
+  },
 }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -405,6 +409,58 @@ describe("RightPanel", () => {
 
       renderPanel(0, true, <ComposerProbe />, "project-1");
       expect(document.activeElement).toBe(composer());
+    });
+  });
+
+  describe("fileOpenRequest", () => {
+    function renderWith(selectedBranch: string | null, fileOpenRequest: FileOpenRequest | null) {
+      act(() => {
+        root!.render(
+          <FocusRegionProvider>
+            <RightPanel projectId="project-1" selectedBranch={selectedBranch} fileOpenRequest={fileOpenRequest} />
+          </FocusRegionProvider>,
+        );
+      });
+    }
+    const openTab = () =>
+      Array.from(container!.querySelectorAll("button")).find((b) => isOpenTabClass(b.className))?.textContent;
+
+    it("holds the request until its workspace is selected, then opens the file", () => {
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      filesNav.requests = [];
+      localStorage.setItem("vibedeckx:activeTab:project-1:feat", "terminal");
+
+      const request = { branch: "feat", path: "docs/x.md", line: 42, nonce: 1 };
+      renderWith("dev", null);
+      renderWith("dev", request);
+      expect(openTab()).toBe("Agent");
+      expect(filesNav.requests.at(-1)).toBeNull();
+
+      renderWith("feat", request);
+      // The Files tab beats the workspace's restored tab.
+      expect(openTab()).toBe("Files");
+      expect(filesNav.requests.at(-1)).toEqual({ path: "docs/x.md", line: 42, nonce: expect.any(Number) });
+      expect(localStorage.getItem("vibedeckx:activeTab:project-1:feat")).toBe("files");
+    });
+
+    it("matches the main workspace as null and fires once per nonce", () => {
+      container = document.createElement("div");
+      document.body.appendChild(container);
+      root = createRoot(container);
+      filesNav.requests = [];
+
+      const request = { branch: null, path: "Makefile", line: null, nonce: 7 };
+      renderWith(null, null);
+      renderWith(null, request);
+      const first = filesNav.requests.at(-1);
+      expect(first).toMatchObject({ path: "Makefile", line: null });
+
+      renderWith(null, { ...request });
+      expect(filesNav.requests.at(-1)).toBe(first);
+      renderWith(null, { ...request, nonce: 8 });
+      expect(filesNav.requests.at(-1)).not.toBe(first);
     });
   });
 });

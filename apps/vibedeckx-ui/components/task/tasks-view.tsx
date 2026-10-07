@@ -47,6 +47,8 @@ interface TasksViewProps {
   onUnarchiveTask: (id: string) => Promise<void>;
   /** Jump to the conversation a proposed task came from, at its card. */
   onOpenSourceSession?: (task: Task) => void;
+  /** Open a repo file in a workspace's Files tab (file links in descriptions). */
+  onOpenFile?: (branch: string | null, path: string, line: number | null) => void;
   /** Open a task or the draft from outside (the sidebar); a new object re-opens. */
   openRequest?: TasksOpenRequest | null;
   /** Reports the task open in the side panel, for the sidebar highlight. */
@@ -55,7 +57,7 @@ interface TasksViewProps {
 
 export type TasksOpenRequest = { kind: "task"; taskId: string; status: TaskStatus } | { kind: "draft" };
 
-export function TasksView({ active = true, projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession, openRequest, onSelectedTaskChange }: TasksViewProps) {
+export function TasksView({ active = true, projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession, onOpenFile, openRequest, onSelectedTaskChange }: TasksViewProps) {
   const { settings: convSettings } = useConversationSettings();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   // Panel, draft, pending creates and the flash are all keyed by project, so
@@ -340,6 +342,7 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
                       worktrees={worktrees}
                       assignedBranches={assignedBranches}
                       onOpenSourceSession={onOpenSourceSession}
+                      onOpenFile={onOpenFile}
                     />
                   )}
                 </div>

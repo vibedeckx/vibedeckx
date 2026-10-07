@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { Streamdown } from "streamdown";
 import { caretClientY, scrollParent, sourceOffsetAt } from "./markdown-caret";
 import { TASK_MARKDOWN_CLASS } from "./task-properties";
+import { TASK_MARKDOWN_COMPONENTS, TASK_REHYPE_PLUGINS, TaskFileOpenProvider, type OpenTaskFile } from "./task-file-link";
 
 /**
  * Markdown shown rendered; a click (outside links, buttons and a text
@@ -15,11 +16,15 @@ import { TASK_MARKDOWN_CLASS } from "./task-properties";
  * Entering must not move the page: a click puts the caret at the matching
  * source offset and scrolls so that line sits where the pointer was (Enter
  * keeps the scroll position). Leaving just swaps back.
+ *
+ * Markdown links to repo-relative paths open the file via `onOpenFile`; bare
+ * paths stay text (see rehype-file-links.ts).
  */
 export function MarkdownField({
   value,
   label,
   className,
+  onOpenFile,
   children,
 }: {
   value: string;
@@ -27,6 +32,8 @@ export function MarkdownField({
   label: string;
   /** Classes for the rendered view, to line it up with the editor. */
   className?: string;
+  /** Opens a file link's target; without it file links render as text. */
+  onOpenFile?: OpenTaskFile;
   children: ReactNode;
 }) {
   const [editing, setEditing] = useState(false);
@@ -76,9 +83,16 @@ export function MarkdownField({
         }}
         className={`cursor-text outline-none ${className ?? ""}`}
       >
-        <Streamdown mode="static" className={TASK_MARKDOWN_CLASS}>
-          {value}
-        </Streamdown>
+        <TaskFileOpenProvider value={onOpenFile ?? null}>
+          <Streamdown
+            mode="static"
+            className={TASK_MARKDOWN_CLASS}
+            rehypePlugins={TASK_REHYPE_PLUGINS}
+            components={TASK_MARKDOWN_COMPONENTS}
+          >
+            {value}
+          </Streamdown>
+        </TaskFileOpenProvider>
       </div>
     );
   }

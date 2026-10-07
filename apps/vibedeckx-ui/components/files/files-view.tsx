@@ -73,6 +73,7 @@ export function FilesView({ projectId, project, selectedBranch, navRequest, sess
     goForward,
     uploadFiles,
     deleteEntry,
+    settled,
   } = useFileBrowser({
     projectId,
     branch: selectedBranch,
@@ -87,14 +88,20 @@ export function FilesView({ projectId, project, selectedBranch, navRequest, sess
     fetchRoot();
   }, [fetchRoot]);
 
-  // Drive jump-to-file requests coming from agent-message file links.
+  // Drive jump-to-file requests coming from file links. Held until the current
+  // workspace has settled: a request that arrives with a workspace switch
+  // (Task description links) would otherwise be overwritten when the new
+  // workspace's saved view is restored.
+  const consumedNavNonceRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!navRequest) return;
+    if (!navRequest || !settled) return;
+    if (consumedNavNonceRef.current === navRequest.nonce) return;
+    consumedNavNonceRef.current = navRequest.nonce;
     if (navRequest.line != null) jumpTo(navRequest.path, navRequest.line);
     else navigate(navRequest.path);
-    // Only react to a new request (nonce), not to identity churn.
+    // Only react to a new request (nonce) or settling, not to identity churn.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [navRequest?.nonce]);
+  }, [navRequest?.nonce, settled]);
 
   // Refresh re-fetches the tree, the open file's content, and the search cache —
   // keeping the current file open (just reloading it from disk).

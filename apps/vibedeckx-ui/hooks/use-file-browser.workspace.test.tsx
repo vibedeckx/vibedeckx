@@ -209,4 +209,37 @@ describe("useFileBrowser workspace scoping", () => {
     await act(async () => { upload.resolve({ uploaded: ["new.txt"] }); await uploading; });
     expect(names()).toEqual(["b.txt"]);
   });
+
+  it("keeps a file opened while the session changes in the same workspace", async () => {
+    function SessionProbe({ sessionId }: { sessionId: string }) {
+      const value = useFileBrowser({ projectId: "p1", branch: "a", sessionId });
+      const { fetchRoot } = value;
+      useEffect(() => { fetchRoot(); }, [fetchRoot]);
+      useEffect(() => { latest = value; });
+      return null;
+    }
+    saveView(makeKey("p1", "a", undefined), {
+      selectedFile: "old.txt",
+      history: { entries: [{ path: "old.txt", line: null }], index: 0 },
+      scrollTop: 0,
+    });
+    browseProjectDirectory.mockResolvedValueOnce({ items: [entry("old.txt"), entry("target.txt")] });
+    getFileContent.mockResolvedValueOnce(content("OLD"));
+    await act(async () => { root.render(<SessionProbe sessionId="s1" />); });
+    expect(latest.selectedFile).toBe("old.txt");
+
+    // A Task file link: the pin clears (the session changes) and the file opens
+    // in the same commit. A re-run restore would answer late and put old.txt back.
+    const lateRoot = deferred<{ items: BrowseEntry[] }>();
+    browseProjectDirectory.mockReturnValueOnce(lateRoot.promise);
+    getFileContent.mockResolvedValue(content("TARGET"));
+    await act(async () => {
+      root.render(<SessionProbe sessionId="s2" />);
+      void latest.navigate("target.txt", 3);
+    });
+    await act(async () => { lateRoot.resolve({ items: [entry("old.txt"), entry("target.txt")] }); });
+
+    expect(latest.selectedFile).toBe("target.txt");
+    expect(browseProjectDirectory).toHaveBeenCalledTimes(1);
+  });
 });

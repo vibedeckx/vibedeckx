@@ -1,11 +1,31 @@
 import { scanFileRefs, parseFileHref } from "./parse-file-ref";
 
-interface HastNode {
+export interface HastNode {
   type: string;
   tagName?: string;
   value?: string;
   properties?: Record<string, unknown>;
   children?: HastNode[];
+}
+
+// The in-app anchor every file reference becomes: `#file-ref` (which harden
+// leaves alone) carrying the raw path and optional line as data attributes.
+export function makeFileRefAnchor(
+  rawPath: string,
+  line: number | null,
+  children: HastNode[],
+): HastNode {
+  return {
+    type: "element",
+    tagName: "a",
+    properties: {
+      className: ["file-ref"],
+      href: "#file-ref",
+      dataFileRaw: rawPath,
+      ...(line != null ? { dataFileLine: String(line) } : {}),
+    },
+    children,
+  };
 }
 
 // Marks every path-shaped reference as a `.file-ref` anchor carrying the RAW
@@ -20,24 +40,6 @@ interface HastNode {
 // plugin (and thus the rendered tree) never depends on the index; a late index
 // only restyles the anchors in place via a context re-render.
 export function rehypeFileRefs() {
-  function makeAnchor(
-    rawPath: string,
-    line: number | null,
-    children: HastNode[],
-  ): HastNode {
-    return {
-      type: "element",
-      tagName: "a",
-      properties: {
-        className: ["file-ref"],
-        href: "#file-ref",
-        dataFileRaw: rawPath,
-        ...(line != null ? { dataFileLine: String(line) } : {}),
-      },
-      children,
-    };
-  }
-
   function expandText(value: string): HastNode[] {
     const refs = scanFileRefs(value);
     if (refs.length === 0) return [{ type: "text", value }];
@@ -46,7 +48,7 @@ export function rehypeFileRefs() {
     for (const r of refs) {
       if (r.start > pos) out.push({ type: "text", value: value.slice(pos, r.start) });
       const display = r.display ?? value.slice(r.start, r.end);
-      out.push(makeAnchor(r.rawPath, r.line, [{ type: "text", value: display }]));
+      out.push(makeFileRefAnchor(r.rawPath, r.line, [{ type: "text", value: display }]));
       pos = r.end;
     }
     if (pos < value.length) out.push({ type: "text", value: value.slice(pos) });
@@ -57,7 +59,7 @@ export function rehypeFileRefs() {
     const href = String(node.properties?.href ?? "");
     const parsed = parseFileHref(href);
     if (!parsed) return [node]; // external / anchor link — leave as-is
-    return [makeAnchor(parsed.rawPath, parsed.line, node.children ?? [])];
+    return [makeFileRefAnchor(parsed.rawPath, parsed.line, node.children ?? [])];
   }
 
   function processChildren(parent: HastNode, insidePre: boolean = false): void {

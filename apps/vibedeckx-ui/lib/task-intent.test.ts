@@ -26,3 +26,13 @@ describe("task intent block", () => {
     expect(takeTaskMarker("plain  ")).toEqual({ text: "plain  ", found: false });
   });
 });
+
+describe("task intent file references", () => {
+  it("asks to link files rather than copy them in", () => {
+    expect(TASK_INTENT_BLOCK).toMatch(/link to the file\s+instead of copying its contents/);
+  });
+
+  it("is still stripped whole", () => {
+    expect(takeTaskMarker(`note\n\n${TASK_INTENT_BLOCK}`)).toEqual({ text: "note", found: true });
+  });
+});

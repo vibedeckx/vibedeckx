@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Archive, ArchiveRestore, Trash2, X } from "lucide-react";
 import { SourceSessionLink } from "@/components/agent/source-session-link";
 import { MarkdownField } from "./markdown-field";
+import { taskFileBranch } from "./task-utils";
 import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
 
 interface TaskDetailPanelProps {
@@ -19,6 +20,8 @@ interface TaskDetailPanelProps {
   worktrees: Worktree[];
   assignedBranches: Set<string | null>;
   onOpenSourceSession?: (task: Task) => void;
+  /** Open a file linked from the description, in the task's source workspace. */
+  onOpenFile?: (branch: string | null, path: string, line: number | null) => void;
 }
 
 /**
@@ -38,6 +41,7 @@ export function TaskDetailPanel({
   worktrees,
   assignedBranches,
   onOpenSourceSession,
+  onOpenFile,
 }: TaskDetailPanelProps) {
   const archived = task.archived_at !== null;
 
@@ -105,6 +109,7 @@ export function TaskDetailPanel({
           <MarkdownField
             value={task.description ?? ""}
             label="Description"
+            onOpenFile={onOpenFile ? (path, line) => onOpenFile(taskFileBranch(task), path, line) : undefined}
             className={`-mx-1.5 rounded-md px-1.5 py-1 focus-visible:bg-muted/40 ${PANEL_BODY_CLASS}`}
           >
             <DraftField

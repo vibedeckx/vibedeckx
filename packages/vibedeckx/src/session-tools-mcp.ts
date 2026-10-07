@@ -208,6 +208,11 @@ export const PROPOSE_TASK_DESCRIPTION = [
   "be done, and how to tell it is finished. Propose several tasks in one call when the user asks to",
   "split the work.",
   "",
+  "Write each file in this repository that a description refers to (a design doc, the source to",
+  "change) as a Markdown link with a path relative to the repository root, e.g.",
+  "[design doc](docs/foo-design.md) or [handler](src/routes/foo.ts:42). Such links open the file in",
+  "the workspace; bare paths and absolute paths do not.",
+  "",
   "Project and source session are taken from this session — do not describe them here.",
 ].join("\n");
 
@@ -223,7 +228,7 @@ export const PROPOSE_TASK_INPUT_SCHEMA = {
         type: "object",
         properties: {
           title: { type: "string", description: "Short, specific title, e.g. \"Cover remote path in retention-hold tests\"" },
-          description: { type: "string", description: "Self-contained description: background, relevant files, remaining work, definition of done." },
+          description: { type: "string", description: "Self-contained Markdown description: background, relevant files (as repo-relative Markdown links, e.g. [design](docs/foo.md) or [handler](src/foo.ts:42)), remaining work, definition of done." },
           priority: { type: "string", enum: ["low", "medium", "high", "urgent"], description: "Optional; defaults to medium." },
         },
         required: ["title", "description"],

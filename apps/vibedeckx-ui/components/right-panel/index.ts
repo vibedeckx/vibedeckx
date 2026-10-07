@@ -1,1 +1,1 @@
-export { RightPanel } from './right-panel';
+export { RightPanel, type FileOpenRequest } from './right-panel';

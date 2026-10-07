@@ -15,7 +15,7 @@ import {
 import { Trash2, GitBranch, Archive, ArchiveRestore } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SourceSessionLink } from "@/components/agent/source-session-link";
-import { statusConfig, priorityConfig, statusOptions, priorityOptions, assignableBranches, branchLabel } from "./task-utils";
+import { statusConfig, priorityConfig, statusOptions, priorityOptions, assignableBranches, branchLabel, descriptionPreview } from "./task-utils";
 
 interface TaskRowProps {
   task: Task;
@@ -66,7 +66,7 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
           </span>
           {!compact && task.description && (
             <p className="text-xs text-muted-foreground truncate max-w-[400px] mt-0.5">
-              {task.description.length > 80 ? task.description.slice(0, 80) + "..." : task.description}
+              {descriptionPreview(task.description)}
             </p>
           )}
           {!compact && task.source_session && (
@@ -222,7 +222,7 @@ export function PendingTaskRow({ pending, compact }: { pending: PendingTask; com
           </>
         )}
         {!compact && (
-          <p className="text-xs text-muted-foreground truncate max-w-[400px] mt-0.5">{pending.description}</p>
+          <p className="text-xs text-muted-foreground truncate max-w-[400px] mt-0.5">{descriptionPreview(pending.description, Infinity)}</p>
         )}
       </TableCell>
       <TableCell className="@max-md:hidden">

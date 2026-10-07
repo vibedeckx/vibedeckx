@@ -1,4 +1,4 @@
-import type { TaskStatus, TaskPriority, Worktree } from "@/lib/api";
+import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 
 export const statusConfig: Record<TaskStatus, { label: string; color: string }> = {
   todo: { label: "To Do", color: "bg-muted text-muted-foreground" },
@@ -35,4 +35,22 @@ export function assignableBranches(
   return worktrees
     .map((wt) => ({ key: wt.branch === null ? "" : wt.branch, label: wt.branch ?? "main" }))
     .filter(({ key }) => current !== key && !assignedBranches.has(key));
+}
+
+/**
+ * The workspace a task's file links resolve in: the one the proposing session
+ * ran in (null = main), else main. Never `assigned_branch` — that is where the
+ * work goes, not where the referenced files were written, and re-assigning
+ * must not move the links.
+ */
+export function taskFileBranch(task: Pick<Task, "source_session">): string | null {
+  return task.source_session?.branch ?? null;
+}
+
+const MD_LINK = /\[([^\]\n]*)\]\(\s*[^)\s]*\s*\)/g;
+
+/** One-line description preview: `[label](href)` collapses to `label`, then truncate. */
+export function descriptionPreview(description: string, max = 80): string {
+  const text = description.replace(MD_LINK, "$1");
+  return text.length > max ? text.slice(0, max) + "..." : text;
 }

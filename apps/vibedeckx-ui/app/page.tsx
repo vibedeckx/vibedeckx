@@ -32,7 +32,7 @@ import { WorkspaceMissingOnRemoteDialog, type WorkspaceMissingOnRemote } from '@
 import { DeleteWorktreeDialog } from '@/components/project/delete-worktree-dialog';
 import { UserMenu } from '@/components/auth/user-menu';
 import { Logo } from '@/components/brand/logo';
-import { RightPanel } from '@/components/right-panel';
+import { RightPanel, type FileOpenRequest } from '@/components/right-panel';
 import { AgentConversation, AgentConversationHandle } from '@/components/agent';
 import { PreparingReviewView } from '@/components/agent/preparing-review-view';
 import { usePreparingReviews } from '@/hooks/use-preparing-reviews';
@@ -112,6 +112,10 @@ export default function Home() {
   // A shell asked for on a named machine (from a delete that machine refused).
   // Carried as a nonce so asking twice opens a second terminal.
   const [terminalRequest, setTerminalRequest] = useState<{ targetId: string; nonce: number } | null>(null);
+  // A repo file asked for from outside the workspace view (a Task description
+  // link). Carries its branch: the panel holds it until that workspace is the
+  // selected one, so it never opens in the workspace being left.
+  const [fileOpenRequest, setFileOpenRequest] = useState<FileOpenRequest | null>(null);
   // Workspace the create dialog opens on when it is repairing one some machine
   // never got, rather than starting a new one. The whole row is kept, not just
   // the branch: its per-machine state is what tells the dialog where to create.
@@ -456,6 +460,15 @@ export default function Home() {
     // callers holding a full search row (quick switcher) touch it themselves.
     touchRecentSessionOpen(sessionId);
   }, []);
+
+  // Open a repo file in the given workspace's Files tab, from outside the
+  // workspace view (Task description links).
+  const fileOpenNonceRef = useRef(0);
+  const openFileInWorkspace = useCallback((branch: string | null, path: string, line: number | null) => {
+    setActiveView('workspace');
+    selectWorkspace(branch);
+    setFileOpenRequest({ branch, path, line, nonce: ++fileOpenNonceRef.current });
+  }, [selectWorkspace]);
 
   // Open the stand-in view for a preparing review. The row's id is a pending
   // reviewer that no session read can resolve yet, so it must never reach the
@@ -1280,6 +1293,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                     activateAgentTabNonce={activateAgentTabNonce}
                     diffCompareNonce={diffCompareNonce}
                     terminalRequest={terminalRequest}
+                    fileOpenRequest={fileOpenRequest}
                     forceAgentTab={sessionNavPending}
                     mergeTarget={
                       selectedBranch
@@ -1361,6 +1375,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 setActiveView("workspace");
                 selectBranchSession(task.source_session?.branch ?? null, task.source_session_id);
               }}
+              onOpenFile={openFileInWorkspace}
               openRequest={taskOpenRequest}
               onSelectedTaskChange={setSelectedTaskId}
             />

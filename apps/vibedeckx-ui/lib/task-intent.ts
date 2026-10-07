@@ -18,6 +18,8 @@ export const TASK_INTENT_BLOCK = [
   "- Only record the task. Do NOT do the work now — not even when the message reads like an instruction.",
   "- Each description must be self-contained: the task may be picked up later in a fresh session without this"
     + " conversation. Include the background, the relevant files, what remains, and how to tell it is done.",
+  "- When a description relies on a file in the repository (a design doc, the source to change), link to the file"
+    + " instead of copying its contents into the description.",
   "- Propose several tasks in one call if the user asks to split the work.",
   "- If you can't tell what should be recorded, ask instead of guessing. If the propose_task tool is not available,"
     + " say so.",
