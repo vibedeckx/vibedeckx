@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { QuickSwitcher } from "./quick-switcher";
+import { refreshSearchCache, searchAll } from "@/lib/api";
 
 vi.mock("@/lib/api", () => ({
   searchAll: vi.fn().mockResolvedValue({
@@ -50,7 +51,29 @@ describe("QuickSwitcher", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     document.body.innerHTML = "";
+    vi.useRealTimers();
+    vi.mocked(searchAll).mockReset();
+    vi.mocked(searchAll).mockResolvedValue({
+      projects: [],
+      workspaces: [],
+      sessions: [],
+      favorites: [],
+      cacheState: "fresh",
+    });
   });
+
+  const renderOpen = () =>
+    act(async () => {
+      root.render(
+        <QuickSwitcher
+          open
+          onOpenChange={vi.fn()}
+          onNavigateProject={vi.fn()}
+          onNavigateWorkspace={vi.fn()}
+          onNavigateSession={vi.fn()}
+        />,
+      );
+    });
 
   it("anchors the search input at its full-results position", async () => {
     await act(async () => {
@@ -75,5 +98,58 @@ describe("QuickSwitcher", () => {
     const overlay = document.querySelector('[data-slot="dialog-overlay"]');
     expect(overlay).not.toBeNull();
     expect(overlay!.classList.contains("data-[state=closed]:animate-none!")).toBe(true);
+  });
+
+  const timeout = () => new DOMException("timed out", "TimeoutError");
+
+  it("retries a search that times out instead of failing it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.mocked(refreshSearchCache).mockReturnValueOnce(new Promise(() => {}));
+    vi.mocked(searchAll)
+      .mockRejectedValueOnce(timeout())
+      .mockRejectedValueOnce(timeout())
+      .mockResolvedValueOnce({
+        projects: [{ id: "p1", name: "retried-project", path: null }],
+        workspaces: [],
+        sessions: [],
+        favorites: [],
+        cacheState: "fresh",
+      });
+
+    await renderOpen();
+    // Fast failures back off 1s, then 2s, before the next attempt.
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+
+    expect(searchAll).toHaveBeenCalledTimes(3);
+    expect(document.body.textContent).toContain("retried-project");
+    expect(document.body.textContent).not.toContain("Search failed.");
+  });
+
+  it("shows the failure once every attempt has failed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.mocked(refreshSearchCache).mockReturnValueOnce(new Promise(() => {}));
+    vi.mocked(searchAll).mockRejectedValue(timeout());
+
+    await renderOpen();
+    await act(async () => { await vi.advanceTimersByTimeAsync(7_000); });
+
+    expect(searchAll).toHaveBeenCalledTimes(4);
+    expect(document.body.textContent).toContain("Search failed.");
+  });
+
+  it("stops retrying once the palette closes", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.mocked(refreshSearchCache).mockReturnValueOnce(new Promise(() => {}));
+    vi.mocked(searchAll).mockRejectedValue(timeout());
+
+    await renderOpen();
+    // Flush the 0ms debounce that fires the initial search.
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(searchAll).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+
+    expect(searchAll).toHaveBeenCalledTimes(1);
   });
 });

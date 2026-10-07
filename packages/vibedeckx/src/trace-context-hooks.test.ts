@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import fastify, { type FastifyInstance } from "fastify";
-import { registerTraceContext } from "./trace-context-hooks.js";
+import { registerTraceContext, SLOW_REQUEST_MS } from "./trace-context-hooks.js";
 import { parseTraceparent } from "./trace-context.js";
 import { setupLogging, restoreConsole, shutdownLogging } from "./logger.js";
 
@@ -34,6 +34,11 @@ function buildServer(): FastifyInstance {
   // Returned, not thrown — the common shape for validation failures, and the
   // one that fires no onError hook.
   server.get("/bad", async (_req, reply) => reply.code(400).send({ error: "nope" }));
+  // Backdates the request start instead of sleeping, so the test stays fast.
+  server.get("/slow", async (req) => {
+    req.traceStartMs! -= SLOW_REQUEST_MS + 1000;
+    return { ok: true };
+  });
   server.get("/log", async (req) => {
     console.error(`handler-log ${(req.query as { tag?: string }).tag}`);
     return { ok: true };
@@ -197,6 +202,37 @@ describe("registerTraceContext", () => {
     await server.inject({ method: "GET", url: "/ok" });
     // Force a line so readLogLines has something to return rather than
     // polling for two seconds against an empty file.
+    console.error("marker");
+
+    const lines = await readLogLines(tmpDir);
+    expect(lines.find((l) => l.msg === "marker")).toBeDefined();
+    expect(lines.find((l) => l.msg === "request completed")).toBeUndefined();
+  });
+
+  it("promotes a slow success to warn", async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vdx-trace-"));
+    setupLogging({ dataDir: tmpDir, level: "info", crashHandlers: false });
+    server = buildServer();
+
+    const res = await server.inject({ method: "GET", url: "/slow" });
+    const traceId = parseTraceparent(res.headers.traceparent as string)?.traceId;
+
+    const line = (await readLogLines(tmpDir)).find(
+      (l) => l.msg === "request completed" && l.traceId === traceId,
+    );
+    expect(line, "no completion line for the slow request").toBeDefined();
+    expect(line?.level).toBe(40); // warn
+    expect(line?.slow).toBe(true);
+    expect(line?.statusCode).toBe(200);
+    expect(line?.ms as number).toBeGreaterThanOrEqual(SLOW_REQUEST_MS);
+  });
+
+  it("never counts a long-lived SSE stream as slow", async () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "vdx-trace-"));
+    setupLogging({ dataDir: tmpDir, level: "info", crashHandlers: false });
+    server = buildServer();
+
+    await server.inject({ method: "GET", url: "/slow", headers: { accept: "text/event-stream" } });
     console.error("marker");
 
     const lines = await readLogLines(tmpDir);

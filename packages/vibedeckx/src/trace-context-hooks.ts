@@ -1,3 +1,4 @@
+import type { IncomingHttpHeaders } from "node:http";
 import type { FastifyInstance } from "fastify";
 import { getLogger } from "./logger.js";
 import {
@@ -6,6 +7,12 @@ import {
   runWithTraceContext,
   type TraceContext,
 } from "./trace-context.js";
+
+export const SLOW_REQUEST_MS = 3000;
+
+function isLongLived(headers: IncomingHttpHeaders): boolean {
+  return headers.upgrade !== undefined || (headers.accept ?? "").includes("text/event-stream");
+}
 
 declare module "fastify" {
   interface FastifyRequest {
@@ -53,12 +60,17 @@ export function registerTraceContext(server: FastifyInstance): void {
   // rather than a throw — fires no onError, so without this a trace ID copied
   // from a failed response in devtools would match nothing at all. Successes
   // stay at debug, since per-request logging at info would drown real signal
-  // (which is why disableRequestLogging is on).
+  // (which is why disableRequestLogging is on). A slow success is promoted to
+  // warn too: when the browser saw a slow request, its absence from the log
+  // says the time went to the network, not the server. Long-lived streams
+  // (WebSocket upgrades, SSE) are slow by design and never count.
   server.addHook("onResponse", (req, reply, done) => {
     const ctx = req.traceContext;
     if (ctx) {
       const status = reply.statusCode;
-      const level = status >= 500 ? "error" : status >= 400 ? "warn" : "debug";
+      const ms = req.traceStartMs ? Date.now() - req.traceStartMs : undefined;
+      const slow = ms !== undefined && ms >= SLOW_REQUEST_MS && !isLongLived(req.headers);
+      const level = status >= 500 ? "error" : status >= 400 || slow ? "warn" : "debug";
       getLogger()[level](
         {
           method: req.method,
@@ -67,7 +79,8 @@ export function registerTraceContext(server: FastifyInstance): void {
           // string, where WebSocket/SSE auth material rides.
           route: req.routeOptions?.url,
           statusCode: status,
-          ms: req.traceStartMs ? Date.now() - req.traceStartMs : undefined,
+          ms,
+          ...(slow ? { slow: true } : {}),
           continuedTrace: ctx.continued,
         },
         "request completed",

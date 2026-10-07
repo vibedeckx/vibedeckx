@@ -17,6 +17,22 @@ import { useGlobalEventStream } from "@/hooks/global-event-stream";
 import { ProjectGlyph } from "@/components/project/project-glyph";
 import { GitBranch, Loader2, MessageSquare, Star } from "lucide-react";
 
+// /api/search is cache-only and normally answers in well under 100ms, so a
+// request still pending after 5s is stuck in the network, not queued behind
+// work. Each retry doubles its timeout (~75s in total), riding out a network
+// stall while still accepting a slow-but-alive response. A fast failure
+// (offline, 5xx) waits out a doubling backoff instead of burning every attempt
+// at once.
+const SEARCH_TIMEOUTS_MS = [5_000, 10_000, 20_000, 40_000];
+const SEARCH_RETRY_BACKOFF_MS = 1_000;
+
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+  });
+}
+
 export interface QuickSwitcherProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -86,15 +102,28 @@ export function QuickSwitcher({
     const controller = new AbortController();
     abortRef.current = controller;
     const gen = q === "" ? beginEmptyQuerySearch() : null;
-    try {
-      const res = await searchAll(q, { signal: controller.signal });
-      if (!controller.signal.aborted) {
-        if (gen !== null) commitEmptyQueryResults(gen, res);
-        setResults(res);
-        setError(false);
+    for (let attempt = 0; ; attempt++) {
+      const startedAt = Date.now();
+      try {
+        const res = await searchAll(q, {
+          signal: AbortSignal.any([controller.signal, AbortSignal.timeout(SEARCH_TIMEOUTS_MS[attempt])]),
+        });
+        if (!controller.signal.aborted) {
+          if (gen !== null) commitEmptyQueryResults(gen, res);
+          setResults(res);
+          setError(false);
+        }
+        return;
+      } catch {
+        if (controller.signal.aborted) return;
+        if (attempt === SEARCH_TIMEOUTS_MS.length - 1) {
+          setError(true);
+          return;
+        }
+        const backoff = SEARCH_RETRY_BACKOFF_MS * 2 ** attempt - (Date.now() - startedAt);
+        if (backoff > 0) await sleep(backoff, controller.signal);
+        if (controller.signal.aborted) return;
       }
-    } catch {
-      if (!controller.signal.aborted) setError(true);
     }
   }, []);
 
