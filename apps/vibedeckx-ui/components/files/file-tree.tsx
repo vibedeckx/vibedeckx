@@ -181,7 +181,7 @@ function FileTreeNode({
             if (files.length) onUploadFiles(nodePath, files);
           }}
         >
-          <div className="flex items-center gap-1 min-w-0 flex-1">
+          <div className="flex items-center gap-1 w-0 min-w-0 flex-1">
             {isUploading || isLoading ? (
               <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
             ) : (
@@ -294,7 +294,7 @@ function FileRow({
         if (files.length) onUploadFiles(parentPath, files);
       }}
     >
-      <div className="flex items-center gap-1 min-w-0 flex-1">
+      <div className="flex items-center gap-1 w-0 min-w-0 flex-1">
         {renderFileIcon(entry.name, cn("h-4 w-4 shrink-0 text-muted-foreground", isHidden && "opacity-60"))}
         <span className={cn("truncate", isHidden && "text-muted-foreground")}>{entry.name}</span>
       </div>
