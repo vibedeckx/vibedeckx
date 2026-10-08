@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { ChevronRight, ChevronDown, Folder, FolderOpen, File, FileCode, FileText, Loader2, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -28,11 +28,11 @@ const TEXT_EXTENSIONS = new Set([
   "md", "txt", "log", "csv", "env", "gitignore", "dockerignore", "editorconfig",
 ]);
 
-function getFileIcon(name: string) {
+function renderFileIcon(name: string, className: string) {
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
-  if (CODE_EXTENSIONS.has(ext)) return FileCode;
-  if (TEXT_EXTENSIONS.has(ext)) return FileText;
-  return File;
+  if (CODE_EXTENSIONS.has(ext)) return <FileCode className={className} />;
+  if (TEXT_EXTENSIONS.has(ext)) return <FileText className={className} />;
+  return <File className={className} />;
 }
 
 function formatFileSize(bytes: number): string {
@@ -116,6 +116,7 @@ interface FileTreeNodeProps {
   directoryContents: Map<string, BrowseEntry[]>;
   loadingDirs: Set<string>;
   selectedFile: string | null;
+  revealNonce: number;
   uploadingDirs: Set<string>;
   dragOverPath: string | null;
   deletingPaths: Set<string>;
@@ -134,6 +135,7 @@ function FileTreeNode({
   directoryContents,
   loadingDirs,
   selectedFile,
+  revealNonce,
   uploadingDirs,
   dragOverPath,
   deletingPaths,
@@ -207,6 +209,7 @@ function FileTreeNode({
                   directoryContents={directoryContents}
                   loadingDirs={loadingDirs}
                   selectedFile={selectedFile}
+                  revealNonce={revealNonce}
                   uploadingDirs={uploadingDirs}
                   dragOverPath={dragOverPath}
                   deletingPaths={deletingPaths}
@@ -224,13 +227,52 @@ function FileTreeNode({
     );
   }
 
-  const FileIcon = getFileIcon(entry.name);
-  const isSelected = selectedFile === nodePath;
+  return (
+    <FileRow
+      entry={entry}
+      path={nodePath}
+      depth={depth}
+      isSelected={selectedFile === nodePath}
+      revealNonce={revealNonce}
+      deletingPaths={deletingPaths}
+      onSelectFile={onSelectFile}
+      onUploadFiles={onUploadFiles}
+      onSetDragOverPath={onSetDragOverPath}
+      onRequestDelete={onRequestDelete}
+    />
+  );
+}
+
+function FileRow({
+  entry,
+  path: nodePath,
+  depth,
+  isSelected,
+  revealNonce,
+  deletingPaths,
+  onSelectFile,
+  onUploadFiles,
+  onSetDragOverPath,
+  onRequestDelete,
+}: Pick<FileTreeNodeProps, "entry" | "path" | "depth" | "revealNonce" | "deletingPaths" | "onSelectFile" | "onUploadFiles" | "onSetDragOverPath" | "onRequestDelete"> & {
+  isSelected: boolean;
+}) {
+  const rowRef = useRef<HTMLDivElement>(null);
+  // Bring the open file into view once its row exists — it may only appear
+  // after its folders were auto-expanded. "nearest" leaves an already-visible
+  // row (e.g. one just clicked) where it is. revealNonce re-runs it when the
+  // file already open is opened again after the user scrolled away.
+  useEffect(() => {
+    if (isSelected) rowRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [isSelected, revealNonce]);
+
+  const isHidden = entry.name.startsWith(".");
   const parentPath = nodePath.includes("/") ? nodePath.slice(0, nodePath.lastIndexOf("/")) : "";
   const isDeleting = deletingPaths.has(nodePath);
 
   return (
     <div
+      ref={rowRef}
       className={cn(
         "group flex items-center w-full px-2 py-2 rounded-sm transition-colors cursor-pointer",
         isSelected ? "bg-accent text-accent-foreground" : "hover:bg-accent/50",
@@ -253,7 +295,7 @@ function FileTreeNode({
       }}
     >
       <div className="flex items-center gap-1 min-w-0 flex-1">
-        <FileIcon className={cn("h-4 w-4 shrink-0 text-muted-foreground", isHidden && "opacity-60")} />
+        {renderFileIcon(entry.name, cn("h-4 w-4 shrink-0 text-muted-foreground", isHidden && "opacity-60"))}
         <span className={cn("truncate", isHidden && "text-muted-foreground")}>{entry.name}</span>
       </div>
       <div className="shrink-0 flex items-center gap-2 ml-1">
@@ -278,6 +320,7 @@ interface FileTreeProps {
   directoryContents: Map<string, BrowseEntry[]>;
   loadingDirs: Set<string>;
   selectedFile: string | null;
+  revealNonce: number;
   uploadingDirs: Set<string>;
   rootLoading: boolean;
   deletingPaths: Set<string>;
@@ -293,6 +336,7 @@ export function FileTree({
   directoryContents,
   loadingDirs,
   selectedFile,
+  revealNonce,
   uploadingDirs,
   rootLoading,
   deletingPaths,
@@ -371,6 +415,7 @@ export function FileTree({
                   directoryContents={directoryContents}
                   loadingDirs={loadingDirs}
                   selectedFile={selectedFile}
+                  revealNonce={revealNonce}
                   uploadingDirs={uploadingDirs}
                   dragOverPath={dragOverPath}
                   deletingPaths={deletingPaths}

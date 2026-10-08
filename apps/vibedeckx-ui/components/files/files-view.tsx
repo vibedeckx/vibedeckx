@@ -60,6 +60,7 @@ export function FilesView({ projectId, project, selectedBranch, navRequest, sess
     uploadingDirs,
     deletingPaths,
     jumpTarget,
+    revealNonce,
     canGoBack,
     canGoForward,
     fetchRoot,
@@ -296,6 +297,7 @@ export function FilesView({ projectId, project, selectedBranch, navRequest, sess
                   directoryContents={directoryContents}
                   loadingDirs={loadingDirs}
                   selectedFile={selectedFile}
+                  revealNonce={revealNonce}
                   uploadingDirs={uploadingDirs}
                   rootLoading={rootLoading}
                   deletingPaths={deletingPaths}

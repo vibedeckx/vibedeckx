@@ -242,4 +242,56 @@ describe("useFileBrowser workspace scoping", () => {
     expect(latest.selectedFile).toBe("target.txt");
     expect(browseProjectDirectory).toHaveBeenCalledTimes(1);
   });
+
+  it("expands the open file's folders and redoes it after a refresh", async () => {
+    browseProjectDirectory.mockReset(); // drop listings queued but never consumed by earlier tests
+    browseProjectDirectory.mockResolvedValueOnce({ items: [entry("src")] });
+    await act(async () => { root.render(<Probe branch="a" />); });
+
+    browseProjectDirectory.mockImplementation(async (_p: string, dir?: string) => ({
+      items: dir === "src" ? [entry("lib")] : dir === "src/lib" ? [entry("x.ts")] : [entry("src")],
+    }));
+    getFileContent.mockResolvedValue(content("X"));
+    await act(async () => { await latest.navigate("src/lib/x.ts"); });
+    await act(async () => {}); // the reveal's listings, fetched from an effect
+    expect([...latest.expandedDirs].sort()).toEqual(["src", "src/lib"]);
+    expect(latest.directoryContents.get("src/lib")?.map((e) => e.name)).toEqual(["x.ts"]);
+    expect(browseProjectDirectory).toHaveBeenCalledTimes(3);
+
+    // Refresh rebuilds the tree collapsed; the open file is revealed again.
+    await act(async () => { await latest.refresh(); });
+    await act(async () => {});
+    expect([...latest.expandedDirs].sort()).toEqual(["src", "src/lib"]);
+    expect(latest.directoryContents.has("src/lib")).toBe(true);
+  });
+
+  it("leaves the tree alone for a file outside the checkout", async () => {
+    browseProjectDirectory.mockReset();
+    browseProjectDirectory.mockResolvedValueOnce({ items: [entry("src")] });
+    await act(async () => { root.render(<Probe branch="a" />); });
+    getFileContent.mockResolvedValue(content("T"));
+    await act(async () => { await latest.navigate("/tmp/out/report.md"); });
+    expect(latest.expandedDirs.size).toBe(0);
+    expect(browseProjectDirectory).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-reveals the file already open when it is opened again, keeping other open folders", async () => {
+    browseProjectDirectory.mockReset();
+    browseProjectDirectory.mockImplementation(async (_p: string, dir?: string) => ({
+      items: dir === "src" ? [entry("lib")] : dir === "src/lib" ? [entry("x.ts")] : [entry("src"), entry("docs")],
+    }));
+    getFileContent.mockResolvedValue(content("X"));
+    await act(async () => { root.render(<Probe branch="a" />); });
+    await act(async () => { await latest.navigate("src/lib/x.ts"); });
+    await act(async () => {});
+    await act(async () => { await latest.toggleDirectory("docs"); });
+    await act(async () => { await latest.toggleDirectory("src"); }); // user collapses it
+    expect(latest.expandedDirs.has("src")).toBe(false);
+
+    const before = latest.revealNonce;
+    await act(async () => { await latest.navigate("src/lib/x.ts"); }); // e.g. a search hit
+    await act(async () => {});
+    expect([...latest.expandedDirs].sort()).toEqual(["docs", "src", "src/lib"]);
+    expect(latest.revealNonce).toBeGreaterThan(before);
+  });
 });

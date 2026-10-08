@@ -18,6 +18,7 @@ vi.mock("@/hooks/use-file-browser", () => ({
     uploadingDirs: new Set(),
     deletingPaths: new Set(),
     jumpTarget: null,
+    revealNonce: 0,
     canGoBack: false,
     canGoForward: false,
     fetchRoot: () => {},
