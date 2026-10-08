@@ -1,4 +1,5 @@
 import { getHighlighterFor, THEMES, type SupportedLanguage } from "@/lib/shiki";
+import type { GrammarState } from "shiki/core";
 
 // What kind of token sits under a click. Only "code" tokens are real symbols
 // worth a definition/reference lookup; the rest are noise the popover should
@@ -37,35 +38,58 @@ function classifyScopes(scopes: string[]): TokenKind {
   return "code";
 }
 
+// Lines tokenized per slice before yielding back to the event loop.
+const TOKENIZE_CHUNK_LINES = 200;
+
 // Tokenize a file with Shiki and classify each token by its scopes. This is the
 // shared foundation for symbol-only clicks (this module) and, later, code
 // folding. Theme is irrelevant to classification — scopes come from the grammar,
 // not the theme — so any theme works.
+//
+// Shiki is synchronous and slow on big files (seconds for ~100KB of TS), so the
+// file is tokenized in slices — the grammar state carries the context (an open
+// comment, an embedded <script>) across each boundary — yielding between them so
+// the page stays responsive. Abort `signal` to stop early (the file changed).
 export async function tokenizeFile(
   code: string,
-  language: SupportedLanguage
+  language: SupportedLanguage,
+  signal?: AbortSignal
 ): Promise<SymbolTokenIndex> {
   const highlighter = await getHighlighterFor(language);
-  const lines = highlighter.codeToTokensBase(code, {
-    lang: language,
-    theme: THEMES.light,
-    includeExplanation: "scopeName",
-  });
-
+  const sourceLines = code.split("\n");
   const index: SymbolTokenIndex = new Map();
-  lines.forEach((lineTokens, i) => {
-    let col = 0;
-    const classified: ClassifiedToken[] = [];
-    for (const token of lineTokens) {
-      const scopes = (token.explanation ?? []).flatMap((e) =>
-        e.scopes.map((s) => s.scopeName)
-      );
-      const end = col + token.content.length;
-      classified.push({ start: col, end, kind: classifyScopes(scopes) });
-      col = end;
-    }
-    index.set(i + 1, classified);
-  });
+  let grammarState: GrammarState | undefined;
+
+  for (let first = 0; first < sourceLines.length; first += TOKENIZE_CHUNK_LINES) {
+    if (first > 0) await new Promise((resolve) => setTimeout(resolve, 0));
+    // Checked before every slice — the first included, since the request may
+    // have been aborted while the grammar was loading.
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    const lines = highlighter.codeToTokensBase(
+      sourceLines.slice(first, first + TOKENIZE_CHUNK_LINES).join("\n"),
+      {
+        lang: language,
+        theme: THEMES.light,
+        includeExplanation: "scopeName",
+        grammarState,
+      }
+    );
+    grammarState = highlighter.getLastGrammarState(lines);
+
+    lines.forEach((lineTokens, i) => {
+      let col = 0;
+      const classified: ClassifiedToken[] = [];
+      for (const token of lineTokens) {
+        const scopes = (token.explanation ?? []).flatMap((e) =>
+          e.scopes.map((s) => s.scopeName)
+        );
+        const end = col + token.content.length;
+        classified.push({ start: col, end, kind: classifyScopes(scopes) });
+        col = end;
+      }
+      index.set(first + i + 1, classified);
+    });
+  }
   return index;
 }
 

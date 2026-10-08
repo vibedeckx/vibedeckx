@@ -14,6 +14,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import type { ShikiTransformer } from "shiki/core";
 import { getHighlighterFor, THEMES, type SupportedLanguage } from "@/lib/shiki";
@@ -90,11 +91,28 @@ function makeFoldGutterTransformer(foldStartLines: Set<number>): ShikiTransforme
   };
 }
 
+// Whether the app is in dark mode, read off the `dark` class on <html>. The
+// pre-hydration script sets it before first paint, so this is right from the
+// first render (useTheme's resolvedTheme starts at "light" until its effect runs,
+// which would highlight a dark-mode file twice).
+function subscribeDarkClass(onChange: () => void) {
+  const observer = new MutationObserver(onChange);
+  observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+  return () => observer.disconnect();
+}
+const isDarkClass = () => document.documentElement.classList.contains("dark");
+const serverIsDark = () => false;
+
+// Highlight in the active theme only. Shiki runs on the main thread and each
+// theme is a full re-tokenization (its dual-theme output costs the same as two
+// calls), so a big file paid double for a copy nobody sees; a theme toggle
+// re-highlights instead.
 export async function highlightCode(
   code: string,
   language: SupportedLanguage,
   showLineNumbers = false,
-  foldStartLines?: Set<number>
+  foldStartLines?: Set<number>,
+  dark = false
 ) {
   // Each transformer unshifts its cell to the front, so the LAST one added ends
   // up leftmost. Order the result [line number][fold chevron][code] (VSCode-like,
@@ -107,10 +125,11 @@ export async function highlightCode(
   if (showLineNumbers) transformers.push(lineNumberTransformer);
 
   const highlighter = await getHighlighterFor(language);
-  return [
-    highlighter.codeToHtml(code, { lang: language, theme: THEMES.light, transformers }),
-    highlighter.codeToHtml(code, { lang: language, theme: THEMES.dark, transformers }),
-  ];
+  return highlighter.codeToHtml(code, {
+    lang: language,
+    theme: dark ? THEMES.dark : THEMES.light,
+    transformers,
+  });
 }
 
 // Imperative controls for the fold gutter, so a sibling (the Files header's
@@ -136,8 +155,7 @@ export const CodeBlock = forwardRef<CodeBlockHandle, CodeBlockProps>(
     ref
   ) {
   const [html, setHtml] = useState<string>("");
-  const [darkHtml, setDarkHtml] = useState<string>("");
-  const mounted = useRef(false);
+  const dark = useSyncExternalStore(subscribeDarkClass, isDarkClass, serverIsDark);
   const rootRef = useRef<HTMLDivElement>(null);
 
   // Foldable regions for this file and the set of collapsed header lines. Both
@@ -171,26 +189,25 @@ export const CodeBlock = forwardRef<CodeBlockHandle, CodeBlockProps>(
     [foldRanges]
   );
 
+  // Per-run cancel flag: a superseded request (theme toggled or code changed
+  // mid-highlight) must not land after, or instead of, the current one.
   useEffect(() => {
-    highlightCode(code, language, showLineNumbers, foldStartLines).then(
-      ([light, dark]) => {
-        if (!mounted.current) {
-          setHtml(light);
-          setDarkHtml(dark);
-          mounted.current = true;
-        }
+    let cancelled = false;
+    highlightCode(code, language, showLineNumbers, foldStartLines, dark).then(
+      (result) => {
+        if (!cancelled) setHtml(result);
       }
     );
 
     return () => {
-      mounted.current = false;
+      cancelled = true;
     };
-  }, [code, language, showLineNumbers, foldStartLines]);
+  }, [code, language, showLineNumbers, foldStartLines, dark]);
 
   // Apply the collapse state to the live DOM: hide the lines inside each
   // collapsed region and tag the header line so CSS can flip its chevron and
   // append a "⋯" placeholder. Re-runs after every re-highlight (the HTML string
-  // is rebuilt) and on every toggle. Both light/dark copies are addressed.
+  // is rebuilt) and on every toggle.
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
@@ -206,7 +223,7 @@ export const CodeBlock = forwardRef<CodeBlockHandle, CodeBlockProps>(
       el.style.display = hidden.has(ln) ? "none" : "";
       el.classList.toggle("code-line-collapsed", collapsed.has(ln));
     }
-  }, [collapsed, foldRanges, html, darkHtml]);
+  }, [collapsed, foldRanges, html]);
 
   // Toggle a region when its chevron is clicked. A native (capture-free) listener
   // on the root lets us stopPropagation before the symbol-nav onClick on an
@@ -234,18 +251,17 @@ export const CodeBlock = forwardRef<CodeBlockHandle, CodeBlockProps>(
   }, [foldable]);
 
   // Scroll the target line into view and briefly highlight it, once the
-  // highlighted HTML is in the DOM. CodeBlock renders two copies (light/dark);
-  // only one is visible, so scroll that one but tag both for theme toggles.
+  // highlighted HTML is in the DOM.
   useEffect(() => {
     if (scrollToLine == null) return;
     const root = rootRef.current;
-    if (!root || (!html && !darkHtml)) return;
+    if (!root || !html) return;
 
     const nodes = Array.from(
       root.querySelectorAll<HTMLElement>(`[data-line="${scrollToLine}"]`)
     );
     if (nodes.length === 0) return;
-    const visible = nodes.find((n) => n.offsetParent !== null) ?? nodes[0];
+    const visible = nodes[0];
 
     const raf = requestAnimationFrame(() => {
       visible.scrollIntoView({ block: "center", behavior: "auto" });
@@ -260,7 +276,7 @@ export const CodeBlock = forwardRef<CodeBlockHandle, CodeBlockProps>(
       window.clearTimeout(timer);
       nodes.forEach((n) => n.classList.remove("code-line-highlight"));
     };
-  }, [scrollToLine, scrollKey, html, darkHtml]);
+  }, [scrollToLine, scrollKey, html]);
 
   // Reset collapse state when a different file's code loads.
   if (code !== prevCode) {
@@ -301,14 +317,9 @@ export const CodeBlock = forwardRef<CodeBlockHandle, CodeBlockProps>(
       >
         <div className="relative">
           <div
-            className="overflow-auto dark:hidden [&>pre]:m-0 [&>pre]:bg-background! [&>pre]:p-4 [&>pre]:text-foreground! [&>pre]:text-sm [&_code]:grid [&_code]:font-mono [&_code]:text-sm"
+            className="overflow-auto [&>pre]:m-0 [&>pre]:bg-background! [&>pre]:p-4 [&>pre]:text-foreground! [&>pre]:text-sm [&_code]:grid [&_code]:font-mono [&_code]:text-sm"
             // biome-ignore lint/security/noDangerouslySetInnerHtml: "this is needed."
             dangerouslySetInnerHTML={{ __html: html }}
-          />
-          <div
-            className="hidden overflow-auto dark:block [&>pre]:m-0 [&>pre]:bg-background! [&>pre]:p-4 [&>pre]:text-foreground! [&>pre]:text-sm [&_code]:grid [&_code]:font-mono [&_code]:text-sm"
-            // biome-ignore lint/security/noDangerouslySetInnerHtml: "this is needed."
-            dangerouslySetInnerHTML={{ __html: darkHtml }}
           />
           {children && (
             <div className="absolute top-2 right-2 flex items-center gap-2">

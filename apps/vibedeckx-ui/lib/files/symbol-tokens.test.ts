@@ -51,4 +51,31 @@ describe("symbol-tokens", () => {
     const index = await tokenizeFile(source, "typescript");
     expect(classifyColumn(index, 999, 0)).toBeNull();
   });
+
+  it("carries grammar context across tokenizer slice boundaries", async () => {
+    // A block comment opened in the first 200-line slice and closed in the
+    // second: its inner lines must stay "comment", and code after it "code".
+    const lines = Array.from({ length: 199 }, (_, i) => `const v${i} = ${i};`);
+    lines.push("/* opens here", "insideComment still", "*/ const afterComment = 1;");
+    const big = lines.join("\n");
+    const index = await tokenizeFile(big, "typescript");
+    expect(classifyColumn(index, 201, colOf(big, 201, "insideComment"))).toBe("comment");
+    expect(classifyColumn(index, 202, colOf(big, 202, "afterComment"))).toBe("code");
+  });
+
+  it("stops early when aborted", async () => {
+    const big = Array.from({ length: 1000 }, (_, i) => `const v${i} = ${i};`).join("\n");
+    const controller = new AbortController();
+    const pending = tokenizeFile(big, "typescript", controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toThrow(/Aborted/);
+  });
+
+  it("does not tokenize the first slice when aborted while the grammar loads", async () => {
+    // Shorter than one slice, so only the pre-first-slice check can stop it.
+    const controller = new AbortController();
+    const pending = tokenizeFile(source, "typescript", controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toThrow(/Aborted/);
+  });
 });

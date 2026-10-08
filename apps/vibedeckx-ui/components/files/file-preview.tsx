@@ -15,6 +15,7 @@ import {
   Code,
   Eye,
   ListCollapse,
+  Highlighter,
   ListTree,
   RotateCw,
 } from "lucide-react";
@@ -58,6 +59,12 @@ const IMAGE_EXTENSIONS = new Set([
   "svg",
 ]);
 const IMAGE_PREVIEW_MAX_SIZE = 10 * 1024 * 1024;
+
+// Above this many characters the source view starts as plain text (line
+// numbers, folding and jumps still work) with a button to highlight anyway.
+// Shiki runs synchronously on the main thread at roughly 20–45ms per KB (worst
+// on HTML with inline <script>), so a 128KB file froze the page for seconds.
+const SYNTAX_HIGHLIGHT_MAX_CHARS = 50_000;
 
 function isImage(filePath: string): boolean {
   const ext = filePath.split("/").pop()?.split(".").pop()?.toLowerCase() ?? "";
@@ -126,7 +133,8 @@ function rangeFromAnchor(anchor: LineColAnchor): Range | null {
   const els = Array.from(
     document.querySelectorAll<HTMLElement>(`[data-line="${CSS.escape(anchor.line)}"]`)
   );
-  // CodeBlock renders two copies (light/dark); resolve against the visible one.
+  // The query is document-wide and other CodeBlocks (e.g. a hidden tab's) also
+  // tag their lines; resolve against the visible one.
   const lineEl = els.find((el) => el.offsetParent !== null) ?? els[0];
   if (!lineEl) return null;
   const startPt = charToPoint(lineEl, anchor.start);
@@ -321,6 +329,7 @@ export function FilePreview({
   );
   const [viewMode, setViewMode] = useState<"rendered" | "source">("rendered");
   const [htmlReloadKey, setHtmlReloadKey] = useState(0);
+  const [highlightLarge, setHighlightLarge] = useState(false);
   const [prevFilePath, setPrevFilePath] = useState(filePath);
   const [symbolNav, setSymbolNav] = useState<{
     symbol: string;
@@ -452,30 +461,37 @@ export function FilePreview({
 
   // Build the token scope index for the open file (source preview only). Clears
   // immediately on file change so a stale index can't gate the next file, then
-  // fills in asynchronously once Shiki tokenizes.
+  // fills in asynchronously once Shiki tokenizes. Skipped while a Markdown/HTML
+  // file is shown rendered: Shiki runs on the main thread, and a big inline
+  // <script> costs seconds to tokenize for an index nothing can use.
+  const sourceVisible =
+    !!filePath && (viewMode === "source" || !(isMarkdown(filePath) || isHtml(filePath)));
+  const largeSource = (fileContent?.content?.length ?? 0) > SYNTAX_HIGHLIGHT_MAX_CHARS;
+  // A plain-text view has no scopes to classify, so the index is skipped too.
+  const plainSource = largeSource && !highlightLarge;
   useEffect(() => {
     tokenIndexRef.current = null;
     const content = fileContent?.content;
     if (
       !filePath ||
+      !sourceVisible ||
+      plainSource ||
       content == null ||
       fileContent?.binary ||
       fileContent?.tooLarge
     ) {
       return;
     }
-    let cancelled = false;
-    tokenizeFile(content, getLanguage(filePath))
+    const controller = new AbortController();
+    tokenizeFile(content, getLanguage(filePath), controller.signal)
       .then((idx) => {
-        if (!cancelled) tokenIndexRef.current = idx;
+        if (!controller.signal.aborted) tokenIndexRef.current = idx;
       })
       .catch(() => {
-        // Leave the gate open (every word clickable) on failure.
+        // Leave the gate open (every word clickable) on failure or abort.
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [filePath, fileContent]);
+    return () => controller.abort();
+  }, [filePath, fileContent, sourceVisible, plainSource]);
   const markdownRef = useRef<HTMLDivElement>(null);
   const realignCleanupRef = useRef<(() => void) | null>(null);
 
@@ -644,6 +660,7 @@ export function FilePreview({
   if (filePath !== prevFilePath) {
     setPrevFilePath(filePath);
     setViewMode("rendered");
+    setHighlightLarge(false);
     setSymbolNav(null);
   }
 
@@ -716,6 +733,9 @@ export function FilePreview({
           <span className="text-xs text-muted-foreground shrink-0">
             {formatSize(fileContent.size)}
           </span>
+          {showingCode && plainSource && (
+            <span className="text-xs text-muted-foreground shrink-0">· plain text</span>
+          )}
           {sourceLabel && (
             <span className="text-xs text-muted-foreground shrink-0">
               on <span className="text-foreground">{sourceLabel}</span>
@@ -743,6 +763,21 @@ export function FilePreview({
               title={viewMode === "rendered" ? "View source" : "View rendered"}
             >
               {viewMode === "rendered" ? <Code className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            </Button>
+          )}
+          {showingCode && largeSource && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className={cn("h-7 w-7", highlightLarge && "text-foreground bg-accent")}
+              onClick={() => setHighlightLarge((v) => !v)}
+              title={
+                highlightLarge
+                  ? "Show as plain text"
+                  : "Highlight syntax (large file, may pause briefly)"
+              }
+            >
+              <Highlighter className="h-3.5 w-3.5" />
             </Button>
           )}
           {showingCode && (
@@ -841,7 +876,7 @@ export function FilePreview({
             <CodeBlock
               ref={codeBlockRef}
               code={fileContent.content}
-              language={getLanguage(filePath)}
+              language={plainSource ? "text" : getLanguage(filePath)}
               showLineNumbers
               foldable
               scrollToLine={scrollToLine}
