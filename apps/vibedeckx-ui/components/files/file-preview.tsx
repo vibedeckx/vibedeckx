@@ -41,6 +41,7 @@ import {
   tokenizeFile,
   type SymbolTokenIndex,
 } from "@/lib/files/symbol-tokens";
+import { beginConfinedSelection, caretFromPoint } from "@/lib/files/confined-selection";
 
 // Raster image extensions previewed inline (when the backend flags the file
 // binary). Larger than this cap, the bytes aren't fetched — a download card is
@@ -149,25 +150,9 @@ function wordFromPoint(
   y: number,
   index?: SymbolTokenIndex | null
 ): { word: string; anchor: LineColAnchor } | null {
-  const doc = document as Document & {
-    caretRangeFromPoint?: (x: number, y: number) => Range | null;
-    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
-  };
-  let node: Node | null = null;
-  let offset = 0;
-  if (doc.caretRangeFromPoint) {
-    const r = doc.caretRangeFromPoint(x, y);
-    if (r) {
-      node = r.startContainer;
-      offset = r.startOffset;
-    }
-  } else if (doc.caretPositionFromPoint) {
-    const p = doc.caretPositionFromPoint(x, y);
-    if (p) {
-      node = p.offsetNode;
-      offset = p.offset;
-    }
-  }
+  const caret = caretFromPoint(x, y);
+  const node = caret?.node ?? null;
+  const offset = caret?.offset ?? 0;
   if (!node || node.nodeType !== Node.TEXT_NODE) return null;
   const text = node.textContent ?? "";
   let start = offset;
@@ -354,6 +339,11 @@ export function FilePreview({
   const tokenIndexRef = useRef<SymbolTokenIndex | null>(null);
   const codeBlockRef = useRef<CodeBlockHandle>(null);
 
+  // The scroll container (the overflow-auto content div below). Capturing and
+  // restoring scrollTop here covers both source code and rendered markdown — the
+  // CodeBlock's inner divs auto-size to content, so this is the only scroller.
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+
   // Mirror the popover-open state into a ref so the click handler can read it
   // synchronously (its deps are empty). React flushes this effect before the next
   // discrete click, so it reflects the committed state by the time a click fires.
@@ -412,9 +402,23 @@ export function FilePreview({
   // whitespace (Shiki emits it as a leading space on the next token), so it would
   // visibly flash a too-wide selection before the click handler could correct it.
   // preventDefault here stops it; handleClick then lays down a tight word range.
-  // Only for the second click (detail 2) — single clicks/drags select normally.
+  // A single press starts a drag selection confined to the code (see
+  // confined-selection.ts) — natively, drifting over the header or file tree
+  // would drag the selection out of the file.
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
-    if (e.detail >= 2) e.preventDefault();
+    if (e.detail >= 2) {
+      e.preventDefault();
+      return;
+    }
+    if (e.button !== 0) return;
+    const target = e.target as Element;
+    // Fold chevrons and the copy button keep their own click behavior.
+    if (!target.closest("pre") || target.closest("[data-fold-start], button")) return;
+    const code = Array.from(e.currentTarget.querySelectorAll("pre code")).find(
+      (el) => (el as HTMLElement).offsetParent !== null
+    );
+    const scroller = scrollContainerRef.current;
+    if (code && scroller) beginConfinedSelection(e.nativeEvent, code, scroller);
   }, []);
 
   // Apply the symbol affordance after the popover mounts (the re-render swaps the
@@ -516,10 +520,6 @@ export function FilePreview({
   // Tear down a pending re-alignment if the preview unmounts mid-window.
   useEffect(() => () => realignCleanupRef.current?.(), []);
 
-  // The scroll container (the overflow-auto content div below). Capturing and
-  // restoring scrollTop here covers both source code and rendered markdown — the
-  // CodeBlock's inner divs auto-size to content, so this is the only scroller.
-  const scrollContainerRef = useRef<HTMLDivElement>(null);
   // True while a restore is programmatically driving scrollTop, so partial
   // (pre-render) offsets don't get reported back and overwrite the saved value.
   const restoringScrollRef = useRef(false);
