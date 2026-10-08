@@ -16,6 +16,7 @@ import {
   Eye,
   ListCollapse,
   ListTree,
+  RotateCw,
 } from "lucide-react";
 import rehypeSlug from "rehype-slug";
 import { defaultRehypePlugins } from "streamdown";
@@ -34,6 +35,7 @@ import { remoteServerIdOf } from "@/lib/remote-session-id";
 import type { SupportedLanguage } from "@/lib/shiki";
 import { SymbolNavPopover } from "./symbol-nav-popover";
 import { ImagePreview } from "./image-preview";
+import { HtmlPreview } from "./html-preview";
 import {
   classifyColumn,
   tokenizeFile,
@@ -233,6 +235,7 @@ const EXTENSION_LANGUAGE_MAP: Record<string, SupportedLanguage> = {
   css: "css",
   scss: "scss",
   html: "html",
+  htm: "html",
   vue: "vue",
   svelte: "svelte",
   php: "php",
@@ -272,6 +275,10 @@ function getLanguage(filePath: string): SupportedLanguage {
 function isMarkdown(filePath: string): boolean {
   const lang = getLanguage(filePath);
   return lang === "markdown" || lang === "mdx";
+}
+
+function isHtml(filePath: string): boolean {
+  return getLanguage(filePath) === "html";
 }
 
 function formatSize(bytes: number): string {
@@ -328,6 +335,7 @@ export function FilePreview({
     fileServerId && fileServerId !== remoteServerIdOf(sessionId) ? fileServerId : null,
   );
   const [viewMode, setViewMode] = useState<"rendered" | "source">("rendered");
+  const [htmlReloadKey, setHtmlReloadKey] = useState(0);
   const [prevFilePath, setPrevFilePath] = useState(filePath);
   const [symbolNav, setSymbolNav] = useState<{
     symbol: string;
@@ -682,16 +690,21 @@ export function FilePreview({
     });
   };
 
-  // Markdown files with previewable content can toggle between rendered and source.
-  const canToggleMarkdown =
-    isMarkdown(filePath) && !fileContent.tooLarge && !fileContent.binary && !!fileContent.content;
+  // Markdown and HTML files with previewable content can toggle between rendered
+  // and source.
+  const hasTextContent = !fileContent.tooLarge && !fileContent.binary && !!fileContent.content;
+  const canToggleMarkdown = isMarkdown(filePath) && hasTextContent;
+  const canToggleHtml = isHtml(filePath) && hasTextContent;
+  const canToggleRendered = canToggleMarkdown || canToggleHtml;
   const showRendered = canToggleMarkdown && viewMode === "rendered";
+  const showHtml = canToggleHtml && viewMode === "rendered";
   // The foldable source CodeBlock is on screen (not rendered markdown, binary,
   // or an oversized file) — gate the Fold/Expand-all controls on this.
   const showingCode =
     !fileContent.tooLarge &&
     !fileContent.binary &&
     !showRendered &&
+    !showHtml &&
     fileContent.content !== null;
 
   return (
@@ -710,15 +723,26 @@ export function FilePreview({
           )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          {canToggleMarkdown && (
+          {showHtml && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={() => setHtmlReloadKey((k) => k + 1)}
+              title="Reload page"
+            >
+              <RotateCw className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {canToggleRendered && (
             <Button
               variant="ghost"
               size="icon"
               className="h-7 w-7"
               onClick={() => setViewMode((m) => (m === "rendered" ? "source" : "rendered"))}
-              title={showRendered ? "View source" : "View rendered"}
+              title={viewMode === "rendered" ? "View source" : "View rendered"}
             >
-              {showRendered ? <Code className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+              {viewMode === "rendered" ? <Code className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
             </Button>
           )}
           {showingCode && (
@@ -792,6 +816,8 @@ export function FilePreview({
               </Button>
             )}
           </div>
+        ) : showHtml ? (
+          <HtmlPreview html={fileContent.content ?? ""} title={filePath} reloadKey={htmlReloadKey} />
         ) : showRendered ? (
           <div
             className="p-4"
