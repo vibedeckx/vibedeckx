@@ -157,6 +157,11 @@ export const CodeBlock = forwardRef<CodeBlockHandle, CodeBlockProps>(
   const [html, setHtml] = useState<string>("");
   const dark = useSyncExternalStore(subscribeDarkClass, isDarkClass, serverIsDark);
   const rootRef = useRef<HTMLDivElement>(null);
+  // React 19 compares dangerouslySetInnerHTML by object identity, so a fresh
+  // `{ __html }` per render rewrites innerHTML on EVERY re-render — replacing
+  // the code's DOM and wiping any text selection in it (a parent re-rendering on
+  // mouse move was enough). A stable object keeps the DOM until the HTML changes.
+  const markup = useMemo(() => ({ __html: html }), [html]);
 
   // Foldable regions for this file and the set of collapsed header lines. Both
   // are no-ops unless `foldable`.
@@ -319,7 +324,7 @@ export const CodeBlock = forwardRef<CodeBlockHandle, CodeBlockProps>(
           <div
             className="overflow-auto [&>pre]:m-0 [&>pre]:bg-background! [&>pre]:p-4 [&>pre]:text-foreground! [&>pre]:text-sm [&_code]:grid [&_code]:font-mono [&_code]:text-sm"
             // biome-ignore lint/security/noDangerouslySetInnerHtml: "this is needed."
-            dangerouslySetInnerHTML={{ __html: html }}
+            dangerouslySetInnerHTML={markup}
           />
           {children && (
             <div className="absolute top-2 right-2 flex items-center gap-2">
