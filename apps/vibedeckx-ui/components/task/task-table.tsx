@@ -10,7 +10,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { TaskRow, PendingTaskRow, type PendingTask } from "./task-row";
-import { orderAsTree, subtaskProgress } from "./task-utils";
+import { orderAsTree } from "./task-utils";
 import { isEditableTarget } from "@/lib/editable-target";
 import { hasOpenOverlay } from "@/components/locate/focus-region";
 
@@ -88,7 +88,11 @@ export function TaskTable({ tasks, allTasks = tasks, onUpdate, onDelete, onArchi
   const progressById = useMemo(() => {
     const map = new Map<string, { done: number; total: number }>();
     for (const t of allTasks) {
-      if (t.parent_id && !map.has(t.parent_id)) map.set(t.parent_id, subtaskProgress(t.parent_id, allTasks));
+      if (!t.parent_id || t.archived_at !== null || t.status === "cancelled") continue;
+      const progress = map.get(t.parent_id) ?? { done: 0, total: 0 };
+      progress.total += 1;
+      if (t.status === "done") progress.done += 1;
+      map.set(t.parent_id, progress);
     }
     return map;
   }, [allTasks]);
