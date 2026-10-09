@@ -43,7 +43,7 @@ import { useTtsOwnedBy } from "@/lib/tts/tts-player";
 import { MessageRow } from "./message-row";
 import { VPasteChip, VFileCard, RemoteGrantMeta, ScheduleIntentMeta, TaskIntentMeta, splitVPasteMarkers, takeRemotesMarker, type VPasteSegment } from "./vpaste-chip";
 import { takeScheduleMarker } from "@/lib/schedule-intent";
-import { takeTaskMarker } from "@/lib/task-intent";
+import { stripTasksCreatedNote, takeTaskMarker } from "@/lib/task-intent";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
 interface AgentMessageProps {
@@ -147,12 +147,18 @@ function renderBody(message: AgentMessage, messageIndex: number, streaming: bool
   }
 }
 
-/** Take the `<vremotes>`, `<vschedule>` and `<vtask>` blocks out of user text for the header. */
-function takeHeaderBlocks(text: string): { text: string; remoteNames: string | null; scheduled: boolean; tasked: boolean } {
-  const remotes = takeRemotesMarker(text);
+/**
+ * Take the `<vremotes>`, `<vschedule>` and `<vtask>` blocks out of user text
+ * for the header, and drop the hidden `<vtasks-created>` note.
+ */
+function takeHeaderBlocks(text: string): {
+  text: string; remoteNames: string | null; scheduled: boolean; tasked: boolean; hadNote: boolean;
+} {
+  const note = stripTasksCreatedNote(text);
+  const remotes = takeRemotesMarker(note.text);
   const schedule = takeScheduleMarker(remotes.text);
   const task = takeTaskMarker(schedule.text);
-  return { text: task.text, remoteNames: remotes.names, scheduled: schedule.found, tasked: task.found };
+  return { text: task.text, remoteNames: remotes.names, scheduled: schedule.found, tasked: task.found, hadNote: note.found };
 }
 
 function renderTextWithVPaste(text: string) {
@@ -244,7 +250,7 @@ function UserMessage({
       if (taken.scheduled) scheduled = true;
       if (taken.tasked) tasked = true;
       // A part that was only a block leaves nothing to render.
-      const hadBlock = taken.remoteNames !== null || taken.scheduled || taken.tasked;
+      const hadBlock = taken.remoteNames !== null || taken.scheduled || taken.tasked || taken.hadNote;
       if (!hadBlock || taken.text.length > 0) body.push({ ...part, text: taken.text });
     }
   }

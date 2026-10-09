@@ -265,6 +265,10 @@ export interface Task {
   source_session_id: string | null;
   source_tool_use_id: string | null;
   source_item_index: number | null;
+  /** Parent task in the same project; null for a top-level task. */
+  parent_id: string | null;
+  /** When the source session's agent was told this task's id; null until then. */
+  source_reported_at: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -2122,7 +2126,10 @@ export interface Storage {
      * With `source`, idempotent on it: a proposal item that already has a task
      * returns that task (a different id than `id` tells the caller so).
      */
-    create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; source?: TaskSource | null }) => Promise<Task>;
+    create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; source?: TaskSource | null; parent_id?: string | null }) => Promise<Task>;
+    /** Tasks proposed from `sessionId` whose ids its agent hasn't been told yet, oldest first. */
+    listUnreportedBySourceSession: (sessionId: string) => Promise<Task[]>;
+    markSourceReported: (ids: string[]) => Promise<void>;
     /** Open (todo / in_progress), unarchived tasks proposed from `sessionId` — its retention holders. */
     listOpenIdsBySourceSession: (sessionId: string) => Promise<string[]>;
     getByProjectId: (projectId: string, opts?: { includeArchived?: boolean }) => Promise<Task[]>;
@@ -2131,9 +2138,10 @@ export interface Storage {
     /** Active overview tasks ordered by in-progress, urgent, then high priority. */
     listPriorityByProject: (projectId: string, limit: number) => Promise<Task[]>;
     getById: (id: string) => Promise<Task | undefined>;
-    update: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number }) => Promise<Task | undefined>;
+    update: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number; parent_id?: string | null }) => Promise<Task | undefined>;
     archive: (id: string) => Promise<Task | undefined>;
     unarchive: (id: string) => Promise<Task | undefined>;
+    /** Its sub-tasks become top-level rather than going with it. */
     delete: (id: string) => Promise<void>;
     reorder: (projectId: string, orderedIds: string[]) => Promise<void>;
     /**

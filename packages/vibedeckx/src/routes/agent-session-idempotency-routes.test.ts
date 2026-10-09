@@ -22,6 +22,8 @@ describe("path agent session preallocated identity", () => {
     const deliveries = new Map<string, { hash: string; status: "pending" | "sent"; token: string | null }>();
     const grants = new Map<string, string[]>();
     const remoteServers = new Map<string, Record<string, unknown>>();
+    /** Tasks confirmed from a session's proposals: [id, title, reported?]. */
+    const proposedTasks: { id: string; title: string; sessionId: string; reported: boolean }[] = [];
     const sendUserMessage = vi.fn(async () => {
       messages.push({ type: "user", content: "delivered" });
       return true;
@@ -75,6 +77,14 @@ describe("path agent session preallocated identity", () => {
       },
       remoteServers: {
         getById: async (id: string) => remoteServers.get(id),
+      },
+      tasks: {
+        listUnreportedBySourceSession: async (sessionId: string) => proposedTasks
+          .filter((t) => t.sessionId === sessionId && !t.reported)
+          .map((t) => ({ id: t.id, title: t.title, project_id: "path-project", parent_id: null })),
+        markSourceReported: async (ids: string[]) => {
+          for (const t of proposedTasks) if (ids.includes(t.id)) t.reported = true;
+        },
       },
       remoteSessionCreationIntents: { getByLocal: async () => undefined },
       remoteSessionMappings: { getByLocal: async () => undefined },
@@ -142,6 +152,9 @@ describe("path agent session preallocated identity", () => {
         grants.set(sessionId, [...(grants.get(sessionId) ?? []), id]);
       },
       grantsOf: async (sessionId: string) => grants.get(sessionId) ?? [],
+      proposeTask: (sessionId: string, id: string, title: string) => {
+        proposedTasks.push({ id, title, sessionId, reported: false });
+      },
       /** A machine the user owns but this session has not been granted. */
       knownRemote: (id: string, name: string, access: "off" | "read" | "exec") => {
         remoteServers.set(id, { id, name, cross_remote_access: access });
@@ -495,6 +508,66 @@ describe("path agent session preallocated identity", () => {
     expect(replay.statusCode).toBe(200);
     expect(replay.json()).toMatchObject({ replayed: true });
     expect(sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("tells the agent about tasks created from its proposals once, on the next delivered message", async () => {
+    const { sendUserMessage, proposeTask, projects } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    // The fake rows name a project the caller can see.
+    const [project] = projects.values();
+    projects.set("path-project", { ...project, id: "path-project" });
+    proposeTask("worker-id", "task-1", "Goal");
+
+    await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message", payload: { content: "next" } });
+    expect(sendUserMessage.mock.calls[0][1]).toMatch(/^next\n\n<vtasks-created [^>]*>\n<task id="task-1" title="Goal" \/>/);
+
+    await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message", payload: { content: "again" } });
+    expect(sendUserMessage.mock.calls[1][1]).toBe("again");
+  });
+
+  it("keeps the task note for the next message when delivery fails", async () => {
+    const { sendUserMessage, proposeTask, projects } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    const [project] = projects.values();
+    projects.set("path-project", { ...project, id: "path-project" });
+    proposeTask("worker-id", "task-1", "Goal");
+
+    sendUserMessage.mockResolvedValueOnce(false);
+    const failed = await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message", payload: { content: "lost" } });
+    expect(failed.statusCode).toBe(404);
+
+    await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message", payload: { content: "retry" } });
+    expect(sendUserMessage.mock.calls[1][1]).toContain('<task id="task-1" title="Goal" />');
+  });
+
+  it("does not spend the task note on a replay, which delivers nothing new", async () => {
+    const { sendUserMessage, proposeTask, projects } = makeApp();
+    await app.register(agentSessionRoutes);
+    await app.inject({
+      method: "POST", url: "/api/path/agent-sessions/new",
+      payload: { path: "/repo", sessionId: "worker-id" },
+    });
+    const [project] = projects.values();
+    projects.set("path-project", { ...project, id: "path-project" });
+
+    await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "One", idempotencyKey: "delivery-1" } });
+    proposeTask("worker-id", "task-1", "Goal");
+    const replay = await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message",
+      payload: { content: "One", idempotencyKey: "delivery-1" } });
+    expect(replay.json()).toMatchObject({ replayed: true });
+
+    await app.inject({ method: "POST", url: "/api/agent-sessions/worker-id/message", payload: { content: "Two" } });
+    expect(sendUserMessage).toHaveBeenCalledTimes(2);
+    expect(sendUserMessage.mock.calls[1][1]).toContain('<task id="task-1" title="Goal" />');
   });
 
   it("discards a newly-created session only while it is still empty", async () => {

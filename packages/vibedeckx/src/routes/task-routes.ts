@@ -15,6 +15,9 @@ const SOURCE_ITEM_INDEX_MAX = 100;
 
 interface SourceBody { session_id?: unknown; tool_use_id?: unknown; item_index?: unknown }
 
+/** Bounds the ancestor walk; far deeper than any tree a person keeps. */
+const PARENT_DEPTH_MAX = 64;
+
 const routes: FastifyPluginAsync = async (fastify) => {
   const applyHoldingChange = (
     taskId: string,
@@ -23,6 +26,25 @@ const routes: FastifyPluginAsync = async (fastify) => {
   ) => applyTaskChange(fastify, taskId, apply, revert);
   const holdFailed = (error: unknown) =>
     `Could not protect the source session from retention: ${error instanceof Error ? error.message : String(error)}`;
+
+  /**
+   * Error message when `parentId` can't parent `taskId` (null for a task not
+   * created yet): it must be an existing task in the same project, and not the
+   * task itself or one of its descendants.
+   */
+  const parentError = async (projectId: string, taskId: string | null, parentId: unknown): Promise<string | null> => {
+    if (parentId === null) return null;
+    if (!validSourceId(parentId)) return "Invalid parent_id";
+    let current: string | null = parentId;
+    for (let depth = 0; current !== null; depth++) {
+      if (current === taskId) return "A task can't be nested under itself or its own sub-task";
+      if (depth >= PARENT_DEPTH_MAX) return "Task nesting is too deep";
+      const ancestor = await fastify.storage.tasks.getById(current);
+      if (!ancestor || ancestor.project_id !== projectId) return "Parent task not found";
+      current = ancestor.parent_id;
+    }
+    return null;
+  };
 
   // List tasks for a project (ordered by position)
   fastify.get<{ Params: { projectId: string }; Querystring: { includeArchived?: string } }>(
@@ -72,6 +94,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Params: { projectId: string };
     Body: {
       title?: string; description: string; status?: string; priority?: string; assigned_branch?: string | null;
+      parent_id?: string | null;
       /** Provenance of an agent proposal (propose_task); makes create idempotent. */
       source?: SourceBody | null;
     };
@@ -88,6 +111,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (!description) {
       return reply.code(400).send({ error: "description is required" });
     }
+    const parent_id = req.body.parent_id ?? null;
+    const invalidParent = await parentError(req.params.projectId, null, parent_id);
+    if (invalidParent) return reply.code(400).send({ error: invalidParent });
 
     let source: TaskSource | null = null;
     if (req.body.source) {
@@ -140,6 +166,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       priority: priority as 'low' | 'medium' | 'high' | 'urgent' | undefined,
       assigned_branch,
       source,
+      parent_id,
     });
 
     // Same shape as the schedule proposal create: the source session must be
@@ -181,7 +208,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Update task
   fastify.put<{
     Params: { id: string };
-    Body: { title?: string; description?: string | null; status?: string; priority?: string; assigned_branch?: string | null; position?: number };
+    Body: { title?: string; description?: string | null; status?: string; priority?: string; assigned_branch?: string | null; position?: number; parent_id?: string | null };
   }>("/api/tasks/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -201,7 +228,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
       priority: req.body.priority as 'low' | 'medium' | 'high' | 'urgent' | undefined,
       assigned_branch: req.body.assigned_branch,
       position: req.body.position,
+      parent_id: req.body.parent_id,
     };
+    if (patch.parent_id !== undefined) {
+      const invalidParent = await parentError(existing.project_id, existing.id, patch.parent_id);
+      if (invalidParent) return reply.code(400).send({ error: invalidParent });
+    }
     let task: Task | undefined;
     try {
       task = await applyHoldingChange(

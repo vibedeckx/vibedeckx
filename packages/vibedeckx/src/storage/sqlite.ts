@@ -1053,6 +1053,18 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     db.exec("ALTER TABLE tasks ADD COLUMN source_item_index INTEGER");
   }
 
+  // Migration: task hierarchy (sub-tasks).
+  const taskParentInfo = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+  if (!taskParentInfo.some((col) => col.name === "parent_id")) {
+    db.exec("ALTER TABLE tasks ADD COLUMN parent_id TEXT DEFAULT NULL");
+  }
+  if (!taskParentInfo.some((col) => col.name === "source_reported_at")) {
+    db.exec("ALTER TABLE tasks ADD COLUMN source_reported_at INTEGER DEFAULT NULL");
+    // Tasks confirmed before this column existed count as reported: otherwise
+    // the next message in each old session would list all of them at once.
+    db.prepare("UPDATE tasks SET source_reported_at = ? WHERE source_session_id IS NOT NULL").run(Date.now());
+  }
+
   // Migration: rename worktree_path to branch in agent_sessions
   const sessionTableInfo = db.prepare("PRAGMA table_info(agent_sessions)").all() as { name: string }[];
   const hasWorktreePathColumn = sessionTableInfo.some((col) => col.name === "worktree_path");
@@ -2059,6 +2071,9 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_source
       ON tasks(source_session_id, source_tool_use_id, source_item_index)
       WHERE source_tool_use_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_tasks_parent
+      ON tasks(parent_id)
+      WHERE parent_id IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_tasks_project_archived_position_id
       ON tasks(project_id, archived_at, position ASC, id ASC);
     CREATE INDEX IF NOT EXISTS idx_tasks_project_archived_status_position_id

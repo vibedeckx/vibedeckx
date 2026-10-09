@@ -41,3 +41,17 @@ export function takeTaskMarker(text: string): { text: string; found: boolean } {
   const stripped = text.replace(new RegExp(VTASK_MARKER_RE.source, "g"), "");
   return stripped === text ? { text, found: false } : { text: stripped.trimEnd(), found: true };
 }
+
+/**
+ * The hub's `<vtasks-created>` note (packages/vibedeckx/src/tasks-created-context.ts):
+ * the ids of tasks created from this session's proposals, told to the agent
+ * once on the next user message. Context for the agent, not something the
+ * user wrote, so the transcript hides it entirely.
+ */
+export const VTASKS_CREATED_MARKER_RE = /<vtasks-created(?:\s[^>]*)?>[\s\S]*?<\/vtasks-created>/g;
+
+/** Drop the note from message text; `found` says whether it was there. */
+export function stripTasksCreatedNote(text: string): { text: string; found: boolean } {
+  const stripped = text.replace(new RegExp(VTASKS_CREATED_MARKER_RE.source, "g"), "");
+  return stripped === text ? { text, found: false } : { text: stripped.trimEnd(), found: true };
+}

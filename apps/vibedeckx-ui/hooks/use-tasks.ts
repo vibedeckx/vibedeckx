@@ -29,7 +29,7 @@ export function useTasks(projectId: string | null) {
   }, [fetchTasks]);
 
   const createTask = useCallback(
-    async (opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => {
+    async (opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; parent_id?: string | null }) => {
       if (!projectId) return null;
 
       try {
@@ -45,7 +45,7 @@ export function useTasks(projectId: string | null) {
   );
 
   const updateTask = useCallback(
-    async (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => {
+    async (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; parent_id?: string | null }) => {
       // Optimistic update
       const previousTasks = tasks;
       setTasks((prev) =>

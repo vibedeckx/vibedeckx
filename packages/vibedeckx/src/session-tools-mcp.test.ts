@@ -96,6 +96,8 @@ describe("parseProposeTaskArgs", () => {
     expect(parseProposeTaskArgs({ tasks: [{ title: "x" }] }).ok).toBe(false);
     expect(parseProposeTaskArgs({ tasks: ["x"] }).ok).toBe(false);
     expect(parseProposeTaskArgs({ tasks: [{ ...item, priority: "critical" }] }).ok).toBe(false);
+    expect(parseProposeTaskArgs({ tasks: [item], parent_task_id: 42 }).ok).toBe(false);
+    expect(parseProposeTaskArgs({ tasks: [item], parent_task_id: "task-1" }).ok).toBe(true);
   });
 
   it("caps field lengths", () => {

@@ -54,3 +54,63 @@ export function descriptionPreview(description: string, max = 80): string {
   const text = description.replace(MD_LINK, "$1");
   return text.length > max ? text.slice(0, max) + "..." : text;
 }
+
+/** `task` and every task nested under it — what it can't be moved beneath. */
+export function selfAndDescendantIds(taskId: string, tasks: Pick<Task, "id" | "parent_id">[]): Set<string> {
+  const ids = new Set([taskId]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const t of tasks) {
+      if (t.parent_id && ids.has(t.parent_id) && !ids.has(t.id)) {
+        ids.add(t.id);
+        grew = true;
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * Tasks ordered as a tree: each parent followed by its sub-tasks, siblings in
+ * the input order, with their nesting depth. A task whose parent isn't in the
+ * list (filtered out, archived, missing) is shown at the top level.
+ */
+export function orderAsTree<T extends Pick<Task, "id" | "parent_id">>(tasks: T[]): { task: T; depth: number }[] {
+  const present = new Set(tasks.map((t) => t.id));
+  const children = new Map<string, T[]>();
+  const roots: T[] = [];
+  for (const t of tasks) {
+    if (t.parent_id && t.parent_id !== t.id && present.has(t.parent_id)) {
+      const list = children.get(t.parent_id) ?? [];
+      list.push(t);
+      children.set(t.parent_id, list);
+    } else {
+      roots.push(t);
+    }
+  }
+  const out: { task: T; depth: number }[] = [];
+  const seen = new Set<string>();
+  const visit = (t: T, depth: number) => {
+    if (seen.has(t.id)) return;
+    seen.add(t.id);
+    out.push({ task: t, depth });
+    for (const child of children.get(t.id) ?? []) visit(child, depth + 1);
+  };
+  for (const root of roots) visit(root, 0);
+  // A cycle (only possible from bad data) has no root; don't lose its rows.
+  for (const t of tasks) visit(t, 0);
+  return out;
+}
+
+/** Done / total over a task's direct sub-tasks (cancelled ones don't count). */
+export function subtaskProgress(taskId: string, tasks: Pick<Task, "parent_id" | "status" | "archived_at">[]): { done: number; total: number } {
+  let done = 0;
+  let total = 0;
+  for (const t of tasks) {
+    if (t.parent_id !== taskId || t.archived_at !== null || t.status === "cancelled") continue;
+    total += 1;
+    if (t.status === "done") done += 1;
+  }
+  return { done, total };
+}

@@ -10,6 +10,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { TaskRow, PendingTaskRow, type PendingTask } from "./task-row";
+import { orderAsTree, subtaskProgress } from "./task-utils";
 import { isEditableTarget } from "@/lib/editable-target";
 import { hasOpenOverlay } from "@/components/locate/focus-region";
 
@@ -21,6 +22,8 @@ const priorityOrder: Record<TaskPriority, number> = { urgent: 0, high: 1, medium
 
 interface TaskTableProps {
   tasks: Task[];
+  /** Every task of the project, filtered or not: sub-task progress counts them all. */
+  allTasks?: Task[];
   onUpdate: (id: string, opts: { title?: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => void;
   onDelete: (id: string) => void;
   onArchive: (id: string) => void;
@@ -45,7 +48,7 @@ interface TaskTableProps {
   assignedBranches: Set<string | null>;
 }
 
-export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign, onOpenSourceSession, panelOpen, selectedTaskId, onSelect, pendingTasks, flashTaskId, keyboardActive, assignedBranches }: TaskTableProps) {
+export function TaskTable({ tasks, allTasks = tasks, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign, onOpenSourceSession, panelOpen, selectedTaskId, onSelect, pendingTasks, flashTaskId, keyboardActive, assignedBranches }: TaskTableProps) {
   const [sortField, setSortField] = useState<SortField | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const tableRef = useRef<HTMLTableElement>(null);
@@ -79,6 +82,17 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
     });
   }, [tasks, sortField, sortDir]);
 
+  // Sub-tasks sit under their parent, siblings in the chosen sort order. One
+  // whose parent is filtered out of this view shows at the top level.
+  const rows = useMemo(() => orderAsTree(sorted), [sorted]);
+  const progressById = useMemo(() => {
+    const map = new Map<string, { done: number; total: number }>();
+    for (const t of allTasks) {
+      if (t.parent_id && !map.has(t.parent_id)) map.set(t.parent_id, subtaskProgress(t.parent_id, allTasks));
+    }
+    return map;
+  }, [allTasks]);
+
   const sortIndicator = (field: SortField) => {
     if (sortField !== field) return null;
     return sortDir === "asc" ? " \u2191" : " \u2193";
@@ -100,21 +114,20 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
       }
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       if (selectedTaskId === null) return;
-      const rows = sorted;
       if (rows.length === 0) return;
       event.preventDefault();
-      const index = rows.findIndex((t) => t.id === selectedTaskId);
+      const index = rows.findIndex((r) => r.task.id === selectedTaskId);
       const next =
         index === -1
           ? 0
           : event.key === "ArrowDown"
             ? Math.min(index + 1, rows.length - 1)
             : Math.max(index - 1, 0);
-      onSelect(rows[next].id);
+      onSelect(rows[next].task.id);
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [panelOpen, selectedTaskId, onSelect, sorted, keyboardActive]);
+  }, [panelOpen, selectedTaskId, onSelect, rows, keyboardActive]);
 
   const revealId = flashTaskId ?? selectedTaskId;
   useEffect(() => {
@@ -149,10 +162,12 @@ export function TaskTable({ tasks, onUpdate, onDelete, onArchive, onUnarchive, a
         </TableRow>
       </TableHeader>
       <TableBody>
-        {sorted.map((task) => (
+        {rows.map(({ task, depth }) => (
           <TaskRow
             key={task.id}
             task={task}
+            depth={depth}
+            progress={progressById.get(task.id)}
             onUpdate={onUpdate}
             onDelete={onDelete}
             onArchive={onArchive}

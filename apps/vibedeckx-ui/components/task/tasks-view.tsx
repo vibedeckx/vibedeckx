@@ -40,8 +40,8 @@ interface TasksViewProps {
   tasks: Task[];
   loading: boolean;
   worktrees: Worktree[];
-  onCreateTask: (opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task | null>;
-  onUpdateTask: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => Promise<Task | null>;
+  onCreateTask: (opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; parent_id?: string | null }) => Promise<Task | null>;
+  onUpdateTask: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; parent_id?: string | null }) => Promise<Task | null>;
   onDeleteTask: (id: string) => Promise<void>;
   onArchiveTask: (id: string) => Promise<void>;
   onUnarchiveTask: (id: string) => Promise<void>;
@@ -94,6 +94,14 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
     return () => clearTimeout(timer);
   }, [flash]);
 
+  /** New-task draft filed under `parentId`, keeping whatever was already typed. */
+  const openSubtaskDraft = (parentId: string) => {
+    setDraftState({ projectId, draft: { ...draft, parent_id: parentId } });
+    setCreateError(null);
+    setPanelState({ projectId, panel: { kind: "draft" } });
+    setFocusNonce((n) => n + 1);
+  };
+
   const openDraft = () => {
     setPanelState({ projectId, panel: { kind: "draft" } });
     setFocusNonce((n) => n + 1);
@@ -137,7 +145,10 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
     const title = snapshot.title.trim() || null;
     setPending((prev) => [...prev, { key, projectId: createProjectId, title, description, status: snapshot.status, priority: snapshot.priority }]);
     setCreateError(null);
-    setDraftState(null);
+    // Create more keeps the parent: adding several sub-tasks in a row.
+    setDraftState(createMore && snapshot.parent_id
+      ? { projectId: createProjectId, draft: { ...EMPTY_TASK_DRAFT, parent_id: snapshot.parent_id } }
+      : null);
     // Create more keeps the panel on a fresh draft; otherwise the panel closes
     // and the new row in the list is the confirmation.
     if (createMore) setFocusNonce((n) => n + 1);
@@ -149,6 +160,7 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
       status: snapshot.status,
       priority: snapshot.priority,
       assigned_branch: snapshot.assigned_branch,
+      parent_id: snapshot.parent_id,
     });
     setPending((prev) => prev.filter((p) => p.key !== key));
     if (task) {
@@ -276,6 +288,7 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
               ) : (
                 <TaskTable
                   tasks={filteredTasks}
+                  allTasks={tasks}
                   onUpdate={onUpdateTask}
                   onDelete={onDeleteTask}
                   onArchive={onArchiveTask}
@@ -328,6 +341,7 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
                       focusNonce={focusNonce}
                       worktrees={worktrees}
                       assignedBranches={assignedBranches}
+                      tasks={tasks}
                     />
                   ) : (
                     <TaskDetailPanel
@@ -343,6 +357,9 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
                       assignedBranches={assignedBranches}
                       onOpenSourceSession={onOpenSourceSession}
                       onOpenFile={onOpenFile}
+                      tasks={tasks}
+                      onSelectTask={selectTask}
+                      onAddSubtask={openSubtaskDraft}
                     />
                   )}
                 </div>

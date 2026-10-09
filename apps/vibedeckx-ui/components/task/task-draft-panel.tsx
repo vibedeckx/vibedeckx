@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import type { TaskStatus, TaskPriority, Worktree } from "@/lib/api";
+import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { X } from "lucide-react";
-import { TaskProperties, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
+import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
+import { TaskParentSelect } from "./task-parent-select";
 
 export interface TaskDraft {
   title: string;
@@ -13,6 +14,7 @@ export interface TaskDraft {
   status: TaskStatus;
   priority: TaskPriority;
   assigned_branch: string | null;
+  parent_id: string | null;
 }
 
 export const EMPTY_TASK_DRAFT: TaskDraft = {
@@ -21,6 +23,7 @@ export const EMPTY_TASK_DRAFT: TaskDraft = {
   status: "todo",
   priority: "medium",
   assigned_branch: null,
+  parent_id: null,
 };
 
 export const isDraftEmpty = (draft: TaskDraft) => !draft.title.trim() && !draft.description.trim();
@@ -39,6 +42,8 @@ interface TaskDraftPanelProps {
   focusNonce: number;
   worktrees: Worktree[];
   assignedBranches: Set<string | null>;
+  /** The project's tasks, for the Parent picker. */
+  tasks: Task[];
 }
 
 // An IME Enter confirms a candidate, not the field (229: legacy signal).
@@ -61,6 +66,7 @@ export function TaskDraftPanel({
   focusNonce,
   worktrees,
   assignedBranches,
+  tasks,
 }: TaskDraftPanelProps) {
   const titleRef = useRef<HTMLTextAreaElement>(null);
   const descriptionRef = useRef<HTMLTextAreaElement>(null);
@@ -120,7 +126,16 @@ export function TaskDraftPanel({
           onAssign={(assigned_branch) => onChange({ assigned_branch })}
           worktrees={worktrees}
           assignedBranches={assignedBranches}
-        />
+        >
+          <Property label="Parent">
+            <TaskParentSelect
+              tasks={tasks}
+              value={draft.parent_id}
+              onChange={(parent_id) => onChange({ parent_id })}
+              className="h-7 max-w-full"
+            />
+          </Property>
+        </TaskProperties>
 
         <div className="mt-5 border-t pt-4">
           <textarea

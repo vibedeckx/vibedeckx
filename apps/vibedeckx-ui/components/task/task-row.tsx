@@ -12,7 +12,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Trash2, GitBranch, Archive, ArchiveRestore } from "lucide-react";
+import { Trash2, GitBranch, Archive, ArchiveRestore, CornerDownRight } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SourceSessionLink } from "@/components/agent/source-session-link";
 import { statusConfig, priorityConfig, statusOptions, priorityOptions, assignableBranches, branchLabel, descriptionPreview } from "./task-utils";
@@ -35,9 +35,13 @@ interface TaskRowProps {
   flash?: boolean;
   /** Detail panel is open: drop what it already shows (description, assign, created). */
   compact?: boolean;
+  /** Nesting level in the task tree; 0 = top level. */
+  depth?: number;
+  /** Done / total of its sub-tasks; absent when it has none. */
+  progress?: { done: number; total: number };
 }
 
-export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, archivedView, onClick, worktrees, assignedBranches, onAssign, onOpenSourceSession, selected, flash, compact }: TaskRowProps) {
+export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, archivedView, onClick, worktrees, assignedBranches, onAssign, onOpenSourceSession, selected, flash, compact, depth = 0, progress }: TaskRowProps) {
   const isDone = task.status === "done" || task.status === "cancelled";
 
   return (
@@ -60,23 +64,33 @@ export function TaskRow({ task, onUpdate, onDelete, onArchive, onUnarchive, arch
       <TableCell className="font-medium w-full max-w-0">
         {/* Title is plain text: clicking it opens the row like anywhere else;
             renaming happens in the detail panel. */}
-        <div>
-          <span className={`block truncate text-sm ${isDone ? "line-through text-muted-foreground" : ""}`}>
-            {task.title}
-          </span>
-          {!compact && task.description && (
-            <p className="text-xs text-muted-foreground truncate max-w-[400px] mt-0.5">
-              {descriptionPreview(task.description)}
-            </p>
-          )}
-          {!compact && task.source_session && (
-            <div className="mt-0.5 flex max-w-[400px] text-xs" onClick={(e) => e.stopPropagation()}>
-              <SourceSessionLink
-                source={task.source_session}
-                onOpen={onOpenSourceSession ? () => onOpenSourceSession(task) : undefined}
-              />
+        <div className="flex min-w-0 items-start gap-1.5" style={depth > 0 ? { paddingLeft: `${(depth - 1) * 1.25}rem` } : undefined}>
+          {depth > 0 && <CornerDownRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground/60" aria-hidden />}
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-baseline gap-2">
+              <span className={`truncate text-sm ${isDone ? "line-through text-muted-foreground" : ""}`}>
+                {task.title}
+              </span>
+              {progress && progress.total > 0 && (
+                <span className="shrink-0 text-xs font-normal tabular-nums text-muted-foreground" title="Sub-tasks done">
+                  {progress.done}/{progress.total}
+                </span>
+              )}
             </div>
-          )}
+            {!compact && task.description && (
+              <p className="text-xs text-muted-foreground truncate max-w-[400px] mt-0.5">
+                {descriptionPreview(task.description)}
+              </p>
+            )}
+            {!compact && task.source_session && (
+              <div className="mt-0.5 flex max-w-[400px] text-xs" onClick={(e) => e.stopPropagation()}>
+                <SourceSessionLink
+                  source={task.source_session}
+                  onOpen={onOpenSourceSession ? () => onOpenSourceSession(task) : undefined}
+                />
+              </div>
+            )}
+          </div>
         </div>
       </TableCell>
       <TableCell className="@max-md:hidden" onClick={(e) => e.stopPropagation()}>

@@ -5,7 +5,7 @@ import type { AgentMessage } from "@/hooks/use-agent-session";
 import { findScrollParent } from "@/lib/scroll";
 import { VREMOTES_MARKER_RE } from "./vpaste-chip";
 import { VSCHEDULE_MARKER_RE } from "@/lib/schedule-intent";
-import { VTASK_MARKER_RE } from "@/lib/task-intent";
+import { VTASK_MARKER_RE, VTASKS_CREATED_MARKER_RE } from "@/lib/task-intent";
 
 function getMessagePreview(msg: AgentMessage): string {
   if (msg.type !== "user") return "";
@@ -23,6 +23,7 @@ function getMessagePreview(msg: AgentMessage): string {
   // session (and the Schedule / Task chips a <vschedule> / <vtask> block); a marker's preview
   // should show what the user wrote.
   const firstLine = text.replace(VREMOTES_MARKER_RE, "").replace(VSCHEDULE_MARKER_RE, "").replace(VTASK_MARKER_RE, "")
+    .replace(VTASKS_CREATED_MARKER_RE, "")
     .trim().split("\n")[0] ?? "";
   const truncated =
     firstLine.length > 80 ? firstLine.slice(0, 77) + "..." : firstLine;

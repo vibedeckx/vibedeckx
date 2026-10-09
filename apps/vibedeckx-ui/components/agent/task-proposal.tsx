@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import { noteTaskCreated, useProposedTasks } from "@/hooks/use-proposed-tasks";
 import { takeProposalCardFocus } from "@/lib/proposal-card-focus";
 import { priorityConfig, priorityOptions } from "@/components/task/task-utils";
+import { TaskParentSelect } from "@/components/task/task-parent-select";
 import { MarkdownField } from "@/components/task/markdown-field";
 import { useAgentConversation } from "./agent-conversation";
 
@@ -46,12 +47,13 @@ function tryParse(value: string): unknown {
   }
 }
 
-function readProposal(input: unknown): ItemFields[] {
+function readProposal(input: unknown): { items: ItemFields[]; parentTaskId: string | null } {
   const raw = typeof input === "string" ? tryParse(input) : input;
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const items = Array.isArray(obj.tasks) ? obj.tasks : [];
   const str = (value: unknown): string => (typeof value === "string" ? value : "");
-  return items.map((item) => {
+  const parentTaskId = str(obj.parent_task_id).trim() || null;
+  return { parentTaskId, items: items.map((item) => {
     const o = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
     const priority = str(o.priority).toLowerCase();
     return {
@@ -59,24 +61,38 @@ function readProposal(input: unknown): ItemFields[] {
       description: str(o.description),
       priority: (priorityOptions as string[]).includes(priority) ? priority as TaskPriority : "medium",
     };
-  });
+  }) };
 }
 
 /**
  * Confirmation card for an agent's `propose_task` call: one editable row per
  * proposed task, each confirmed on its own (or all at once). Nothing exists
  * until the user confirms; the project and source session come from the
- * session this card lives in, never from the model. A confirmed row follows
+ * session this card lives in, never from the model. The whole proposal goes
+ * under one parent: the agent's `parent_task_id` while it names a task of
+ * this project, else none — the user can change it until the first row is
+ * created; after that the rest follow that row's parent. A confirmed row follows
  * its task — created, then done/cancelled — and returns to the editable state
  * if the task is deleted.
  */
 export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
   const { sessionId, projectId, openTask } = useAgentConversation();
   const proposal = useMemo(() => readProposal(input), [input]);
-  const [fields, setFields] = useState<ItemFields[]>(proposal);
+  const [fields, setFields] = useState<ItemFields[]>(proposal.items);
+  /** The user's pick; undefined = still the proposal's default. */
+  const [parentChoice, setParentChoice] = useState<string | null | undefined>(undefined);
   const [submitting, setSubmitting] = useState<Set<number>>(() => new Set());
   const [errors, setErrors] = useState<Map<number, string>>(() => new Map());
-  const { byItem, loading, loadError, retry } = useProposedTasks(projectId, sessionId, toolUseId);
+  const { byItem, tasks, loading, loadError, retry } = useProposedTasks(projectId, sessionId, toolUseId);
+  // Once a row exists the group's parent is settled: the rest follow it, so a
+  // proposal never ends up split across parents (nor reverts after a reload).
+  const firstCreated = [...byItem.values()][0];
+  const parentLocked = firstCreated !== undefined;
+  const parentId = parentLocked
+    ? firstCreated.parent_id ?? null
+    : parentChoice !== undefined
+      ? parentChoice
+      : proposal.parentTaskId && tasks?.some((t) => t.id === proposal.parentTaskId) ? proposal.parentTaskId : null;
 
   const rootRef = useRef<HTMLDivElement>(null);
   const [highlighted, setHighlighted] = useState(false);
@@ -109,6 +125,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
         description: item.description,
         priority: item.priority,
         source: { session_id: sessionId, tool_use_id: toolUseId, item_index: index },
+        parent_id: parentId,
       });
       noteTaskCreated(projectId, task);
     } catch (err) {
@@ -144,10 +161,24 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
           </Button>
         </div>
       )}
+      {pendingIndices.length > 0 && tasks && (
+        <div className="flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
+          <span className="shrink-0">{fields.length > 1 ? "File these under" : "File under"}</span>
+          <TaskParentSelect
+            tasks={tasks}
+            value={parentId}
+            onChange={setParentChoice}
+            sessionId={sessionId}
+            disabled={parentLocked || submitting.size > 0}
+            className="h-7 max-w-72"
+          />
+        </div>
+      )}
       {fields.map((item, index) => {
         const created = byItem.get(index);
         if (created) {
-          return <CreatedTaskRow key={index} task={created} onOpen={openTask} />;
+          const parentTitle = created.parent_id ? tasks?.find((t) => t.id === created.parent_id)?.title : undefined;
+          return <CreatedTaskRow key={index} task={created} parentTitle={parentTitle} onOpen={openTask} />;
         }
         const busy = submitting.has(index);
         const error = errors.get(index);
@@ -218,7 +249,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
   );
 }
 
-function CreatedTaskRow({ task, onOpen }: { task: Task; onOpen?: (task: Task) => void }) {
+function CreatedTaskRow({ task, parentTitle, onOpen }: { task: Task; parentTitle?: string; onOpen?: (task: Task) => void }) {
   const closed = task.status === "done" || task.status === "cancelled" || task.archived_at !== null;
   const { Icon, label, tone } = task.archived_at !== null
     ? { Icon: Archive, label: "Archived", tone: "text-muted-foreground" }
@@ -244,6 +275,7 @@ function CreatedTaskRow({ task, onOpen }: { task: Task; onOpen?: (task: Task) =>
           </p>
           <p className="mt-0.5 text-xs text-muted-foreground">
             {label} · {priorityConfig[task.priority].label} priority
+            {parentTitle && <> · under {parentTitle}</>}
           </p>
         </div>
         {onOpen && (

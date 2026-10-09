@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { appendTaskIntent, TASK_INTENT_BLOCK, takeTaskMarker } from "./task-intent";
+import { appendTaskIntent, stripTasksCreatedNote, TASK_INTENT_BLOCK, takeTaskMarker } from "./task-intent";
 
 describe("task intent block", () => {
   it("appends after the text and comes back out intact", () => {
@@ -34,5 +34,13 @@ describe("task intent file references", () => {
 
   it("is still stripped whole", () => {
     expect(takeTaskMarker(`note\n\n${TASK_INTENT_BLOCK}`)).toEqual({ text: "note", found: true });
+  });
+});
+
+describe("stripTasksCreatedNote", () => {
+  it("drops the hub's note and leaves other text alone", () => {
+    const note = '<vtasks-created note="x">\n<task id="t1" title="Goal" />\n</vtasks-created>';
+    expect(stripTasksCreatedNote(`what next?\n\n${note}`)).toEqual({ text: "what next?", found: true });
+    expect(stripTasksCreatedNote("plain")).toEqual({ text: "plain", found: false });
   });
 });

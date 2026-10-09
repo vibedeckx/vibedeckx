@@ -165,11 +165,46 @@ describe("TaskProposalUI", () => {
       description: "Add the remote retention test",
       priority: "high",
       source: { session_id: "sess-1", tool_use_id: "toolu_1", item_index: 0 },
+      parent_id: null,
     });
     // Nothing about a branch: proposed tasks are never pre-assigned.
     expect(JSON.stringify(apiMock.createTask.mock.calls[0])).not.toContain("assigned_branch");
     expect(titles()).toEqual(["Drop legacy flag"]);
     expect(container.textContent).toContain("Created");
+  });
+
+  it("files the tasks under the agent's parent_task_id when it names a task of the project", async () => {
+    apiMock.getTasks.mockResolvedValue([
+      taskRow({ id: "goal", title: "Ship sub-tasks", source_tool_use_id: "toolu_0", source_item_index: 0 }),
+    ]);
+    await render({ input: { ...PROPOSAL, parent_task_id: "goal" }, toolUseId: "toolu_1" });
+    expect(container.textContent).toContain("File these under");
+    expect(container.querySelector('[aria-label="Parent task"]')?.textContent).toContain("Ship sub-tasks");
+
+    await act(async () => { buttons("Create task")[0].click(); });
+    expect(apiMock.createTask.mock.calls[0][1]).toMatchObject({ parent_id: "goal" });
+  });
+
+  it("files the rest of a partly created proposal under the parent its created row has", async () => {
+    apiMock.getTasks.mockResolvedValue([
+      taskRow({ id: "goal", title: "Ship sub-tasks", source_tool_use_id: "toolu_0", source_item_index: 0 }),
+      taskRow({ id: "other", title: "Other goal", source_tool_use_id: "toolu_0", source_item_index: 1 }),
+      // Created earlier (before a reload) under "other", though the agent proposed "goal".
+      taskRow({ id: "task-0", parent_id: "other", source_item_index: 0 }),
+    ]);
+    await render({ input: { ...PROPOSAL, parent_task_id: "goal" }, toolUseId: "toolu_1" });
+    const picker = container.querySelector<HTMLButtonElement>('[aria-label="Parent task"]');
+    expect(picker?.textContent).toContain("Other goal");
+    expect(picker?.disabled).toBe(true);
+
+    await act(async () => { buttons("Create task")[0].click(); });
+    expect(apiMock.createTask.mock.calls[0][1]).toMatchObject({ parent_id: "other", source: { item_index: 1 } });
+  });
+
+  it("ignores a parent_task_id that names no task of the project", async () => {
+    await render({ input: { ...PROPOSAL, parent_task_id: "made-up" }, toolUseId: "toolu_1" });
+    await act(async () => { buttons("Create task")[0].click(); });
+    expect(apiMock.createTask.mock.calls[0][1]).toMatchObject({ parent_id: null });
   });
 
   it("creates all pending items at once", async () => {

@@ -11,7 +11,8 @@ import "../server-types.js";
 import { writePasteToTempFile } from "../utils/paste-file.js";
 import { writeAttachmentToTempFile, MAX_ATTACHMENT_BYTES, ATTACHMENT_BODY_LIMIT } from "../utils/attachment-file.js";
 import { extractUserText } from "../utils/conversation-title.js";
-import { appendRemoteGrantContext } from "../cross-remote-grant-context.js";
+import { appendContextBlock, appendRemoteGrantContext } from "../cross-remote-grant-context.js";
+import { buildTasksCreatedContext } from "../tasks-created-context.js";
 import { validateSessionGrantIds } from "../cross-remote-access.js";
 import { authorizeLocalSession, authorizeRemoteSession, resolveRemoteSessionOwner } from "./session-ownership.js";
 import { projectMessagesForBrief } from "../utils/review-brief.js";
@@ -1618,11 +1619,27 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // §6): regenerated from the database on every turn, so a grant added or
     // revoked is reflected without restarting the agent. Appended after the
     // size cap above — the cap is on what the user typed.
-    const content = await appendRemoteGrantContext(fastify.storage, req.params.sessionId, userId, rawContent)
+    const withGrants = await appendRemoteGrantContext(fastify.storage, req.params.sessionId, userId, rawContent)
       .catch((err) => {
         console.error(`[API] grant context build failed for ${req.params.sessionId}:`, err);
         return rawContent;
       });
+    // Tasks confirmed from this session's propose_task cards since the agent
+    // was last told, with their ids — once each. Marked reported only once
+    // this message is actually delivered, so a failed send (or a replay,
+    // which delivers nothing new) leaves them for the next one.
+    const tasksCreated = await buildTasksCreatedContext(fastify.storage, req.params.sessionId, userId)
+      .catch((err) => {
+        console.error(`[API] tasks-created context build failed for ${req.params.sessionId}:`, err);
+        return null;
+      });
+    const content = appendContextBlock(withGrants, tasksCreated?.block ?? null);
+    const markTasksReported = async () => {
+      if (!tasksCreated) return;
+      await fastify.storage.tasks.markSourceReported(tasksCreated.ids).catch((err) => {
+        console.error(`[API] marking tasks reported failed for ${req.params.sessionId}:`, err);
+      });
+    };
 
     if (req.params.sessionId.startsWith("remote-")) {
       const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, authResult);
@@ -1684,6 +1701,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
           detail: result.data,
         });
       }
+      // A worker replay delivered an earlier attempt's text, not this one's.
+      if ((result.data as { replayed?: unknown } | null)?.replayed !== true) await markTasksReported();
       const projectId = projectIdFromRemoteSessionId(req.params.sessionId, remoteInfo);
       const activityReady = await fastify.storage.searchCache.updateRemoteSessionActivity({
         localSessionId: req.params.sessionId,
@@ -1800,6 +1819,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           console.log(`[API] /message 404: local session not found or not running. sessionId=${req.params.sessionId}, sessionExists=${!!currentSession}, dormant=${currentSession.dormant}`);
           return reply.code(404).send({ error: "Session not found or not running" });
         }
+        await markTasksReported();
         return reply.code(200).send({ success: true });
       }
 
@@ -1810,7 +1830,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
         storage: fastify.storage, sessionId: req.params.sessionId, idempotencyKey, rawContent, deliver,
       });
       switch (result) {
-        case "delivered": return reply.code(200).send({ success: true });
+        case "delivered":
+          await markTasksReported();
+          return reply.code(200).send({ success: true });
         case "replayed": return reply.code(200).send({ success: true, replayed: true });
         case "conflict": return reply.code(409).send({ error: "Idempotency key was already used with different content" });
         case "busy": return reply.code(409).send({ error: "Instruction delivery is already in progress" });

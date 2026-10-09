@@ -25,7 +25,7 @@ export const createWorkspaceRepos = (
   h: DialectHelpers,
 ): Pick<Storage, "tasks" | "rules" | "commands"> => ({
   tasks: {
-    create: async ({ id, project_id, title, description, status, priority, assigned_branch, source }) => {
+    create: async ({ id, project_id, title, description, status, priority, assigned_branch, source, parent_id }) => {
       // Position assignment pushed into the INSERT itself (a
       // `coalesce(max(position), -1) + 1` subquery scoped to the project)
       // instead of a JS-side "read max, then write" — same technique as
@@ -46,6 +46,7 @@ export const createWorkspaceRepos = (
         source_session_id: source?.session_id ?? null,
         source_tool_use_id: source?.tool_use_id ?? null,
         source_item_index: source?.item_index ?? null,
+        parent_id: parent_id ?? null,
       // DO NOTHING only for a proposal, so a concurrent replay races into
       // idx_tasks_source and is resolved below (same argument as
       // scheduledTasks.create); a plain insert keeps failing loudly.
@@ -64,6 +65,25 @@ export const createWorkspaceRepos = (
         if (existing) return mapTask(existing);
       }
       throw new Error(`Failed to create task ${id}`);
+    },
+
+    listUnreportedBySourceSession: async (sessionId) => {
+      const rows = await kdb.selectFrom("tasks").selectAll()
+        .where("source_session_id", "=", sessionId)
+        .where("source_tool_use_id", "is not", null)
+        .where("source_reported_at", "is", null)
+        .orderBy("created_at", "asc")
+        .orderBy("position", "asc")
+        .execute();
+      return rows.map(mapTask);
+    },
+
+    markSourceReported: async (ids) => {
+      if (ids.length === 0) return;
+      await kdb.updateTable("tasks")
+        .set({ source_reported_at: Date.now() })
+        .where("id", "in", ids)
+        .execute();
     },
 
     listOpenIdsBySourceSession: async (sessionId) => {
@@ -138,6 +158,7 @@ export const createWorkspaceRepos = (
       if (opts.priority !== undefined) sets.priority = opts.priority;
       if (opts.assigned_branch !== undefined) sets.assigned_branch = opts.assigned_branch;
       if (opts.position !== undefined) sets.position = opts.position;
+      if (opts.parent_id !== undefined) sets.parent_id = opts.parent_id;
 
       if (Object.keys(sets).length > 0) {
         sets.updated_at = sql`CURRENT_TIMESTAMP`;
@@ -166,7 +187,13 @@ export const createWorkspaceRepos = (
     },
 
     delete: async (id) => {
-      await kdb.deleteFrom("tasks").where("id", "=", id).execute();
+      await kdb.transaction().execute(async (trx) => {
+        await trx.updateTable("tasks")
+          .set({ parent_id: null, updated_at: sql`CURRENT_TIMESTAMP` })
+          .where("parent_id", "=", id)
+          .execute();
+        await trx.deleteFrom("tasks").where("id", "=", id).execute();
+      });
     },
 
     reorder: async (projectId, orderedIds) => {

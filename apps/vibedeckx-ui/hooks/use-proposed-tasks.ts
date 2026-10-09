@@ -106,6 +106,8 @@ export function noteTaskCreated(projectId: string, task: Task): void {
 export interface ProposedTasksState {
   /** Created task per proposal item index; missing = not (or no longer) created. */
   byItem: Map<number, Task>;
+  /** The project's tasks (archived included) — the card's parent choices; null until loaded. */
+  tasks: Task[] | null;
   /** True only until the project's tasks are known for the first time. */
   loading: boolean;
   /** Set when the first load failed; the cards can't tell what exists yet. */
@@ -173,6 +175,7 @@ export function useProposedTasks(
 
   return {
     byItem,
+    tasks,
     loading: tasks === null && loadError === null,
     loadError: tasks === null ? loadError : null,
     retry,

@@ -3,6 +3,7 @@ import type { Storage } from "../storage/types.js";
 import type { ContentPart } from "../agent-types.js";
 import { getChatProviderConfig, isModelConfigured, resolveFastChatModel } from "./chat-model.js";
 import { stripRemoteGrantContext } from "../cross-remote-grant-context.js";
+import { VTASKS_CREATED_BLOCK_RE } from "../tasks-created-context.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLanguageModel = any;
@@ -58,8 +59,10 @@ export function extractUserText(content: string | ContentPart[]): string {
   // The hub appends a <vremotes> grant block to every user message of a
   // granted session. It is machine-addressed context, not something the user
   // wrote — titles and review briefs must not see it. Same for the Schedule
-  // and Task chips' instruction blocks.
-  return stripRemoteGrantContext(text.replace(VSCHEDULE_BLOCK_RE, "").replace(VTASK_BLOCK_RE, ""));
+  // and Task chips' instruction blocks, and the <vtasks-created> note.
+  return stripRemoteGrantContext(
+    text.replace(VSCHEDULE_BLOCK_RE, "").replace(VTASK_BLOCK_RE, "").replace(VTASKS_CREATED_BLOCK_RE, ""),
+  );
 }
 
 /**

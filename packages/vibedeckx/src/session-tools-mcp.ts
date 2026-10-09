@@ -213,6 +213,13 @@ export const PROPOSE_TASK_DESCRIPTION = [
   "[design doc](docs/foo-design.md) or [handler](src/routes/foo.ts:42). Such links open the file in",
   "the workspace; bare paths and absolute paths do not.",
   "",
+  "To file the tasks as sub-tasks of an existing task (e.g. a follow-up found while working on",
+  "step 2 of a plan), pass that task's id as `parent_task_id`. Ids of tasks the user created from",
+  "your earlier proposals arrive in a <vtasks-created> note on a later user message; use one of",
+  "those, never a guessed id. Omit it when you don't know the id — the user can still pick a",
+  "parent on the card. One call files all its tasks under the same parent; make separate calls",
+  "for different parents.",
+  "",
   "Project and source session are taken from this session — do not describe them here.",
 ].join("\n");
 
@@ -234,6 +241,10 @@ export const PROPOSE_TASK_INPUT_SCHEMA = {
         required: ["title", "description"],
       },
     },
+    parent_task_id: {
+      type: "string",
+      description: "Optional id of an existing task to file all these tasks under, taken from a <vtasks-created> note.",
+    },
   },
   required: ["tasks"],
 } as const;
@@ -254,6 +265,7 @@ export interface ProposedTask {
 export const PROPOSE_TASK_MAX_ITEMS = 5;
 export const TASK_TITLE_MAX = 200;
 export const TASK_DESCRIPTION_MAX = 20_000;
+const PARENT_TASK_ID_MAX = 200;
 const TASK_PRIORITIES: readonly ProposedTaskPriority[] = ["low", "medium", "high", "urgent"];
 
 /** Shape validation only; nothing is stored until the user confirms the card. */
@@ -264,6 +276,11 @@ export function parseProposeTaskArgs(
   if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: "tasks must be a non-empty array" };
   if (raw.length > PROPOSE_TASK_MAX_ITEMS) {
     return { ok: false, error: `propose at most ${PROPOSE_TASK_MAX_ITEMS} tasks at a time` };
+  }
+  const parentTaskId = args.parent_task_id;
+  if (parentTaskId !== undefined && parentTaskId !== null
+    && (typeof parentTaskId !== "string" || parentTaskId.length > PARENT_TASK_ID_MAX)) {
+    return { ok: false, error: "parent_task_id must be a task id string" };
   }
   const tasks: ProposedTask[] = [];
   for (const [i, item] of raw.entries()) {

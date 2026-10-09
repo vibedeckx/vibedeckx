@@ -587,6 +587,8 @@ export interface Task {
   source_item_index?: number | null;
   /** Enriched by GET /api/projects/:id/tasks; null for hand-made tasks. */
   source_session?: SourceSessionSummary | null;
+  /** Parent task in the same project; null (or absent) for a top-level task. */
+  parent_id?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -2455,7 +2457,7 @@ export const api = {
 
   async createTask(
     projectId: string,
-    opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; source?: TaskSourceInput }
+    opts: { title?: string; description: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; source?: TaskSourceInput; parent_id?: string | null }
   ): Promise<Task> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/tasks`, {
       method: "POST",
@@ -2472,7 +2474,7 @@ export const api = {
 
   async updateTask(
     id: string,
-    opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number }
+    opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number; parent_id?: string | null }
   ): Promise<Task> {
     const res = await authFetch(`${getApiBase()}/api/tasks/${id}`, {
       method: "PUT",

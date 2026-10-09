@@ -241,6 +241,13 @@ export interface TasksTable {
   source_tool_use_id: string | null;
   /** Index of this task within the proposal's `tasks[]`. */
   source_item_index: number | null;
+  /** Parent task (same project); null for a top-level task. */
+  parent_id: string | null;
+  /**
+   * When the hub told the source session's agent this task exists (its id, in
+   * a <vtasks-created> note on the next user message); null until then.
+   */
+  source_reported_at: number | null;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

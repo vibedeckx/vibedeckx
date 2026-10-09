@@ -1,17 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Archive, ArchiveRestore, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, CheckCircle2, ChevronRight, Circle, CircleDot, Plus, Trash2, X, XCircle } from "lucide-react";
 import { SourceSessionLink } from "@/components/agent/source-session-link";
 import { MarkdownField } from "./markdown-field";
-import { taskFileBranch } from "./task-utils";
+import { selfAndDescendantIds, subtaskProgress, taskFileBranch } from "./task-utils";
+import { TaskParentSelect } from "./task-parent-select";
 import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
 
 interface TaskDetailPanelProps {
   task: Task;
-  onUpdate: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority }) => void;
+  onUpdate: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; parent_id?: string | null }) => void;
   onAssign: (taskId: string, branch: string | null) => void;
   onArchive: (id: string) => void;
   onUnarchive: (id: string) => void;
@@ -22,6 +23,12 @@ interface TaskDetailPanelProps {
   onOpenSourceSession?: (task: Task) => void;
   /** Open a file linked from the description, in the task's source workspace. */
   onOpenFile?: (branch: string | null, path: string, line: number | null) => void;
+  /** The project's tasks: the parent chain, the sub-tasks and the Parent picker's choices. */
+  tasks: Task[];
+  /** Open another task (a parent or sub-task) in the panel. */
+  onSelectTask: (taskId: string) => void;
+  /** Start a new-task draft filed under this task. */
+  onAddSubtask: (parentId: string) => void;
 }
 
 /**
@@ -42,8 +49,30 @@ export function TaskDetailPanel({
   assignedBranches,
   onOpenSourceSession,
   onOpenFile,
+  tasks,
+  onSelectTask,
+  onAddSubtask,
 }: TaskDetailPanelProps) {
   const archived = task.archived_at !== null;
+  const byId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
+  /** Root first; stops at a missing link (or a cycle in bad data). */
+  const ancestors = useMemo(() => {
+    const chain: Task[] = [];
+    const seen = new Set([task.id]);
+    let parent = task.parent_id ? byId.get(task.parent_id) : undefined;
+    while (parent && !seen.has(parent.id)) {
+      chain.unshift(parent);
+      seen.add(parent.id);
+      parent = parent.parent_id ? byId.get(parent.parent_id) : undefined;
+    }
+    return chain;
+  }, [task, byId]);
+  const subtasks = useMemo(
+    () => tasks.filter((t) => t.parent_id === task.id && t.archived_at === null),
+    [tasks, task.id],
+  );
+  const progress = useMemo(() => subtaskProgress(task.id, tasks), [tasks, task.id]);
+  const excludeIds = useMemo(() => selfAndDescendantIds(task.id, tasks), [tasks, task.id]);
 
   return (
     <div className="flex h-full flex-col">
@@ -66,6 +95,22 @@ export function TaskDetailPanel({
       </div>
 
       <div className="flex-1 overflow-auto px-6 pb-6 edge-scrollbar">
+        {ancestors.length > 0 && (
+          <nav aria-label="Parent tasks" className="mb-1 flex min-w-0 flex-wrap items-center gap-0.5 text-xs text-muted-foreground">
+            {ancestors.map((a) => (
+              <span key={a.id} className="flex min-w-0 items-center gap-0.5">
+                <button
+                  type="button"
+                  className="max-w-48 truncate rounded px-1 py-0.5 hover:bg-muted hover:text-foreground"
+                  onClick={() => onSelectTask(a.id)}
+                >
+                  {a.title}
+                </button>
+                <ChevronRight className="h-3 w-3 shrink-0" aria-hidden />
+              </span>
+            ))}
+          </nav>
+        )}
         <DraftField
           value={task.title}
           onCommit={(value) => {
@@ -87,6 +132,15 @@ export function TaskDetailPanel({
           worktrees={worktrees}
           assignedBranches={assignedBranches}
         >
+          <Property label="Parent">
+            <TaskParentSelect
+              tasks={tasks}
+              value={task.parent_id ?? null}
+              onChange={(parent_id) => onUpdate(task.id, { parent_id })}
+              excludeIds={excludeIds}
+              className="h-7 max-w-full"
+            />
+          </Property>
           {task.source_session && (
             <Property label="From session">
               <div className="flex min-w-0">
@@ -124,9 +178,51 @@ export function TaskDetailPanel({
             />
           </MarkdownField>
         </div>
+
+        <section aria-label="Sub-tasks" className="mt-5 border-t pt-4">
+          <div className="mb-1.5 flex items-center gap-2 text-xs font-medium text-muted-foreground">
+            <span>Sub-tasks</span>
+            {progress.total > 0 && <span className="tabular-nums">{progress.done}/{progress.total}</span>}
+          </div>
+          {subtasks.length > 0 && (
+            <ul className="-mx-1.5 mb-1">
+              {subtasks.map((sub) => (
+                <li key={sub.id}>
+                  <button
+                    type="button"
+                    className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left text-sm hover:bg-muted/60"
+                    onClick={() => onSelectTask(sub.id)}
+                  >
+                    <SubtaskStatusIcon status={sub.status} />
+                    <span className={`truncate ${sub.status === "done" || sub.status === "cancelled" ? "text-muted-foreground line-through" : ""}`}>
+                      {sub.title}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {!archived && (
+            <Button variant="ghost" size="sm" className="-mx-1.5 h-7 px-1.5 text-xs text-muted-foreground" onClick={() => onAddSubtask(task.id)}>
+              <Plus className="mr-1 h-3.5 w-3.5" />
+              Add sub-task
+            </Button>
+          )}
+        </section>
       </div>
     </div>
   );
+}
+
+function SubtaskStatusIcon({ status }: { status: TaskStatus }) {
+  const { Icon, tone } = status === "done"
+    ? { Icon: CheckCircle2, tone: "text-emerald-500" }
+    : status === "cancelled"
+      ? { Icon: XCircle, tone: "text-muted-foreground" }
+      : status === "in_progress"
+        ? { Icon: CircleDot, tone: "text-blue-500" }
+        : { Icon: Circle, tone: "text-muted-foreground" };
+  return <Icon className={`h-3.5 w-3.5 shrink-0 ${tone}`} aria-label={status} />;
 }
 
 /**

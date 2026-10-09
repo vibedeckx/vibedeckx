@@ -218,6 +218,7 @@ describe("TasksView new-task draft", () => {
       status: "todo",
       priority: "medium",
       assigned_branch: null,
+      parent_id: null,
     });
     expect(draftPanel()).toBeNull();
     expect(pendingRows()).toHaveLength(1);
