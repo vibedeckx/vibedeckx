@@ -185,7 +185,7 @@ describe("TaskProposalUI", () => {
     expect(apiMock.createTask.mock.calls[0][1]).toMatchObject({ parent_id: "goal" });
   });
 
-  it("files the rest of a partly created proposal under the parent its created row has", async () => {
+  it("keeps the parent editable for pending tasks without moving already created tasks", async () => {
     apiMock.getTasks.mockResolvedValue([
       taskRow({ id: "goal", title: "Ship sub-tasks", source_tool_use_id: "toolu_0", source_item_index: 0 }),
       taskRow({ id: "other", title: "Other goal", source_tool_use_id: "toolu_0", source_item_index: 1 }),
@@ -194,11 +194,12 @@ describe("TaskProposalUI", () => {
     ]);
     await render({ input: { ...PROPOSAL, parent_task_id: "goal" }, toolUseId: "toolu_1" });
     const picker = container.querySelector<HTMLButtonElement>('[aria-label="Parent task"]');
-    expect(picker?.textContent).toContain("Other goal");
-    expect(picker?.disabled).toBe(true);
+    expect(picker?.textContent).toContain("Ship sub-tasks");
+    expect(picker?.disabled).toBe(false);
+    expect(container.textContent).toContain("under Other goal");
 
     await act(async () => { buttons("Create task")[0].click(); });
-    expect(apiMock.createTask.mock.calls[0][1]).toMatchObject({ parent_id: "other", source: { item_index: 1 } });
+    expect(apiMock.createTask.mock.calls[0][1]).toMatchObject({ parent_id: "goal", source: { item_index: 1 } });
   });
 
   it("ignores a parent_task_id that names no task of the project", async () => {

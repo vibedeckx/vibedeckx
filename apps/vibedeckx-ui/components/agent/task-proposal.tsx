@@ -70,8 +70,8 @@ function readProposal(input: unknown): { items: ItemFields[]; parentTaskId: stri
  * until the user confirms; the project and source session come from the
  * session this card lives in, never from the model. The whole proposal goes
  * under one parent: the agent's `parent_task_id` while it names a task of
- * this project, else none — the user can change it until the first row is
- * created; after that the rest follow that row's parent. A confirmed row follows
+ * this project, else none — the user can change it for any remaining
+ * proposals without moving tasks already created. A confirmed row follows
  * its task — created, then done/cancelled — and returns to the editable state
  * if the task is deleted.
  */
@@ -84,15 +84,9 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
   const [submitting, setSubmitting] = useState<Set<number>>(() => new Set());
   const [errors, setErrors] = useState<Map<number, string>>(() => new Map());
   const { byItem, tasks, loading, loadError, retry } = useProposedTasks(projectId, sessionId, toolUseId);
-  // Once a row exists the group's parent is settled: the rest follow it, so a
-  // proposal never ends up split across parents (nor reverts after a reload).
-  const firstCreated = [...byItem.values()][0];
-  const parentLocked = firstCreated !== undefined;
-  const parentId = parentLocked
-    ? firstCreated.parent_id ?? null
-    : parentChoice !== undefined
-      ? parentChoice
-      : proposal.parentTaskId && tasks?.some((t) => t.id === proposal.parentTaskId) ? proposal.parentTaskId : null;
+  const parentId = parentChoice !== undefined
+    ? parentChoice
+    : proposal.parentTaskId && tasks?.some((t) => t.id === proposal.parentTaskId) ? proposal.parentTaskId : null;
 
   const rootRef = useRef<HTMLDivElement>(null);
   const [highlighted, setHighlighted] = useState(false);
@@ -169,7 +163,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
             value={parentId}
             onChange={setParentChoice}
             sessionId={sessionId}
-            disabled={parentLocked || submitting.size > 0}
+            disabled={submitting.size > 0}
             className="h-7 max-w-72"
           />
         </div>
