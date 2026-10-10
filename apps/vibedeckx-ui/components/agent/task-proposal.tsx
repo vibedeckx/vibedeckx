@@ -51,6 +51,48 @@ function tryParse(value: string): unknown {
   }
 }
 
+/** Mirrors the limits parseProposeTaskArgs enforces in packages/vibedeckx/src/session-tools-mcp.ts. */
+const PROPOSE_TASK_MAX_ITEMS = 10;
+const TASK_TITLE_MAX = 200;
+const TASK_DESCRIPTION_MAX = 20_000;
+const PARENT_TASK_ID_MAX = 200;
+
+/**
+ * Why the worker rejected this call, or null if it accepted it. The card
+ * cannot see the tool result (Claude Code's never reaches the conversation),
+ * but the check is pure shape validation of the input, so replaying it here
+ * gives the same verdict. A rejected call got an error back and the agent is
+ * expected to propose again, so its card must not offer the tasks too.
+ * Older workers capped the list lower; a call they rejected between the two
+ * caps still shows as a normal card, never the reverse.
+ */
+export function proposalRejection(input: unknown): string | null {
+  const raw = typeof input === "string" ? tryParse(input) : input;
+  const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const items = obj.tasks;
+  if (!Array.isArray(items) || items.length === 0) return "The proposal had no tasks.";
+  if (items.length > PROPOSE_TASK_MAX_ITEMS) {
+    return `It listed ${items.length} tasks; at most ${PROPOSE_TASK_MAX_ITEMS} fit in one proposal.`;
+  }
+  const parent = obj.parent_task_id;
+  if (parent !== undefined && parent !== null && (typeof parent !== "string" || parent.length > PARENT_TASK_ID_MAX)) {
+    return "Its parent task id was malformed.";
+  }
+  const str = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+  for (const [i, item] of items.entries()) {
+    const o = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+    const title = str(o.title);
+    const description = str(o.description);
+    const priority = str(o.priority).toLowerCase();
+    if (!title || title.length > TASK_TITLE_MAX) return `Task ${i + 1} had a missing or overlong title.`;
+    if (!description || description.length > TASK_DESCRIPTION_MAX) {
+      return `Task ${i + 1} had a missing or overlong description.`;
+    }
+    if (priority && !(priorityOptions as string[]).includes(priority)) return `Task ${i + 1} had an unknown priority.`;
+  }
+  return null;
+}
+
 function readProposal(input: unknown): { items: ItemFields[]; parentTaskId: string | null } {
   const raw = typeof input === "string" ? tryParse(input) : input;
   const obj = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
@@ -96,15 +138,14 @@ const ROW_GRID = "grid grid-cols-[22px_minmax(0,1fr)_auto] gap-x-2.5 gap-y-1 bor
 export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
   const { sessionId, projectId, openTask } = useAgentConversation();
   const proposal = useMemo(() => readProposal(input), [input]);
+  const rejection = useMemo(() => proposalRejection(input), [input]);
   const [fields, setFields] = useState<ItemFields[]>(proposal.items);
   /** The header pick; undefined = still the proposal's default. */
   const [sharedChoice, setSharedChoice] = useState<string | null | undefined>(undefined);
   /** Per-row picks that override the header's. */
   const [parentChoices, setParentChoices] = useState<Map<number, string | null>>(() => new Map());
-  /** Rows showing the editor; an empty description starts there. */
-  const [editing, setEditing] = useState<Set<number>>(
-    () => new Set(proposal.items.flatMap((item, i) => (item.description.trim() ? [] : [i]))),
-  );
+  /** Rows showing the editor. */
+  const [editing, setEditing] = useState<Set<number>>(() => new Set());
   const [submitting, setSubmitting] = useState<Set<number>>(() => new Set());
   const [errors, setErrors] = useState<Map<number, string>>(() => new Map());
   const { byItem, tasks, loading, loadError, retry } = useProposedTasks(projectId, sessionId, toolUseId);
@@ -185,8 +226,15 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
 
   const pendingIndices = fields.map((_, i) => i).filter((i) => !byItem.has(i));
 
-  if (fields.length === 0) {
-    return <p className="text-xs text-muted-foreground">The proposal had no tasks.</p>;
+  if (rejection) {
+    return (
+      <div className="flex items-start gap-2 rounded-xl border border-border bg-muted/40 px-3 py-2.5 text-[11.5px] text-muted-foreground">
+        <XCircle className="mt-px h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 break-words">
+          Not proposed — {rejection} The agent was told why and may propose again.
+        </span>
+      </div>
+    );
   }
 
   const createdCount = fields.length - pendingIndices.length;

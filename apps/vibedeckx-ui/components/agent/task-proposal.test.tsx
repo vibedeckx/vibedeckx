@@ -48,7 +48,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-import { TaskProposalUI } from "./task-proposal";
+import { proposalRejection, TaskProposalUI } from "./task-proposal";
 import { __resetProposedTaskCache } from "@/hooks/use-proposed-tasks";
 import { requestProposalCardFocus } from "@/lib/proposal-card-focus";
 
@@ -75,6 +75,30 @@ const taskRow = (over: Partial<Task> = {}): Task => ({
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z",
   ...over,
+});
+
+describe("proposalRejection", () => {
+  const item = { title: "T", description: "D" };
+
+  it("accepts what the worker accepts", () => {
+    expect(proposalRejection(PROPOSAL)).toBeNull();
+    expect(proposalRejection(JSON.stringify(PROPOSAL))).toBeNull();
+    expect(proposalRejection({ tasks: Array(10).fill(item) })).toBeNull();
+    expect(proposalRejection({ tasks: [{ ...item, priority: " HIGH " }], parent_task_id: null })).toBeNull();
+    expect(proposalRejection({ tasks: [{ ...item, priority: 3 }] })).toBeNull();
+  });
+
+  it("rejects what the worker rejects", () => {
+    expect(proposalRejection({})).not.toBeNull();
+    expect(proposalRejection({ tasks: [] })).not.toBeNull();
+    expect(proposalRejection({ tasks: Array(11).fill(item) })).not.toBeNull();
+    expect(proposalRejection({ tasks: [item], parent_task_id: 42 })).not.toBeNull();
+    expect(proposalRejection({ tasks: [{ ...item, title: "  " }] })).not.toBeNull();
+    expect(proposalRejection({ tasks: [{ ...item, title: "x".repeat(201) }] })).not.toBeNull();
+    expect(proposalRejection({ tasks: [{ title: "T", description: "" }] })).not.toBeNull();
+    expect(proposalRejection({ tasks: [{ ...item, priority: "critical" }] })).not.toBeNull();
+    expect(proposalRejection({ tasks: ["x"] })).not.toBeNull();
+  });
 });
 
 describe("TaskProposalUI", () => {
@@ -154,13 +178,13 @@ describe("TaskProposalUI", () => {
     expect(document.activeElement).toBe(container.querySelector("input[aria-label='Task title']"));
   });
 
-  it("keeps an initially empty description in the editor while typing", async () => {
-    await render({ input: { tasks: [{ title: "T", description: "" }] }, toolUseId: "toolu_1" });
-    const editor = descriptionEditor()!;
-    act(() => editor.focus());
-    typeInto(editor, "Now it has text");
-    expect(descriptionEditor()).toBe(editor);
-    expect(document.activeElement).toBe(editor);
+  it("shows a call the worker rejected as not proposed, with nothing to create", async () => {
+    const item = { title: "T", description: "D" };
+    await render({ input: { tasks: Array(11).fill(item) }, toolUseId: "toolu_1" });
+    expect(container.textContent).toContain("Not proposed");
+    expect(container.textContent).toContain("at most 10");
+    expect(buttons("Create task")).toHaveLength(0);
+    expect(apiMock.getTasks).toHaveBeenCalled();
   });
 
   it("accepts a JSON-encoded input payload", async () => {
@@ -278,8 +302,10 @@ describe("TaskProposalUI", () => {
     expect(container.querySelector('[aria-label="Parent task"]')).toBeNull();
   });
 
-  it("asks for a description before creating a row without one", async () => {
-    await render({ input: { tasks: [{ title: "T", description: "" }] }, toolUseId: "toolu_1" });
+  it("asks for a description before creating a row whose description was cleared", async () => {
+    await render({ input: { tasks: [{ title: "T", description: "D" }] }, toolUseId: "toolu_1" });
+    act(() => container.querySelector<HTMLElement>("[data-markdown-field='Task description']")!.click());
+    typeInto(descriptionEditor()!, "");
     expect(container.textContent).toContain("Description is required");
     expect(buttons("Create task")[0].disabled).toBe(true);
     typeInto(descriptionEditor()!, "Something to do");
