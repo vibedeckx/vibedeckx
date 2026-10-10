@@ -32,8 +32,6 @@ interface TaskTableProps {
   onSelect: (taskId: string | null) => void;
   /** ↑/↓ while a task is open: move the selection by one row. */
   onStep: (delta: 1 | -1) => void;
-  /** A while a task is open: start a sub-task draft under it. */
-  onAddSubtask?: () => void;
   /** Creates still in flight, shown as placeholder rows after the real ones. */
   pendingTasks: PendingTask[];
   /** Just-created task: scrolled into view and briefly highlighted. */
@@ -44,7 +42,7 @@ interface TaskTableProps {
   assignedBranches: Set<string | null>;
 }
 
-export function TaskTable({ rows, allTasks, sort, onSortChange, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign, onOpenSourceSession, panelOpen, selectedTaskId, onSelect, onStep, onAddSubtask, pendingTasks, flashTaskId, keyboardActive, assignedBranches }: TaskTableProps) {
+export function TaskTable({ rows, allTasks, sort, onSortChange, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign, onOpenSourceSession, panelOpen, selectedTaskId, onSelect, onStep, pendingTasks, flashTaskId, keyboardActive, assignedBranches }: TaskTableProps) {
   const listRef = useRef<HTMLDivElement>(null);
   const compact = panelOpen;
 
@@ -94,11 +92,6 @@ export function TaskTable({ rows, allTasks, sort, onSortChange, onUpdate, onDele
         return;
       }
       if (selectedTaskId === null) return;
-      if ((event.key === "a" || event.key === "A") && !event.shiftKey && onAddSubtask) {
-        event.preventDefault();
-        onAddSubtask();
-        return;
-      }
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       if (rows.length === 0) return;
       event.preventDefault();
@@ -106,7 +99,7 @@ export function TaskTable({ rows, allTasks, sort, onSortChange, onUpdate, onDele
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [panelOpen, selectedTaskId, onSelect, onStep, onAddSubtask, rows.length, keyboardActive]);
+  }, [panelOpen, selectedTaskId, onSelect, onStep, rows.length, keyboardActive]);
 
   const revealId = flashTaskId ?? selectedTaskId;
   useEffect(() => {

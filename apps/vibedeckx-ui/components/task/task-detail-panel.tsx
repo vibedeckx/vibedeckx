@@ -282,7 +282,6 @@ export function TaskDetailPanel({
                 <Plus className="size-2" strokeWidth={3} />
               </span>
               Add sub-task
-              <Kbd className="ml-auto">A</Kbd>
             </button>
           )}
         </Section>
@@ -313,7 +312,7 @@ function Section({ title, hint, extra, children, ...props }: { title: string; hi
   );
 }
 
-export function Kbd({ children, className }: { children: ReactNode; className?: string }) {
+function Kbd({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <kbd className={cn("inline-grid h-[17px] min-w-[17px] place-items-center rounded border border-b-[1.5px] border-border bg-card px-1 font-mono text-[10px] leading-none text-secondary-foreground", className)}>
       {children}

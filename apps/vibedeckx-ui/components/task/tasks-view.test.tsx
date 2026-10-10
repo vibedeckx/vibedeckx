@@ -193,14 +193,6 @@ describe("TasksView redesign behaviors", () => {
     expect(panel()!.querySelector('[data-markdown-field="Description"]')!.textContent).toContain("Long first description");
   });
 
-  it("opens a sub-task draft under the open task on A", () => {
-    act(() => row("t1").click());
-    press("a");
-    expect(container.textContent).toContain("New task");
-    const parent = panel()!.querySelector('[aria-label="Parent task"]')!;
-    expect(parent.textContent).toContain("First");
-  });
-
   it("shows the open task's position and steps with the header buttons", () => {
     act(() => row("t1").click());
     expect(panel()!.textContent).toContain("1 / 2");

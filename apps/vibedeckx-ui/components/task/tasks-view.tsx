@@ -307,7 +307,6 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
                   sort={sort}
                   onSortChange={setSort}
                   onStep={stepSelection}
-                  onAddSubtask={selectedTask && selectedTask.archived_at === null ? () => openSubtaskDraft(selectedTask.id) : undefined}
                   onUpdate={onUpdateTask}
                   onDelete={onDeleteTask}
                   onArchive={onArchiveTask}
