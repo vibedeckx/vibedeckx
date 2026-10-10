@@ -25,6 +25,7 @@ import {
   GripVertical,
   Ban,
   CircleCheck,
+  Loader2,
 } from "lucide-react";
 import { ExecutorOutput } from "./executor-output";
 import { ExecutorForm } from "./executor-form";
@@ -35,6 +36,8 @@ import { cn } from "@/lib/utils";
 import { LocateMatchText } from "@/components/locate/locate-highlight";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+
+const ACTION_FLIP_COOLDOWN_MS = 800;
 
 interface ExecutorItemProps {
   executor: ExecutorWithProcess;
@@ -76,6 +79,14 @@ export function ExecutorItem({
   );
   const processFinishedCalledRef = useRef(false);
   const prevProcessIdRef = useRef<string | null>(executor.currentProcessId);
+  // Start/Stop request in flight. A remote start can take several seconds;
+  // without feedback, repeated clicks land on the Stop button the moment it
+  // replaces Start and kill the process that just came up.
+  const [pendingAction, setPendingAction] = useState<"start" | "stop" | null>(null);
+  const pendingCooldownRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (pendingCooldownRef.current) clearTimeout(pendingCooldownRef.current);
+  }, []);
 
   const {
     attributes,
@@ -129,19 +140,40 @@ export function ExecutorItem({
     }
   }, [status, exitCode, localProcessId, onProcessFinished]);
 
+  // Keep the button locked briefly after it flips, so a click already on its
+  // way (double-click, impatient retry) can't hit the opposite action.
+  const releasePendingAfterCooldown = () => {
+    pendingCooldownRef.current = setTimeout(() => {
+      pendingCooldownRef.current = null;
+      setPendingAction(null);
+    }, ACTION_FLIP_COOLDOWN_MS);
+  };
+
   const handleStart = async () => {
+    if (pendingAction) return;
+    setPendingAction("start");
     console.log(`[ExecutorItem] Starting executor ${executor.id}`);
     processFinishedCalledRef.current = false; // Reset for new process
-    const processId = await onStart();
-    console.log(`[ExecutorItem] Got processId: ${processId}`);
-    if (processId) {
-      setLocalProcessId(processId);
-      onOpenChange(true); // Auto-expand on start
+    try {
+      const processId = await onStart();
+      console.log(`[ExecutorItem] Got processId: ${processId}`);
+      if (processId) {
+        setLocalProcessId(processId);
+        onOpenChange(true); // Auto-expand on start
+      }
+    } finally {
+      releasePendingAfterCooldown();
     }
   };
 
   const handleStop = async () => {
-    await onStop(localProcessId || undefined);
+    if (pendingAction) return;
+    setPendingAction("stop");
+    try {
+      await onStop(localProcessId || undefined);
+    } finally {
+      releasePendingAfterCooldown();
+    }
   };
 
   const isRunning = executor.isRunning;
@@ -234,22 +266,29 @@ export function ExecutorItem({
                     size="sm"
                     variant="destructive"
                     onClick={handleStop}
+                    disabled={pendingAction !== null}
+                    aria-busy={pendingAction === "stop"}
                     data-locate-action
                     className="w-20 border border-destructive"
                   >
-                    <Square className="h-3 w-3 mr-1" />
+                    {pendingAction === "stop"
+                      ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                      : <Square className="h-3 w-3 mr-1" />}
                     Stop
                   </Button>
                 ) : (
                   <Button
                     size="sm"
                     onClick={handleStart}
-                    disabled={isDisabled}
+                    disabled={isDisabled || pendingAction !== null}
+                    aria-busy={pendingAction === "start"}
                     title={isDisabled ? "Executor is disabled" : undefined}
                     data-locate-action
                     className="w-20"
                   >
-                    <Play className="h-3 w-3 mr-1" />
+                    {pendingAction === "start"
+                      ? <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                      : <Play className="h-3 w-3 mr-1" />}
                     Start
                   </Button>
                 )}
