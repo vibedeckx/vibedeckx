@@ -18,8 +18,14 @@ import { PriorityGlyph, PriorityMenu, StatusGlyph, StatusMenu } from "./task-gly
 export const PANEL_FIELD_CLASS =
   "field-sizing-content w-full resize-none rounded-md bg-transparent px-1.5 py-1 -mx-1.5 outline-none placeholder:text-muted-foreground/60";
 
-/** Description body; its size follows the Tasks font size setting via `--task-body-font-size`. */
-export const PANEL_BODY_CLASS = "min-h-32 text-[length:var(--task-body-font-size,14px)] leading-relaxed";
+/** Description text; its size follows the Tasks font size setting via `--task-body-font-size`. */
+export const PANEL_BODY_TEXT_CLASS = "text-[length:var(--task-body-font-size,14px)] leading-relaxed";
+
+/**
+ * Description editor: the text plus room to type. The rendered markdown uses
+ * PANEL_BODY_TEXT_CLASS alone, so a one-line description stays one line tall.
+ */
+export const PANEL_BODY_CLASS = `min-h-32 ${PANEL_BODY_TEXT_CLASS}`;
 
 /**
  * Streamdown wrapper for task descriptions. globals.css has no `@source` for

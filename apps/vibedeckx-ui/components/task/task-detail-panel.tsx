@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { MarkdownField } from "./markdown-field";
 import { agoPhrase, footerDate, selfAndDescendantIds, subtaskProgress, taskFileBranch } from "./task-utils";
 import { TaskParentSelect } from "./task-parent-select";
-import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
+import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS, PANEL_BODY_TEXT_CLASS } from "./task-properties";
 import { PriorityGlyph, StatusGlyph } from "./task-glyphs";
 import { RowAction } from "./task-row";
 
@@ -126,7 +126,11 @@ export function TaskDetailPanel({
         </div>
       )}
 
-      <div className={cn("min-h-0 flex-1 overflow-auto px-6 pt-[18px] pb-[22px] edge-scrollbar", archived && "opacity-[.78]")}>
+      {/* Column so a short description's section can take the leftover
+          height: Sub-tasks then sits above the footer instead of leaving
+          the blank space under it. Nothing shrinks — an overflowing column
+          would squash the title textarea to nothing; it scrolls instead. */}
+      <div className={cn("flex min-h-0 flex-1 flex-col overflow-auto [&>*]:shrink-0 px-6 pt-[18px] pb-[22px] edge-scrollbar", archived && "opacity-[.78]")}>
         {ancestors.length > 0 && (
           <nav aria-label="Parent tasks" className="mb-1 -ml-[5px] flex min-w-0 flex-wrap items-center gap-px text-[11.5px] text-muted-foreground/70">
             {ancestors.map((a) => (
@@ -198,13 +202,14 @@ export function TaskDetailPanel({
 
         <Section
           title="Description"
+          className="flex flex-[1_0_auto] flex-col"
           hint={!editingDescription && task.description?.trim() ? "Click to edit · Markdown" : undefined}
         >
           <MarkdownField
             value={task.description ?? ""}
             label="Description"
             onOpenFile={onOpenFile ? (path, line) => onOpenFile(taskFileBranch(task), path, line) : undefined}
-            className={`-mx-1.5 rounded-md px-1.5 py-1 text-secondary-foreground hover:bg-secondary focus-visible:bg-muted/40 ${PANEL_BODY_CLASS}`}
+            className={`-mx-1.5 flex-1 rounded-md px-1.5 py-1 text-secondary-foreground hover:bg-secondary focus-visible:bg-muted/40 ${PANEL_BODY_TEXT_CLASS}`}
           >
             <DraftField
               value={task.description ?? ""}
@@ -231,6 +236,9 @@ export function TaskDetailPanel({
         <Section
           title="Sub-tasks"
           aria-label="Sub-tasks"
+          compact
+          // Nothing to list and nothing to add: say so in the header, no body.
+          hint={archived && subtasks.length === 0 ? "None" : undefined}
           extra={progress.total > 0 && (
             <>
               <span className="ml-0.5 flex gap-[3px]" aria-hidden>
@@ -248,7 +256,7 @@ export function TaskDetailPanel({
             </>
           )}
         >
-          {subtasks.length > 0 ? (
+          {subtasks.length > 0 && (
             <ul className="-mx-2 flex flex-col">
               {subtasks.map((sub) => {
                 const closed = sub.status === "done" || sub.status === "cancelled";
@@ -256,7 +264,7 @@ export function TaskDetailPanel({
                   <li key={sub.id}>
                     <button
                       type="button"
-                      className="flex h-8 w-full min-w-0 items-center gap-[9px] rounded-md px-2 text-left hover:bg-muted"
+                      className="flex h-7 w-full min-w-0 items-center gap-[9px] rounded-md px-2 text-left hover:bg-muted"
                       onClick={() => onSelectTask(sub.id)}
                     >
                       <StatusGlyph status={sub.status} />
@@ -269,13 +277,11 @@ export function TaskDetailPanel({
                 );
               })}
             </ul>
-          ) : (
-            <div className="pt-0.5 pb-1 text-xs text-muted-foreground/70">No sub-tasks.</div>
           )}
           {!archived && (
             <button
               type="button"
-              className="-mx-2 mt-0.5 flex h-[30px] w-[calc(100%+1rem)] items-center gap-[9px] rounded-md px-2 text-[12.5px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="-mx-2 flex h-7 w-[calc(100%+1rem)] items-center gap-[9px] rounded-md px-2 text-[12.5px] text-muted-foreground hover:bg-muted hover:text-foreground"
               onClick={() => onAddSubtask(task.id)}
             >
               <span className="grid size-3.5 place-items-center rounded-full border-[1.5px] border-dashed border-border text-muted-foreground/70">
@@ -299,10 +305,11 @@ export function TaskDetailPanel({
   );
 }
 
-function Section({ title, hint, extra, children, ...props }: { title: string; hint?: string; extra?: ReactNode; children: ReactNode; "aria-label"?: string }) {
+/** `compact`: tighter header spacing, for list sections like Sub-tasks. */
+function Section({ title, hint, extra, compact, className, children, ...props }: { title: string; hint?: string; extra?: ReactNode; compact?: boolean; className?: string; children: ReactNode; "aria-label"?: string }) {
   return (
-    <section className="mt-[18px] border-t border-border/60 pt-3.5" {...props}>
-      <div className="mb-2 flex h-5 items-center gap-2 text-[11.5px] font-medium text-muted-foreground">
+    <section className={cn("mt-[18px] border-t border-border/60", compact ? "pt-3" : "pt-3.5", className)} {...props}>
+      <div className={cn("flex h-5 items-center gap-2 text-[11.5px] font-medium text-muted-foreground", compact ? "mb-1" : "mb-2")}>
         {title}
         {extra}
         {hint && <span className="ml-auto text-[11px] font-normal text-muted-foreground/70">{hint}</span>}
