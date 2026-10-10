@@ -206,7 +206,8 @@ export const PROPOSE_TASK_DESCRIPTION = [
   "Each description must be self-contained: the task may be picked up later in a fresh session with",
   "none of this conversation's context. Cover the background, the relevant files, what remains to",
   "be done, and how to tell it is finished. Propose several tasks in one call when the user asks to",
-  "split the work.",
+  "split the work. Keep tasks coarse: one per piece of work someone would pick up and finish on its",
+  "own, not one per step; steps belong in that task's description. At most 10 tasks per call.",
   "",
   "Write each file in this repository that a description refers to (a design doc, the source to",
   "change) as a Markdown link with a path relative to the repository root, e.g.",
@@ -229,7 +230,7 @@ export const PROPOSE_TASK_INPUT_SCHEMA = {
     tasks: {
       type: "array",
       minItems: 1,
-      maxItems: 5,
+      maxItems: 10,
       description: "The tasks to propose, usually one.",
       items: {
         type: "object",
@@ -262,7 +263,7 @@ export interface ProposedTask {
   priority: ProposedTaskPriority;
 }
 
-export const PROPOSE_TASK_MAX_ITEMS = 5;
+export const PROPOSE_TASK_MAX_ITEMS = 10;
 export const TASK_TITLE_MAX = 200;
 export const TASK_DESCRIPTION_MAX = 20_000;
 const PARENT_TASK_ID_MAX = 200;
@@ -275,7 +276,12 @@ export function parseProposeTaskArgs(
   const raw = args.tasks;
   if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: "tasks must be a non-empty array" };
   if (raw.length > PROPOSE_TASK_MAX_ITEMS) {
-    return { ok: false, error: `propose at most ${PROPOSE_TASK_MAX_ITEMS} tasks at a time` };
+    return {
+      ok: false,
+      error: `propose at most ${PROPOSE_TASK_MAX_ITEMS} tasks at a time. This split is likely too fine: `
+        + "merge related items into coarser tasks, listing their steps in the description, and call again. "
+        + "Only if the user explicitly asked for each item as its own task, split them across several calls.",
+    };
   }
   const parentTaskId = args.parent_task_id;
   if (parentTaskId !== undefined && parentTaskId !== null
