@@ -11,6 +11,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { PageHeader, FilterBar, FilterChip } from "@/components/layout";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
+import { orderAsTree, sortTasks, type TaskSort } from "./task-utils";
 
 type StatusFilter = "all" | TaskStatus | "archived";
 
@@ -60,6 +61,7 @@ export type TasksOpenRequest = { kind: "task"; taskId: string; status: TaskStatu
 export function TasksView({ active = true, projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession, onOpenFile, openRequest, onSelectedTaskChange }: TasksViewProps) {
   const { settings: convSettings } = useConversationSettings();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sort, setSort] = useState<TaskSort>(null);
   // Panel, draft, pending creates and the flash are all keyed by project, so
   // switching projects closes the panel and drops the draft.
   const [panelState, setPanelState] = useState<{ projectId: string | null; panel: Panel } | null>(null);
@@ -206,6 +208,19 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
 
   const archivedView = statusFilter === "archived";
 
+  // Sub-tasks sit under their parent, siblings in the chosen sort order. One
+  // whose parent is filtered out of this view shows at the top level.
+  const rows = useMemo(() => orderAsTree(sortTasks(filteredTasks, sort)), [filteredTasks, sort]);
+  const selectedIndex = selectedTask ? rows.findIndex((r) => r.task.id === selectedTask.id) : -1;
+  const stepSelection = useCallback(
+    (delta: 1 | -1) => {
+      if (rows.length === 0) return;
+      const next = selectedIndex === -1 ? 0 : Math.min(Math.max(selectedIndex + delta, 0), rows.length - 1);
+      selectTask(rows[next].task.id);
+    },
+    [rows, selectedIndex, selectTask],
+  );
+
   const visiblePending = useMemo(
     () => pending.filter((p) => p.projectId === projectId && (statusFilter === "all" || statusFilter === p.status)),
     [pending, projectId, statusFilter],
@@ -280,15 +295,19 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
           <ResizablePanel id="task-list" order={1} minSize={30}>
             {/* Container for the table's width queries: as the panel is dragged
                 wider, Priority then Status drop out instead of scrolling sideways. */}
-            <div className="@container h-full overflow-y-auto overflow-x-hidden px-5 edge-scrollbar">
+            <div className="@container h-full overflow-y-auto overflow-x-hidden edge-scrollbar">
               {loading ? (
                 <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
                   Loading tasks...
                 </div>
               ) : (
                 <TaskTable
-                  tasks={filteredTasks}
+                  rows={rows}
                   allTasks={tasks}
+                  sort={sort}
+                  onSortChange={setSort}
+                  onStep={stepSelection}
+                  onAddSubtask={selectedTask && selectedTask.archived_at === null ? () => openSubtaskDraft(selectedTask.id) : undefined}
                   onUpdate={onUpdateTask}
                   onDelete={onDeleteTask}
                   onArchive={onArchiveTask}
@@ -360,6 +379,8 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
                       tasks={tasks}
                       onSelectTask={selectTask}
                       onAddSubtask={openSubtaskDraft}
+                      position={selectedIndex === -1 || shownPanel.task.id !== selectedTask?.id ? null : { index: selectedIndex, total: rows.length }}
+                      onStep={stepSelection}
                     />
                   )}
                 </div>

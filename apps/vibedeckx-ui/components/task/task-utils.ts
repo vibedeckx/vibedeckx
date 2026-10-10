@@ -1,7 +1,7 @@
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 
 export const statusConfig: Record<TaskStatus, { label: string; color: string }> = {
-  todo: { label: "To Do", color: "bg-muted text-muted-foreground" },
+  todo: { label: "Todo", color: "bg-muted text-muted-foreground" },
   in_progress: { label: "In Progress", color: "bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300" },
   done: { label: "Done", color: "bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300" },
   cancelled: { label: "Cancelled", color: "bg-neutral-100 text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400 line-through" },
@@ -49,9 +49,17 @@ export function taskFileBranch(task: Pick<Task, "source_session">): string | nul
 
 const MD_LINK = /\[([^\]\n]*)\]\(\s*[^)\s]*\s*\)/g;
 
-/** One-line description preview: `[label](href)` collapses to `label`, then truncate. */
+/**
+ * One-line description preview: `[label](href)` collapses to `label`, code
+ * backticks and list/heading markers drop, lines join; then truncate.
+ */
 export function descriptionPreview(description: string, max = 80): string {
-  const text = description.replace(MD_LINK, "$1");
+  const text = description
+    .replace(MD_LINK, "$1")
+    .replace(/`/g, "")
+    .replace(/^\s*(?:[-*+]|\d+\.|#{1,6})\s+/gm, "")
+    .replace(/\s*\n\s*/g, " ")
+    .trim();
   return text.length > max ? text.slice(0, max) + "..." : text;
 }
 
@@ -113,4 +121,57 @@ export function subtaskProgress(taskId: string, tasks: Pick<Task, "parent_id" | 
     if (t.status === "done") done += 1;
   }
   return { done, total };
+}
+
+export type TaskSortField = "title" | "priority" | "created_at";
+export type TaskSort = { field: TaskSortField; dir: "asc" | "desc" } | null;
+
+const priorityRank: Record<TaskPriority, number> = { urgent: 0, high: 1, medium: 2, low: 3 };
+
+/** `tasks` in the list's sort order; null keeps the input (position) order. */
+export function sortTasks<T extends Pick<Task, "title" | "priority" | "created_at">>(tasks: T[], sort: TaskSort): T[] {
+  if (!sort) return tasks;
+  const dir = sort.dir === "asc" ? 1 : -1;
+  return [...tasks].sort((a, b) => {
+    switch (sort.field) {
+      case "title":
+        return dir * a.title.localeCompare(b.title);
+      case "priority":
+        return dir * (priorityRank[a.priority] - priorityRank[b.priority]);
+      case "created_at":
+        return dir * (new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    }
+  });
+}
+
+/** Compact age for list columns: now, 12m, 3h, 2d, 1w, 5mo, 1y. */
+export function shortAge(iso: string, now = Date.now()): string {
+  const minutes = Math.floor(Math.max(0, now - new Date(iso).getTime()) / 60_000);
+  if (minutes < 1) return "now";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d`;
+  if (days < 30) return `${Math.floor(days / 7)}w`;
+  if (days < 365) return `${Math.floor(days / 30)}mo`;
+  return `${Math.floor(days / 365)}y`;
+}
+
+/** Footer timestamps: "Oct 7, 14:02", with the year only when it isn't this one. */
+export function footerDate(iso: string, now = new Date()): string {
+  const d = new Date(iso);
+  const date = d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(d.getFullYear() !== now.getFullYear() ? { year: "numeric" } : {}),
+  });
+  const time = d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+  return `${date}, ${time}`;
+}
+
+/** "Updated 12m ago" / "Updated just now". */
+export function agoPhrase(iso: string, now = Date.now()): string {
+  const age = shortAge(iso, now);
+  return age === "now" ? "just now" : `${age} ago`;
 }

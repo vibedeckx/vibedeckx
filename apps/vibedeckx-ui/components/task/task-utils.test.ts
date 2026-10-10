@@ -30,6 +30,10 @@ describe("descriptionPreview", () => {
     expect(descriptionPreview(`${label} [b](${"p/".repeat(40)}x.md) tail`)).toBe(`${label} b tail`);
     expect(descriptionPreview("x".repeat(90))).toBe("x".repeat(80) + "...");
   });
+
+  it("joins lines and drops code ticks and list markers", () => {
+    expect(descriptionPreview("Run `pnpm test`.\n\n- first\n2. second\n## Notes")).toBe("Run pnpm test. first second Notes");
+  });
 });
 
 describe("task tree helpers", () => {

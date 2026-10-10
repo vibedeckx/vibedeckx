@@ -7,6 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { X } from "lucide-react";
 import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
 import { TaskParentSelect } from "./task-parent-select";
+import { RowAction } from "./task-row";
 
 export interface TaskDraft {
   title: string;
@@ -78,7 +79,7 @@ export function TaskDraftPanel({
 
   return (
     <div
-      className="flex h-full flex-col"
+      className="flex h-full flex-col bg-card"
       onKeyDown={(e) => {
         if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !isComposing(e)) {
           e.preventDefault();
@@ -86,16 +87,16 @@ export function TaskDraftPanel({
         }
       }}
     >
-      <div className="flex shrink-0 items-center justify-between pl-6 pr-3 pt-2">
+      <div className="flex h-[42px] shrink-0 items-center justify-between border-b border-border/60 pr-2 pl-6">
         <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
           New task <span className="normal-case tracking-normal text-muted-foreground/70">· Draft</span>
         </span>
-        <Button variant="ghost" size="icon" className="h-7 w-7" title="Close (Esc) — keeps the draft" onClick={onClose}>
-          <X className="h-4 w-4 text-muted-foreground" />
-        </Button>
+        <RowAction title="Close (Esc) — keeps the draft" onClick={onClose}>
+          <X className="size-3.5" />
+        </RowAction>
       </div>
 
-      <div className="flex-1 overflow-auto px-6 pb-6 edge-scrollbar">
+      <div className="flex-1 overflow-auto px-6 pt-[18px] pb-6 edge-scrollbar">
         <textarea
           ref={titleRef}
           rows={1}
@@ -109,13 +110,11 @@ export function TaskDraftPanel({
           }}
           placeholder="Untitled"
           aria-label="Title"
-          className={`${PANEL_FIELD_CLASS} text-lg font-semibold leading-snug`}
+          className={`${PANEL_FIELD_CLASS} text-lg leading-[1.32] font-semibold tracking-[-0.02em]`}
         />
-        {!draft.title.trim() && (
-          <p className="mt-0.5 text-[11px] text-muted-foreground/70">
-            Leave empty to generate a title from the description.
-          </p>
-        )}
+        <p className="mt-0.5 mb-3 min-h-4 text-[11px] text-muted-foreground/70">
+          {!draft.title.trim() && "Leave empty to generate a title from the description."}
+        </p>
 
         <TaskProperties
           status={draft.status}
@@ -132,12 +131,12 @@ export function TaskDraftPanel({
               tasks={tasks}
               value={draft.parent_id}
               onChange={(parent_id) => onChange({ parent_id })}
-              className="h-7 max-w-full"
+              field
             />
           </Property>
         </TaskProperties>
 
-        <div className="mt-5 border-t pt-4">
+        <div className="mt-[18px] border-t border-border/60 pt-3.5">
           <textarea
             ref={descriptionRef}
             rows={1}
@@ -154,7 +153,7 @@ export function TaskDraftPanel({
         )}
       </div>
 
-      <div className="flex shrink-0 items-center justify-end gap-2 border-t px-6 py-3">
+      <div className="flex shrink-0 items-center justify-end gap-2 border-t border-border/60 bg-secondary px-6 py-2.5">
         <label className="mr-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
           <Checkbox checked={createMore} onCheckedChange={(checked) => onCreateMoreChange(checked === true)} />
           Create more

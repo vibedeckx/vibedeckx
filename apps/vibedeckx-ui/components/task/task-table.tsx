@@ -1,29 +1,21 @@
 "use client";
 
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useMemo, useEffect, useRef, type ReactNode } from "react";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
-import {
-  Table,
-  TableBody,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import { TaskRow, PendingTaskRow, type PendingTask } from "./task-row";
-import { orderAsTree } from "./task-utils";
+import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
+import { TaskRow, PendingTaskRow, FULL_GRID, HIDE_BRANCH, HIDE_PRIORITY, type PendingTask } from "./task-row";
+import type { TaskSort, TaskSortField } from "./task-utils";
 import { isEditableTarget } from "@/lib/editable-target";
 import { hasOpenOverlay } from "@/components/locate/focus-region";
-
-type SortField = "title" | "status" | "priority" | "created_at";
-type SortDir = "asc" | "desc";
-
-const statusOrder: Record<TaskStatus, number> = { todo: 0, in_progress: 1, done: 2, cancelled: 3 };
-const priorityOrder: Record<TaskPriority, number> = { urgent: 0, high: 1, medium: 2, low: 3 };
+import { cn } from "@/lib/utils";
 
 interface TaskTableProps {
-  tasks: Task[];
+  /** Visible tasks in display order (sorted, then as a tree), with nesting depth. */
+  rows: { task: Task; depth: number }[];
   /** Every task of the project, filtered or not: sub-task progress counts them all. */
-  allTasks?: Task[];
+  allTasks: Task[];
+  sort: TaskSort;
+  onSortChange: (sort: TaskSort) => void;
   onUpdate: (id: string, opts: { title?: string; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null }) => void;
   onDelete: (id: string) => void;
   onArchive: (id: string) => void;
@@ -34,10 +26,14 @@ interface TaskTableProps {
   onOpenSourceSession?: (task: Task) => void;
   /** The side panel is open (a task or the new-task draft): rows go compact, Esc closes it. */
   panelOpen: boolean;
-  /** Task open in the detail panel; ↑↓ step through the sorted rows. */
+  /** Task open in the detail panel. */
   selectedTaskId: string | null;
   /** null closes the panel. */
   onSelect: (taskId: string | null) => void;
+  /** ↑/↓ while a task is open: move the selection by one row. */
+  onStep: (delta: 1 | -1) => void;
+  /** A while a task is open: start a sub-task draft under it. */
+  onAddSubtask?: () => void;
   /** Creates still in flight, shown as placeholder rows after the real ones. */
   pendingTasks: PendingTask[];
   /** Just-created task: scrolled into view and briefly highlighted. */
@@ -48,43 +44,17 @@ interface TaskTableProps {
   assignedBranches: Set<string | null>;
 }
 
-export function TaskTable({ tasks, allTasks = tasks, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign, onOpenSourceSession, panelOpen, selectedTaskId, onSelect, pendingTasks, flashTaskId, keyboardActive, assignedBranches }: TaskTableProps) {
-  const [sortField, setSortField] = useState<SortField | null>(null);
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const tableRef = useRef<HTMLTableElement>(null);
+export function TaskTable({ rows, allTasks, sort, onSortChange, onUpdate, onDelete, onArchive, onUnarchive, archivedView, worktrees, onAssign, onOpenSourceSession, panelOpen, selectedTaskId, onSelect, onStep, onAddSubtask, pendingTasks, flashTaskId, keyboardActive, assignedBranches }: TaskTableProps) {
+  const listRef = useRef<HTMLDivElement>(null);
   const compact = panelOpen;
 
-  const toggleSort = (field: SortField) => {
-    if (sortField === field) {
-      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
-    } else {
-      setSortField(field);
-      setSortDir("asc");
-    }
+  const toggleSort = (field: TaskSortField) => {
+    // asc → desc → off, so the list can go back to its own order.
+    if (sort?.field !== field) onSortChange({ field, dir: "asc" });
+    else if (sort.dir === "asc") onSortChange({ field, dir: "desc" });
+    else onSortChange(null);
   };
 
-  const sorted = useMemo(() => {
-    if (!sortField) return tasks;
-    const dir = sortDir === "asc" ? 1 : -1;
-    return [...tasks].sort((a, b) => {
-      switch (sortField) {
-        case "title":
-          return dir * a.title.localeCompare(b.title);
-        case "status":
-          return dir * (statusOrder[a.status] - statusOrder[b.status]);
-        case "priority":
-          return dir * (priorityOrder[a.priority] - priorityOrder[b.priority]);
-        case "created_at":
-          return dir * (new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
-        default:
-          return 0;
-      }
-    });
-  }, [tasks, sortField, sortDir]);
-
-  // Sub-tasks sit under their parent, siblings in the chosen sort order. One
-  // whose parent is filtered out of this view shows at the top level.
-  const rows = useMemo(() => orderAsTree(sorted), [sorted]);
   const progressById = useMemo(() => {
     const map = new Map<string, { done: number; total: number }>();
     for (const t of allTasks) {
@@ -97,10 +67,17 @@ export function TaskTable({ tasks, allTasks = tasks, onUpdate, onDelete, onArchi
     return map;
   }, [allTasks]);
 
-  const sortIndicator = (field: SortField) => {
-    if (sortField !== field) return null;
-    return sortDir === "asc" ? " \u2191" : " \u2193";
-  };
+  // Each top-level row with its descendants, so the sub-tasks can hang off
+  // one tree guide line.
+  const groups = useMemo(() => {
+    const out: { root: { task: Task; depth: number }; kids: { task: Task; depth: number }[] }[] = [];
+    for (const row of rows) {
+      const last = out[out.length - 1];
+      if (row.depth > 0 && last) last.kids.push(row);
+      else out.push({ root: row, kids: [] });
+    }
+    return out;
+  }, [rows]);
 
   // Keyboard for the open panel. Capture phase so the Esc that closes the
   // panel is claimed (defaultPrevented) before focus-region's bubble-phase
@@ -116,91 +93,97 @@ export function TaskTable({ tasks, allTasks = tasks, onUpdate, onDelete, onArchi
         onSelect(null);
         return;
       }
-      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       if (selectedTaskId === null) return;
+      if ((event.key === "a" || event.key === "A") && !event.shiftKey && onAddSubtask) {
+        event.preventDefault();
+        onAddSubtask();
+        return;
+      }
+      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       if (rows.length === 0) return;
       event.preventDefault();
-      const index = rows.findIndex((r) => r.task.id === selectedTaskId);
-      const next =
-        index === -1
-          ? 0
-          : event.key === "ArrowDown"
-            ? Math.min(index + 1, rows.length - 1)
-            : Math.max(index - 1, 0);
-      onSelect(rows[next].task.id);
+      onStep(event.key === "ArrowDown" ? 1 : -1);
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [panelOpen, selectedTaskId, onSelect, rows, keyboardActive]);
+  }, [panelOpen, selectedTaskId, onSelect, onStep, onAddSubtask, rows.length, keyboardActive]);
 
   const revealId = flashTaskId ?? selectedTaskId;
   useEffect(() => {
     if (revealId === null) return;
-    const rows = tableRef.current?.querySelectorAll<HTMLElement>("[data-task-id]") ?? [];
-    Array.from(rows)
+    const rowEls = listRef.current?.querySelectorAll<HTMLElement>("[data-task-id]") ?? [];
+    Array.from(rowEls)
       .find((row) => row.dataset.taskId === revealId)
       ?.scrollIntoView({ block: "nearest" });
   }, [revealId]);
 
+  const renderRow = ({ task, depth }: { task: Task; depth: number }) => (
+    <TaskRow
+      key={task.id}
+      task={task}
+      depth={depth}
+      progress={progressById.get(task.id)}
+      onUpdate={onUpdate}
+      onDelete={onDelete}
+      onArchive={onArchive}
+      onUnarchive={onUnarchive}
+      archivedView={archivedView}
+      onClick={(t) => onSelect(t.id === selectedTaskId ? null : t.id)}
+      selected={task.id === selectedTaskId}
+      flash={task.id === flashTaskId}
+      compact={compact}
+      worktrees={worktrees}
+      assignedBranches={assignedBranches}
+      onAssign={onAssign}
+      onOpenSourceSession={onOpenSourceSession}
+    />
+  );
+
   return (
-    <Table ref={tableRef}>
-      <TableHeader>
-        <TableRow>
-          <TableHead className="w-10" />
-          <TableHead className="cursor-pointer select-none" onClick={() => toggleSort("title")}>
-            Title{sortIndicator("title")}
-          </TableHead>
-          <TableHead className="cursor-pointer select-none w-32 @max-md:hidden" onClick={() => toggleSort("status")}>
-            Status{sortIndicator("status")}
-          </TableHead>
-          <TableHead className="cursor-pointer select-none w-28 @max-lg:hidden" onClick={() => toggleSort("priority")}>
-            Priority{sortIndicator("priority")}
-          </TableHead>
-          {!compact && <TableHead className="w-32">Assign</TableHead>}
-          {!compact && (
-            <TableHead className="cursor-pointer select-none w-28" onClick={() => toggleSort("created_at")}>
-              Created{sortIndicator("created_at")}
-            </TableHead>
+    <div ref={listRef} role="grid" aria-label="Tasks" className="flex flex-col gap-px px-3 pt-2 pb-4">
+      {!compact && (
+        <div role="row" className={cn("mb-1 grid h-[30px] items-center gap-x-3 border-b border-border/60 px-2 text-[11px] font-medium text-muted-foreground/70", FULL_GRID)}>
+          <SortHeader field="title" sort={sort} onToggle={toggleSort}>Title</SortHeader>
+          <SortHeader field="priority" sort={sort} onToggle={toggleSort} className={HIDE_PRIORITY}>Priority</SortHeader>
+          <span className={HIDE_BRANCH}>Branch</span>
+          <SortHeader field="created_at" sort={sort} onToggle={toggleSort} className="justify-self-end">Created</SortHeader>
+          <span />
+        </div>
+      )}
+      {groups.map(({ root, kids }) => (
+        <div key={root.task.id} className="contents">
+          {renderRow(root)}
+          {kids.length > 0 && (
+            <div className="relative flex flex-col gap-px before:absolute before:top-[-2px] before:bottom-3 before:left-[15px] before:w-px before:bg-border">
+              {kids.map(renderRow)}
+            </div>
           )}
-          <TableHead className="w-10" />
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.map(({ task, depth }) => (
-          <TaskRow
-            key={task.id}
-            task={task}
-            depth={depth}
-            progress={progressById.get(task.id)}
-            onUpdate={onUpdate}
-            onDelete={onDelete}
-            onArchive={onArchive}
-            onUnarchive={onUnarchive}
-            archivedView={archivedView}
-            onClick={(t) => onSelect(t.id === selectedTaskId ? null : t.id)}
-            selected={task.id === selectedTaskId}
-            flash={task.id === flashTaskId}
-            compact={compact}
-            worktrees={worktrees}
-            assignedBranches={assignedBranches}
-            onAssign={onAssign}
-            onOpenSourceSession={onOpenSourceSession}
-          />
-        ))}
-        {pendingTasks.map((pending) => (
-          <PendingTaskRow key={pending.key} pending={pending} compact={compact} />
-        ))}
-        {tasks.length === 0 && pendingTasks.length === 0 && (
-          <TableRow>
-            <td colSpan={compact ? 5 : 7} className="text-center text-muted-foreground py-12 text-sm">
-              <div className="flex flex-col items-center gap-1">
-                <p className="text-sm font-medium text-foreground/60">No tasks yet</p>
-                <p className="text-xs text-muted-foreground">Create one to get started.</p>
-              </div>
-            </td>
-          </TableRow>
-        )}
-      </TableBody>
-    </Table>
+        </div>
+      ))}
+      {pendingTasks.map((pending) => (
+        <PendingTaskRow key={pending.key} pending={pending} compact={compact} />
+      ))}
+      {rows.length === 0 && pendingTasks.length === 0 && (
+        <div className="flex flex-col items-center gap-1 py-12 text-center">
+          <p className="text-sm font-medium text-foreground/60">No tasks yet</p>
+          <p className="text-xs text-muted-foreground">Create one to get started.</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SortHeader({ field, sort, onToggle, className, children }: { field: TaskSortField; sort: TaskSort; onToggle: (field: TaskSortField) => void; className?: string; children: ReactNode }) {
+  const active = sort?.field === field;
+  const Icon = !active ? ChevronsUpDown : sort.dir === "asc" ? ArrowUp : ArrowDown;
+  return (
+    <button
+      type="button"
+      onClick={() => onToggle(field)}
+      className={cn("group/sh inline-flex w-fit items-center gap-[3px] outline-none hover:text-muted-foreground", active && "text-muted-foreground", className)}
+    >
+      {children}
+      <Icon className={cn("size-2.5", !active && "opacity-0 group-hover/sh:opacity-100")} aria-hidden />
+    </button>
   );
 }

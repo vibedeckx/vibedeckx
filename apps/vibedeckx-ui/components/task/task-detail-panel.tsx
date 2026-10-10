@@ -1,14 +1,16 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Archive, ArchiveRestore, CheckCircle2, ChevronRight, Circle, CircleDot, Plus, Trash2, X, XCircle } from "lucide-react";
-import { SourceSessionLink } from "@/components/agent/source-session-link";
+import { Archive, ArchiveRestore, ChevronDown, ChevronRight, ChevronUp, MessageSquare, Plus, Trash2, X } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { MarkdownField } from "./markdown-field";
-import { selfAndDescendantIds, subtaskProgress, taskFileBranch } from "./task-utils";
+import { agoPhrase, footerDate, selfAndDescendantIds, subtaskProgress, taskFileBranch } from "./task-utils";
 import { TaskParentSelect } from "./task-parent-select";
 import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
+import { PriorityGlyph, StatusGlyph } from "./task-glyphs";
+import { RowAction } from "./task-row";
 
 interface TaskDetailPanelProps {
   task: Task;
@@ -29,6 +31,10 @@ interface TaskDetailPanelProps {
   onSelectTask: (taskId: string) => void;
   /** Start a new-task draft filed under this task. */
   onAddSubtask: (parentId: string) => void;
+  /** Where the task sits in the list (0-based); null when it isn't in the current view. */
+  position?: { index: number; total: number } | null;
+  /** Previous / next task in the list. */
+  onStep?: (delta: 1 | -1) => void;
 }
 
 /**
@@ -52,6 +58,8 @@ export function TaskDetailPanel({
   tasks,
   onSelectTask,
   onAddSubtask,
+  position,
+  onStep,
 }: TaskDetailPanelProps) {
   const archived = task.archived_at !== null;
   const byId = useMemo(() => new Map(tasks.map((t) => [t.id, t])), [tasks]);
@@ -73,40 +81,64 @@ export function TaskDetailPanel({
   );
   const progress = useMemo(() => subtaskProgress(task.id, tasks), [tasks, task.id]);
   const excludeIds = useMemo(() => selfAndDescendantIds(task.id, tasks), [tasks, task.id]);
+  // Segments of the progress bar: done, then in progress, then the rest.
+  const segments = useMemo(() => {
+    const counted = subtasks.filter((t) => t.status !== "cancelled");
+    const done = counted.filter((t) => t.status === "done").length;
+    const doing = counted.filter((t) => t.status === "in_progress").length;
+    return counted.map((_, i) => (i < done ? "done" : i < done + doing ? "doing" : "todo"));
+  }, [subtasks]);
+  const [editingDescription, setEditingDescription] = useState(false);
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center justify-end gap-0.5 px-3 pt-2">
-        {archived ? (
-          <Button variant="ghost" size="icon" className="h-7 w-7" title="Unarchive" onClick={() => onUnarchive(task.id)}>
-            <ArchiveRestore className="h-3.5 w-3.5 text-muted-foreground" />
-          </Button>
-        ) : (
-          <Button variant="ghost" size="icon" className="h-7 w-7" title="Archive" onClick={() => onArchive(task.id)}>
-            <Archive className="h-3.5 w-3.5 text-muted-foreground" />
-          </Button>
+    <div className="flex h-full min-w-0 flex-col bg-card">
+      <div className="flex h-[42px] shrink-0 items-center gap-0.5 border-b border-border/60 pr-2 pl-3">
+        {onStep && (
+          <>
+            <RowAction title="Previous (↑)" onClick={() => onStep(-1)}><ChevronUp className="size-3.5" /></RowAction>
+            <RowAction title="Next (↓)" onClick={() => onStep(1)}><ChevronDown className="size-3.5" /></RowAction>
+          </>
         )}
-        <Button variant="ghost" size="icon" className="h-7 w-7" title="Delete" onClick={() => onDelete(task.id)}>
-          <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
-        </Button>
-        <Button variant="ghost" size="icon" className="h-7 w-7" title="Close (Esc)" onClick={onClose}>
-          <X className="h-4 w-4 text-muted-foreground" />
-        </Button>
+        {position && (
+          <span className="mx-1.5 font-mono text-[10.5px] tabular-nums text-muted-foreground/70">
+            {position.index + 1} / {position.total}
+          </span>
+        )}
+        <span className="flex-1" />
+        {!archived && (
+          <RowAction title="Archive" onClick={() => onArchive(task.id)}><Archive className="size-[13px]" /></RowAction>
+        )}
+        <RowAction title="Delete" onClick={() => onDelete(task.id)}><Trash2 className="size-[13px]" /></RowAction>
+        <span className="mx-1 h-4 w-px bg-border" aria-hidden />
+        <RowAction title="Close (Esc)" onClick={onClose}><X className="size-3.5" /></RowAction>
       </div>
 
-      <div className="flex-1 overflow-auto px-6 pb-6 edge-scrollbar">
+      {archived && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-border/60 bg-secondary py-2 pr-3 pl-3.5 text-xs text-muted-foreground">
+          <Archive className="size-[13px] shrink-0" aria-hidden />
+          <span className="min-w-0 truncate">
+            Archived {new Date(task.archived_at!).toLocaleDateString(undefined, { month: "short", day: "numeric" })} — hidden from the list and the sidebar
+          </span>
+          <Button variant="outline" size="sm" className="ml-auto h-6 gap-1 px-2 text-[11.5px]" onClick={() => onUnarchive(task.id)}>
+            <ArchiveRestore className="size-3" />
+            Unarchive
+          </Button>
+        </div>
+      )}
+
+      <div className={cn("min-h-0 flex-1 overflow-auto px-6 pt-[18px] pb-[22px] edge-scrollbar", archived && "opacity-[.78]")}>
         {ancestors.length > 0 && (
-          <nav aria-label="Parent tasks" className="mb-1 flex min-w-0 flex-wrap items-center gap-0.5 text-xs text-muted-foreground">
+          <nav aria-label="Parent tasks" className="mb-1 -ml-[5px] flex min-w-0 flex-wrap items-center gap-px text-[11.5px] text-muted-foreground/70">
             {ancestors.map((a) => (
-              <span key={a.id} className="flex min-w-0 items-center gap-0.5">
+              <span key={a.id} className="flex min-w-0 items-center gap-px">
                 <button
                   type="button"
-                  className="max-w-48 truncate rounded px-1 py-0.5 hover:bg-muted hover:text-foreground"
+                  className="max-w-[280px] truncate rounded-[5px] px-[5px] py-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
                   onClick={() => onSelectTask(a.id)}
                 >
                   {a.title}
                 </button>
-                <ChevronRight className="h-3 w-3 shrink-0" aria-hidden />
+                <ChevronRight className="size-[11px] shrink-0" aria-hidden />
               </span>
             ))}
           </nav>
@@ -119,7 +151,7 @@ export function TaskDetailPanel({
           }}
           singleLine
           aria-label="Title"
-          className="text-lg font-semibold leading-snug"
+          className="mb-3.5 text-lg leading-[1.32] font-semibold tracking-[-0.02em] hover:bg-muted focus:bg-muted/60"
         />
 
         <TaskProperties
@@ -131,40 +163,48 @@ export function TaskDetailPanel({
           onAssign={(branch) => onAssign(task.id, branch)}
           worktrees={worktrees}
           assignedBranches={assignedBranches}
+          readOnlyBranch={archived}
         >
-          <Property label="Parent">
-            <TaskParentSelect
-              tasks={tasks}
-              value={task.parent_id ?? null}
-              onChange={(parent_id) => onUpdate(task.id, { parent_id })}
-              excludeIds={excludeIds}
-              className="h-7 max-w-full"
-            />
-          </Property>
-          {task.source_session && (
-            <Property label="From session">
-              <div className="flex min-w-0">
-                <SourceSessionLink
-                  source={task.source_session}
-                  onOpen={onOpenSourceSession ? () => onOpenSourceSession(task) : undefined}
-                />
-              </div>
+          {!(archived && !task.parent_id) && (
+            <Property label="Parent">
+              <TaskParentSelect
+                tasks={tasks}
+                value={task.parent_id ?? null}
+                onChange={(parent_id) => onUpdate(task.id, { parent_id })}
+                excludeIds={excludeIds}
+                field
+              />
             </Property>
           )}
-          <Property label="Created">
-            <span className="text-muted-foreground">{new Date(task.created_at).toLocaleString()}</span>
-          </Property>
-          <Property label="Updated">
-            <span className="text-muted-foreground">{new Date(task.updated_at).toLocaleString()}</span>
-          </Property>
+          {task.source_session && (
+            <Property label="From session">
+              {task.source_session.exists ? (
+                <button
+                  type="button"
+                  disabled={!onOpenSourceSession}
+                  onClick={() => onOpenSourceSession?.(task)}
+                  title={task.source_session.title?.trim() || "Untitled session"}
+                  className="-ml-2 inline-flex h-[30px] min-w-0 max-w-full items-center gap-2 rounded-md px-2 text-primary hover:bg-muted disabled:text-foreground"
+                >
+                  <MessageSquare className="size-[13px] shrink-0" aria-hidden />
+                  <span className="truncate">{task.source_session.title?.trim() || "Untitled session"}</span>
+                </button>
+              ) : (
+                <span className="inline-flex h-[30px] items-center italic text-muted-foreground">Source session deleted</span>
+              )}
+            </Property>
+          )}
         </TaskProperties>
 
-        <div className="mt-5 border-t pt-4">
+        <Section
+          title="Description"
+          hint={!editingDescription && task.description?.trim() ? "Click to edit · Markdown" : undefined}
+        >
           <MarkdownField
             value={task.description ?? ""}
             label="Description"
             onOpenFile={onOpenFile ? (path, line) => onOpenFile(taskFileBranch(task), path, line) : undefined}
-            className={`-mx-1.5 rounded-md px-1.5 py-1 focus-visible:bg-muted/40 ${PANEL_BODY_CLASS}`}
+            className={`-mx-1.5 rounded-md px-1.5 py-1 text-secondary-foreground hover:bg-secondary focus-visible:bg-muted/40 ${PANEL_BODY_CLASS}`}
           >
             <DraftField
               value={task.description ?? ""}
@@ -172,57 +212,122 @@ export function TaskDetailPanel({
                 const next = value.trim() ? value : null;
                 if (next !== task.description) onUpdate(task.id, { description: next });
               }}
+              onEditingChange={setEditingDescription}
               placeholder="Add a description…"
               aria-label="Description"
-              className={PANEL_BODY_CLASS}
+              className={`${PANEL_BODY_CLASS} focus:border focus:border-primary focus:bg-card focus:px-3 focus:py-2.5 focus:font-mono focus:text-xs focus:leading-[1.65] focus:shadow-[0_0_0_3px_var(--accent)]`}
             />
           </MarkdownField>
-        </div>
+          {editingDescription && (
+            <div className="mt-2 flex items-center gap-2.5 text-[11px] text-muted-foreground/70">
+              <KeyHint keys={["⌘", "↵"]}>save</KeyHint>
+              <KeyHint keys={["Esc"]}>cancel</KeyHint>
+              <span className="flex-1" />
+              <span>Saves on blur</span>
+            </div>
+          )}
+        </Section>
 
-        <section aria-label="Sub-tasks" className="mt-5 border-t pt-4">
-          <div className="mb-1.5 flex items-center gap-2 text-xs font-medium text-muted-foreground">
-            <span>Sub-tasks</span>
-            {progress.total > 0 && <span className="tabular-nums">{progress.done}/{progress.total}</span>}
-          </div>
-          {subtasks.length > 0 && (
-            <ul className="-mx-1.5 mb-1">
-              {subtasks.map((sub) => (
-                <li key={sub.id}>
-                  <button
-                    type="button"
-                    className="flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left text-sm hover:bg-muted/60"
-                    onClick={() => onSelectTask(sub.id)}
-                  >
-                    <SubtaskStatusIcon status={sub.status} />
-                    <span className={`truncate ${sub.status === "done" || sub.status === "cancelled" ? "text-muted-foreground line-through" : ""}`}>
-                      {sub.title}
-                    </span>
-                  </button>
-                </li>
-              ))}
+        <Section
+          title="Sub-tasks"
+          aria-label="Sub-tasks"
+          extra={progress.total > 0 && (
+            <>
+              <span className="ml-0.5 flex gap-[3px]" aria-hidden>
+                {segments.map((seg, i) => (
+                  <i
+                    key={i}
+                    className={cn(
+                      "h-1 w-[18px] rounded-sm",
+                      seg === "done" ? "bg-[oklch(0.6_0.14_152)]" : seg === "doing" ? "bg-[oklch(0.58_0.16_245)]" : "bg-border",
+                    )}
+                  />
+                ))}
+              </span>
+              <span className="font-mono text-[10.5px] font-normal tabular-nums text-muted-foreground/70">{progress.done}/{progress.total}</span>
+            </>
+          )}
+        >
+          {subtasks.length > 0 ? (
+            <ul className="-mx-2 flex flex-col">
+              {subtasks.map((sub) => {
+                const closed = sub.status === "done" || sub.status === "cancelled";
+                return (
+                  <li key={sub.id}>
+                    <button
+                      type="button"
+                      className="flex h-8 w-full min-w-0 items-center gap-[9px] rounded-md px-2 text-left hover:bg-muted"
+                      onClick={() => onSelectTask(sub.id)}
+                    >
+                      <StatusGlyph status={sub.status} />
+                      <span className={cn("min-w-0 flex-1 truncate text-[12.5px] font-[450]", closed && "text-muted-foreground line-through decoration-border")}>
+                        {sub.title}
+                      </span>
+                      <PriorityGlyph priority={sub.priority} />
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
+          ) : (
+            <div className="pt-0.5 pb-1 text-xs text-muted-foreground/70">No sub-tasks.</div>
           )}
           {!archived && (
-            <Button variant="ghost" size="sm" className="-mx-1.5 h-7 px-1.5 text-xs text-muted-foreground" onClick={() => onAddSubtask(task.id)}>
-              <Plus className="mr-1 h-3.5 w-3.5" />
+            <button
+              type="button"
+              className="-mx-2 mt-0.5 flex h-[30px] w-[calc(100%+1rem)] items-center gap-[9px] rounded-md px-2 text-[12.5px] text-muted-foreground hover:bg-muted hover:text-foreground"
+              onClick={() => onAddSubtask(task.id)}
+            >
+              <span className="grid size-3.5 place-items-center rounded-full border-[1.5px] border-dashed border-border text-muted-foreground/70">
+                <Plus className="size-2" strokeWidth={3} />
+              </span>
               Add sub-task
-            </Button>
+              <Kbd className="ml-auto">A</Kbd>
+            </button>
           )}
-        </section>
+        </Section>
+      </div>
+
+      <div className="flex h-9 shrink-0 items-center gap-1.5 border-t border-border/60 bg-secondary px-4 text-[11px] text-muted-foreground">
+        <span title={new Date(task.created_at).toLocaleString()}>Created {footerDate(task.created_at)}</span>
+        <span className="text-border" aria-hidden>·</span>
+        <span title={new Date(task.updated_at).toLocaleString()}>Updated {agoPhrase(task.updated_at)}</span>
+        <span className="flex-1" />
+        {position && <KeyHint keys={["↑", "↓"]}>switch</KeyHint>}
+        <KeyHint keys={["Esc"]} className="ml-2">close</KeyHint>
       </div>
     </div>
   );
 }
 
-function SubtaskStatusIcon({ status }: { status: TaskStatus }) {
-  const { Icon, tone } = status === "done"
-    ? { Icon: CheckCircle2, tone: "text-emerald-500" }
-    : status === "cancelled"
-      ? { Icon: XCircle, tone: "text-muted-foreground" }
-      : status === "in_progress"
-        ? { Icon: CircleDot, tone: "text-blue-500" }
-        : { Icon: Circle, tone: "text-muted-foreground" };
-  return <Icon className={`h-3.5 w-3.5 shrink-0 ${tone}`} aria-label={status} />;
+function Section({ title, hint, extra, children, ...props }: { title: string; hint?: string; extra?: ReactNode; children: ReactNode; "aria-label"?: string }) {
+  return (
+    <section className="mt-[18px] border-t border-border/60 pt-3.5" {...props}>
+      <div className="mb-2 flex h-5 items-center gap-2 text-[11.5px] font-medium text-muted-foreground">
+        {title}
+        {extra}
+        {hint && <span className="ml-auto text-[11px] font-normal text-muted-foreground/70">{hint}</span>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+export function Kbd({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <kbd className={cn("inline-grid h-[17px] min-w-[17px] place-items-center rounded border border-b-[1.5px] border-border bg-card px-1 font-mono text-[10px] leading-none text-secondary-foreground", className)}>
+      {children}
+    </kbd>
+  );
+}
+
+function KeyHint({ keys, className, children }: { keys: string[]; className?: string; children: ReactNode }) {
+  return (
+    <span className={cn("inline-flex items-center gap-1", className)}>
+      {keys.map((k) => <Kbd key={k}>{k}</Kbd>)}
+      {children}
+    </span>
+  );
 }
 
 /**
@@ -230,36 +335,52 @@ function SubtaskStatusIcon({ status }: { status: TaskStatus }) {
  * draft exists only while focused: unfocused it shows `value`, so outside
  * changes land right away but never clobber what is being typed. Saves are
  * optimistic upstream, so dropping the draft on blur doesn't flash the old text.
+ * Esc throws the draft away instead.
  */
 function DraftField({
   value,
   onCommit,
   singleLine,
+  onEditingChange,
   className,
   ...props
 }: {
   value: string;
   onCommit: (value: string) => void;
   singleLine?: boolean;
+  /** Focus in / out: the field is being edited. */
+  onEditingChange?: (editing: boolean) => void;
   className?: string;
   placeholder?: string;
   "aria-label": string;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
+  const cancelRef = useRef(false);
 
   return (
     <textarea
       rows={1}
       value={draft ?? value}
-      onFocus={() => setDraft(value)}
+      onFocus={() => {
+        setDraft(value);
+        onEditingChange?.(true);
+      }}
       onChange={(e) => setDraft(singleLine ? e.target.value.replace(/\n/g, " ") : e.target.value)}
       onBlur={() => {
-        if (draft !== null) onCommit(draft);
+        if (draft !== null && !cancelRef.current) onCommit(draft);
+        cancelRef.current = false;
         setDraft(null);
+        onEditingChange?.(false);
       }}
       onKeyDown={(e) => {
         // An IME Enter confirms a candidate, not the field (229: legacy signal).
         if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+        if (e.key === "Escape") {
+          e.preventDefault();
+          cancelRef.current = true;
+          e.currentTarget.blur();
+          return;
+        }
         if (e.key === "Enter" && (singleLine || e.metaKey || e.ctrlKey)) {
           e.preventDefault();
           e.currentTarget.blur();

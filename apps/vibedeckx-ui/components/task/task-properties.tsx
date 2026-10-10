@@ -1,8 +1,7 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { forwardRef, type ComponentProps, type ReactNode } from "react";
 import type { TaskStatus, TaskPriority, Worktree } from "@/lib/api";
-import { Badge } from "@/components/ui/badge";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -10,15 +9,10 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { GitBranch } from "lucide-react";
-import {
-  statusConfig,
-  priorityConfig,
-  statusOptions,
-  priorityOptions,
-  assignableBranches,
-  branchLabel,
-} from "./task-utils";
+import { ChevronDown, GitBranch } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { statusConfig, priorityConfig, assignableBranches, branchLabel } from "./task-utils";
+import { PriorityGlyph, PriorityMenu, StatusGlyph, StatusMenu } from "./task-glyphs";
 
 /** Borderless auto-growing textarea look shared by the side panels' text fields. */
 export const PANEL_FIELD_CLASS =
@@ -35,6 +29,84 @@ export const PANEL_BODY_CLASS = "min-h-32 text-[length:var(--task-body-font-size
 export const TASK_MARKDOWN_CLASS =
   "[&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_ol]:list-inside [&_ol]:list-decimal [&_ul]:list-inside";
 
+/** Hover chevron of a field value; shown while the field is hovered or open. */
+export const FIELD_CHEVRON = (
+  <ChevronDown className="size-3 shrink-0 text-muted-foreground/70 opacity-0 transition-opacity group-hover/fv:opacity-100 group-data-[state=open]/fv:opacity-100" aria-hidden />
+);
+
+/**
+ * A property value that edits in place: plain text until hovered, then a soft
+ * tint and a chevron. Spread onto a menu trigger.
+ */
+export const FieldValue = forwardRef<HTMLButtonElement, ComponentProps<"button"> & { muted?: boolean }>(
+  function FieldValue({ muted, className, children, ...props }, ref) {
+    return (
+      <button
+        ref={ref}
+        type="button"
+        className={cn(
+          "group/fv -ml-2 inline-flex h-[30px] min-w-0 max-w-full items-center gap-2 rounded-md px-2 text-left outline-none hover:bg-muted focus-visible:bg-muted data-[state=open]:bg-muted disabled:pointer-events-none",
+          muted ? "text-muted-foreground/80" : "text-foreground",
+          className,
+        )}
+        {...props}
+      >
+        {children}
+        {FIELD_CHEVRON}
+      </button>
+    );
+  },
+);
+
+/** Mono branch chip; "" is the main workspace. */
+export function BranchChip({ branch, className }: { branch: string; className?: string }) {
+  return (
+    <span className={cn("inline-flex h-[22px] min-w-0 max-w-full items-center gap-1.5 rounded-md border border-border/60 bg-muted px-[7px] font-mono text-[11px] text-secondary-foreground", className)}>
+      <GitBranch className="size-[11px] shrink-0 text-muted-foreground/70" aria-hidden />
+      <span className="truncate">{branchLabel(branch)}</span>
+    </span>
+  );
+}
+
+/** Branch picker: Unassign plus every branch no other task holds. */
+export function BranchMenu({
+  current,
+  onAssign,
+  worktrees,
+  assignedBranches,
+  children,
+}: {
+  current: string | null;
+  onAssign: (branch: string | null) => void;
+  worktrees: Worktree[];
+  assignedBranches: Set<string | null>;
+  children: ReactNode;
+}) {
+  const choices = assignableBranches(current, worktrees, assignedBranches);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>{children}</DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="min-w-44">
+        {current !== null && (
+          <>
+            <DropdownMenuItem onClick={() => onAssign(null)} className="text-[12.5px]">Unassign</DropdownMenuItem>
+            {choices.length > 0 && <DropdownMenuSeparator />}
+          </>
+        )}
+        {choices.map(({ key, label }) => (
+          <DropdownMenuItem key={key} onClick={() => onAssign(key)} className="gap-2 font-mono text-[12px]">
+            <GitBranch className="size-3 text-muted-foreground" />
+            {label}
+          </DropdownMenuItem>
+        ))}
+        {current === null && choices.length === 0 && (
+          <div className="px-2 py-1.5 text-xs text-muted-foreground">No free branches</div>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 interface TaskPropertiesProps {
   status: TaskStatus;
   priority: TaskPriority;
@@ -45,11 +117,13 @@ interface TaskPropertiesProps {
   worktrees: Worktree[];
   /** Branches other tasks hold; they are left out of the Branch menu. */
   assignedBranches: Set<string | null>;
-  /** Extra read-only rows after Branch (use <Property>). */
+  /** Read-only: the archived task shows its fields without menus. */
+  readOnlyBranch?: boolean;
+  /** Extra rows after Branch (use <Property>). */
   children?: ReactNode;
 }
 
-/** Status / Priority / Branch as badge dropdowns, laid out as a label grid. */
+/** Status / Priority / Branch as click-to-edit field values, laid out as a label grid. */
 export function TaskProperties({
   status,
   priority,
@@ -59,73 +133,46 @@ export function TaskProperties({
   onAssign,
   worktrees,
   assignedBranches,
+  readOnlyBranch,
   children,
 }: TaskPropertiesProps) {
   return (
-    <dl className="mt-4 grid grid-cols-[6.5rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2.5 text-xs">
+    <dl className="m-0 grid grid-cols-[96px_minmax(0,1fr)] items-center gap-x-2 gap-y-px text-[12.5px]">
       <Property label="Status">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button className="focus:outline-none">
-              <Badge variant="outline" className={`cursor-pointer text-xs ${statusConfig[status].color}`}>
-                {statusConfig[status].label}
-              </Badge>
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {statusOptions.map((s) => (
-              <DropdownMenuItem key={s} onClick={() => onStatusChange(s)}>
-                <span className={`inline-block w-2 h-2 rounded-full mr-2 ${statusConfig[s].color}`} />
-                {statusConfig[s].label}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <StatusMenu status={status} onChange={onStatusChange}>
+          <FieldValue aria-label="Status">
+            <StatusGlyph status={status} />
+            {statusConfig[status].label}
+          </FieldValue>
+        </StatusMenu>
       </Property>
       <Property label="Priority">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button className="focus:outline-none">
-              <Badge variant="outline" className={`cursor-pointer text-xs ${priorityConfig[priority].color}`}>
-                {priorityConfig[priority].label}
-              </Badge>
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {priorityOptions.map((p) => (
-              <DropdownMenuItem key={p} onClick={() => onPriorityChange(p)}>
-                <span className={`inline-block w-2 h-2 rounded-full mr-2 ${priorityConfig[p].color}`} />
-                {priorityConfig[p].label}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <PriorityMenu priority={priority} onChange={onPriorityChange}>
+          <FieldValue aria-label="Priority">
+            <PriorityGlyph priority={priority} />
+            {priorityConfig[priority].label}
+          </FieldValue>
+        </PriorityMenu>
       </Property>
       <Property label="Branch">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button className="focus:outline-none">
-              <Badge variant="outline" className={`cursor-pointer text-xs font-mono ${assignedBranch !== null ? "bg-accent text-accent-foreground border-transparent" : "text-muted-foreground"}`}>
-                <GitBranch className="h-3 w-3 mr-1" />
-                {assignedBranch !== null ? branchLabel(assignedBranch) : "Unassigned"}
-              </Badge>
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {assignedBranch !== null && (
-              <>
-                <DropdownMenuItem onClick={() => onAssign(null)}>Unassign</DropdownMenuItem>
-                <DropdownMenuSeparator />
-              </>
-            )}
-            {assignableBranches(assignedBranch, worktrees, assignedBranches).map(({ key, label }) => (
-              <DropdownMenuItem key={key} onClick={() => onAssign(key)}>
-                <GitBranch className="h-3 w-3 mr-2" />
-                {label}
-              </DropdownMenuItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {readOnlyBranch ? (
+          <span className="inline-flex h-[30px] items-center gap-2 text-muted-foreground/80">
+            {assignedBranch !== null ? <BranchChip branch={assignedBranch} /> : <><GitBranch className="size-3" aria-hidden />Unassigned</>}
+          </span>
+        ) : (
+          <BranchMenu current={assignedBranch} onAssign={onAssign} worktrees={worktrees} assignedBranches={assignedBranches}>
+            <FieldValue aria-label="Branch" muted={assignedBranch === null}>
+              {assignedBranch !== null ? (
+                <BranchChip branch={assignedBranch} />
+              ) : (
+                <>
+                  <GitBranch className="size-3 shrink-0" aria-hidden />
+                  Assign a branch
+                </>
+              )}
+            </FieldValue>
+          </BranchMenu>
+        )}
       </Property>
       {children}
     </dl>
@@ -135,8 +182,8 @@ export function TaskProperties({
 export function Property({ label, children }: { label: string; children: ReactNode }) {
   return (
     <>
-      <dt className="text-muted-foreground">{label}</dt>
-      <dd className="min-w-0">{children}</dd>
+      <dt className="flex h-[30px] items-center text-muted-foreground">{label}</dt>
+      <dd className="m-0 flex min-w-0">{children}</dd>
     </>
   );
 }

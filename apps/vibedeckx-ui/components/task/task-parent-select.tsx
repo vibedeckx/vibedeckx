@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { StatusGlyph } from "./task-glyphs";
 
 const NONE = "__none__";
 
@@ -25,6 +26,8 @@ interface TaskParentSelectProps {
   sessionId?: string | null;
   disabled?: boolean;
   className?: string;
+  /** Borderless field value (detail panels): the parent's status glyph and title, "None" when unset. */
+  field?: boolean;
 }
 
 /**
@@ -32,7 +35,7 @@ interface TaskParentSelectProps {
  * its state), this session's own first — they are the likely parents of what
  * it proposes next.
  */
-export function TaskParentSelect({ tasks, value, onChange, excludeIds, sessionId, disabled, className }: TaskParentSelectProps) {
+export function TaskParentSelect({ tasks, value, onChange, excludeIds, sessionId, disabled, className, field }: TaskParentSelectProps) {
   const { mine, others } = useMemo(() => {
     const choices = tasks.filter((t) =>
       !excludeIds?.has(t.id)
@@ -43,10 +46,32 @@ export function TaskParentSelect({ tasks, value, onChange, excludeIds, sessionId
     };
   }, [tasks, excludeIds, sessionId, value]);
 
+  const parent = field && value ? tasks.find((t) => t.id === value) : undefined;
+
   return (
     <Select value={value ?? NONE} onValueChange={(v) => onChange(v === NONE ? null : v)} disabled={disabled}>
-      <SelectTrigger size="sm" className={cn("min-w-0 text-xs", className)} aria-label="Parent task">
-        <SelectValue />
+      <SelectTrigger
+        size="sm"
+        className={cn(
+          "min-w-0 text-xs",
+          field && "-ml-2 h-[30px] max-w-full gap-2 border-transparent px-2 text-[12.5px] shadow-none hover:bg-muted data-[state=open]:bg-muted dark:bg-transparent [&>svg:last-child]:size-3 [&>svg:last-child]:opacity-0 hover:[&>svg:last-child]:opacity-70 data-[state=open]:[&>svg:last-child]:opacity-70",
+          field && !parent && "text-muted-foreground/80",
+          className,
+        )}
+        aria-label="Parent task"
+      >
+        {field ? (
+          <SelectValue>
+            {parent ? (
+              <>
+                <StatusGlyph status={parent.status} />
+                <span className="truncate">{parent.title}</span>
+              </>
+            ) : "None"}
+          </SelectValue>
+        ) : (
+          <SelectValue />
+        )}
       </SelectTrigger>
       <SelectContent className="max-w-[min(28rem,90vw)]">
         <SelectItem value={NONE}>No parent</SelectItem>
