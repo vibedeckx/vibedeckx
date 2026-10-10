@@ -89,9 +89,12 @@ describe("TaskProposalUI", () => {
   };
 
   const buttons = (label: string) =>
-    [...container.querySelectorAll("button")].filter((b) => b.textContent?.includes(label));
+    [...container.querySelectorAll("button")].filter((b) =>
+      b.textContent?.includes(label) || b.getAttribute("aria-label") === label);
+  /** Titles of the rows still pending, whether shown or being edited. */
   const titles = () =>
-    [...container.querySelectorAll<HTMLInputElement>("[aria-label='Task title']")].map((i) => i.value);
+    [...container.querySelectorAll<HTMLElement>("[data-proposed-title], input[aria-label='Task title']")]
+      .map((el) => (el instanceof HTMLInputElement ? el.value : el.textContent));
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -125,21 +128,30 @@ describe("TaskProposalUI", () => {
       el.dispatchEvent(new Event("input", { bubbles: true }));
     });
 
-  it("shows the description rendered and edits it in place on click", async () => {
+  it("shows the description rendered and edits the row on click until collapsed", async () => {
     await render({ input: { tasks: [{ title: "T", description: "Add **the** test" }] }, toolUseId: "toolu_1" });
-    const rendered = container.querySelector<HTMLElement>("[data-markdown-field='Task description']")!;
-    expect(rendered.textContent).toContain("Add the test");
+    const rendered = () => container.querySelector<HTMLElement>("[data-markdown-field='Task description']");
+    expect(rendered()!.textContent).toContain("Add the test");
     expect(descriptionEditor()).toBeNull();
 
-    act(() => rendered.click());
+    act(() => rendered()!.click());
     const editor = descriptionEditor()!;
     expect(document.activeElement).toBe(editor);
     typeInto(editor, "Add **the** test, then ship");
     act(() => editor.blur());
+    expect(descriptionEditor()).toBe(editor);
+    act(() => buttons("Collapse")[0].click());
     expect(descriptionEditor()).toBeNull();
+    expect(rendered()!.textContent).toContain("Add the test, then ship");
 
     await act(async () => { buttons("Create task")[0].click(); });
     expect(apiMock.createTask.mock.calls[0][1]).toMatchObject({ description: "Add **the** test, then ship" });
+  });
+
+  it("focuses the title when the title is clicked", async () => {
+    await render({ input: PROPOSAL, toolUseId: "toolu_1" });
+    act(() => container.querySelector<HTMLElement>("[data-proposed-title]")!.click());
+    expect(document.activeElement).toBe(container.querySelector("input[aria-label='Task title']"));
   });
 
   it("keeps an initially empty description in the editor while typing", async () => {
@@ -178,6 +190,7 @@ describe("TaskProposalUI", () => {
       taskRow({ id: "goal", title: "Ship sub-tasks", source_tool_use_id: "toolu_0", source_item_index: 0 }),
     ]);
     await render({ input: { ...PROPOSAL, parent_task_id: "goal" }, toolUseId: "toolu_1" });
+    expect(container.querySelectorAll('[aria-label="Parent task"]')).toHaveLength(1);
     expect(container.textContent).toContain("File these under");
     expect(container.querySelector('[aria-label="Parent task"]')?.textContent).toContain("Ship sub-tasks");
 
@@ -196,7 +209,7 @@ describe("TaskProposalUI", () => {
     const picker = container.querySelector<HTMLButtonElement>('[aria-label="Parent task"]');
     expect(picker?.textContent).toContain("Ship sub-tasks");
     expect(picker?.disabled).toBe(false);
-    expect(container.textContent).toContain("under Other goal");
+    expect(container.querySelector("[data-created-task]")?.textContent).toContain("Other goal");
 
     await act(async () => { buttons("Create task")[0].click(); });
     expect(apiMock.createTask.mock.calls[0][1]).toMatchObject({ parent_id: "goal", source: { item_index: 1 } });
@@ -208,6 +221,35 @@ describe("TaskProposalUI", () => {
     expect(apiMock.createTask.mock.calls[0][1]).toMatchObject({ parent_id: null });
   });
 
+  it("creates each item with its own parent when creating all", async () => {
+    const previousScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = vi.fn();
+    apiMock.getTasks.mockResolvedValue([
+      taskRow({ id: "goal", title: "Goal", source_tool_use_id: "earlier" }),
+    ]);
+    await render({ input: { ...PROPOSAL, parent_task_id: "goal" }, toolUseId: "toolu_1" });
+    // The header picker is shared; editing a row offers that row its own.
+    act(() => container.querySelectorAll<HTMLElement>("[data-proposed-title]")[1].click());
+    const pickers = container.querySelectorAll<HTMLButtonElement>('[aria-label="Parent task"]');
+    await act(async () => {
+      pickers[1].dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    const noParent = [...document.querySelectorAll<HTMLElement>('[role="option"]')]
+      .find((option) => option.textContent === "No parent");
+    expect(noParent).toBeDefined();
+    await act(async () => { noParent!.click(); });
+    expect(pickers[0].textContent).toContain("Goal");
+    expect(pickers[1].textContent).toContain("No parent");
+    act(() => buttons("Collapse")[0].click());
+    expect(container.textContent).toContain("No parent");
+    await act(async () => { buttons("Create all")[0].click(); });
+    expect(apiMock.createTask.mock.calls.map((call) => call[1])).toEqual([
+      expect.objectContaining({ parent_id: "goal", source: expect.objectContaining({ item_index: 0 }) }),
+      expect.objectContaining({ parent_id: null, source: expect.objectContaining({ item_index: 1 }) }),
+    ]);
+    Element.prototype.scrollIntoView = previousScrollIntoView;
+  });
+
   it("creates all pending items at once", async () => {
     apiMock.createTask.mockImplementation(async (_p: string, opts: { source: { item_index: number } }) =>
       taskRow({ id: `task-${opts.source.item_index}`, source_item_index: opts.source.item_index }));
@@ -216,6 +258,33 @@ describe("TaskProposalUI", () => {
 
     expect(apiMock.createTask).toHaveBeenCalledTimes(2);
     expect(titles()).toEqual([]);
+  });
+
+  it("counts progress in the footer and sums up closed tasks once all are filed", async () => {
+    apiMock.getTasks.mockResolvedValue([taskRow({ status: "done" })]);
+    await render({ input: PROPOSAL, toolUseId: "toolu_1" });
+    expect(container.textContent).toContain("1 of 2 created");
+    expect(container.textContent).toContain("1 left to confirm");
+    expect(buttons("Create all")).toHaveLength(0);
+
+    apiMock.getTasks.mockResolvedValue([
+      taskRow({ status: "done" }),
+      taskRow({ id: "task-2", source_item_index: 1, archived_at: 1767312000000 }),
+    ]);
+    await fireTaskEvent();
+    await act(async () => { await Promise.resolve(); });
+    expect(container.textContent).toContain("All filed · 1 done, 1 archived");
+    expect(container.textContent).not.toContain("created");
+    expect(container.querySelector('[aria-label="Parent task"]')).toBeNull();
+  });
+
+  it("asks for a description before creating a row without one", async () => {
+    await render({ input: { tasks: [{ title: "T", description: "" }] }, toolUseId: "toolu_1" });
+    expect(container.textContent).toContain("Description is required");
+    expect(buttons("Create task")[0].disabled).toBe(true);
+    typeInto(descriptionEditor()!, "Something to do");
+    expect(container.textContent).not.toContain("Description is required");
+    expect(buttons("Create task")[0].disabled).toBe(false);
   });
 
   it("recovers created and completed state from the task list", async () => {
