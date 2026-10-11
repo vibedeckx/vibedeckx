@@ -295,6 +295,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
               }}
               sessionId={sessionId}
               disabled={submitting.size > 0}
+              align="end"
               className="h-[26px] max-w-[230px] bg-card text-[11.5px]"
             />
           </div>

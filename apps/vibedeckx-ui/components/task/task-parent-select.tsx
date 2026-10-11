@@ -28,6 +28,8 @@ interface TaskParentSelectProps {
   className?: string;
   /** Borderless field value (detail panels): the parent's status glyph and title, "None" when unset. */
   field?: boolean;
+  /** Menu edge aligned to the trigger; "end" for triggers near the right edge. */
+  align?: "start" | "end";
 }
 
 /**
@@ -35,7 +37,7 @@ interface TaskParentSelectProps {
  * its state), this session's own first — they are the likely parents of what
  * it proposes next.
  */
-export function TaskParentSelect({ tasks, value, onChange, excludeIds, sessionId, disabled, className, field }: TaskParentSelectProps) {
+export function TaskParentSelect({ tasks, value, onChange, excludeIds, sessionId, disabled, className, field, align = "start" }: TaskParentSelectProps) {
   const { mine, others } = useMemo(() => {
     const choices = tasks.filter((t) =>
       !excludeIds?.has(t.id)
@@ -73,15 +75,17 @@ export function TaskParentSelect({ tasks, value, onChange, excludeIds, sessionId
           <SelectValue />
         )}
       </SelectTrigger>
-      <SelectContent className="max-w-[min(28rem,90vw)]">
+      {/* Popper, not item-aligned: item-aligned overlays the trigger and re-measures
+          after mount, so a menu of long titles opened past the right edge then jumped back. */}
+      <SelectContent position="popper" align={align} collisionPadding={8} className="max-w-[min(28rem,90vw)]">
         <SelectItem value={NONE}>No parent</SelectItem>
         {mine.length > 0 && <SelectSeparator />}
         {mine.map((t) => (
-          <SelectItem key={t.id} value={t.id}><span className="truncate">{t.title}</span></SelectItem>
+          <SelectItem key={t.id} value={t.id} className="*:[span]:last:min-w-0"><span className="truncate">{t.title}</span></SelectItem>
         ))}
         {others.length > 0 && <SelectSeparator />}
         {others.map((t) => (
-          <SelectItem key={t.id} value={t.id}><span className="truncate">{t.title}</span></SelectItem>
+          <SelectItem key={t.id} value={t.id} className="*:[span]:last:min-w-0"><span className="truncate">{t.title}</span></SelectItem>
         ))}
       </SelectContent>
     </Select>
