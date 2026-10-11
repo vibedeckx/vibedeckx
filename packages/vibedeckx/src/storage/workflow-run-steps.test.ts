@@ -168,6 +168,50 @@ describe("workflowRunSteps repository", () => {
       expect(await storage.workflowRuns.getById("r2")).toBeUndefined();
     });
 
+    describe("a milestone unless the loop continues", () => {
+      const event = {
+        id: "session:s-src:turn:9:result-ready", kind: "session_result_ready" as const, project_id: "p1",
+        branch: "dev", session_id: "s-src", workflow_run_id: null, created_at: 1,
+      };
+      const outboxIds = async () => (await storage.notificationOutbox.listAfter(0, 10)).map((r) => r.id);
+
+      it("is not written when the gate is inserted", async () => {
+        await open("a", "feedback");
+        await finishRound();
+        await storage.workflowRuns.claimStepAndTransition({
+          stepId: "a", turnEndIndex: 9, outputSnapshot: "done", nextRun, outbox: { event, unlessNextRunInserted: true },
+        });
+        expect((await storage.workflowRuns.getById("r2"))?.status).toBe("waiting_rereview");
+        expect(await outboxIds()).toEqual([]);
+      });
+
+      it("is written, in the claim itself, when the gate's insert is skipped", async () => {
+        await open("a", "feedback");
+        await finishRound();
+        await storage.workflowRuns.create({
+          id: "other", project_id: "p1", branch: "dev", source_session_id: "s-src",
+          source_turn_end_index: 9, review_focus: null, review_target: null,
+        });
+        await storage.workflowRuns.claimStepAndTransition({
+          stepId: "a", turnEndIndex: 9, outputSnapshot: "done", nextRun, outbox: { event, unlessNextRunInserted: true },
+        });
+        expect(await storage.workflowRuns.getById("r2")).toBeUndefined();
+        expect(await outboxIds()).toEqual([event.id]);
+      });
+
+      it("without the condition, is written alongside the gate; never when the step CAS loses", async () => {
+        await open("a", "feedback");
+        await finishRound();
+        await storage.workflowRuns.claimStepAndTransition({ stepId: "a", turnEndIndex: 9, outputSnapshot: "done", nextRun, outbox: { event } });
+        expect((await storage.workflowRuns.getById("r2"))?.status).toBe("waiting_rereview");
+        expect(await outboxIds()).toEqual([event.id]);
+        expect(await storage.workflowRuns.claimStepAndTransition({
+          stepId: "a", turnEndIndex: 9, outputSnapshot: "done", outbox: { event: { ...event, id: "again" } },
+        })).toBe(false);
+        expect(await outboxIds()).toEqual([event.id]);
+      });
+    });
+
     it("is not inserted when the step CAS loses", async () => {
       await open("a", "feedback");
       await finishRound();

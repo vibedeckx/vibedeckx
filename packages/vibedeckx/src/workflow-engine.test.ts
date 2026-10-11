@@ -20,7 +20,7 @@ import {
   extractAuthorSelfReport,
   FINAL_VERDICT_PROMPT,
 } from "./workflow-engine.js";
-import type { AgentMessage } from "./agent-types.js";
+import type { AgentMessage, NotificationDisposition } from "./agent-types.js";
 
 const entries: AgentMessage[] = [];
 entries[0] = { type: "user", content: "please fix the bug", timestamp: 1 };
@@ -494,7 +494,10 @@ describe("WorkflowEngine", () => {
   const acceptInstruction = async (sessionId: string, content: string, opts?: SendOpts) => {
     const list = transcriptOf(sessionId);
     const index = list.length;
-    list[index] = { type: "user", content, timestamp: Date.now(), origin: "workflow" };
+    list[index] = {
+      type: "user", content, timestamp: Date.now(), origin: "workflow",
+      ...(opts?.notificationDisposition ? { notificationDisposition: opts.notificationDisposition as NotificationDisposition } : {}),
+    };
     await opts?.onUserEntryPersisted?.(index);
     return index;
   };
@@ -1927,6 +1930,8 @@ describe("WorkflowEngine", () => {
     describe("unattended within the cap", () => {
       const outbox = async () => (await storage.notificationOutbox.listAfter(0, 100)).filter((r) => r.workflow_run_id);
       const reviewReady = async (runId: string) => (await outbox()).filter((r) => r.kind === "review_ready" && r.workflow_run_id === runId);
+      const sourceResults = async () => (await storage.notificationOutbox.listAfter(0, 100))
+        .filter((r) => r.kind === "session_result_ready" && r.session_id === "s-src");
       /** A loop whose reviewer is between turns, as it is after each verdict. */
       async function startIdleLoop(maxRounds = 3) {
         const run = await startLoop(maxRounds);
@@ -1946,10 +1951,13 @@ describe("WorkflowEngine", () => {
         expect(relayed[0]).toBe("s-src");
         expect(relayed[1]).toContain("Found a bug in foo.ts");
         expect(await reviewReady(run.id)).toHaveLength(0); // an unattended hop rings nothing
+        // The fix it relays is not the user's deliverable either: only a failure rings.
+        expect(relayed[4]).toMatchObject({ origin: "workflow", notificationDisposition: "failures-only" });
 
         sourceAppliesFeedback();
         const gate = await gateOf(run.id, 2);
         await waitStatus(gate.id, "waiting_reviewer");
+        expect(await sourceResults()).toHaveLength(0);
         const round2 = (await storage.workflowRuns.getById(gate.id))!;
         expect(round2).toMatchObject({ reviewer_session_id: "s-rev", error: null });
         expect(agentOps.prepareReviewer).toHaveBeenCalledTimes(1); // round 1 only — round 2 re-used the reviewer
@@ -2037,6 +2045,42 @@ describe("WorkflowEngine", () => {
         expect(back?.error).toBeTruthy();
       });
 
+      it("a review that lands after the next-round check wins, and the fix's result still rings once", async () => {
+        const run = await startIdleLoop();
+        reviewerSays(NEEDS);
+        await waitStatus(run.id, "completed");
+        // The race: the engine has already built the next gate, then another
+        // run takes the source just before the claim's transaction.
+        const claim = storage.workflowRuns.claimStepAndTransition;
+        vi.spyOn(storage.workflowRuns, "claimStepAndTransition").mockImplementationOnce(async (opts) => {
+          expect(opts.nextRun).toBeDefined();
+          await storage.workflowRuns.create({
+            id: "newer", project_id: "p1", branch: "dev", source_session_id: "s-src",
+            source_turn_end_index: 0, review_focus: null, review_target: null,
+          });
+          return claim(opts);
+        });
+        const turnEnd = sourceAppliesFeedback();
+        await vi.waitFor(async () => {
+          expect((await storage.workflowRunSteps.listByRun(run.id)).find((st) => st.kind === "feedback")?.status).toBe("claimed");
+        });
+        await settle();
+        expect((await activeRuns()).map((r) => r.id)).toEqual(["newer"]);
+        expect((await sourceResults()).map((r) => r.id)).toEqual([`session:s-src:turn:${turnEnd}:result-ready`]);
+      });
+
+      it("restart: a relayed fix that completed while we were down rings once", async () => {
+        const run = await startIdleLoop();
+        reviewerSays(NEEDS);
+        await waitStatus(run.id, "completed");
+        sourceEntries.push({ type: "assistant", content: "Applied.", timestamp: 1 }, { type: "turn_end", timestamp: 2, outcome: "completed" } as AgentMessage);
+
+        await new WorkflowEngine(storage, agentOps).init();
+        await new WorkflowEngine(storage, agentOps).init();
+        expect(await sourceResults()).toHaveLength(1);
+        expect((await activeRuns()).find((r) => r.round === 2)).toMatchObject({ status: "waiting_rereview" });
+      });
+
       it("restart: a gate an unattended relay never left rings once", async () => {
         const run = await startIdleLoop();
         await storage.agentSessions.updateStatus("s-src", "running"); // the relay parks…
@@ -2087,11 +2131,13 @@ describe("WorkflowEngine", () => {
         expect(engine.isSessionInActiveRun("s-src")).toBe(false);
         await engine.handleExternalUserMessage("s-src");
         expect((await storage.workflowRuns.getById(run.id))?.loop_manual).toBe(1);
-        sourceAppliesFeedback();
+        const turnEnd = sourceAppliesFeedback();
         const gate = await gateOf(run.id, 2);
         expect(gate.loop_manual).toBe(1);
         await settle();
         expect(await statusOf(gate.id)).toBe("waiting_rereview");
+        // The relayed fix went out silent, but the loop stops here: the user is told it landed.
+        expect((await sourceResults()).map((r) => r.id)).toEqual([`session:s-src:turn:${turnEnd}:result-ready`]);
 
         // Confirmed by hand, the next rounds stay manual too.
         const round2 = await engine.approveRereview(gate.id);
@@ -2113,6 +2159,7 @@ describe("WorkflowEngine", () => {
         expect(gate.loop_manual).toBe(1);
         await settle();
         expect(await statusOf(gate.id)).toBe("waiting_rereview");
+        expect(await sourceResults()).toHaveLength(1);
       });
 
       it("messaging the reviewer while its re-review is parked hands the gate over", async () => {

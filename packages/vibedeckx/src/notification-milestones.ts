@@ -134,8 +134,9 @@ const FAILURE_OUTCOMES: ReadonlySet<TurnOutcome> = new Set<TurnOutcome>([
 /**
  * The outbox row a turn_end deserves, or undefined for none.
  *
- * Only `result` turns produce a generic session milestone. `stopped` never
- * produces one: a user-initiated Stop is the user already knowing.
+ * Only `result` turns produce a generic session milestone, plus the failures
+ * of `failures-only` turns. `stopped` never produces one: a user-initiated Stop
+ * is the user already knowing.
  */
 export function sessionMilestoneForTurnEnd(opts: {
   sessionId: string;
@@ -146,7 +147,7 @@ export function sessionMilestoneForTurnEnd(opts: {
   disposition: NotificationDisposition;
   createdAt: number;
 }): Omit<NotificationOutboxEvent, "seq"> | undefined {
-  if (opts.disposition !== "result") return undefined;
+  if (opts.disposition !== "result" && opts.disposition !== "failures-only") return undefined;
 
   const base = {
     project_id: opts.projectId,
@@ -158,7 +159,8 @@ export function sessionMilestoneForTurnEnd(opts: {
 
   // Both count as "the answer is ready" — the whole point of committing a
   // parked turn on a deadline is that the user finally gets told.
-  if (opts.outcome === "completed" || opts.outcome === "completed_with_pending_tasks") {
+  if (opts.disposition === "result"
+    && (opts.outcome === "completed" || opts.outcome === "completed_with_pending_tasks")) {
     return {
       ...base,
       id: sessionResultReadyId(opts.sessionId, opts.entryIndex),

@@ -634,7 +634,7 @@ describe("session result milestones", () => {
 
   async function turnFrom(
     manager: AgentSessionManager,
-    opts?: { origin?: "workflow"; notificationDisposition?: "result" | "internal" | "milestone-managed" },
+    opts?: { origin?: "workflow"; notificationDisposition?: "result" | "internal" | "milestone-managed" | "failures-only" },
   ) {
     const { session } = await liveSession(manager, null);
     (session as unknown as { process: FakeProcess }).process = {
@@ -719,6 +719,31 @@ describe("session result milestones", () => {
     }).endActiveTurn(session, "failed");
 
     expect(outbox).toHaveLength(0);
+  });
+
+  it("a completed failures-only turn (an unattended loop's fix) creates no milestone", async () => {
+    const { storage, outbox } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const session = await turnFrom(manager, { origin: "workflow", notificationDisposition: "failures-only" });
+
+    await (manager as unknown as {
+      endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+    }).endActiveTurn(session, "completed");
+
+    expect(outbox).toHaveLength(0);
+  });
+
+  it("a failed failures-only turn still creates one session_failed", async () => {
+    const { storage, outbox } = makeHarness();
+    const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });
+    const session = await turnFrom(manager, { origin: "workflow", notificationDisposition: "failures-only" });
+
+    await (manager as unknown as {
+      endActiveTurn: (s: unknown, o: string) => Promise<number | null>;
+    }).endActiveTurn(session, "failed");
+
+    expect(outbox).toHaveLength(1);
+    expect(outbox[0].kind).toBe("session_failed");
   });
 
   it("re-writing the same turn end does not create a duplicate milestone", async () => {

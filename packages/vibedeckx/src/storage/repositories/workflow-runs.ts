@@ -147,7 +147,7 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
     // Step CAS, run CAS and the outbox row in ONE transaction. A guard that
     // fails throws to roll the whole thing back — a claimed step with an
     // un-advanced run would be unrecoverable after a restart.
-    claimStepAndTransition: async ({ stepId, turnEndIndex, outputSnapshot, abandonStep, run, nextRun, insertRun }) => {
+    claimStepAndTransition: async ({ stepId, turnEndIndex, outputSnapshot, abandonStep, run, nextRun, insertRun, outbox }) => {
       const LOST = Symbol("cas-lost");
       try {
         await kdb.transaction().execute(async (trx) => {
@@ -188,10 +188,11 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
               kind: "repeat", params: insertRun.params,
             }).execute();
           }
+          let nextRunInserted = false;
           if (nextRun) {
             // After the run CAS on purpose: the run being completed in this
             // same transaction must not count as occupying its own source.
-            await sql`
+            const inserted = await sql`
               INSERT INTO workflow_runs
                 (id, project_id, branch, source_session_id, source_turn_end_index, reviewer_session_id,
                  review_focus, review_target, review_span, status, loop_id, round, max_rounds, loop_manual)
@@ -206,6 +207,13 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
                     OR reviewer_session_id = ${nextRun.source_session_id})
               )
             `.execute(trx);
+            nextRunInserted = (inserted.numAffectedRows ?? 0n) > 0n;
+          }
+          if (outbox && !(outbox.unlessNextRunInserted && nextRunInserted)) {
+            await trx.insertInto("notification_outbox")
+              .values(outbox.event)
+              .onConflict((oc) => oc.column("id").doNothing())
+              .execute();
           }
         });
         return true;

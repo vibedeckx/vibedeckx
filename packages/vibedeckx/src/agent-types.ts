@@ -39,13 +39,16 @@ export type TurnOutcome =
  * - `milestone-managed` — a workflow owns this turn's attention event (a
  *   reviewer's completion becomes `review_ready`, not a second generic
  *   notification).
+ * - `failures-only` — a workflow owns this turn's success (an unattended loop
+ *   moves straight on to the next hop), but a failure still notifies: nothing
+ *   downstream would report it.
  *
  * Decided when the turn STARTS and persisted on the opening user entry (then
  * copied to its `turn_end`) — deliberately not process-memory-only, because
  * crash repair and remote outbox generation must reach the same decision after
  * a restart. See docs/plans/2026-07-25-persistent-notification-milestones-design.md.
  */
-export type NotificationDisposition = "result" | "internal" | "milestone-managed";
+export type NotificationDisposition = "result" | "internal" | "milestone-managed" | "failures-only";
 
 export type AgentMessage =
   // origin marks machine-authored user turns (e.g. workflow-injected reviewer

@@ -2290,6 +2290,13 @@ export interface Storage {
        * A skipped insert does not fail the claim: read the id back to tell.
        */
       nextRun?: WorkflowNextRunInput;
+      /**
+       * A milestone written in the same transaction, so a crash right after
+       * the claim cannot lose it. With `unlessNextRunInserted`, it is written
+       * only when the loop does not continue: `nextRun` absent, or its
+       * conditional insert skipped.
+       */
+      outbox?: { event: Omit<NotificationOutboxEvent, "seq">; unlessNextRunInserted?: boolean };
     }): Promise<boolean>;
   };
   workflowRunSteps: {

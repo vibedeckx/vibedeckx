@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import type { AgentSession, ReviewSpan, Storage, WorkflowRun, WorkflowRunStep, WorkflowRunStepKind, WorkflowVerdict } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { AgentMessage, AgentType, NotificationDisposition, TextPart } from "./agent-types.js";
-import { findTurnOpeningUserEntryIndex, reviewReadyId, workflowFailedId } from "./notification-milestones.js";
+import { findTurnOpeningUserEntryIndex, reviewReadyId, sessionResultReadyId, workflowFailedId } from "./notification-milestones.js";
 import { deliverInstruction, instructionContentHash, serializeSessionMutation } from "./instruction-delivery.js";
 import { captureReviewTarget, hasDrifted, type ReviewTarget } from "./utils/review-target.js";
 import { captureSnapshot, computeScope, resolveStartSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
@@ -121,6 +121,18 @@ const REVIEWER_TURN = {
 const FEEDBACK_TURN = {
   origin: "workflow",
   notificationDisposition: "result",
+} as const satisfies { origin: "workflow"; notificationDisposition: NotificationDisposition };
+
+/**
+ * Feedback an unattended loop relayed by itself. The fix is not the user's
+ * deliverable yet — the loop re-reviews it straight away, and the next
+ * review_ready is the attention event — so only a failure rings here. When the
+ * loop stops at the re-review gate after all, the claim writes the result
+ * milestone itself (see notifyUnattendedFixStopped).
+ */
+const AUTO_FEEDBACK_TURN = {
+  origin: "workflow",
+  notificationDisposition: "failures-only",
 } as const satisfies { origin: "workflow"; notificationDisposition: NotificationDisposition };
 
 // ---------- pure helpers (exported for tests / reuse) ----------
@@ -1359,7 +1371,7 @@ export class WorkflowEngine {
     sessionId: string;
     payload: string;
     projectPath: string | undefined;
-    turn: typeof REVIEWER_TURN | typeof FEEDBACK_TURN;
+    turn: typeof REVIEWER_TURN | typeof FEEDBACK_TURN | typeof AUTO_FEEDBACK_TURN;
     /**
      * Automatic hops only: re-checked under the target's session lock, which
      * the `/message` route also holds while it hands a loop over — so a user
@@ -2059,15 +2071,17 @@ export class WorkflowEngine {
       // A claim found by restart reconciliation stays at the gate: the user
       // was not around when the source finished, and may have moved on.
       const auto = opts.live && run?.verdict === "needs-changes" && !run.loop_manual;
+      const outbox = run ? this.unattendedFixOutbox(run, step, entries, boundary, auto) : undefined;
       if (run && (run.status === "sending_feedback" || run.status === "waiting_feedback")) {
         const completed = await this.storage.workflowRuns.claimStepAndTransition({
           stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
           run: { id: run.id, from: run.status, to: "completed", patch: { error: null } },
-          nextRun,
+          nextRun, outbox,
         });
         if (completed) {
           const done = await this.storage.workflowRuns.getById(run.id);
           if (done) { this.untrackRun(done); this.emitRunUpdated(done); }
+          if (outbox) this.onMilestoneCreated?.();
           await this.announceNextRoundGate(nextRun?.id, auto);
           return;
         }
@@ -2075,9 +2089,12 @@ export class WorkflowEngine {
         // it. The whole transaction rolled back, so claim the step on its own.
       }
       const claimed = await this.storage.workflowRuns.claimStepAndTransition({
-        stepId: step.id, turnEndIndex: boundary, outputSnapshot: output, nextRun,
+        stepId: step.id, turnEndIndex: boundary, outputSnapshot: output, nextRun, outbox,
       });
-      if (claimed) await this.announceNextRoundGate(nextRun?.id, auto);
+      if (claimed) {
+        if (outbox) this.onMilestoneCreated?.();
+        await this.announceNextRoundGate(nextRun?.id, auto);
+      }
       return;
     }
 
@@ -2110,6 +2127,34 @@ export class WorkflowEngine {
     const updated = await this.storage.workflowRuns.getById(run.id);
     if (updated) this.emitRunUpdated(updated);
     if (relay) await this.autoRelay(run.id);
+  }
+
+  /**
+   * The result milestone an automatically relayed fix skipped (its turn was
+   * `failures-only`), for when its loop does not go on to re-review by itself:
+   * the user stepped in mid-fix, a newer review holds the source, or restart
+   * reconciliation found it. Rides the claim's transaction — conditional on
+   * the next gate's insert when `auto` — so neither a lost race nor a crash
+   * after the claim can drop it. Same deterministic id as the generic one.
+   */
+  private unattendedFixOutbox(
+    run: WorkflowRun, step: WorkflowRunStep, entries: AgentMessage[], boundary: number, auto: boolean,
+  ) {
+    const openingIndex = findTurnOpeningUserEntryIndex(entries, boundary);
+    const opener = openingIndex === null ? undefined : entries[openingIndex];
+    if (opener?.type !== "user" || opener.notificationDisposition !== "failures-only") return undefined;
+    return {
+      event: {
+        id: sessionResultReadyId(step.session_id, boundary),
+        kind: "session_result_ready" as const,
+        project_id: run.project_id,
+        branch: run.branch,
+        session_id: step.session_id,
+        workflow_run_id: null,
+        created_at: Date.now(),
+      },
+      unlessNextRunInserted: auto,
+    };
   }
 
   private async computeDriftNote(run: WorkflowRun): Promise<string | null> {
@@ -2200,7 +2245,7 @@ export class WorkflowEngine {
     const project = await this.storage.projects.getById(run.project_id);
     const outcome = await this.dispatchStep({
       run, kind: "feedback", role: "source", sessionId: run.source_session_id,
-      payload, projectPath: project?.path ?? undefined, turn: FEEDBACK_TURN,
+      payload, projectPath: project?.path ?? undefined, turn: opts.auto ? AUTO_FEEDBACK_TURN : FEEDBACK_TURN,
       stillAutomatic: opts.auto ? () => this.isStillAutomatic(runId) : undefined,
     });
 
