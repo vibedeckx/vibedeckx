@@ -284,6 +284,21 @@ describe("TaskProposalUI", () => {
     expect(titles()).toEqual([]);
   });
 
+  it("creates all in card order, each after the previous one lands", async () => {
+    // A task's position is taken when its insert lands; concurrent creates
+    // would file sibling sub-tasks in arrival order.
+    const first = deferred<Task>();
+    apiMock.createTask.mockImplementation(async (_p: string, opts: { source: { item_index: number } }) =>
+      opts.source.item_index === 0 ? first.promise : taskRow({ id: "task-1", source_item_index: 1 }));
+    await render({ input: PROPOSAL, toolUseId: "toolu_1" });
+    await act(async () => { buttons("Create all")[0].click(); });
+    expect(apiMock.createTask).toHaveBeenCalledTimes(1);
+    expect(buttons("Create all")[0].disabled).toBe(true);
+
+    await act(async () => { first.resolve(taskRow({ id: "task-0", source_item_index: 0 })); });
+    expect(apiMock.createTask.mock.calls.map((call) => call[1].source.item_index)).toEqual([0, 1]);
+  });
+
   it("counts progress in the footer and sums up closed tasks once all are filed", async () => {
     apiMock.getTasks.mockResolvedValue([taskRow({ status: "done" })]);
     await render({ input: PROPOSAL, toolUseId: "toolu_1" });

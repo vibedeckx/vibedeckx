@@ -147,6 +147,8 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
   /** Rows showing the editor. */
   const [editing, setEditing] = useState<Set<number>>(() => new Set());
   const [submitting, setSubmitting] = useState<Set<number>>(() => new Set());
+  /** "Create all" is working through the rows, one at a time. */
+  const [creatingAll, setCreatingAll] = useState(false);
   const [errors, setErrors] = useState<Map<number, string>>(() => new Map());
   const { byItem, tasks, loading, loadError, retry } = useProposedTasks(projectId, sessionId, toolUseId);
   const sharedParentId = sharedChoice !== undefined
@@ -225,6 +227,16 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
   };
 
   const pendingIndices = fields.map((_, i) => i).filter((i) => !byItem.has(i));
+  // One at a time: a task's position is taken when its insert lands, so
+  // concurrent creates would file the rows in whatever order they arrive.
+  const createAll = async () => {
+    setCreatingAll(true);
+    try {
+      for (const index of pendingIndices) await create(index);
+    } finally {
+      setCreatingAll(false);
+    }
+  };
 
   if (rejection) {
     return (
@@ -477,8 +489,8 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
             <Button
               size="sm"
               className={cn("h-7 gap-1.5 rounded-lg px-3 text-xs", ACCENT_BUTTON)}
-              onClick={() => pendingIndices.forEach((i) => void create(i))}
-              disabled={!canCreate || loading || creatingCount > 0}
+              onClick={() => void createAll()}
+              disabled={!canCreate || loading || creatingAll || creatingCount > 0}
             >
               <ListPlus className="h-3 w-3" />
               Create all {pendingIndices.length}
