@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { TaskPlanCard, parseTaskPlan } from "./task-plan-card";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +13,7 @@ interface ToolApprovalCardProps {
   tool: string;
   input: unknown;
   resolved?: "approved" | "denied";
+  embedded?: boolean;
 }
 
 function extractMessage(input: unknown): string {
@@ -29,11 +31,15 @@ export function ToolApprovalCard({
   tool,
   input,
   resolved,
+  embedded = false,
 }: ToolApprovalCardProps) {
   const [pending, setPending] = useState<null | "approve" | "deny">(null);
 
+  const plan = tool === "setPlan" ? parseTaskPlan(input) : null;
+  const [error, setError] = useState<string | null>(null);
+
   const label =
-    tool === "spawnAgentSession"
+    tool === "setPlan" ? "Review task plan" : tool === "spawnAgentSession"
       ? "Start a new coding agent"
       : "Send to the coding agent";
 
@@ -43,16 +49,19 @@ export function ToolApprovalCard({
     if (pending || resolved) return;
     const action = approved ? "approve" : "deny";
     setPending(action);
+    setError(null);
     try {
       await api.chatToolApproval(sessionId, approvalId, approved);
+    } catch {
+      setError("Could not submit your decision. Please try again.");
     } finally {
       setPending(null);
     }
   };
 
   return (
-    <div className="mx-4 my-1">
-      <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
+    <div className={embedded ? undefined : "mx-4 my-1"}>
+      <div className={embedded ? "space-y-2" : "rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2"}>
         <div className="flex items-center gap-2">
           <Bot className="h-3.5 w-3.5 text-amber-500 shrink-0" />
           <span className="text-xs font-medium text-amber-600 dark:text-amber-400">
@@ -60,12 +69,13 @@ export function ToolApprovalCard({
           </span>
         </div>
 
-        <pre
+        {plan ? <TaskPlanCard plan={plan} draft /> : <pre
           className="bg-muted/50 p-2 rounded overflow-x-auto max-w-full whitespace-pre-wrap break-all text-foreground/80"
           style={{ fontSize: "var(--conv-font-size, 12px)" }}
         >
           {message}
-        </pre>
+        </pre>}
+        {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
 
         {resolved ? (
           <Badge
@@ -81,7 +91,7 @@ export function ToolApprovalCard({
             ) : (
               <XCircle className="h-3 w-3 mr-1" />
             )}
-            {resolved === "approved" ? "Approved — sent." : "Denied — not sent."}
+            {plan ? (resolved === "approved" ? "Plan confirmed" : "Plan declined — describe changes in chat") : (resolved === "approved" ? "Approved — sent." : "Denied — not sent.")}
           </Badge>
         ) : (
           <div className="flex gap-2">
@@ -96,7 +106,7 @@ export function ToolApprovalCard({
               ) : (
                 <CheckCircle2 className="h-3.5 w-3.5 mr-1" />
               )}
-              Approve
+              {plan ? "Confirm and execute" : "Approve"}
             </Button>
             <Button
               onClick={() => decide(false)}
@@ -109,7 +119,7 @@ export function ToolApprovalCard({
               ) : (
                 <XCircle className="h-3.5 w-3.5 mr-1" />
               )}
-              Deny
+              {plan ? "Decline and revise" : "Deny"}
             </Button>
           </div>
         )}

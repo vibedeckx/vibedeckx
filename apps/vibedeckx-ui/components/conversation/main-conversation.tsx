@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, forwardRef, useImperativeHandle } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo, forwardRef, useImperativeHandle } from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import {
   Conversation,
@@ -18,6 +18,8 @@ import {
   MessageResponse,
 } from "@/components/ai-elements/message";
 import { useChatSession, type AgentMessage } from "@/hooks/use-chat-session";
+import { TaskPlanCard, readPlanResult } from "./task-plan-card";
+import { TaskPlanPanel, collectTaskPlans } from "./task-plan-panel";
 import { ToolApprovalCard } from "./tool-approval-card";
 import { ReviewRunPanel } from "./review-run-panel";
 import { NewLoopDialog } from "./new-loop-dialog";
@@ -105,6 +107,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
 
   const { settings: convSettings } = useConversationSettings();
   const [activeRuns, setActiveRuns] = useState<WorkflowRun[]>([]);
+  const taskPlans = useMemo(() => collectTaskPlans(messages), [messages]);
 
   useImperativeHandle(ref, () => ({
     sendMessage: async (text: string) => {
@@ -317,6 +320,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             }
 
             if (msg.type === "tool_use") {
+              if (msg.tool === "setPlan") return null;
               return (
                 <div key={index} className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground">
                   <Search className="w-3.5 h-3.5 animate-pulse" />
@@ -326,6 +330,15 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             }
 
             if (msg.type === "tool_result") {
+              if (msg.tool === "setPlan") {
+                const original = readPlanResult(msg.output);
+                if (original?.planId) {
+                  if (taskPlans.current?.plan.planId === original.planId) return null;
+                  const saved = taskPlans.history.get(original.planId);
+                  if (!saved || saved.firstIndex !== index) return null;
+                  return <div key={index} className="mx-4 my-2"><TaskPlanCard plan={saved.plan} /></div>;
+                }
+              }
               return (
                 <div key={index} className="px-4 py-2">
                   <details className="text-xs text-muted-foreground">
@@ -344,6 +357,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             }
 
             if (msg.type === "tool_approval_request") {
+              if (msg.tool === "setPlan" && (
+                msg.resolved === "approved" || taskPlans.current?.approval?.approvalId === msg.approvalId
+              )) return null;
               if (!session) return null;
               return (
                 <ToolApprovalCard
@@ -388,6 +404,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
           not overridable from a class) reserving 6px per side, plus the
           content's own p-4 — 22px per side. */}
       <div className="flex-shrink-0 py-3 px-[22px]">
+        {taskPlans.current && session && (
+          <TaskPlanPanel key={taskPlans.current.key} task={taskPlans.current} sessionId={session.id} />
+        )}
         {isGenerating && (
           <div className="flex justify-center mb-2">
             <Button
