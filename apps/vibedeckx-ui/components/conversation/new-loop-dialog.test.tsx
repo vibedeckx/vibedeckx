@@ -26,7 +26,7 @@ describe("NewLoopDialog", () => {
     el.dispatchEvent(new Event("input", { bubbles: true }));
   };
   const byId = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
-  const startButton = () => [...document.body.querySelectorAll("button")].find((b) => b.textContent === "Start loop")!;
+  const startButton = () => document.body.querySelector<HTMLButtonElement>('button[aria-label="Start loop"]')!;
 
   beforeEach(async () => {
     container = document.createElement("div");

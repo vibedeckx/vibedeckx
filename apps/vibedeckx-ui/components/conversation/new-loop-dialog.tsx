@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Repeat } from "lucide-react";
+import { useState, useSyncExternalStore } from "react";
+import { GitBranch, Loader2, Repeat, SquareTerminal, TriangleAlert, X } from "lucide-react";
 import { toast } from "sonner";
 import {
   api,
@@ -12,9 +12,24 @@ import {
   type WorkflowRun,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
+import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  BOX_INPUT,
+  CONTROL_INPUT,
+  ControlBox,
+  FieldLabel,
+  HintLine,
+  Strip,
+} from "@/components/schedule/schedule-form-chrome";
+import { isMacPlatform } from "@/lib/tab-shortcuts";
+import { cn } from "@/lib/utils";
+
+const noopSubscribe = () => () => {};
+
+const AGENT_LABELS = { "claude-code": "Claude Code", codex: "Codex" } as const;
 
 /** Typed text → a value the server accepts (it rejects anything outside 1..max). */
 function clamp(raw: string, fallback: number, max: number): number {
@@ -73,6 +88,9 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
     }
   };
 
+  const isMac = useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
+  const submitDisabled = !prompt.trim() || busy;
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
@@ -82,71 +100,147 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
           <Repeat className="h-3.5 w-3.5" />
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-xl" onKeyDown={(e) => {
-        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void start(); }
-      }}>
-        <DialogHeader>
-          <DialogTitle>New loop</DialogTitle>
-          <DialogDescription>
-            Runs the same instruction again and again — each time in a fresh agent session that handles one item and
-            is then stopped — until a session reports there is nothing left.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-3 text-sm">
-          <div className="space-y-1">
-            <label htmlFor="loop-prompt" className="font-medium">Instruction</label>
-            <Textarea id="loop-prompt" rows={6} value={prompt} onChange={(e) => setPrompt(e.target.value)}
-              placeholder={"Fetch the unprocessed items from …, pick the first one, handle it, and mark it processed.\nIf none are left, say so."} />
-            <p className="text-xs text-muted-foreground">
-              No session remembers the previous one: say where the next unprocessed item is found, and how an item is
-              marked done. Make handling an item safe to repeat — an interrupted item may be picked up again.
-            </p>
+      <DialogContent
+        showCloseButton={false}
+        className="max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] min-w-0 gap-0 overflow-hidden bg-card p-0 grid-rows-[auto_minmax(0,1fr)_auto] sm:w-full sm:max-w-[500px]"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !submitDisabled) { e.preventDefault(); void start(); }
+        }}
+      >
+        <div className="flex items-start gap-3 border-b bg-secondary px-4 py-3.5">
+          <span className="grid size-7 shrink-0 place-items-center rounded-lg border border-primary/20 bg-accent text-accent-foreground">
+            <Repeat className="size-[15px]" />
+          </span>
+          <div className="min-w-0">
+            <DialogTitle className="text-[14.5px] font-semibold tracking-tight">New loop</DialogTitle>
+            <DialogDescription className="mt-0.5 max-w-[46ch] text-[11.5px] leading-snug">
+              Runs the same instruction again and again, each time in a fresh session that handles one item, until a
+              session reports there is nothing left.
+            </DialogDescription>
           </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <label htmlFor="loop-name" className="font-medium">Name</label>
-              <Input id="loop-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Loop" maxLength={80} />
-            </div>
-            <div className="space-y-1">
-              <span className="font-medium">Agent</span>
-              <div className="flex gap-1" role="group" aria-label="Agent">
-                {(["claude-code", "codex"] as const).map((type) => (
-                  <Button key={type} type="button" size="sm" variant={agentType === type ? "default" : "outline"}
-                    aria-pressed={agentType === type} onClick={() => setAgentType(type)}>
-                    {type === "claude-code" ? "Claude Code" : "Codex"}
-                  </Button>
-                ))}
-              </div>
-            </div>
-            <div className="space-y-1">
-              <label htmlFor="loop-iterations" className="font-medium">Stop after (items)</label>
-              <Input id="loop-iterations" inputMode="numeric" value={iterations} onChange={(e) => setIterations(e.target.value)} />
-            </div>
-            <div className="space-y-1">
-              <label htmlFor="loop-minutes" className="font-medium">Stop after (minutes)</label>
-              <Input id="loop-minutes" inputMode="numeric" value={minutes} onChange={(e) => setMinutes(e.target.value)} />
-            </div>
-          </div>
-
-          <div className="space-y-1">
-            <label htmlFor="loop-check" className="font-medium">Check command <span className="font-normal text-muted-foreground">(optional)</span></label>
-            <Input id="loop-check" value={checkCommand} onChange={(e) => setCheckCommand(e.target.value)} placeholder="npm test" className="font-mono" />
-            <p className="text-xs text-muted-foreground">Runs in the worktree after each item; a non-zero exit stops the loop.</p>
-          </div>
-
-          <p className="text-xs text-amber-600">
-            Sessions run in edit mode with no confirmation between items. The loop stops on its own when an item is
-            blocked, fails, or a limit is reached — and you can stop it any time.
-          </p>
-          {error && <p className="text-xs text-destructive">{error}</p>}
+          <DialogClose className="ml-auto grid size-6 shrink-0 place-items-center rounded-md border border-transparent text-muted-foreground/70 transition-colors hover:border-border hover:bg-muted hover:text-foreground">
+            <X className="size-3.5" />
+            <span className="sr-only">Close</span>
+          </DialogClose>
         </div>
 
-        <DialogFooter>
-          <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
-          <Button onClick={() => void start()} disabled={!prompt.trim() || busy}>Start loop</Button>
-        </DialogFooter>
+        <div className="flex min-h-0 min-w-0 flex-col gap-[13px] overflow-x-hidden overflow-y-auto px-4 pt-3.5 pb-1">
+          <div className="flex min-w-0 flex-col gap-[7px]">
+            <FieldLabel
+              after={
+                <Select value={agentType} onValueChange={(v) => setAgentType(v as typeof agentType)}>
+                  <SelectTrigger
+                    size="sm"
+                    aria-label="Agent"
+                    className="h-[23px] gap-1 rounded-[7px] border-input bg-card px-2 py-0 text-[11px] font-medium text-secondary-foreground shadow-none hover:bg-muted [&_svg:not([class*='size-'])]:size-2.5"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(AGENT_LABELS) as Array<keyof typeof AGENT_LABELS>).map((type) => (
+                      <SelectItem key={type} value={type}>{AGENT_LABELS[type]}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              }
+              note={prompt.trim() ? undefined : "Required"}
+            >
+              <label htmlFor="loop-prompt">Instruction</label>
+            </FieldLabel>
+            <Textarea
+              id="loop-prompt"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder={"Fetch the unprocessed items from …, pick the first one, handle it, and mark it processed.\nIf none are left, say so."}
+              className={cn(
+                CONTROL_INPUT,
+                "field-sizing-fixed min-h-[118px] min-w-0 max-w-full resize-y overflow-auto px-[11px] py-2 font-mono text-xs leading-[1.55] md:text-xs",
+              )}
+            />
+            <HintLine>
+              No session remembers the previous one: say where the next unprocessed item is found and how an item is
+              marked done. Make handling an item safe to repeat — an interrupted item may be picked up again.
+            </HintLine>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-[7px]">
+            <FieldLabel note="Optional"><label htmlFor="loop-name">Name</label></FieldLabel>
+            <Input
+              id="loop-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Loop"
+              maxLength={80}
+              className={cn(CONTROL_INPUT, "h-[34px] px-[11px]")}
+            />
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-[7px]">
+            <FieldLabel note="Whichever comes first">Stop after</FieldLabel>
+            <div className="grid min-w-0 grid-cols-2 gap-2.5">
+              <ControlBox>
+                <input id="loop-iterations" inputMode="numeric" value={iterations}
+                  onChange={(e) => setIterations(e.target.value)} aria-label="Stop after (items)" className={BOX_INPUT} />
+                <span className="text-[11px] whitespace-nowrap text-muted-foreground/70">items</span>
+              </ControlBox>
+              <ControlBox>
+                <input id="loop-minutes" inputMode="numeric" value={minutes}
+                  onChange={(e) => setMinutes(e.target.value)} aria-label="Stop after (minutes)" className={BOX_INPUT} />
+                <span className="text-[11px] whitespace-nowrap text-muted-foreground/70">minutes</span>
+              </ControlBox>
+            </div>
+          </div>
+
+          <div className="flex min-w-0 flex-col gap-[7px]">
+            <FieldLabel note="Optional"><label htmlFor="loop-check">Check command</label></FieldLabel>
+            <ControlBox>
+              <SquareTerminal />
+              <input id="loop-check" value={checkCommand} onChange={(e) => setCheckCommand(e.target.value)}
+                placeholder="npm test" spellCheck={false} className={cn(BOX_INPUT, "font-mono text-xs tracking-tight")} />
+            </ControlBox>
+            <HintLine>Runs in the worktree after each item; a non-zero exit stops the loop.</HintLine>
+          </div>
+
+          <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11.5px] leading-snug text-amber-700 dark:text-amber-300">
+            <TriangleAlert className="mt-px size-[13px] shrink-0" />
+            <span className="min-w-0">
+              Sessions run in edit mode with no confirmation between items. The loop stops on its own when an item is
+              blocked, fails, or a limit is reached — and you can stop it any time.
+            </span>
+          </div>
+
+          {error && <Strip tone="rose" icon={<TriangleAlert />}>{error}</Strip>}
+        </div>
+
+        <div className="mt-2.5 flex min-w-0 items-center gap-2.5 overflow-hidden border-t bg-secondary px-4 py-2.5">
+          <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden text-[11px] text-muted-foreground">
+            <GitBranch className="size-3 shrink-0 text-muted-foreground/70" />
+            <span className="truncate">Runs on <span className="font-mono">{branch ?? "main"}</span></span>
+          </span>
+          <DialogClose asChild>
+            <Button variant="outline" size="sm" className="h-7 text-xs">Cancel</Button>
+          </DialogClose>
+          <Button size="sm" className="h-7 gap-1.5 text-xs" aria-label="Start loop"
+            onClick={() => void start()} disabled={submitDisabled}>
+            {busy ? (
+              <>
+                <Loader2 className="size-3 animate-spin" />
+                Starting…
+              </>
+            ) : (
+              <>
+                <Repeat className="size-3" />
+                Start loop
+                <kbd
+                  className="rounded border border-background/30 bg-background/15 px-1 font-mono text-[10px] leading-[1.4] text-background/90"
+                  title={isMac ? "Command+Enter" : "Ctrl+Enter"}
+                >
+                  {isMac ? "⌘⏎" : "Ctrl⏎"}
+                </kbd>
+              </>
+            )}
+          </Button>
+        </div>
       </DialogContent>
     </Dialog>
   );
