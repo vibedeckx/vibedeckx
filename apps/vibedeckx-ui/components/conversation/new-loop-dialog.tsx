@@ -14,7 +14,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   BOX_INPUT,
@@ -126,25 +125,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
 
         <div className="flex min-h-0 min-w-0 flex-col gap-[13px] overflow-x-hidden overflow-y-auto px-4 pt-3.5 pb-1">
           <div className="flex min-w-0 flex-col gap-[7px]">
-            <FieldLabel
-              after={
-                <Select value={agentType} onValueChange={(v) => setAgentType(v as typeof agentType)}>
-                  <SelectTrigger
-                    size="sm"
-                    aria-label="Agent"
-                    className="h-[23px] gap-1 rounded-[7px] border-input bg-card px-2 py-0 text-[11px] font-medium text-secondary-foreground shadow-none hover:bg-muted [&_svg:not([class*='size-'])]:size-2.5"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(Object.keys(AGENT_LABELS) as Array<keyof typeof AGENT_LABELS>).map((type) => (
-                      <SelectItem key={type} value={type}>{AGENT_LABELS[type]}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              }
-              note={prompt.trim() ? undefined : "Required"}
-            >
+            <FieldLabel note={prompt.trim() ? undefined : "Required"}>
               <label htmlFor="loop-prompt">Instruction</label>
             </FieldLabel>
             <Textarea
@@ -163,26 +144,51 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
             </HintLine>
           </div>
 
-          <div className="flex min-w-0 flex-col gap-[7px]">
-            <FieldLabel note="Optional"><label htmlFor="loop-name">Name</label></FieldLabel>
-            <Input
-              id="loop-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Loop"
-              maxLength={80}
-              className={cn(CONTROL_INPUT, "h-[34px] px-[11px]")}
-            />
-          </div>
-
-          <div className="flex min-w-0 flex-col gap-[7px]">
-            <FieldLabel note="Whichever comes first">Stop after</FieldLabel>
-            <div className="grid min-w-0 grid-cols-2 gap-2.5">
+          <div className="grid min-w-0 grid-cols-2 gap-x-2.5 gap-y-[13px]">
+            <div className="flex min-w-0 flex-col gap-[7px]">
+              <FieldLabel note="Optional"><label htmlFor="loop-name">Name</label></FieldLabel>
+              <Input
+                id="loop-name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="Loop"
+                maxLength={80}
+                className={cn(CONTROL_INPUT, "h-[34px] px-[11px]")}
+              />
+            </div>
+            <div className="flex min-w-0 flex-col gap-[7px]">
+              <FieldLabel>Agent</FieldLabel>
+              <div role="radiogroup" aria-label="Agent" className="grid h-[34px] min-w-0 grid-cols-2 gap-0.5 rounded-[9px] border bg-secondary p-[3px]">
+                {(Object.keys(AGENT_LABELS) as Array<keyof typeof AGENT_LABELS>).map((type) => {
+                  const on = agentType === type;
+                  return (
+                    <button
+                      key={type}
+                      type="button"
+                      role="radio"
+                      aria-checked={on}
+                      onClick={() => setAgentType(type)}
+                      className={cn(
+                        "min-w-0 truncate rounded-md border border-transparent px-2 text-[12px] font-medium transition-colors",
+                        on ? "border-border bg-card text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {AGENT_LABELS[type]}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <div className="flex min-w-0 flex-col gap-[7px]">
+              <FieldLabel><label htmlFor="loop-iterations">Stop after</label></FieldLabel>
               <ControlBox>
                 <input id="loop-iterations" inputMode="numeric" value={iterations}
                   onChange={(e) => setIterations(e.target.value)} aria-label="Stop after (items)" className={BOX_INPUT} />
                 <span className="text-[11px] whitespace-nowrap text-muted-foreground/70">items</span>
               </ControlBox>
+            </div>
+            <div className="flex min-w-0 flex-col gap-[7px]">
+              <FieldLabel><label htmlFor="loop-minutes">Stop after</label></FieldLabel>
               <ControlBox>
                 <input id="loop-minutes" inputMode="numeric" value={minutes}
                   onChange={(e) => setMinutes(e.target.value)} aria-label="Stop after (minutes)" className={BOX_INPUT} />
