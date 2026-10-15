@@ -28,6 +28,13 @@ export interface RemoteStartRequest {
   remoteServerId: string;
   branch: string | null;
   body: RemoteExecuteBody;
+  /**
+   * Caller-chosen worker process id, so the caller can register who owns the
+   * process before it exists. A request carrying the id of the process already
+   * running answers `started` again; any other running or unconfirmed start on
+   * the target is someone else's and is reported, never adopted.
+   */
+  processId?: string;
 }
 
 export type RemoteStartOutcome =
@@ -126,16 +133,18 @@ export function createRemoteExecutorStarts(fastify: FastifyInstance) {
     // overlapping requests cannot both pass these checks.
     for (const [localProcessId, info] of fastify.remoteExecutorMap) {
       if (info.executorId === request.executorId && info.remoteServerId === request.remoteServerId) {
+        if (request.processId && info.remoteProcessId === request.processId) return { kind: "started", processId: localProcessId };
         return { kind: "already_running", processId: localProcessId };
       }
     }
     const key = `${request.executorId}:${request.remoteServerId}`;
     let entry = pending.get(key);
     if (entry?.inFlight) return { kind: "starting" };
+    if (entry && request.processId && entry.processId !== request.processId) return { kind: "starting" };
     if (!entry) {
       entry = {
         ...request,
-        processId: randomUUID(),
+        processId: request.processId ?? randomUUID(),
         effectFingerprint: createHash("sha256")
           .update(JSON.stringify({ executorId: request.executorId, remoteServerId: request.remoteServerId, body: request.body }))
           .digest("hex"),
@@ -217,3 +226,5 @@ export function createRemoteExecutorStarts(fastify: FastifyInstance) {
 
   return { start, reconcile };
 }
+
+export type RemoteExecutorStarts = ReturnType<typeof createRemoteExecutorStarts>;

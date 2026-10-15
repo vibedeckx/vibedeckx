@@ -23,6 +23,7 @@ vi.mock("../utils/remote-proxy.js", async (importOriginal) => {
 });
 
 import processRoutes from "./process-routes.js";
+import { createRemoteExecutorStarts } from "../remote-executor-starts.js";
 import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
@@ -301,6 +302,52 @@ describe("remote executor start/stop over an unreliable tunnel", () => {
       expect(remoteExecutorMap.has(localId)).toBe(false);
       expect(monitor.unwatch).toHaveBeenCalledWith(localId);
       expect((await storage.remoteExecutorProcesses.getById(localId))?.status).toBe("killed");
+    });
+  });
+  describe("caller-chosen identity (commander operations)", () => {
+    const request = (processId: string) => ({
+      executorId: "e1", projectId: "project-1", remoteServerId: serverId, branch: null, processId,
+      body: { path: "/repo", command: "./dev.sh", executor_type: "command", prompt_provider: null, pty: true },
+    });
+
+    it("starts under the caller's id", async () => {
+      proxy.handler = async (_s, _m, _p, body) => ok({ processId: (body as ExecuteBody).processId });
+      const outcome = await createRemoteExecutorStarts(app).start(request("op-proc"));
+      expect(outcome).toEqual({ kind: "started", processId: "remote-e1-op-proc" });
+      expect((executeCalls()[0][3] as ExecuteBody).processId).toBe("op-proc");
+    });
+
+    it("answers a re-sent request for its own running process without reaching the worker", async () => {
+      remoteExecutorMap.set("remote-e1-op-proc", { remoteServerId: serverId, remoteProcessId: "op-proc", executorId: "e1", projectId: "project-1" });
+      proxy.handler = async () => { throw new Error("must not reach the worker"); };
+      const starts = createRemoteExecutorStarts(app);
+      expect(await starts.start(request("op-proc"))).toEqual({ kind: "started", processId: "remote-e1-op-proc" });
+      expect(await starts.start(request("other"))).toEqual({ kind: "already_running", processId: "remote-e1-op-proc" });
+    });
+
+    it("request never reached the worker → reconnect finds nothing → the same identity resumes the start", async () => {
+      proxy.handler = async () => lost;
+      const starts = createRemoteExecutorStarts(app);
+      expect((await starts.start(request("op-proc"))).kind).toBe("unknown");
+
+      proxy.handler = async (_s, method, p, body) => {
+        if (method === "GET" && p === "/api/executor-processes/running") return ok({ processes: [] });
+        return ok({ processId: (body as ExecuteBody).processId });
+      };
+      await starts.reconcile(serverId);
+      expect(remoteExecutorMap.size).toBe(0);
+
+      expect(await starts.start(request("op-proc"))).toEqual({ kind: "started", processId: "remote-e1-op-proc" });
+      const ids = executeCalls().map(([, , , body]) => (body as ExecuteBody).processId);
+      expect(ids).toEqual(["op-proc", "op-proc"]);
+    });
+
+    it("never adopts someone else's unconfirmed start", async () => {
+      proxy.handler = async () => lost;
+      const starts = createRemoteExecutorStarts(app);
+      expect((await starts.start({ ...request("user-proc") })).kind).toBe("unknown");
+      expect(await starts.start(request("op-proc"))).toEqual({ kind: "starting" });
+      expect(executeCalls()).toHaveLength(1);
     });
   });
 });

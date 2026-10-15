@@ -35,6 +35,7 @@ import { RemoteLivenessTracker } from "../remote-liveness-reconcile.js";
 import { MemoryStatsReporter } from "../memory-stats.js";
 import type { RemoteExecutorInfo, RemoteSessionInfo } from "../server-types.js";
 import "../server-types.js";
+import { createRemoteExecutorStarts } from "../remote-executor-starts.js";
 
 interface SharedServicesOptions {
   storage: Storage;
@@ -531,6 +532,11 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
 
   chatSessionManager.setEventBus(eventBus);
   chatSessionManager.setRemoteExecutorMonitor(remoteExecutorMonitor);
+  // Created after the decorators it reads; the Executors panel and the
+  // commander share it so their unconfirmed starts see each other.
+  const remoteExecutorStarts = createRemoteExecutorStarts(fastify);
+  fastify.decorate("remoteExecutorStarts", remoteExecutorStarts);
+  chatSessionManager.setRemoteExecutorStarts(remoteExecutorStarts);
   processManager.setEventBus(eventBus);
   scheduler.setEventBus(eventBus);
   await scheduler.start();

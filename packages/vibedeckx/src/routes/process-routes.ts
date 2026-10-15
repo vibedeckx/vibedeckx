@@ -15,7 +15,9 @@ import {
 import "../server-types.js";
 
 const routes: FastifyPluginAsync = async (fastify) => {
-  const remoteStarts = createRemoteExecutorStarts(fastify);
+  const remoteStarts = fastify.hasDecorator("remoteExecutorStarts")
+    ? fastify.remoteExecutorStarts
+    : createRemoteExecutorStarts(fastify);
 
   // Execute command at a path (for remote executor)
   fastify.post<{

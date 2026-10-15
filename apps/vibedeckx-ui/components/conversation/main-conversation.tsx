@@ -174,7 +174,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
                 }
               }}
               className={`h-7 w-7 ${eventListeningEnabled ? "text-amber-500" : ""}`}
-              title={eventListeningEnabled ? "Listening to executor events (click to disable)" : "Listen to executor events (click to enable)"}
+              title={eventListeningEnabled ? "Listening to events from runs Commander did not start (click to disable)" : "Also listen to events from runs Commander did not start (click to enable)"}
             >
               <Radio className="h-3.5 w-3.5" />
             </Button>

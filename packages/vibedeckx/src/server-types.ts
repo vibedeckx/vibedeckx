@@ -9,6 +9,7 @@ import type { ProxyManager } from "./utils/proxy-manager.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import type { BrowserManager } from "./browser-manager.js";
+import type { RemoteExecutorStarts } from "./remote-executor-starts.js";
 import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
 import type { SchedulerService } from "./scheduler.js";
 import type { NotificationService } from "./notification-service.js";
@@ -44,6 +45,8 @@ declare module "fastify" {
     projectChatManager: ProjectChatManager;
     remoteExecutorMap: Map<string, RemoteExecutorInfo>;
     remoteExecutorMonitor: RemoteExecutorMonitor;
+    /** Shared idempotent remote-executor starter (one pending map per hub). */
+    remoteExecutorStarts: RemoteExecutorStarts;
     remoteSessionMap: Map<string, RemoteSessionInfo>;
     eventBus: EventBus;
     proxyManager: ProxyManager;
