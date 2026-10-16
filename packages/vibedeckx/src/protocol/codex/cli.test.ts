@@ -144,6 +144,19 @@ describe("codex CLI builders", () => {
     expect(config.env).toEqual({ VIBEDECKX_SESSION_MCP_TOKEN: "session-token" });
   });
 
+  it("injects the hub's task-tools MCP server, token in env only", () => {
+    const config = buildCodexAppServerSpawnConfig("/bin/codex", undefined, undefined, undefined, {
+      url: "https://app.example.com/api/task-tools-mcp",
+      token: "task-token",
+    });
+    expect(config.args).toEqual([
+      "app-server",
+      "-c",
+      'mcp_servers.vibedeckx-tasks={ url = "https://app.example.com/api/task-tools-mcp", bearer_token_env_var = "VIBEDECKX_TASK_TOOLS_MCP_TOKEN", default_tools_approval_mode = "approve" }',
+    ]);
+    expect(config.env).toEqual({ VIBEDECKX_TASK_TOOLS_MCP_TOKEN: "task-token" });
+  });
+
   it("quotes a model name containing a double quote so the TOML value stays well-formed", () => {
     expect(buildCodexAppServerSpawnConfig("/bin/codex", undefined, 'we"ird').args).toEqual([
       "app-server",

@@ -4,6 +4,8 @@ import { AgentSessionManager } from "./agent-session-manager.js";
 import { getProvider } from "./providers/index.js";
 import { SESSION_TOOLS_MCP_PATH, type SessionToolsMcpConfig } from "./session-tools-mcp.js";
 import { verifySessionToolsToken } from "./utils/session-tools-token.js";
+import { TASK_TOOLS_MCP_PATH, type TaskToolsMcpConfig } from "./task-tools-mcp.js";
+import { verifyTaskToolsToken } from "./utils/task-tools-token.js";
 import type { AgentSession, Storage } from "./storage/types.js";
 
 mkdirSync("/tmp/p1", { recursive: true });
@@ -106,5 +108,53 @@ describe("session tools MCP wiring at spawn", () => {
 
     expect(manager.getSession(sessionId)).toBeDefined();
     expect(calls[0]?.[4]).toBeUndefined();
+  });
+});
+
+describe("task tools MCP wiring at spawn", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("on the hub, mints a config naming this session and its project", async () => {
+    const { storage, settings } = makeStorage();
+    const calls = stubSpawn();
+    const manager = new AgentSessionManager(storage);
+    manager.localApiOrigin = "http://127.0.0.1:5173";
+    manager.hostsTaskTools = true;
+
+    const sessionId = await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code");
+
+    const config = calls[0]?.[5] as TaskToolsMcpConfig;
+    expect(config.url).toBe(`http://127.0.0.1:5173${TASK_TOOLS_MCP_PATH}`);
+    expect(verifyTaskToolsToken(settings.get("task_tools_token_secret")!, config.token, Date.now()))
+      .toEqual({ sessionId, projectId: "p1", userId: null });
+  });
+
+  it("on a worker, uses only the config the hub handed over", async () => {
+    const { storage, settings } = makeStorage();
+    const calls = stubSpawn();
+    const manager = new AgentSessionManager(storage);
+    manager.localApiOrigin = "http://127.0.0.1:5173";
+    const handed = { url: "https://hub.example.com/api/task-tools-mcp", token: "hub-signed" };
+    manager.setTaskToolsMcp("worker-sess", handed);
+
+    await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code", false, false, { sessionId: "worker-sess" });
+    await manager.createNewSession("p1", "other", "/tmp/p1", false, "edit", "claude-code");
+
+    expect(calls[0]?.[5]).toEqual(handed);
+    expect(calls[1]?.[5]).toBeUndefined();
+    expect(settings.has("task_tools_token_secret")).toBe(false);
+  });
+
+  it("on the hub, ignores a handed-over config", async () => {
+    const { storage } = makeStorage();
+    const calls = stubSpawn();
+    const manager = new AgentSessionManager(storage);
+    manager.localApiOrigin = "http://127.0.0.1:5173";
+    manager.hostsTaskTools = true;
+    manager.setTaskToolsMcp("s1", { url: "https://evil.example.com/x", token: "t" });
+
+    await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code", false, false, { sessionId: "s1" });
+
+    expect((calls[0]?.[5] as TaskToolsMcpConfig).url).toBe(`http://127.0.0.1:5173${TASK_TOOLS_MCP_PATH}`);
   });
 });

@@ -141,6 +141,35 @@ describe("RemoteSessionLifecycleAdapter", () => {
     expect(proxyToRemoteAuto.mock.calls[1][3]).toMatchObject({ sessionId: intent!.remote_session_id });
   });
 
+  it("activate hands the worker a hub task-tools token for the local id and project, only with a public URL", async () => {
+    proxyToRemoteAuto.mockImplementationOnce(async () => ok("prepared", view({ sessionId: (await storage.remoteSessionCreationIntents.getByPrepareOperationId("op-1"))!.remote_session_id })));
+    const prepared = await adapter.prepare(params());
+    const localId = (prepared as { view: SessionLifecycleView }).view.sessionId;
+    const remoteId = (await storage.remoteSessionCreationIntents.getByLocal(localId))!.remote_session_id;
+    const activated = () => ok("activated", view({ sessionId: remoteId, state: "active", activationKey: "op-1", activatedAt: now }));
+
+    vi.stubEnv("VIBEDECKX_PUBLIC_URL", "");
+    proxyToRemoteAuto.mockImplementationOnce(async (_srv, _method, _path, body) => {
+      expect(body).not.toHaveProperty("taskToolsMcp");
+      return activated();
+    });
+    await adapter.activate({ localSessionId: localId, activationKey: "op-1", instruction: "hello", userId: "u1" });
+
+    vi.stubEnv("VIBEDECKX_PUBLIC_URL", "https://app.example.com");
+    let handed: { url: string; token: string } | undefined;
+    proxyToRemoteAuto.mockImplementationOnce(async (_srv, _method, _path, body) => {
+      handed = (body as { taskToolsMcp?: { url: string; token: string } }).taskToolsMcp;
+      return activated();
+    });
+    await adapter.activate({ localSessionId: localId, activationKey: "op-1", instruction: "hello", userId: "u1" });
+    vi.unstubAllEnvs();
+
+    expect(handed!.url).toBe("https://app.example.com/api/task-tools-mcp");
+    const { getTaskToolsSecret, verifyTaskToolsToken } = await import("./utils/task-tools-token.js");
+    expect(verifyTaskToolsToken(await getTaskToolsSecret(storage), handed!.token, Date.now()))
+      .toEqual({ sessionId: localId, projectId: "p1", userId: "u1" });
+  });
+
   it("activate pre-registers, mints a token for the local id, and publishes the projection only on activated", async () => {
     proxyToRemoteAuto.mockImplementationOnce(async () => ok("prepared", view({ sessionId: (await storage.remoteSessionCreationIntents.getByPrepareOperationId("op-1"))!.remote_session_id })));
     const prepared = await adapter.prepare(params());

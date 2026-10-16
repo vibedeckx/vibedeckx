@@ -6,10 +6,12 @@
 import type { SpawnConfig } from "../../agent-provider.js";
 import type { CrossRemoteMcpConfig } from "../../cross-remote-mcp-config.js";
 import { SESSION_TOOLS_MCP_SERVER_NAME, type SessionToolsMcpConfig } from "../../session-tools-mcp.js";
+import { TASK_TOOLS_MCP_SERVER_NAME, type TaskToolsMcpConfig } from "../../task-tools-mcp.js";
 import { CODEX_NPM_PACKAGE } from "./schema.js";
 
 const CROSS_REMOTE_MCP_TOKEN_ENV = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN";
 const SESSION_TOOLS_MCP_TOKEN_ENV = "VIBEDECKX_SESSION_MCP_TOKEN";
+const TASK_TOOLS_MCP_TOKEN_ENV = "VIBEDECKX_TASK_TOOLS_MCP_TOKEN";
 
 /** `-c mcp_servers.<name>={…}` — TOML inline table; JSON.stringify yields valid TOML basic strings. */
 const mcpServerOverride = (name: string, url: string, tokenEnvVar: string): string =>
@@ -20,6 +22,7 @@ export function buildCodexAppServerSpawnConfig(
   crossRemoteMcp?: CrossRemoteMcpConfig,
   model?: string | null,
   sessionToolsMcp?: SessionToolsMcpConfig,
+  taskToolsMcp?: TaskToolsMcpConfig,
 ): SpawnConfig {
   const args = ["app-server"];
 
@@ -44,9 +47,14 @@ export function buildCodexAppServerSpawnConfig(
     );
   }
 
+  if (taskToolsMcp) {
+    args.push("-c", mcpServerOverride(TASK_TOOLS_MCP_SERVER_NAME, taskToolsMcp.url, TASK_TOOLS_MCP_TOKEN_ENV));
+  }
+
   const env: Record<string, string> = {};
   if (crossRemoteMcp) env[CROSS_REMOTE_MCP_TOKEN_ENV] = crossRemoteMcp.token;
   if (sessionToolsMcp) env[SESSION_TOOLS_MCP_TOKEN_ENV] = sessionToolsMcp.token;
+  if (taskToolsMcp) env[TASK_TOOLS_MCP_TOKEN_ENV] = taskToolsMcp.token;
   const hasEnv = Object.keys(env).length > 0;
 
   if (nativeBinary) {

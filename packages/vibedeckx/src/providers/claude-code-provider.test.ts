@@ -291,6 +291,28 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     expect(hint).toContain("mcp__vibedeckx__propose_schedule");
   });
 
+  it("mounts the hub's task tools, allowlists them and states their rule", () => {
+    const config = new ClaudeCodeProvider().buildSpawnConfig(
+      "/tmp", "plan", undefined, null,
+      { url: "http://127.0.0.1:5173/api/session-mcp", token: "session-tok" },
+      { url: "https://app.example.com/api/task-tools-mcp", token: "task-tok" },
+    );
+
+    const blob = JSON.parse(config.args[config.args.indexOf("--mcp-config") + 1]);
+    expect(Object.keys(blob.mcpServers)).toEqual(["vibedeckx", "vibedeckx-tasks"]);
+    expect(blob.mcpServers["vibedeckx-tasks"].headers.Authorization).toBe("Bearer task-tok");
+    expect(config.args[config.args.indexOf("--allowedTools") + 1].split(",")).toEqual([
+      "mcp__vibedeckx__propose_schedule",
+      "mcp__vibedeckx__propose_task",
+      "mcp__vibedeckx-tasks__list_tasks",
+      "mcp__vibedeckx-tasks__get_task",
+      "mcp__vibedeckx-tasks__propose_task_update",
+    ]);
+    const hint = config.args[config.args.indexOf("--append-system-prompt") + 1];
+    expect(hint).toContain("mcp__vibedeckx__propose_schedule");
+    expect(hint).toContain("mcp__vibedeckx-tasks__propose_task_update");
+  });
+
   it("says nothing about scheduling when the session tool is absent", () => {
     // Advertising a tool the session doesn't have would be worse than silence.
     const config = new ClaudeCodeProvider().buildSpawnConfig("/tmp", "edit");

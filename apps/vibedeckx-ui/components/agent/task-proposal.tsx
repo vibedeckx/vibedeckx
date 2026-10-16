@@ -110,14 +110,14 @@ function readProposal(input: unknown): { items: ItemFields[]; parentTaskId: stri
   }) };
 }
 
-const PRIORITY_DOT: Record<TaskPriority, string> = {
+export const PRIORITY_DOT: Record<TaskPriority, string> = {
   low: "bg-slate-400",
   medium: "bg-amber-400",
   high: "bg-orange-500",
   urgent: "bg-red-500",
 };
 
-const ACCENT_BUTTON = "bg-violet-600 text-white hover:bg-violet-700 dark:bg-violet-500 dark:hover:bg-violet-600";
+export const ACCENT_BUTTON = "bg-violet-600 text-white hover:bg-violet-700 dark:bg-violet-500 dark:hover:bg-violet-600";
 
 /** Fixed so every row's priority picker lines up whatever the button says. */
 const CREATE_WIDTH = "w-[84px] shrink-0 justify-center";

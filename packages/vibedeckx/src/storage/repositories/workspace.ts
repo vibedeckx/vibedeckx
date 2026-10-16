@@ -109,7 +109,8 @@ export const createWorkspaceRepos = (
       let query = kdb.selectFrom("tasks").selectAll()
         .where("project_id", "=", projectId)
         .where("archived_at", "is", null);
-      if (opts.status) query = query.where("status", "=", opts.status);
+      if (Array.isArray(opts.status)) query = query.where("status", "in", opts.status);
+      else if (opts.status) query = query.where("status", "=", opts.status as TaskStatus);
       const term = opts.query?.trim().slice(0, 256).toLowerCase();
       if (term) {
         const pattern = `%${term.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
@@ -118,6 +119,7 @@ export const createWorkspaceRepos = (
           sql<boolean>`lower(coalesce(description, '')) like ${pattern} escape '\\'`,
         ]));
       }
+      if (opts.offset) query = query.offset(opts.offset);
       const rows = await query.orderBy("position", "asc").orderBy("id", "asc").limit(opts.limit).execute();
       return rows.map(mapTask);
     },

@@ -17,6 +17,7 @@ import { randomUUID } from "node:crypto";
 import type { ContentPart, NotificationDisposition } from "./agent-types.js";
 import type { EventBus } from "./event-bus.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
+import { mintRemoteTaskToolsMcpConfig } from "./task-tools-mcp.js";
 import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
 import { extractUserText } from "./utils/conversation-title.js";
 import { appendContextBlock, buildRemoteGrantContext } from "./cross-remote-grant-context.js";
@@ -147,6 +148,7 @@ export class RemoteSessionLifecycleAdapter {
       this.deps.remoteSessionMap.set(localSessionId, { remoteServerId: params.remoteServerId, remoteSessionId, branch: params.branch });
     }
     const crossRemoteMcp = await this.mintFor(localSessionId, params.userId, params.remoteServerId);
+    const taskToolsMcp = await this.mintTaskToolsFor(localSessionId, params.projectId, params.userId);
     const frozen = await this.withFrozenGrantContext(localSessionId, params.userId, params.instruction);
     if (!frozen.ok) {
       if (preRegistered) this.deps.remoteSessionMap.delete(localSessionId);
@@ -168,6 +170,7 @@ export class RemoteSessionLifecycleAdapter {
         instruction, force: params.force === true, origin: params.origin,
         notificationDisposition: params.notificationDisposition,
         ...(crossRemoteMcp ? { crossRemoteMcp } : {}),
+        ...(taskToolsMcp ? { taskToolsMcp } : {}),
       },
       { reverseConnectManager: this.deps.reverseConnectManager ?? undefined },
     );
@@ -279,6 +282,10 @@ export class RemoteSessionLifecycleAdapter {
     });
   }
 
+  private mintTaskToolsFor(localSessionId: string, projectId: string, userId: string | undefined) {
+    return mintRemoteTaskToolsMcpConfig({ storage: this.deps.storage }, { sessionId: localSessionId, projectId, userId });
+  }
+
   async prepare(params: RemotePrepareParams): Promise<RemotePrepareResult> {
     const intents = this.deps.storage.remoteSessionCreationIntents;
     const ids = await this.ensureIntent(params);
@@ -343,6 +350,7 @@ export class RemoteSessionLifecycleAdapter {
       this.deps.remoteSessionMap.set(params.localSessionId, { remoteServerId, remoteSessionId, branch });
     }
     const crossRemoteMcp = await this.mintFor(params.localSessionId, params.userId, remoteServerId);
+    const taskToolsMcp = await this.mintTaskToolsFor(params.localSessionId, projectId, params.userId);
 
     const activityAt = this.now();
     const result = await proxyToRemoteAuto(
@@ -351,6 +359,7 @@ export class RemoteSessionLifecycleAdapter {
         activationKey: params.activationKey, instruction: params.instruction, force: params.force === true,
         origin: params.origin, notificationDisposition: params.notificationDisposition,
         ...(crossRemoteMcp ? { crossRemoteMcp } : {}),
+        ...(taskToolsMcp ? { taskToolsMcp } : {}),
       },
       { reverseConnectManager: this.deps.reverseConnectManager ?? undefined },
     );

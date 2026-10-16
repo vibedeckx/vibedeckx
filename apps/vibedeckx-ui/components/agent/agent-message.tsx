@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye, CalendarClock, Copy, Check, ListPlus } from "lucide-react";
+import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye, CalendarClock, Copy, Check, ListPlus, PencilLine } from "lucide-react";
 import type { AgentMessage, ContentPart } from "@/hooks/use-agent-session";
 import { AgentMarkdown } from "./agent-markdown";
 import { useAgentConversation } from "./agent-conversation";
@@ -36,6 +36,7 @@ import { TaskOutputToolUseUI, TaskOutputToolResultUI } from "./task-output-tools
 import { FileChangeToolUseUI, FileChangeToolResultUI } from "./file-change-tools";
 import { PROPOSE_SCHEDULE_TOOL, ScheduleProposalUI } from "./schedule-proposal";
 import { PROPOSE_TASK_TOOL, TaskProposalUI } from "./task-proposal";
+import { PROPOSE_TASK_UPDATE_TOOL, TaskUpdateProposalUI } from "./task-update-proposal";
 import { CrossRemoteToolUse, CrossRemoteToolResult, isCrossRemoteTool } from "./cross-remote-tools";
 import { ZoomableImage } from "./zoomable-image";
 import { SpeakButton, speakOwnerKey } from "./speak-button";
@@ -447,6 +448,14 @@ function ToolUseMessage({ tool, input, messageIndex, toolUseId }: { tool: string
     );
   }
 
+  if (tool === PROPOSE_TASK_UPDATE_TOOL) {
+    return (
+      <MessageRow color="violet" icon={PencilLine} title="Proposed task update">
+        <TaskUpdateProposalUI input={input} />
+      </MessageRow>
+    );
+  }
+
   if (tool === "ImageView") {
     const path =
       typeof input === "object" && input !== null && "path" in input && typeof input.path === "string"
@@ -622,7 +631,7 @@ function ToolUseMessage({ tool, input, messageIndex, toolUseId }: { tool: string
 function ToolResultMessage({ tool, output }: { tool: string; output: string }) {
   // The proposal's result is a fixed acknowledgement written for the agent, not
   // for the user — the card above already says everything a reader needs.
-  if (tool === PROPOSE_SCHEDULE_TOOL || tool === PROPOSE_TASK_TOOL) return null;
+  if (tool === PROPOSE_SCHEDULE_TOOL || tool === PROPOSE_TASK_TOOL || tool === PROPOSE_TASK_UPDATE_TOOL) return null;
 
   // The screenshot the agent just looked at (Read/ImageView on an image) —
   // shown inline regardless of tool name, so the user sees what the agent saw.

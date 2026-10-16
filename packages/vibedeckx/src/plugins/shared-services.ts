@@ -76,6 +76,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   const processManager = new ProcessManager(opts.storage);
   const agentSessionManager = new AgentSessionManager(opts.storage);
   agentSessionManager.residentLimitIsMachineWide = opts.isReverseConnectWorker ?? false;
+  agentSessionManager.hostsTaskTools = !(opts.isReverseConnectWorker ?? false);
   // Lifecycle recovery runs BEFORE restore (design §8.3): a pending row whose
   // entries prove the agent ran is promoted to active here, and only then is
   // it visible to `restoreSessionsFromDb` — the other order would leave it

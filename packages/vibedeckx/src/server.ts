@@ -40,6 +40,7 @@ import browserRoutes from "./routes/browser-routes.js";
 import browserProxyRoutes from "./routes/browser-proxy-routes.js";
 import crossRemoteTargetRoutes from "./routes/cross-remote-target-routes.js";
 import crossRemoteMcpRoutes from "./routes/cross-remote-mcp-routes.js";
+import taskToolsMcpRoutes from "./routes/task-tools-mcp-routes.js";
 import { crossRemoteMcpEnabled } from "./cross-remote-mcp-config.js";
 import sessionMcpRoutes from "./routes/session-mcp-routes.js";
 import scheduleRoutes from "./routes/schedule-routes.js";
@@ -429,6 +430,7 @@ export const createServer = async (opts: {
   server.register(crossRemoteTargetRoutes);
   server.register(crossRemoteMcpRoutes);
   server.register(sessionMcpRoutes);
+  server.register(taskToolsMcpRoutes);
 
   // 提供静态 UI 文件（reverse-connect worker / --no-ui 模式下不提供）
   if (UI_ROOT) {

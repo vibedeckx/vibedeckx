@@ -21,6 +21,7 @@ import { getProvider } from "./providers/index.js";
 import type { ParsedAgentEvent } from "./agent-provider.js";
 import { crossRemoteMcpEnabled, mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { mintSessionToolsMcpConfig } from "./session-tools-mcp.js";
+import { mintTaskToolsMcpConfig, taskToolsPublicBaseUrl, type TaskToolsMcpConfig } from "./task-tools-mcp.js";
 import { getBinaryVersion } from "./protocol/shared/binary.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
 import type { EventBus } from "./event-bus.js";
@@ -535,6 +536,20 @@ export class AgentSessionManager {
    * TLS termination — in both cases the tools are simply not offered.
    */
   localApiOrigin: string | null = null;
+  /**
+   * Whether this process serves the project-task MCP tools itself, i.e. is the
+   * hub (task-tools-mcp.ts). Set by shared-services; false on reverse-connect
+   * workers, whose agents get a hub-minted config via setTaskToolsMcp instead.
+   */
+  hostsTaskTools = false;
+  /**
+   * Worker side: the hub-minted task-tools config per session id. A side map
+   * rather than a RunningSession field because the hub sends it on the create
+   * routes, before the session exists, and on every forwarded message after.
+   * Never persisted, like crossRemoteMcp: a worker restart drops it until the
+   * hub's next message refreshes it.
+   */
+  private hubTaskToolsMcp = new Map<string, TaskToolsMcpConfig>();
   private capacityQueue: Promise<void> = Promise.resolve();
   /**
    * Sessions whose retention delete has passed its re-check and is in flight.
@@ -1560,6 +1575,16 @@ export class AgentSessionManager {
   }
 
   /**
+   * Worker half of the task-tools hand-off: used from the session's next spawn
+   * on. Ignored on the hub, which mints its own — a client cannot point a hub
+   * session's agent elsewhere.
+   */
+  setTaskToolsMcp(sessionId: string, config: TaskToolsMcpConfig): void {
+    if (this.hostsTaskTools) return;
+    this.hubTaskToolsMcp.set(sessionId, config);
+  }
+
+  /**
    * Kill an agent process and its entire process tree.
    * Uses negative PID to signal the process group (requires detached: true at spawn).
    */
@@ -1574,6 +1599,25 @@ export class AgentSessionManager {
       // Process group kill failed (e.g. already dead) — try direct kill as fallback
       try { proc.kill(signal); } catch { /* already dead */ }
     }
+  }
+
+  /**
+   * The hub mints per spawn, pointed at its own loopback (or its public URL
+   * when loopback is unavailable under local TLS); a worker uses what the hub
+   * handed it. skipDb sessions have no project row for the tools to read.
+   */
+  private async taskToolsMcpFor(session: RunningSession): Promise<TaskToolsMcpConfig | undefined> {
+    if (!this.hostsTaskTools) return this.hubTaskToolsMcp.get(session.id);
+    if (session.skipDb || !session.projectId) return undefined;
+    return mintTaskToolsMcpConfig(
+      { storage: this.storage },
+      {
+        sessionId: session.id,
+        projectId: session.projectId,
+        userId: session.userId,
+        baseUrl: this.localApiOrigin ?? taskToolsPublicBaseUrl(),
+      },
+    );
   }
 
   /**
@@ -1632,8 +1676,13 @@ export class AgentSessionManager {
       }
     }
 
+    const taskToolsMcp = await this.taskToolsMcpFor(session).catch((err) => {
+      console.error(`[AgentSession] Failed to mint task tools MCP config for ${session.id}:`, err);
+      return undefined;
+    });
+
     const config = provider.buildSpawnConfig(
-      cwd, session.permissionMode, session.crossRemoteMcp, session.model, sessionToolsMcp,
+      cwd, session.permissionMode, session.crossRemoteMcp, session.model, sessionToolsMcp, taskToolsMcp,
     );
 
     // Log the agent CLI version once per binary so protocol failures can be
@@ -3500,6 +3549,7 @@ export class AgentSessionManager {
 
     // 4. Remove from in-memory map
     this.sessions.delete(sessionId);
+    this.hubTaskToolsMcp.delete(sessionId);
 
     // 5. Re-derive branch activity — deleting the latest session can change
     //    which session is now "latest" for the branch, so the activity might
@@ -3550,6 +3600,7 @@ export class AgentSessionManager {
         getProvider(session.agentType).onSessionDestroyed?.(sessionId);
         this.broadcastRaw(sessionId, { finished: true });
         this.sessions.delete(sessionId);
+        this.hubTaskToolsMcp.delete(sessionId);
         await this.emitDerivedBranchActivity(session.projectId, session.branch);
       }
       return true;
@@ -3598,6 +3649,7 @@ export class AgentSessionManager {
         this.emitProcessAlive(session, false);
         this.broadcastRaw(sessionId, { finished: true });
         this.sessions.delete(sessionId);
+        this.hubTaskToolsMcp.delete(sessionId);
         await this.emitDerivedBranchActivity(session.projectId, session.branch);
       }
       return true;

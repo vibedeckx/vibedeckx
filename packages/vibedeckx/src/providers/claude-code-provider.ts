@@ -9,6 +9,12 @@ import {
   SESSION_TOOLS_SYSTEM_PROMPT_HINT,
   type SessionToolsMcpConfig,
 } from "../session-tools-mcp.js";
+import {
+  TASK_TOOLS_CANONICAL_NAMES,
+  TASK_TOOLS_MCP_SERVER_NAME,
+  TASK_TOOLS_SYSTEM_PROMPT_HINT,
+  type TaskToolsMcpConfig,
+} from "../task-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import { parseClaudeLine, serializeUserInput, extractImageToolResults } from "../protocol/claude-code/codec.js";
 import {
@@ -55,18 +61,29 @@ export class ClaudeCodeProvider implements AgentProvider {
     crossRemoteMcp?: CrossRemoteMcpConfig,
     model?: string | null,
     sessionToolsMcp?: SessionToolsMcpConfig,
+    taskToolsMcp?: TaskToolsMcpConfig,
   ): SpawnConfig {
     const mcpServers: Record<string, ClaudeHttpMcpServer> = {};
     if (crossRemoteMcp) mcpServers["cross-remote"] = crossRemoteMcp;
     if (sessionToolsMcp) mcpServers[SESSION_TOOLS_MCP_SERVER_NAME] = sessionToolsMcp;
+    if (taskToolsMcp) mcpServers[TASK_TOOLS_MCP_SERVER_NAME] = taskToolsMcp;
+
+    const allowedTools = [
+      ...(sessionToolsMcp ? [CANONICAL_PROPOSE_SCHEDULE_TOOL, CANONICAL_PROPOSE_TASK_TOOL] : []),
+      ...(taskToolsMcp ? TASK_TOOLS_CANONICAL_NAMES : []),
+    ];
+    const hints = [
+      ...(sessionToolsMcp ? [SESSION_TOOLS_SYSTEM_PROMPT_HINT] : []),
+      ...(taskToolsMcp ? [TASK_TOOLS_SYSTEM_PROMPT_HINT] : []),
+    ];
 
     return buildClaudeSessionSpawnConfig(
       this.detectBinary(),
       permissionMode,
       Object.keys(mcpServers).length > 0 ? buildClaudeMcpConfigArg(mcpServers) : undefined,
       model,
-      sessionToolsMcp ? [CANONICAL_PROPOSE_SCHEDULE_TOOL, CANONICAL_PROPOSE_TASK_TOOL] : undefined,
-      sessionToolsMcp ? SESSION_TOOLS_SYSTEM_PROMPT_HINT : undefined,
+      allowedTools.length > 0 ? allowedTools : undefined,
+      hints.length > 0 ? hints.join(" ") : undefined,
     );
   }
 

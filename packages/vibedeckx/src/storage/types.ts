@@ -2134,7 +2134,7 @@ export interface Storage {
     listOpenIdsBySourceSession: (sessionId: string) => Promise<string[]>;
     getByProjectId: (projectId: string, opts?: { includeArchived?: boolean }) => Promise<Task[]>;
     /** Project-scoped, SQL-bounded task lookup for read-only assistant tools. */
-    queryByProject: (projectId: string, opts: { query?: string; status?: TaskStatus; limit: number }) => Promise<Task[]>;
+    queryByProject: (projectId: string, opts: { query?: string; status?: TaskStatus | readonly TaskStatus[]; limit: number; offset?: number }) => Promise<Task[]>;
     /** Active overview tasks ordered by in-progress, urgent, then high priority. */
     listPriorityByProject: (projectId: string, limit: number) => Promise<Task[]>;
     getById: (id: string) => Promise<Task | undefined>;
