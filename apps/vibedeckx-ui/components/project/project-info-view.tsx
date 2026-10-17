@@ -22,6 +22,8 @@ interface ProjectInfoViewProps {
   onOpenScheduleRun: (runId: string, scheduleId?: string) => void;
   onRunScheduleAgain: (runId: string) => Promise<void> | void;
   onViewAllTasks: () => void;
+  /** Show one task on the Tasks page, from its detail dialog. */
+  onOpenTaskInTasks?: (task: Task) => void;
   onProjectUpdated: (id: string, opts: {
     name?: string;
     path?: string | null;
@@ -47,6 +49,7 @@ export function ProjectInfoView({
   onOpenScheduleRun,
   onRunScheduleAgain,
   onViewAllTasks,
+  onOpenTaskInTasks,
   onProjectUpdated,
 }: ProjectInfoViewProps) {
   const createThread = useCreateProjectChatThread(project.id);
@@ -127,7 +130,12 @@ export function ProjectInfoView({
         </TabsContent>
       </div>
 
-      <TaskDetailDialog task={selectedTask} open={taskDetailOpen} onOpenChange={setTaskDetailOpen} />
+      <TaskDetailDialog
+        task={selectedTask}
+        open={taskDetailOpen}
+        onOpenChange={setTaskDetailOpen}
+        onOpenInTasks={onOpenTaskInTasks}
+      />
     </Tabs>
   );
 }

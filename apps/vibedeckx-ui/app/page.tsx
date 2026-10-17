@@ -292,6 +292,12 @@ export default function Home() {
   const [selectedScheduleRunId, setSelectedScheduleRunId] = useState<string | null>(null);
   const [scheduleCreateOpen, setScheduleCreateOpen] = useState(false);
   const [projectChatContextTask, setProjectChatContextTask] = useState<Task | null>(null);
+  // Tasks page with the task's side panel open — the sidebar's task click, and
+  // the detail dialogs' "Open in Tasks".
+  const openTaskInTasks = useCallback((task: Task) => {
+    setTaskOpenRequest({ kind: "task", taskId: task.id, status: task.status });
+    setActiveView("tasks");
+  }, [setActiveView]);
 
   const {
     activity: branchActivity,
@@ -1172,10 +1178,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
             tasks={tasks}
             selectedTaskId={selectedTaskId}
             onTasksOpen={() => setActiveView("tasks")}
-            onTaskSelect={(task) => {
-              setTaskOpenRequest({ kind: "task", taskId: task.id, status: task.status });
-              setActiveView("tasks");
-            }}
+            onTaskSelect={openTaskInTasks}
             onCreateTaskOpen={() => {
               setTaskOpenRequest({ kind: "draft" });
               setActiveView("tasks");
@@ -1396,6 +1399,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 }}
                 onRunScheduleAgain={projectActivityActions.runScheduleAgain}
                 onViewAllTasks={() => setActiveView("tasks")}
+                onOpenTaskInTasks={openTaskInTasks}
                 onProjectUpdated={updateProject}
               />
             </div>
@@ -1512,6 +1516,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
           task={projectChatContextTask}
           open={projectChatContextTask !== null}
           onOpenChange={(open) => { if (!open) setProjectChatContextTask(null); }}
+          onOpenInTasks={openTaskInTasks}
         />
         <CreateProjectDialog
           open={createDialogOpen}
