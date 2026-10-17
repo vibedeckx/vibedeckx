@@ -1,15 +1,16 @@
 /**
- * Session-scoped MCP tool surface served by the vibedeckx process that spawned
- * the agent — always same-machine loopback (the hub for local sessions, the
- * worker for remote ones, since remote sessions are spawned by the worker's own
- * agent-session-manager). Unlike the cross-remote gateway this never crosses a
- * machine boundary, so it needs no VIBEDECKX_PUBLIC_URL and no tunnel call.
+ * The `vibedeckx` MCP server every agent session gets: proposals (schedule,
+ * task, task update) and reads of the session's project tasks. Always served
+ * by the HUB — tasks live only in its storage. A local session reaches it on
+ * the hub's loopback; a remote session's agent runs on a worker, so it reaches
+ * it over VIBEDECKX_PUBLIC_URL with a hub-signed token the hub hands the worker
+ * (create/start/activate/branch bodies, refreshed on every forwarded message).
  *
  * Lives outside routes/ so providers and the session manager can import the
  * contract (path, tool names, config shape) without pulling Fastify in.
  * Full design: docs/schedule-proposal-tool-design.md
  */
-import type { Storage } from "./storage/types.js";
+import type { Storage, TaskPriority, TaskStatus } from "./storage/types.js";
 import { getSessionToolsSecret, signSessionToolsToken } from "./utils/session-tools-token.js";
 
 export const SESSION_TOOLS_MCP_PATH = "/api/session-mcp";
@@ -32,9 +33,34 @@ export const PROPOSE_TASK_TOOL = "propose_task";
 
 export const CANONICAL_PROPOSE_TASK_TOOL = `mcp__${SESSION_TOOLS_MCP_SERVER_NAME}__${PROPOSE_TASK_TOOL}`;
 
+/** Reads of the session's project task list, and the update-proposal card. */
+export const LIST_TASKS_TOOL = "list_tasks";
+export const GET_TASK_TOOL = "get_task";
+export const PROPOSE_TASK_UPDATE_TOOL = "propose_task_update";
+export const CANONICAL_LIST_TASKS_TOOL = `mcp__${SESSION_TOOLS_MCP_SERVER_NAME}__${LIST_TASKS_TOOL}`;
+export const CANONICAL_GET_TASK_TOOL = `mcp__${SESSION_TOOLS_MCP_SERVER_NAME}__${GET_TASK_TOOL}`;
+export const CANONICAL_PROPOSE_TASK_UPDATE_TOOL = `mcp__${SESSION_TOOLS_MCP_SERVER_NAME}__${PROPOSE_TASK_UPDATE_TOOL}`;
+
+/** The two tools that need no task data — all a worker's fallback endpoint serves. */
+export const SESSION_TOOLS_PROPOSAL_NAMES = [CANONICAL_PROPOSE_SCHEDULE_TOOL, CANONICAL_PROPOSE_TASK_TOOL] as const;
+
+/** Every tool the hub offers, as Claude reports them — the plan-mode allowlist. */
+export const SESSION_TOOLS_CANONICAL_NAMES = [
+  ...SESSION_TOOLS_PROPOSAL_NAMES,
+  CANONICAL_LIST_TASKS_TOOL,
+  CANONICAL_GET_TASK_TOOL,
+  CANONICAL_PROPOSE_TASK_UPDATE_TOOL,
+] as const;
+
 export interface SessionToolsMcpConfig {
   url: string;
   token: string;
+  /**
+   * Set on the worker's own fallback config: the worker serves only the two
+   * proposals (it has no task data), so the agent is told about only those.
+   * See AgentSessionManager.sessionToolsMcpFor.
+   */
+  proposalsOnly?: boolean;
 }
 
 export const PROPOSE_SCHEDULE_DESCRIPTION = [
@@ -80,13 +106,6 @@ export const ARTIFACT_PATH_HINT =
   + "the user, write its absolute path on its own line in your reply so it can be previewed.";
 
 /**
- * Server-level `instructions` returned from MCP `initialize`. Claude Code folds
- * these into the system prompt, so they are read even when the model never
- * considers the tool list — which is the actual failure mode: "set up a nightly
- * check" reads as an engineering task, so the agent writes a cron job instead of
- * looking for a tool. Kept short; the tool description carries the detail.
- */
-/**
  * Shared by the instructions and the system-prompt hint. Only routes an explicit
  * request: the agent must neither propose tasks unprompted nor remind the user
  * that it could. Agents already list leftover work at the end of a turn; a
@@ -96,30 +115,51 @@ const TASK_ROUTING_HINT =
   `Tasks: when the user asks to record something as a task or to-do for later, call \`${CANONICAL_PROPOSE_TASK_TOOL}\``
   + " to propose it, and do not do the work itself now. Never call it, or suggest creating a task, unless the user asks.";
 
-export const SESSION_TOOLS_MCP_INSTRUCTIONS = [
-  `\`${PROPOSE_SCHEDULE_TOOL}\` is the only way to schedule work in this environment.`,
-  "When the user asks for anything recurring — nightly, hourly, every morning, on a cron, \"keep",
-  "watching\" — call it instead of writing a crontab entry, systemd timer, or setInterval loop.",
-  "Scheduling inside the user's own product remains ordinary coding work.",
-  "",
-  TASK_ROUTING_HINT,
-  "",
-  ARTIFACT_PATH_HINT,
-].join("\n");
+const TASK_DATA_HINT =
+  ` \`${CANONICAL_LIST_TASKS_TOOL}\` and \`${CANONICAL_GET_TASK_TOOL}\` read the project's existing tasks; use them`
+  + " when the user refers to existing tasks, and before proposing new ones so you don't duplicate one."
+  + ` To change existing tasks (status, priority, title, description), call \`${CANONICAL_PROPOSE_TASK_UPDATE_TOOL}\``
+  + " when the user asks; the user confirms each change on a card. Never claim you created or updated a task.";
+
+/**
+ * Server-level `instructions` returned from MCP `initialize`. Claude Code folds
+ * these into the system prompt, so they are read even when the model never
+ * considers the tool list — which is the actual failure mode: "set up a nightly
+ * check" reads as an engineering task, so the agent writes a cron job instead of
+ * looking for a tool. Kept short; the tool description carries the detail.
+ */
+export function sessionToolsInstructions(proposalsOnly = false): string {
+  return [
+    `\`${PROPOSE_SCHEDULE_TOOL}\` is the only way to schedule work in this environment.`,
+    "When the user asks for anything recurring — nightly, hourly, every morning, on a cron, \"keep",
+    "watching\" — call it instead of writing a crontab entry, systemd timer, or setInterval loop.",
+    "Scheduling inside the user's own product remains ordinary coding work.",
+    "",
+    proposalsOnly ? TASK_ROUTING_HINT : TASK_ROUTING_HINT + TASK_DATA_HINT,
+    "",
+    ARTIFACT_PATH_HINT,
+  ].join("\n");
+}
+
+export const SESSION_TOOLS_MCP_INSTRUCTIONS = sessionToolsInstructions();
 
 /**
  * Same rule as a system-prompt append, for CLIs that take one. Belt to the
  * instructions' braces: this lands in context by construction rather than by
  * the CLI's choice to surface server instructions.
  */
-export const SESSION_TOOLS_SYSTEM_PROMPT_HINT = [
-  "Scheduling: when the user asks you to run something on a schedule (nightly, hourly, every",
-  `morning, on a cron, "keep watching"), call the \`${CANONICAL_PROPOSE_SCHEDULE_TOOL}\` tool. That`,
-  "is the only way to schedule work here — do not hand-roll a crontab entry, systemd timer, or",
-  "setInterval loop for it. Writing scheduling into the user's own project is still normal coding.",
-  TASK_ROUTING_HINT,
-  ARTIFACT_PATH_HINT,
-].join(" ");
+export function sessionToolsSystemPromptHint(proposalsOnly = false): string {
+  return [
+    "Scheduling: when the user asks you to run something on a schedule (nightly, hourly, every",
+    `morning, on a cron, "keep watching"), call the \`${CANONICAL_PROPOSE_SCHEDULE_TOOL}\` tool. That`,
+    "is the only way to schedule work here — do not hand-roll a crontab entry, systemd timer, or",
+    "setInterval loop for it. Writing scheduling into the user's own project is still normal coding.",
+    proposalsOnly ? TASK_ROUTING_HINT : TASK_ROUTING_HINT + TASK_DATA_HINT,
+    ARTIFACT_PATH_HINT,
+  ].join(" ");
+}
+
+export const SESSION_TOOLS_SYSTEM_PROMPT_HINT = sessionToolsSystemPromptHint();
 
 export const PROPOSE_SCHEDULE_INPUT_SCHEMA = {
   type: "object",
@@ -215,13 +255,12 @@ export const PROPOSE_TASK_DESCRIPTION = [
   "the workspace; bare paths and absolute paths do not.",
   "",
   "To file the tasks as sub-tasks of an existing task (e.g. a follow-up found while working on",
-  "step 2 of a plan), pass that task's id as `parent_task_id`. Take the id from the project's",
-  "task list via the vibedeckx-tasks `list_tasks` / `get_task` tools when they are available, or",
-  "from a <vtasks-created> note (ids of tasks the user created from your earlier proposals, on a",
-  "later user message) — never a guessed id. When those tools are available, check the list first",
-  "so you don't propose a task that already exists. Omit the parent when you don't know its id —",
-  "the user can still pick one on the card. One call files all its tasks under the same parent;",
-  "make separate calls for different parents.",
+  "step 2 of a plan), pass that task's id as `parent_task_id`. Take the id from `list_tasks` /",
+  "`get_task`, or from a <vtasks-created> note (ids of tasks the user created from your earlier",
+  "proposals, on a later user message) — never a guessed id. When `list_tasks` is available, check",
+  "it first so you don't propose a task that already exists. Omit the parent when you don't know",
+  "its id — the user can still pick one on the card. One call files all its tasks under the same",
+  "parent; make separate calls for different parents.",
   "",
   "Project and source session are taken from this session — do not describe them here.",
 ].join("\n");
@@ -312,6 +351,155 @@ export function parseProposeTaskArgs(
   return { ok: true, value: tasks };
 }
 
+export const LIST_TASKS_DESCRIPTION = [
+  "List or search the tasks of the project this session belongs to — the user's to-do list for the",
+  "project, not your own todo list. Returns ids, titles, status, priority, parent and the start of",
+  "each description; call get_task for a task's full description and sub-tasks.",
+  "",
+  "By default only open tasks (todo / in_progress) are listed. Archived tasks are never listed.",
+  "Results come in pages of 50: when `next_offset` is present, call again with it as `offset`",
+  "to read the rest.",
+].join("\n");
+
+export const LIST_TASKS_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    query: { type: "string", description: "Optional case-insensitive text to match in titles and descriptions." },
+    status: {
+      type: "string",
+      enum: ["open", "all", "todo", "in_progress", "done", "cancelled"],
+      description: "Optional; \"open\" (default) = todo or in_progress.",
+    },
+    offset: { type: "integer", minimum: 0, description: "Optional; the `next_offset` of the previous page." },
+  },
+  additionalProperties: false,
+} as const;
+
+export const GET_TASK_DESCRIPTION =
+  "Read one task of this project in full: its description, status, priority, parent and sub-tasks.";
+
+export const GET_TASK_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    task_id: { type: "string", description: "Task id, from list_tasks or a <vtasks-created> note." },
+  },
+  required: ["task_id"],
+  additionalProperties: false,
+} as const;
+
+export const PROPOSE_TASK_UPDATE_DESCRIPTION = [
+  "Propose changes to existing tasks of this project: status, priority, title or description. Call",
+  "it when the user asks to update, close, reprioritize or rewrite tasks — \"mark the retention task",
+  "done\", \"fold what we learned into the task\". Never call it on your own initiative.",
+  "",
+  "The proposal is shown to the user as a confirmation card listing each change against the task's",
+  "current values; it does NOT change anything by itself and this call does not wait for the user.",
+  "Say you have proposed the update (never that you made it) and continue.",
+  "",
+  "Give only the fields that should change. `description` replaces the whole description: read it",
+  "with get_task first and keep everything that should remain. Write files in this repository as",
+  "Markdown links with repo-relative paths, as for propose_task. Use ids from list_tasks / get_task;",
+  "never a guessed id. At most 10 tasks per call, each at most once. An entry whose task doesn't",
+  "exist or already has those values is left off the card and reported back to you.",
+].join("\n");
+
+export const PROPOSE_TASK_UPDATE_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    updates: {
+      type: "array",
+      minItems: 1,
+      maxItems: 10,
+      description: "One entry per task to change.",
+      items: {
+        type: "object",
+        properties: {
+          task_id: { type: "string", description: "Id of the task to change." },
+          title: { type: "string", description: "New title." },
+          description: { type: "string", description: "New full Markdown description (replaces the current one)." },
+          status: { type: "string", enum: ["todo", "in_progress", "done", "cancelled"], description: "New status." },
+          priority: { type: "string", enum: ["low", "medium", "high", "urgent"], description: "New priority." },
+        },
+        required: ["task_id"],
+      },
+    },
+  },
+  required: ["updates"],
+} as const;
+
+export const PROPOSE_TASK_UPDATE_ACK =
+  "Proposal shown to the user as a confirmation card. Nothing has changed yet — the user decides "
+  + "whether to apply it. Tell the user you PROPOSED the update and that they can apply it on the card above.";
+
+export interface ProposedTaskUpdate {
+  task_id: string;
+  title?: string;
+  description?: string;
+  status?: TaskStatus;
+  priority?: TaskPriority;
+}
+
+export const PROPOSE_TASK_UPDATE_MAX_ITEMS = 10;
+const TASK_ID_MAX = 200;
+const TASK_STATUSES: readonly TaskStatus[] = ["todo", "in_progress", "done", "cancelled"];
+
+/**
+ * Shape validation only — whether each task exists in the project is checked
+ * by the route, which owns storage. Mirrored by the card's replay
+ * (task-update-proposal.tsx) so a rejected call never offers changes.
+ */
+export function parseProposeTaskUpdateArgs(
+  args: Record<string, unknown>,
+): { ok: true; value: ProposedTaskUpdate[] } | { ok: false; error: string } {
+  const raw = args.updates;
+  if (!Array.isArray(raw) || raw.length === 0) return { ok: false, error: "updates must be a non-empty array" };
+  if (raw.length > PROPOSE_TASK_UPDATE_MAX_ITEMS) {
+    return { ok: false, error: `propose at most ${PROPOSE_TASK_UPDATE_MAX_ITEMS} task updates at a time` };
+  }
+  const seen = new Set<string>();
+  const updates: ProposedTaskUpdate[] = [];
+  for (const [i, item] of raw.entries()) {
+    const obj = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+    const taskId = typeof obj.task_id === "string" ? obj.task_id.trim() : "";
+    if (!taskId || taskId.length > TASK_ID_MAX) return { ok: false, error: `updates[${i}].task_id is required` };
+    if (seen.has(taskId)) return { ok: false, error: `task ${taskId} appears more than once; merge its changes into one entry` };
+    seen.add(taskId);
+
+    const update: ProposedTaskUpdate = { task_id: taskId };
+    if (obj.title !== undefined) {
+      const title = typeof obj.title === "string" ? obj.title.trim() : "";
+      if (!title || title.length > TASK_TITLE_MAX) {
+        return { ok: false, error: `updates[${i}].title must be a non-empty string of at most ${TASK_TITLE_MAX} characters` };
+      }
+      update.title = title;
+    }
+    if (obj.description !== undefined) {
+      const description = typeof obj.description === "string" ? obj.description : "";
+      if (!description.trim() || description.length > TASK_DESCRIPTION_MAX) {
+        return { ok: false, error: `updates[${i}].description must be non-empty and at most ${TASK_DESCRIPTION_MAX} characters` };
+      }
+      update.description = description;
+    }
+    if (obj.status !== undefined) {
+      if (!TASK_STATUSES.includes(obj.status as TaskStatus)) {
+        return { ok: false, error: `updates[${i}].status must be one of: ${TASK_STATUSES.join(", ")}` };
+      }
+      update.status = obj.status as TaskStatus;
+    }
+    if (obj.priority !== undefined) {
+      if (!TASK_PRIORITIES.includes(obj.priority as ProposedTaskPriority)) {
+        return { ok: false, error: `updates[${i}].priority must be one of: ${TASK_PRIORITIES.join(", ")}` };
+      }
+      update.priority = obj.priority as TaskPriority;
+    }
+    if (Object.keys(update).length === 1) {
+      return { ok: false, error: `updates[${i}] changes nothing; give at least one of title, description, status, priority` };
+    }
+    updates.push(update);
+  }
+  return { ok: true, value: updates };
+}
+
 /**
  * Every shape the two CLIs are known to report our MCP tool under, mapped onto
  * the canonical name. Claude Code prefixes `mcp__<server>__`. Codex (verified
@@ -335,6 +523,7 @@ const aliasesOf = (tool: string, canonical: string): Set<string> => new Set(
 const SESSION_TOOL_ALIASES: ReadonlyArray<[Set<string>, string]> = [
   [aliasesOf(PROPOSE_SCHEDULE_TOOL, CANONICAL_PROPOSE_SCHEDULE_TOOL), CANONICAL_PROPOSE_SCHEDULE_TOOL],
   [aliasesOf(PROPOSE_TASK_TOOL, CANONICAL_PROPOSE_TASK_TOOL), CANONICAL_PROPOSE_TASK_TOOL],
+  [aliasesOf(PROPOSE_TASK_UPDATE_TOOL, CANONICAL_PROPOSE_TASK_UPDATE_TOOL), CANONICAL_PROPOSE_TASK_UPDATE_TOOL],
 ];
 
 /**
@@ -351,22 +540,52 @@ export function canonicalizeSessionToolName(tool: string, server?: string): stri
   return SESSION_TOOL_ALIASES.find(([aliases]) => aliases.has(key))?.[1] ?? tool;
 }
 
+/** Public base URL remote agents reach the hub on; remote sessions get no tools without it. */
+export function sessionToolsPublicBaseUrl(): string | null {
+  return process.env.VIBEDECKX_PUBLIC_URL?.trim() || null;
+}
+
 /**
- * Mints a session-scoped bearer token for the loopback endpoint. `origin` is
- * the local base URL of the process that is about to spawn the agent; when it
- * is unknown (server not listening yet) or not plain http (TLS-terminated
- * locally — a loopback https URL cannot pass hostname verification against a
- * public certificate), no config is minted and the tool is simply absent.
+ * Mints the config for one session's agent. `baseUrl` is how that agent
+ * reaches the hub: its loopback for a local session, the public URL for a
+ * remote one. Undefined (tools absent) when there is no usable base URL.
  */
 export async function mintSessionToolsMcpConfig(
   deps: { storage: Pick<Storage, "settings"> },
-  args: { sessionId: string; origin: string | null },
+  args: { sessionId: string; projectId: string; userId: string | null | undefined; baseUrl: string | null },
 ): Promise<SessionToolsMcpConfig | undefined> {
-  const origin = args.origin?.trim();
-  if (!origin || !origin.startsWith("http://")) return undefined;
-  if (!args.sessionId) return undefined;
+  const baseUrl = args.baseUrl?.trim();
+  if (!baseUrl || !/^https?:\/\//.test(baseUrl)) return undefined;
+  if (!args.sessionId || !args.projectId) return undefined;
+  // The solo sentinel is not a principal: solo projects are stored ownerless.
+  const userId = args.userId && args.userId !== "local" ? args.userId : null;
 
   const secret = await getSessionToolsSecret(deps.storage);
-  const token = signSessionToolsToken(secret, { sessionId: args.sessionId }, Date.now());
-  return { url: `${origin.replace(/\/+$/, "")}${SESSION_TOOLS_MCP_PATH}`, token };
+  const token = signSessionToolsToken(secret, { sessionId: args.sessionId, projectId: args.projectId, userId }, Date.now());
+  return { url: `${baseUrl.replace(/\/+$/, "")}${SESSION_TOOLS_MCP_PATH}`, token };
+}
+
+/**
+ * Hub side, for a remote session: the config to hand its worker. Best-effort —
+ * a failed mint leaves the tools off rather than failing the caller.
+ */
+export async function mintRemoteSessionToolsMcpConfig(
+  deps: { storage: Pick<Storage, "settings"> },
+  args: { sessionId: string; projectId: string | null | undefined; userId: string | null | undefined },
+): Promise<SessionToolsMcpConfig | undefined> {
+  if (!args.projectId) return undefined;
+  return mintSessionToolsMcpConfig(deps, {
+    sessionId: args.sessionId, projectId: args.projectId, userId: args.userId, baseUrl: sessionToolsPublicBaseUrl(),
+  }).catch((err) => {
+    console.error(`[SessionTools] mint for remote session ${args.sessionId} failed:`, err);
+    return undefined;
+  });
+}
+
+/** Worker side: accept the hub-minted config from a request body, or nothing. */
+export function parseSessionToolsMcpConfig(value: unknown): SessionToolsMcpConfig | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { url, token } = value as Record<string, unknown>;
+  if (typeof url !== "string" || !/^https?:\/\//.test(url) || typeof token !== "string" || !token) return undefined;
+  return { url, token };
 }

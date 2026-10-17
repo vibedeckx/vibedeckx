@@ -267,8 +267,15 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     expect(Object.keys(blob.mcpServers).sort()).toEqual(["cross-remote", "vibedeckx"]);
     expect(blob.mcpServers.vibedeckx.url).toBe("http://127.0.0.1:5173/api/session-mcp");
     expect(blob.mcpServers.vibedeckx.headers.Authorization).toBe("Bearer session-tok");
-    expect(config.args[config.args.indexOf("--allowedTools") + 1])
-      .toBe("mcp__vibedeckx__propose_schedule,mcp__vibedeckx__propose_task");
+    expect(config.args[config.args.indexOf("--allowedTools") + 1].split(",")).toEqual([
+      "mcp__vibedeckx__propose_schedule",
+      "mcp__vibedeckx__propose_task",
+      "mcp__vibedeckx__list_tasks",
+      "mcp__vibedeckx__get_task",
+      "mcp__vibedeckx__propose_task_update",
+    ]);
+    const hint = config.args[config.args.indexOf("--append-system-prompt") + 1];
+    expect(hint).toContain("mcp__vibedeckx__propose_task_update");
   });
 
   it("injects the session tools alone when there is no cross-remote config", () => {
@@ -291,26 +298,19 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     expect(hint).toContain("mcp__vibedeckx__propose_schedule");
   });
 
-  it("mounts the hub's task tools, allowlists them and states their rule", () => {
-    const config = new ClaudeCodeProvider().buildSpawnConfig(
-      "/tmp", "plan", undefined, null,
-      { url: "http://127.0.0.1:5173/api/session-mcp", token: "session-tok" },
-      { url: "https://app.example.com/api/task-tools-mcp", token: "task-tok" },
-    );
+  it("allowlists and describes only the proposals for a worker's proposals-only config", () => {
+    const config = new ClaudeCodeProvider().buildSpawnConfig("/tmp", "plan", undefined, null, {
+      url: "http://127.0.0.1:5173/api/session-mcp", token: "session-tok", proposalsOnly: true,
+    });
 
     const blob = JSON.parse(config.args[config.args.indexOf("--mcp-config") + 1]);
-    expect(Object.keys(blob.mcpServers)).toEqual(["vibedeckx", "vibedeckx-tasks"]);
-    expect(blob.mcpServers["vibedeckx-tasks"].headers.Authorization).toBe("Bearer task-tok");
-    expect(config.args[config.args.indexOf("--allowedTools") + 1].split(",")).toEqual([
-      "mcp__vibedeckx__propose_schedule",
-      "mcp__vibedeckx__propose_task",
-      "mcp__vibedeckx-tasks__list_tasks",
-      "mcp__vibedeckx-tasks__get_task",
-      "mcp__vibedeckx-tasks__propose_task_update",
-    ]);
+    // The flag is ours, not part of the CLI's server config.
+    expect(blob.mcpServers.vibedeckx.proposalsOnly).toBeUndefined();
+    expect(config.args[config.args.indexOf("--allowedTools") + 1])
+      .toBe("mcp__vibedeckx__propose_schedule,mcp__vibedeckx__propose_task");
     const hint = config.args[config.args.indexOf("--append-system-prompt") + 1];
-    expect(hint).toContain("mcp__vibedeckx__propose_schedule");
-    expect(hint).toContain("mcp__vibedeckx-tasks__propose_task_update");
+    expect(hint).toContain("mcp__vibedeckx__propose_task");
+    expect(hint).not.toContain("list_tasks");
   });
 
   it("says nothing about scheduling when the session tool is absent", () => {

@@ -9,7 +9,6 @@
 import type { AgentType, ContentPart } from "./agent-types.js";
 import type { CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import type { SessionToolsMcpConfig } from "./session-tools-mcp.js";
-import type { TaskToolsMcpConfig } from "./task-tools-mcp.js";
 export type { AgentType };
 
 // ============ SpawnConfig (task 1.3) ============
@@ -85,12 +84,8 @@ export interface AgentProvider {
    * NOT store it on the provider instance — providers are singletons shared
    * by every session.
    *
-   * `sessionToolsMcp` points at this process's own loopback MCP endpoint and is
-   * minted per spawn (the token dies with the process); undefined means the
-   * session-scoped tools are simply not offered.
-   *
-   * `taskToolsMcp` points at the hub's project-task tools (task-tools-mcp.ts);
-   * undefined means they are not offered.
+   * `sessionToolsMcp` points at the hub's `vibedeckx` MCP endpoint
+   * (session-tools-mcp.ts); undefined means those tools are not offered.
    */
   buildSpawnConfig(
     cwd: string,
@@ -98,7 +93,6 @@ export interface AgentProvider {
     crossRemoteMcp?: CrossRemoteMcpConfig,
     model?: string | null,
     sessionToolsMcp?: SessionToolsMcpConfig,
-    taskToolsMcp?: TaskToolsMcpConfig,
   ): SpawnConfig;
 
   /** Parse a single stdout line into zero or more agent events. */

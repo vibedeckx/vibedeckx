@@ -26,7 +26,7 @@ import { requireAuth as requireRawAuth } from "../server.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
-import { parseTaskToolsMcpConfig } from "../task-tools-mcp.js";
+import { parseSessionToolsMcpConfig } from "../session-tools-mcp.js";
 import { isSessionPurpose, type SessionPurpose } from "../session-lifecycle-log.js";
 import { toLifecycleResponse, type SessionLifecycleView, type SessionOwner } from "../agent-session-lifecycle.js";
 import { RemoteSessionLifecycleAdapter } from "../remote-session-lifecycle.js";
@@ -76,8 +76,8 @@ interface StartBody extends PrepareBody {
   origin?: "workflow";
   notificationDisposition?: NotificationDisposition;
   crossRemoteMcp?: unknown;
-  /** Hub-minted project-task tools config (task-tools-mcp.ts); additive, workers only. */
-  taskToolsMcp?: unknown;
+  /** Hub-minted `vibedeckx` MCP config (session-tools-mcp.ts); additive, workers only. */
+  sessionToolsMcp?: unknown;
 }
 interface ActivateBody {
   activationKey?: string;
@@ -86,7 +86,7 @@ interface ActivateBody {
   origin?: "workflow";
   notificationDisposition?: NotificationDisposition;
   crossRemoteMcp?: unknown;
-  taskToolsMcp?: unknown;
+  sessionToolsMcp?: unknown;
   /** The composer's declaration as of the send; the prepare-time one may be stale. */
   grantedRemoteIds?: unknown;
 }
@@ -110,11 +110,11 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     eventBus: fastify.eventBus ?? null,
   });
 
-  /** Worker half of the task-tools hand-off (task-tools-mcp.ts). */
-  const adoptTaskToolsMcp = (sessionId: unknown, value: unknown) => {
-    const config = parseTaskToolsMcpConfig(value);
+  /** Worker half of the session-tools hand-off (session-tools-mcp.ts). */
+  const adoptSessionToolsMcp = (sessionId: unknown, value: unknown) => {
+    const config = parseSessionToolsMcpConfig(value);
     if (config && typeof sessionId === "string" && sessionId) {
-      fastify.agentSessionManager.setTaskToolsMcp(sessionId, config);
+      fastify.agentSessionManager.setSessionToolsMcp(sessionId, config);
     }
   };
 
@@ -231,7 +231,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     if (!purpose) return reply.code(400).send({ error: "Invalid purpose" });
     const projectId = await resolvePathProject(projectPath, authResult);
     if (!projectId) return reply.code(404).send({ error: "Project not found" });
-    adoptTaskToolsMcp(req.body.sessionId, req.body.taskToolsMcp);
+    adoptSessionToolsMcp(req.body.sessionId, req.body.sessionToolsMcp);
     const result = await fastify.agentSessionLifecycle.start({
       operationId: req.body.operationId,
       sessionId: typeof req.body.sessionId === "string" ? req.body.sessionId : undefined,
@@ -397,7 +397,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     if (!grants.ok) return reply.code(400).send({ error: grants.error });
     // Re-minted per spawn (the worker half adopts a hub-supplied config, the
     // hub half mints its own for a local session).
-    adoptTaskToolsMcp(sessionId, req.body.taskToolsMcp);
+    adoptSessionToolsMcp(sessionId, req.body.sessionToolsMcp);
     const crossRemoteMcp = crossRemoteOf(req.body.crossRemoteMcp)
       ?? await mintCrossRemoteMcpConfig({ storage: fastify.storage }, { userId: authResult, sessionId, sourceRemoteServerId: null })
         .catch(() => undefined);

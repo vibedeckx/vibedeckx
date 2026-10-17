@@ -3,18 +3,12 @@ import type { ClaudeContentBlock } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
 import { type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import {
-  CANONICAL_PROPOSE_SCHEDULE_TOOL,
-  CANONICAL_PROPOSE_TASK_TOOL,
+  SESSION_TOOLS_CANONICAL_NAMES,
   SESSION_TOOLS_MCP_SERVER_NAME,
-  SESSION_TOOLS_SYSTEM_PROMPT_HINT,
+  SESSION_TOOLS_PROPOSAL_NAMES,
+  sessionToolsSystemPromptHint,
   type SessionToolsMcpConfig,
 } from "../session-tools-mcp.js";
-import {
-  TASK_TOOLS_CANONICAL_NAMES,
-  TASK_TOOLS_MCP_SERVER_NAME,
-  TASK_TOOLS_SYSTEM_PROMPT_HINT,
-  type TaskToolsMcpConfig,
-} from "../task-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import { parseClaudeLine, serializeUserInput, extractImageToolResults } from "../protocol/claude-code/codec.js";
 import {
@@ -61,29 +55,19 @@ export class ClaudeCodeProvider implements AgentProvider {
     crossRemoteMcp?: CrossRemoteMcpConfig,
     model?: string | null,
     sessionToolsMcp?: SessionToolsMcpConfig,
-    taskToolsMcp?: TaskToolsMcpConfig,
   ): SpawnConfig {
     const mcpServers: Record<string, ClaudeHttpMcpServer> = {};
     if (crossRemoteMcp) mcpServers["cross-remote"] = crossRemoteMcp;
-    if (sessionToolsMcp) mcpServers[SESSION_TOOLS_MCP_SERVER_NAME] = sessionToolsMcp;
-    if (taskToolsMcp) mcpServers[TASK_TOOLS_MCP_SERVER_NAME] = taskToolsMcp;
-
-    const allowedTools = [
-      ...(sessionToolsMcp ? [CANONICAL_PROPOSE_SCHEDULE_TOOL, CANONICAL_PROPOSE_TASK_TOOL] : []),
-      ...(taskToolsMcp ? TASK_TOOLS_CANONICAL_NAMES : []),
-    ];
-    const hints = [
-      ...(sessionToolsMcp ? [SESSION_TOOLS_SYSTEM_PROMPT_HINT] : []),
-      ...(taskToolsMcp ? [TASK_TOOLS_SYSTEM_PROMPT_HINT] : []),
-    ];
+    if (sessionToolsMcp) mcpServers[SESSION_TOOLS_MCP_SERVER_NAME] = { url: sessionToolsMcp.url, token: sessionToolsMcp.token };
+    const proposalsOnly = sessionToolsMcp?.proposalsOnly === true;
 
     return buildClaudeSessionSpawnConfig(
       this.detectBinary(),
       permissionMode,
       Object.keys(mcpServers).length > 0 ? buildClaudeMcpConfigArg(mcpServers) : undefined,
       model,
-      allowedTools.length > 0 ? allowedTools : undefined,
-      hints.length > 0 ? hints.join(" ") : undefined,
+      sessionToolsMcp ? [...(proposalsOnly ? SESSION_TOOLS_PROPOSAL_NAMES : SESSION_TOOLS_CANONICAL_NAMES)] : undefined,
+      sessionToolsMcp ? sessionToolsSystemPromptHint(proposalsOnly) : undefined,
     );
   }
 

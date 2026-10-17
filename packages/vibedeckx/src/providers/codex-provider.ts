@@ -2,7 +2,6 @@ import type { AgentType, ContentPart } from "../agent-types.js";
 import type { AgentProvider, SpawnConfig, ParsedAgentEvent } from "../agent-provider.js";
 import type { CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import { canonicalizeSessionToolName, type SessionToolsMcpConfig } from "../session-tools-mcp.js";
-import type { TaskToolsMcpConfig } from "../task-tools-mcp.js";
 import { qualifiedMcpToolName } from "../protocol/mcp/tool-names.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import {
@@ -123,14 +122,13 @@ export class CodexProvider implements AgentProvider {
     crossRemoteMcp?: CrossRemoteMcpConfig,
     model?: string | null,
     sessionToolsMcp?: SessionToolsMcpConfig,
-    taskToolsMcp?: TaskToolsMcpConfig,
   ): SpawnConfig {
     // Store permissionMode for use in formatUserInput's turn/start params
     this.lastPermissionMode = permissionMode;
     // NOTE: `model` is deliberately NOT stored on `this`. It only affects the
     // process being spawned right now; this provider instance is shared by
     // every session in the server.
-    return buildCodexAppServerSpawnConfig(this.detectBinary(), crossRemoteMcp, model, sessionToolsMcp, taskToolsMcp);
+    return buildCodexAppServerSpawnConfig(this.detectBinary(), crossRemoteMcp, model, sessionToolsMcp);
   }
 
   // ============ Task 5.5: parseStdoutLine — JSON-RPC message routing ============

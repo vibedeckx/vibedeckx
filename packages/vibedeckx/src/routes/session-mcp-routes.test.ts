@@ -7,7 +7,14 @@ import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
 import { getSessionToolsSecret, signSessionToolsToken } from "../utils/session-tools-token.js";
 import { getCrossRemoteSecret, signCrossRemoteToken } from "../utils/cross-remote-token.js";
-import { CANONICAL_PROPOSE_SCHEDULE_TOOL, PROPOSE_SCHEDULE_TOOL, PROPOSE_TASK_TOOL } from "../session-tools-mcp.js";
+import {
+  CANONICAL_PROPOSE_SCHEDULE_TOOL,
+  GET_TASK_TOOL,
+  LIST_TASKS_TOOL,
+  PROPOSE_SCHEDULE_TOOL,
+  PROPOSE_TASK_TOOL,
+  PROPOSE_TASK_UPDATE_TOOL,
+} from "../session-tools-mcp.js";
 import sessionMcpRoutes from "./session-mcp-routes.js";
 
 describe("session tools MCP endpoint", () => {
@@ -35,10 +42,12 @@ describe("session tools MCP endpoint", () => {
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
     secret = await getSessionToolsSecret(storage);
     alive = true;
+    await storage.projects.create({ id: "p1", name: "Mine", path: "/tmp/mine" }, "user-1");
 
     app = Fastify();
     app.decorate("storage", storage);
     app.decorate("agentSessionManager", { getSessionProcessAlive: () => alive } as never);
+    app.decorate("remoteSessionMap", new Map() as never);
     await app.register(sessionMcpRoutes);
     await app.ready();
   });
@@ -49,19 +58,20 @@ describe("session tools MCP endpoint", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const tokenFor = (sessionId = "sess-1") => signSessionToolsToken(secret, { sessionId }, Date.now());
+  const payload = (sessionId = "sess-1") => ({ sessionId, projectId: "p1", userId: "user-1" });
+  const tokenFor = (sessionId = "sess-1") => signSessionToolsToken(secret, payload(sessionId), Date.now());
 
   it("rejects a request with no token", async () => {
     expect((await rpc(null, { jsonrpc: "2.0", id: 1, method: "tools/list" })).statusCode).toBe(401);
   });
 
   it("rejects a forged token", async () => {
-    const forged = signSessionToolsToken("wrong-secret", { sessionId: "sess-1" }, Date.now());
+    const forged = signSessionToolsToken("wrong-secret", payload(), Date.now());
     expect((await rpc(forged, { jsonrpc: "2.0", id: 1, method: "tools/list" })).statusCode).toBe(401);
   });
 
   it("rejects an expired token", async () => {
-    const expired = signSessionToolsToken(secret, { sessionId: "sess-1" }, Date.now() - 1, 1);
+    const expired = signSessionToolsToken(secret, payload(), Date.now() - 1, 1);
     expect((await rpc(expired, { jsonrpc: "2.0", id: 1, method: "tools/list" })).statusCode).toBe(401);
   });
 
@@ -78,11 +88,13 @@ describe("session tools MCP endpoint", () => {
     expect((await rpc(tokenFor(), { jsonrpc: "2.0", id: 1, method: "tools/list" })).statusCode).toBe(401);
   });
 
-  it("lists propose_schedule and propose_task", async () => {
+  it("lists the proposals and the task tools", async () => {
     const res = await rpc(tokenFor(), { jsonrpc: "2.0", id: 1, method: "tools/list" });
     expect(res.statusCode).toBe(200);
     const tools = res.json().result.tools as Array<{ name: string; description: string }>;
-    expect(tools.map((t) => t.name)).toEqual([PROPOSE_SCHEDULE_TOOL, PROPOSE_TASK_TOOL]);
+    expect(tools.map((t) => t.name)).toEqual([
+      PROPOSE_SCHEDULE_TOOL, PROPOSE_TASK_TOOL, LIST_TASKS_TOOL, GET_TASK_TOOL, PROPOSE_TASK_UPDATE_TOOL,
+    ]);
     // The description is the only place the agent learns it must not claim the
     // schedule was created — a regression there is silent otherwise.
     expect(tools[0].description).toMatch(/SUGGESTED/);

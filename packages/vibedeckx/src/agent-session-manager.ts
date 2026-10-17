@@ -20,8 +20,7 @@ import {
 import { getProvider } from "./providers/index.js";
 import type { ParsedAgentEvent } from "./agent-provider.js";
 import { crossRemoteMcpEnabled, mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
-import { mintSessionToolsMcpConfig } from "./session-tools-mcp.js";
-import { mintTaskToolsMcpConfig, taskToolsPublicBaseUrl, type TaskToolsMcpConfig } from "./task-tools-mcp.js";
+import { mintSessionToolsMcpConfig, sessionToolsPublicBaseUrl, type SessionToolsMcpConfig } from "./session-tools-mcp.js";
 import { getBinaryVersion } from "./protocol/shared/binary.js";
 import { ConversationPatch, type Patch, type AgentWsMessage } from "./conversation-patch.js";
 import type { EventBus } from "./event-bus.js";
@@ -537,19 +536,20 @@ export class AgentSessionManager {
    */
   localApiOrigin: string | null = null;
   /**
-   * Whether this process serves the project-task MCP tools itself, i.e. is the
-   * hub (task-tools-mcp.ts). Set by shared-services; false on reverse-connect
-   * workers, whose agents get a hub-minted config via setTaskToolsMcp instead.
+   * Whether this process serves the `vibedeckx` session MCP tools itself, i.e.
+   * is the hub (session-tools-mcp.ts). Set by shared-services; false on
+   * reverse-connect workers, whose agents get a hub-minted config via
+   * setSessionToolsMcp instead.
    */
-  hostsTaskTools = false;
+  hostsSessionTools = false;
   /**
-   * Worker side: the hub-minted task-tools config per session id. A side map
-   * rather than a RunningSession field because the hub sends it on the create
-   * routes, before the session exists, and on every forwarded message after.
-   * Never persisted, like crossRemoteMcp: a worker restart drops it until the
-   * hub's next message refreshes it.
+   * Worker side: the hub-minted session-tools config per session id. A side
+   * map rather than a RunningSession field because the hub sends it on the
+   * create routes, before the session exists, and on every forwarded message
+   * after. Never persisted, like crossRemoteMcp: a worker restart drops it
+   * until the hub's next message refreshes it.
    */
-  private hubTaskToolsMcp = new Map<string, TaskToolsMcpConfig>();
+  private hubSessionToolsMcp = new Map<string, SessionToolsMcpConfig>();
   private capacityQueue: Promise<void> = Promise.resolve();
   /**
    * Sessions whose retention delete has passed its re-check and is in flight.
@@ -1575,13 +1575,13 @@ export class AgentSessionManager {
   }
 
   /**
-   * Worker half of the task-tools hand-off: used from the session's next spawn
-   * on. Ignored on the hub, which mints its own — a client cannot point a hub
-   * session's agent elsewhere.
+   * Worker half of the session-tools hand-off: used from the session's next
+   * spawn on. Ignored on the hub, which mints its own — a client cannot point a
+   * hub session's agent elsewhere.
    */
-  setTaskToolsMcp(sessionId: string, config: TaskToolsMcpConfig): void {
-    if (this.hostsTaskTools) return;
-    this.hubTaskToolsMcp.set(sessionId, config);
+  setSessionToolsMcp(sessionId: string, config: SessionToolsMcpConfig): void {
+    if (this.hostsSessionTools) return;
+    this.hubSessionToolsMcp.set(sessionId, config);
   }
 
   /**
@@ -1603,19 +1603,30 @@ export class AgentSessionManager {
 
   /**
    * The hub mints per spawn, pointed at its own loopback (or its public URL
-   * when loopback is unavailable under local TLS); a worker uses what the hub
-   * handed it. skipDb sessions have no project row for the tools to read.
+   * when loopback is unavailable under local TLS). A worker uses what the hub
+   * handed it; a session the worker started on its own (a remote review or
+   * loop run) never got one, so it falls back to this process's own endpoint,
+   * which serves only the two proposals — the worker has no task data.
+   * skipDb sessions on the hub have no project row for the tools to read.
    */
-  private async taskToolsMcpFor(session: RunningSession): Promise<TaskToolsMcpConfig | undefined> {
-    if (!this.hostsTaskTools) return this.hubTaskToolsMcp.get(session.id);
+  private async sessionToolsMcpFor(session: RunningSession): Promise<SessionToolsMcpConfig | undefined> {
+    if (!this.hostsSessionTools) {
+      const handed = this.hubSessionToolsMcp.get(session.id);
+      if (handed) return handed;
+      const own = await mintSessionToolsMcpConfig(
+        { storage: this.storage },
+        { sessionId: session.id, projectId: session.projectId || session.id, userId: null, baseUrl: this.localApiOrigin },
+      );
+      return own && { ...own, proposalsOnly: true };
+    }
     if (session.skipDb || !session.projectId) return undefined;
-    return mintTaskToolsMcpConfig(
+    return mintSessionToolsMcpConfig(
       { storage: this.storage },
       {
         sessionId: session.id,
         projectId: session.projectId,
         userId: session.userId,
-        baseUrl: this.localApiOrigin ?? taskToolsPublicBaseUrl(),
+        baseUrl: this.localApiOrigin ?? sessionToolsPublicBaseUrl(),
       },
     );
   }
@@ -1647,13 +1658,9 @@ export class AgentSessionManager {
       return;
     }
 
-    // Minted per spawn, never persisted: the token is only usable by the
-    // process about to be started, on this machine's loopback endpoint.
-    const sessionToolsMcp = await mintSessionToolsMcpConfig(
-      { storage: this.storage },
-      { sessionId: session.id, origin: this.localApiOrigin },
-    ).catch((err) => {
-      // A missing tool surface must never block the session itself.
+    // Minted per spawn on the hub, never persisted. A missing tool surface
+    // must never block the session itself.
+    const sessionToolsMcp = await this.sessionToolsMcpFor(session).catch((err) => {
       console.error(`[AgentSession] Failed to mint session tools MCP config for ${session.id}:`, err);
       return undefined;
     });
@@ -1676,13 +1683,8 @@ export class AgentSessionManager {
       }
     }
 
-    const taskToolsMcp = await this.taskToolsMcpFor(session).catch((err) => {
-      console.error(`[AgentSession] Failed to mint task tools MCP config for ${session.id}:`, err);
-      return undefined;
-    });
-
     const config = provider.buildSpawnConfig(
-      cwd, session.permissionMode, session.crossRemoteMcp, session.model, sessionToolsMcp, taskToolsMcp,
+      cwd, session.permissionMode, session.crossRemoteMcp, session.model, sessionToolsMcp,
     );
 
     // Log the agent CLI version once per binary so protocol failures can be
@@ -3549,7 +3551,7 @@ export class AgentSessionManager {
 
     // 4. Remove from in-memory map
     this.sessions.delete(sessionId);
-    this.hubTaskToolsMcp.delete(sessionId);
+    this.hubSessionToolsMcp.delete(sessionId);
 
     // 5. Re-derive branch activity — deleting the latest session can change
     //    which session is now "latest" for the branch, so the activity might
@@ -3600,7 +3602,7 @@ export class AgentSessionManager {
         getProvider(session.agentType).onSessionDestroyed?.(sessionId);
         this.broadcastRaw(sessionId, { finished: true });
         this.sessions.delete(sessionId);
-        this.hubTaskToolsMcp.delete(sessionId);
+        this.hubSessionToolsMcp.delete(sessionId);
         await this.emitDerivedBranchActivity(session.projectId, session.branch);
       }
       return true;
@@ -3649,7 +3651,7 @@ export class AgentSessionManager {
         this.emitProcessAlive(session, false);
         this.broadcastRaw(sessionId, { finished: true });
         this.sessions.delete(sessionId);
-        this.hubTaskToolsMcp.delete(sessionId);
+        this.hubSessionToolsMcp.delete(sessionId);
         await this.emitDerivedBranchActivity(session.projectId, session.branch);
       }
       return true;

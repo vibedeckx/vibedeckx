@@ -23,7 +23,7 @@ import { findWorkspaceMissingOnRemote, workspaceMissingOnRemoteBody } from "../w
 import { ResidentProcessLimitError, shouldShowBranchSessionInList, type AliveAgentSession } from "../resident-agent-processes.js";
 import { isSessionPurpose, logSessionLifecycle } from "../session-lifecycle-log.js";
 import { mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
-import { mintRemoteTaskToolsMcpConfig, parseTaskToolsMcpConfig } from "../task-tools-mcp.js";
+import { mintRemoteSessionToolsMcpConfig, parseSessionToolsMcpConfig } from "../session-tools-mcp.js";
 import { randomUUID } from "crypto";
 import { MODEL_SUGGESTIONS } from "../protocol/model-suggestions.js";
 import { WorkspaceCheckoutUnavailableError } from "../agent-session-manager.js";
@@ -552,15 +552,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
   // Path-based: always create a new session (for remote `/new` proxy target)
   fastify.post<{
-  Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; taskToolsMcp?: unknown; model?: string | null; purpose?: string; operationId?: string };
+  Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; sessionToolsMcp?: unknown; model?: string | null; purpose?: string; operationId?: string };
   }>("/api/path/agent-sessions/new", async (req, reply) => {
     const authResult = requireRawAuth(req, reply);
     if (authResult === null) return;
     const { path: projectPath, branch, permissionMode, agentType, force, sessionId, crossRemoteMcp, model } = req.body;
-    // Hub-minted project-task tools (additive field; older hubs omit it). Set
+    // Hub-minted `vibedeckx` MCP tools (additive field; older hubs omit it). Set
     // before the create, which spawns the agent.
-    const taskToolsMcp = parseTaskToolsMcpConfig(req.body.taskToolsMcp);
-    if (taskToolsMcp && sessionId) fastify.agentSessionManager.setTaskToolsMcp(sessionId, taskToolsMcp);
+    const sessionToolsMcp = parseSessionToolsMcpConfig(req.body.sessionToolsMcp);
+    if (sessionToolsMcp && sessionId) fastify.agentSessionManager.setSessionToolsMcp(sessionId, sessionToolsMcp);
     // Additive tunnel fields (hub ≥ this version sends them; older hubs don't):
     // logging correlation only, validated against the closed purpose set.
     const purpose = isSessionPurpose(req.body.purpose) ? req.body.purpose : "interactive";
@@ -1563,8 +1563,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
       content: string | ContentPart[];
       idempotencyKey?: string;
       crossRemoteMcp?: CrossRemoteMcpConfig;
-      /** Same refresh for the hub's project-task tools (task-tools-mcp.ts). */
-      taskToolsMcp?: unknown;
+      /** Same refresh for the hub's `vibedeckx` MCP tools (session-tools-mcp.ts). */
+      sessionToolsMcp?: unknown;
       grantedRemoteIds?: unknown;
     };
   }>("/api/agent-sessions/:sessionId/message", { bodyLimit: 10 * 1024 * 1024 }, async (req, reply) => {
@@ -1687,7 +1687,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           return undefined;
         })
         : undefined;
-      const freshTaskToolsMcp = await mintRemoteTaskToolsMcpConfig(
+      const freshSessionToolsMcp = await mintRemoteSessionToolsMcpConfig(
         { storage: fastify.storage },
         { sessionId: req.params.sessionId, projectId: remoteInfo.projectId, userId },
       );
@@ -1700,7 +1700,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           content,
           ...(idempotencyKey ? { idempotencyKey } : {}),
           ...(freshCrossRemoteMcp ? { crossRemoteMcp: freshCrossRemoteMcp } : {}),
-          ...(freshTaskToolsMcp ? { taskToolsMcp: freshTaskToolsMcp } : {}),
+          ...(freshSessionToolsMcp ? { sessionToolsMcp: freshSessionToolsMcp } : {}),
         }
       );
       if (!result.ok) {
@@ -1789,8 +1789,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // one. Runs after the ownership check above — the sender already holds
     // message-send authority over this session (same trust as the create
     // routes, which accept the field the same way).
-    const incomingTaskToolsMcp = parseTaskToolsMcpConfig(req.body.taskToolsMcp);
-    if (incomingTaskToolsMcp) fastify.agentSessionManager.setTaskToolsMcp(req.params.sessionId, incomingTaskToolsMcp);
+    const incomingSessionToolsMcp = parseSessionToolsMcpConfig(req.body.sessionToolsMcp);
+    if (incomingSessionToolsMcp) fastify.agentSessionManager.setSessionToolsMcp(req.params.sessionId, incomingSessionToolsMcp);
     const incomingCrossRemoteMcp = req.body.crossRemoteMcp;
     if (incomingCrossRemoteMcp
       && typeof incomingCrossRemoteMcp.url === "string"
@@ -2368,16 +2368,16 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // on mismatch, mirroring /api/path/agent-sessions/new).
   fastify.post<{
     Params: { sessionId: string };
-    Body: { agentType?: string; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; taskToolsMcp?: unknown; upToEntryIndex?: number };
+    Body: { agentType?: string; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; sessionToolsMcp?: unknown; upToEntryIndex?: number };
   }>("/api/path/agent-sessions/:sessionId/branch", async (req, reply) => {
     const { agentType, sessionId, crossRemoteMcp, upToEntryIndex } = req.body || {};
-    const taskToolsMcp = parseTaskToolsMcpConfig(req.body?.taskToolsMcp);
+    const sessionToolsMcp = parseSessionToolsMcpConfig(req.body?.sessionToolsMcp);
     if (upToEntryIndex !== undefined && (!Number.isInteger(upToEntryIndex) || upToEntryIndex < 0)) {
       return reply.code(400).send({ error: "upToEntryIndex must be a non-negative integer" });
     }
     const userId = requireRawAuth(req, reply);
     if (userId === null) return;
-    if (taskToolsMcp && sessionId) fastify.agentSessionManager.setTaskToolsMcp(sessionId, taskToolsMcp);
+    if (sessionToolsMcp && sessionId) fastify.agentSessionManager.setSessionToolsMcp(sessionId, sessionToolsMcp);
 
     const branched = await performLocalBranch(req.params.sessionId, userId, {
       agentType,

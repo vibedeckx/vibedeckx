@@ -1,13 +1,18 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   CANONICAL_PROPOSE_SCHEDULE_TOOL,
   CANONICAL_PROPOSE_TASK_TOOL,
   PROPOSE_TASK_MAX_ITEMS,
   SESSION_TOOLS_MCP_PATH,
   canonicalizeSessionToolName,
+  mintRemoteSessionToolsMcpConfig,
   mintSessionToolsMcpConfig,
   parseProposeScheduleArgs,
   parseProposeTaskArgs,
+  parseProposeTaskUpdateArgs,
+  parseSessionToolsMcpConfig,
+  sessionToolsInstructions,
+  sessionToolsSystemPromptHint,
 } from "./session-tools-mcp.js";
 import { verifySessionToolsToken } from "./utils/session-tools-token.js";
 
@@ -145,20 +150,86 @@ describe("canonicalizeSessionToolName", () => {
 describe("mintSessionToolsMcpConfig", () => {
   const storage = storageStub();
 
-  it("mints a loopback URL and a token that verifies for that session", async () => {
+  it("binds the token to the session and project, dropping the solo sentinel", async () => {
     const config = await mintSessionToolsMcpConfig(
-      { storage }, { sessionId: "sess-1", origin: "http://127.0.0.1:5173" },
+      { storage }, { sessionId: "sess-1", projectId: "p1", userId: "local", baseUrl: "http://127.0.0.1:5173/" },
     );
     expect(config?.url).toBe(`http://127.0.0.1:5173${SESSION_TOOLS_MCP_PATH}`);
     const secret = await storage.settings.getOrCreate("session_tools_token_secret", () => "unused");
-    expect(verifySessionToolsToken(secret, config!.token, Date.now())).toEqual({ sessionId: "sess-1" });
+    expect(verifySessionToolsToken(secret, config!.token, Date.now()))
+      .toEqual({ sessionId: "sess-1", projectId: "p1", userId: null });
   });
 
-  it("mints nothing without an origin, or under local TLS", async () => {
-    // https on loopback can't pass hostname verification against a public cert;
-    // the tool is simply not offered rather than offered broken.
-    expect(await mintSessionToolsMcpConfig({ storage }, { sessionId: "s", origin: null })).toBeUndefined();
-    expect(await mintSessionToolsMcpConfig({ storage }, { sessionId: "s", origin: "https://127.0.0.1:443" })).toBeUndefined();
-    expect(await mintSessionToolsMcpConfig({ storage }, { sessionId: "", origin: "http://127.0.0.1:1" })).toBeUndefined();
+  it("mints nothing without a usable base URL, session or project", async () => {
+    const mint = (over: Record<string, unknown>) => mintSessionToolsMcpConfig({ storage }, {
+      sessionId: "s", projectId: "p", userId: "u", baseUrl: "http://127.0.0.1:1", ...over,
+    });
+    expect(await mint({ baseUrl: null })).toBeUndefined();
+    expect(await mint({ baseUrl: "ftp://x" })).toBeUndefined();
+    expect(await mint({ sessionId: "" })).toBeUndefined();
+    expect(await mint({ projectId: "" })).toBeUndefined();
+  });
+});
+
+describe("mintRemoteSessionToolsMcpConfig", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("points remote sessions at the public URL, and is off without one", async () => {
+    const storage = storageStub();
+    vi.stubEnv("VIBEDECKX_PUBLIC_URL", "");
+    expect(await mintRemoteSessionToolsMcpConfig({ storage }, { sessionId: "remote-x", projectId: "p1", userId: "u" })).toBeUndefined();
+    vi.stubEnv("VIBEDECKX_PUBLIC_URL", "https://app.example.com");
+    const config = await mintRemoteSessionToolsMcpConfig({ storage }, { sessionId: "remote-x", projectId: "p1", userId: "u" });
+    expect(config!.url).toBe(`https://app.example.com${SESSION_TOOLS_MCP_PATH}`);
+    expect(await mintRemoteSessionToolsMcpConfig({ storage }, { sessionId: "remote-x", projectId: null, userId: "u" })).toBeUndefined();
+  });
+});
+
+describe("parseSessionToolsMcpConfig", () => {
+  it("accepts only a well-formed config, never a proposals-only flag from the wire", () => {
+    expect(parseSessionToolsMcpConfig({ url: "https://h/api", token: "t", proposalsOnly: true })).toEqual({ url: "https://h/api", token: "t" });
+    expect(parseSessionToolsMcpConfig({ url: "file:///x", token: "t" })).toBeUndefined();
+    expect(parseSessionToolsMcpConfig({ url: "https://h", token: "" })).toBeUndefined();
+    expect(parseSessionToolsMcpConfig("nope")).toBeUndefined();
+  });
+});
+
+describe("parseProposeTaskUpdateArgs", () => {
+  it("accepts partial updates and keeps only the given fields", () => {
+    const parsed = parseProposeTaskUpdateArgs({
+      updates: [{ task_id: " t1 ", status: "done" }, { task_id: "t2", title: " New ", priority: "high" }],
+    });
+    expect(parsed).toEqual({
+      ok: true,
+      value: [{ task_id: "t1", status: "done" }, { task_id: "t2", title: "New", priority: "high" }],
+    });
+  });
+
+  it.each([
+    [{}, "non-empty"],
+    [{ updates: [] }, "non-empty"],
+    [{ updates: Array.from({ length: 11 }, (_, i) => ({ task_id: `t${i}`, status: "done" })) }, "at most"],
+    [{ updates: [{ status: "done" }] }, "task_id"],
+    [{ updates: [{ task_id: "t1" }] }, "changes nothing"],
+    [{ updates: [{ task_id: "t1", status: "closed" }] }, "status"],
+    [{ updates: [{ task_id: "t1", priority: "p0" }] }, "priority"],
+    [{ updates: [{ task_id: "t1", title: "  " }] }, "title"],
+    [{ updates: [{ task_id: "t1", description: "" }] }, "description"],
+    [{ updates: [{ task_id: "t1", status: "done" }, { task_id: "t1", title: "x" }] }, "more than once"],
+  ])("rejects %j", (args, message) => {
+    const parsed = parseProposeTaskUpdateArgs(args as Record<string, unknown>);
+    expect(parsed.ok).toBe(false);
+    if (!parsed.ok) expect(parsed.error).toContain(message);
+  });
+});
+
+describe("instructions", () => {
+  it("mention the task tools only when they are served", () => {
+    expect(sessionToolsInstructions()).toContain("mcp__vibedeckx__list_tasks");
+    expect(sessionToolsInstructions(true)).not.toContain("list_tasks");
+    expect(sessionToolsInstructions(true)).toContain("propose_task");
+    expect(sessionToolsSystemPromptHint(true)).not.toContain("propose_task_update");
   });
 });

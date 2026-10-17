@@ -27,6 +27,7 @@ describe("session MCP endpoint on a real server", () => {
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
 
     const server = await createServer({ storage, uiRoot: null });
+    await storage.projects.create({ id: "p1", name: "p1", path: dir });
     const started = await server.startLocal(0);
     baseUrl = started.url;
     localApiOrigin = started.instance.agentSessionManager.localApiOrigin;
@@ -57,8 +58,8 @@ describe("session MCP endpoint on a real server", () => {
 
   it("serves a proposal from a config minted for a live session", async () => {
     const config = await mintSessionToolsMcpConfig({ storage }, {
-      sessionId: "sess-live",
-      origin: localApiOrigin,
+      sessionId: "sess-live", projectId: "p1", userId: null,
+      baseUrl: localApiOrigin,
     });
     expect(config!.url).toBe(`${baseUrl}/api/session-mcp`);
 
@@ -84,8 +85,8 @@ describe("session MCP endpoint on a real server", () => {
 
   it("refuses a config minted for a session that is not running here", async () => {
     const config = await mintSessionToolsMcpConfig({ storage }, {
-      sessionId: "sess-elsewhere",
-      origin: localApiOrigin,
+      sessionId: "sess-elsewhere", projectId: "p1", userId: null,
+      baseUrl: localApiOrigin,
     });
     const res = await call(config!.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
     expect(res.status).toBe(401);

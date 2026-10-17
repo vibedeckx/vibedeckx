@@ -4,8 +4,6 @@ import { AgentSessionManager } from "./agent-session-manager.js";
 import { getProvider } from "./providers/index.js";
 import { SESSION_TOOLS_MCP_PATH, type SessionToolsMcpConfig } from "./session-tools-mcp.js";
 import { verifySessionToolsToken } from "./utils/session-tools-token.js";
-import { TASK_TOOLS_MCP_PATH, type TaskToolsMcpConfig } from "./task-tools-mcp.js";
-import { verifyTaskToolsToken } from "./utils/task-tools-token.js";
 import type { AgentSession, Storage } from "./storage/types.js";
 
 mkdirSync("/tmp/p1", { recursive: true });
@@ -72,28 +70,52 @@ function stubSpawn() {
 describe("session tools MCP wiring at spawn", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("hands the spawn builder a loopback config whose token names this session", async () => {
-    const { storage, settings } = makeStorage();
-    const calls = stubSpawn();
+  /** A hub-side manager: it serves the tools itself and mints per spawn. */
+  const hub = (storage: Storage) => {
     const manager = new AgentSessionManager(storage);
     manager.localApiOrigin = "http://127.0.0.1:5173";
+    manager.hostsSessionTools = true;
+    return manager;
+  };
 
-    const sessionId = await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code");
+  it("on the hub, hands the spawn builder a loopback config naming this session and its project", async () => {
+    const { storage, settings } = makeStorage();
+    const calls = stubSpawn();
+
+    const sessionId = await hub(storage).createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code");
 
     const config = calls[0]?.[4] as SessionToolsMcpConfig;
     expect(config.url).toBe(`http://127.0.0.1:5173${SESSION_TOOLS_MCP_PATH}`);
+    expect(config.proposalsOnly).toBeUndefined();
     const secret = settings.get("session_tools_token_secret")!;
-    expect(verifySessionToolsToken(secret, config.token, Date.now())).toEqual({ sessionId });
+    expect(verifySessionToolsToken(secret, config.token, Date.now())).toEqual({ sessionId, projectId: "p1", userId: null });
   });
 
-  it("offers no tools when the server's local origin is unknown", async () => {
+  it("on the hub, falls back to the public URL when loopback is unknown, and offers nothing without either", async () => {
+    vi.stubEnv("VIBEDECKX_PUBLIC_URL", "https://app.example.com");
     const { storage } = makeStorage();
     const calls = stubSpawn();
-    const manager = new AgentSessionManager(storage);
+    const manager = hub(storage);
+    manager.localApiOrigin = null;
 
     await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code");
+    vi.stubEnv("VIBEDECKX_PUBLIC_URL", "");
+    await manager.createNewSession("p1", "b2", "/tmp/p1", false, "edit", "claude-code");
+    vi.unstubAllEnvs();
 
-    expect(calls[0]?.[4]).toBeUndefined();
+    expect((calls[0]?.[4] as SessionToolsMcpConfig).url).toBe(`https://app.example.com${SESSION_TOOLS_MCP_PATH}`);
+    expect(calls[1]?.[4]).toBeUndefined();
+  });
+
+  it("on the hub, ignores a handed-over config", async () => {
+    const { storage } = makeStorage();
+    const calls = stubSpawn();
+    const manager = hub(storage);
+    manager.setSessionToolsMcp("s1", { url: "https://evil.example.com/x", token: "t" });
+
+    await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code", false, false, { sessionId: "s1" });
+
+    expect((calls[0]?.[4] as SessionToolsMcpConfig).url).toBe(`http://127.0.0.1:5173${SESSION_TOOLS_MCP_PATH}`);
   });
 
   it("spawns the session anyway when minting fails", async () => {
@@ -101,60 +123,29 @@ describe("session tools MCP wiring at spawn", () => {
     const calls = stubSpawn();
     vi.spyOn(console, "error").mockImplementation(() => {});
     (storage.settings.getOrCreate as ReturnType<typeof vi.fn>).mockRejectedValue(new Error("db down"));
-    const manager = new AgentSessionManager(storage);
-    manager.localApiOrigin = "http://127.0.0.1:5173";
+    const manager = hub(storage);
 
     const sessionId = await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code");
 
     expect(manager.getSession(sessionId)).toBeDefined();
     expect(calls[0]?.[4]).toBeUndefined();
   });
-});
 
-describe("task tools MCP wiring at spawn", () => {
-  afterEach(() => vi.restoreAllMocks());
-
-  it("on the hub, mints a config naming this session and its project", async () => {
-    const { storage, settings } = makeStorage();
-    const calls = stubSpawn();
-    const manager = new AgentSessionManager(storage);
-    manager.localApiOrigin = "http://127.0.0.1:5173";
-    manager.hostsTaskTools = true;
-
-    const sessionId = await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code");
-
-    const config = calls[0]?.[5] as TaskToolsMcpConfig;
-    expect(config.url).toBe(`http://127.0.0.1:5173${TASK_TOOLS_MCP_PATH}`);
-    expect(verifyTaskToolsToken(settings.get("task_tools_token_secret")!, config.token, Date.now()))
-      .toEqual({ sessionId, projectId: "p1", userId: null });
-  });
-
-  it("on a worker, uses only the config the hub handed over", async () => {
-    const { storage, settings } = makeStorage();
-    const calls = stubSpawn();
-    const manager = new AgentSessionManager(storage);
-    manager.localApiOrigin = "http://127.0.0.1:5173";
-    const handed = { url: "https://hub.example.com/api/task-tools-mcp", token: "hub-signed" };
-    manager.setTaskToolsMcp("worker-sess", handed);
-
-    await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code", false, false, { sessionId: "worker-sess" });
-    await manager.createNewSession("p1", "other", "/tmp/p1", false, "edit", "claude-code");
-
-    expect(calls[0]?.[5]).toEqual(handed);
-    expect(calls[1]?.[5]).toBeUndefined();
-    expect(settings.has("task_tools_token_secret")).toBe(false);
-  });
-
-  it("on the hub, ignores a handed-over config", async () => {
+  it("on a worker, uses the hub's config, else its own proposals-only endpoint", async () => {
     const { storage } = makeStorage();
     const calls = stubSpawn();
     const manager = new AgentSessionManager(storage);
     manager.localApiOrigin = "http://127.0.0.1:5173";
-    manager.hostsTaskTools = true;
-    manager.setTaskToolsMcp("s1", { url: "https://evil.example.com/x", token: "t" });
+    const handed = { url: "https://hub.example.com/api/session-mcp", token: "hub-signed" };
+    manager.setSessionToolsMcp("worker-sess", handed);
 
-    await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code", false, false, { sessionId: "s1" });
+    await manager.createNewSession("p1", null, "/tmp/p1", false, "edit", "claude-code", false, false, { sessionId: "worker-sess" });
+    // A session the worker starts on its own (a remote review or loop run).
+    await manager.createNewSession("p1", "other", "/tmp/p1", false, "edit", "claude-code");
 
-    expect((calls[0]?.[5] as TaskToolsMcpConfig).url).toBe(`http://127.0.0.1:5173${TASK_TOOLS_MCP_PATH}`);
+    expect(calls[0]?.[4]).toEqual(handed);
+    const own = calls[1]?.[4] as SessionToolsMcpConfig;
+    expect(own.url).toBe(`http://127.0.0.1:5173${SESSION_TOOLS_MCP_PATH}`);
+    expect(own.proposalsOnly).toBe(true);
   });
 });

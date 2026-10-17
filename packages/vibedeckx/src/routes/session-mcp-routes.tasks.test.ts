@@ -5,17 +5,19 @@ import { tmpdir } from "os";
 import path from "path";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
-import { getTaskToolsSecret, signTaskToolsToken } from "../utils/task-tools-token.js";
 import { getSessionToolsSecret, signSessionToolsToken } from "../utils/session-tools-token.js";
+import { getCrossRemoteSecret, signCrossRemoteToken } from "../utils/cross-remote-token.js";
 import {
   GET_TASK_TOOL,
   LIST_TASKS_TOOL,
+  PROPOSE_SCHEDULE_TOOL,
+  PROPOSE_TASK_TOOL,
   PROPOSE_TASK_UPDATE_TOOL,
-  TASK_TOOLS_MCP_PATH,
-} from "../task-tools-mcp.js";
-import taskToolsMcpRoutes from "./task-tools-mcp-routes.js";
+  SESSION_TOOLS_MCP_PATH,
+} from "../session-tools-mcp.js";
+import sessionMcpRoutes from "./session-mcp-routes.js";
 
-describe("task tools MCP endpoint", () => {
+describe("session MCP endpoint: project tasks", () => {
   let app: FastifyInstance;
   let storage: Storage;
   let dir: string;
@@ -26,7 +28,7 @@ describe("task tools MCP endpoint", () => {
   const rpc = (token: string | null, body: unknown) =>
     app.inject({
       method: "POST",
-      url: TASK_TOOLS_MCP_PATH,
+      url: SESSION_TOOLS_MCP_PATH,
       headers: token ? { authorization: `Bearer ${token}` } : {},
       payload: body as object,
     });
@@ -39,16 +41,27 @@ describe("task tools MCP endpoint", () => {
   };
 
   const tokenFor = (opts: { sessionId?: string; projectId?: string; userId?: string | null } = {}) =>
-    signTaskToolsToken(secret, {
+    signSessionToolsToken(secret, {
       sessionId: opts.sessionId ?? "sess-1",
       projectId: opts.projectId ?? "project-1",
       userId: opts.userId === undefined ? "user-1" : opts.userId,
     }, Date.now());
 
+  const build = async (opts: { worker?: boolean } = {}) => {
+    await app?.close();
+    app = Fastify();
+    app.decorate("storage", storage);
+    app.decorate("agentSessionManager", { getSessionProcessAlive: () => alive } as never);
+    app.decorate("remoteSessionMap", remoteSessions as never);
+    app.decorate("isReverseConnectWorker", opts.worker === true);
+    await app.register(sessionMcpRoutes);
+    await app.ready();
+  };
+
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "vdx-taskmcp-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
-    secret = await getTaskToolsSecret(storage);
+    secret = await getSessionToolsSecret(storage);
     alive = true;
     remoteSessions = new Map();
 
@@ -59,12 +72,7 @@ describe("task tools MCP endpoint", () => {
     await storage.tasks.create({ id: "t-done", project_id: "project-1", title: "Finished", description: "Done already", status: "done" });
     await storage.tasks.create({ id: "t-foreign", project_id: "project-2", title: "Elsewhere", description: "Not yours" });
 
-    app = Fastify();
-    app.decorate("storage", storage);
-    app.decorate("agentSessionManager", { getSessionProcessAlive: () => alive } as never);
-    app.decorate("remoteSessionMap", remoteSessions as never);
-    await app.register(taskToolsMcpRoutes);
-    await app.ready();
+    await build();
   });
 
   afterEach(async () => {
@@ -78,14 +86,16 @@ describe("task tools MCP endpoint", () => {
 
     it("rejects a missing, forged or expired token", async () => {
       expect((await rpc(null, list)).statusCode).toBe(401);
-      const forged = signTaskToolsToken("wrong", { sessionId: "sess-1", projectId: "project-1", userId: "user-1" }, Date.now());
+      const forged = signSessionToolsToken("wrong", { sessionId: "sess-1", projectId: "project-1", userId: "user-1" }, Date.now());
       expect((await rpc(forged, list)).statusCode).toBe(401);
-      const expired = signTaskToolsToken(secret, { sessionId: "sess-1", projectId: "project-1", userId: "user-1" }, Date.now() - 1, 1);
+      const expired = signSessionToolsToken(secret, { sessionId: "sess-1", projectId: "project-1", userId: "user-1" }, Date.now() - 1, 1);
       expect((await rpc(expired, list)).statusCode).toBe(401);
     });
 
-    it("rejects a session-tools token — the audiences never overlap", async () => {
-      const other = signSessionToolsToken(await getSessionToolsSecret(storage), { sessionId: "sess-1" }, Date.now());
+    it("rejects a cross-remote token — the audiences never overlap", async () => {
+      const other = signCrossRemoteToken(
+        await getCrossRemoteSecret(storage), { userId: "user-1", sessionId: "sess-1", sourceRemoteServerId: null }, Date.now(),
+      );
       expect((await rpc(other, list)).statusCode).toBe(401);
     });
 
@@ -106,11 +116,10 @@ describe("task tools MCP endpoint", () => {
       expect((await rpc(tokenFor({ userId: "user-2" }), list)).statusCode).toBe(401);
     });
 
-    it("lists the three tools and returns instructions", async () => {
-      const tools = (await rpc(tokenFor(), list)).json().result.tools.map((t: { name: string }) => t.name);
-      expect(tools).toEqual([LIST_TASKS_TOOL, GET_TASK_TOOL, PROPOSE_TASK_UPDATE_TOOL]);
+    it("states the task tools in the server instructions", async () => {
       const init = (await rpc(tokenFor(), { jsonrpc: "2.0", id: 1, method: "initialize" })).json().result;
-      expect(init.instructions).toContain(PROPOSE_TASK_UPDATE_TOOL);
+      expect(init.instructions).toContain("mcp__vibedeckx__list_tasks");
+      expect(init.instructions).toContain("mcp__vibedeckx__propose_task_update");
     });
   });
 
@@ -217,6 +226,46 @@ describe("task tools MCP endpoint", () => {
     it("rejects a malformed proposal", async () => {
       expect((await call(tokenFor(), PROPOSE_TASK_UPDATE_TOOL, { updates: [{ task_id: "t-open" }] })).isError).toBe(true);
       expect((await call(tokenFor(), PROPOSE_TASK_UPDATE_TOOL, { updates: [{ task_id: "t-open", status: "closed" }] })).isError).toBe(true);
+    });
+  });
+  describe("propose_task with the project's tasks at hand", () => {
+    const proposeTask = (args: Record<string, unknown>) => call(tokenFor(), PROPOSE_TASK_TOOL, args);
+
+    it("acknowledges plainly when the parent exists and nothing looks duplicated", async () => {
+      const { text, isError } = await proposeTask({ tasks: [{ title: "Brand new", description: "x" }], parent_task_id: "t-open" });
+      expect(isError).toBe(false);
+      expect(text).not.toContain("Note:");
+    });
+
+    it("notes a parent outside the project instead of failing — the card files without one", async () => {
+      for (const parent of ["nope", "t-foreign"]) {
+        const { text, isError } = await proposeTask({ tasks: [{ title: "Brand new", description: "x" }], parent_task_id: parent });
+        expect(isError, parent).toBe(false);
+        expect(text).toContain(`parent_task_id ${parent} is not a task of this project`);
+      }
+    });
+
+    it("notes a title that matches an existing task", async () => {
+      const { text, isError } = await proposeTask({ tasks: [{ title: " open TASK ", description: "x" }] });
+      expect(isError).toBe(false);
+      expect(text).toContain("same title as existing task t-open");
+    });
+  });
+
+  describe("on a reverse-connect worker", () => {
+    beforeEach(async () => { await build({ worker: true }); });
+
+    it("serves only the two proposals, without consulting its own projects", async () => {
+      const token = tokenFor({ projectId: "worker-path-project" });
+      const tools = (await rpc(token, { jsonrpc: "2.0", id: 1, method: "tools/list" })).json().result.tools;
+      expect(tools.map((t: { name: string }) => t.name)).toEqual([PROPOSE_SCHEDULE_TOOL, PROPOSE_TASK_TOOL]);
+      const init = (await rpc(token, { jsonrpc: "2.0", id: 1, method: "initialize" })).json().result;
+      expect(init.instructions).not.toContain("list_tasks");
+
+      expect((await call(token, LIST_TASKS_TOOL)).isError).toBe(true);
+      const proposed = await call(token, PROPOSE_TASK_TOOL, { tasks: [{ title: "Open task", description: "x" }], parent_task_id: "nope" });
+      expect(proposed.isError).toBe(false);
+      expect(proposed.text).not.toContain("Note:");
     });
   });
 });

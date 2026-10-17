@@ -14,7 +14,7 @@ import { statusEventFromRemotePatch, projectIdFromRemoteSessionId, taskCompleted
 import type { EventBus } from "./event-bus.js";
 import type { SessionPurpose } from "./session-lifecycle-log.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
-import { mintRemoteTaskToolsMcpConfig } from "./task-tools-mcp.js";
+import { mintRemoteSessionToolsMcpConfig } from "./session-tools-mcp.js";
 import { WATCH_WINDOW_MS as NOTIFICATION_WATCH_WINDOW_MS } from "./remote-notification-sync.js";
 import { conventionalWorktreePath } from "./utils/worktree-paths.js";
 
@@ -207,7 +207,7 @@ export async function createRemoteAgentSession(
     { storage: deps.storage },
     { userId, sessionId: localSessionId, sourceRemoteServerId: agentMode },
   );
-  const taskToolsMcp = await mintRemoteTaskToolsMcpConfig(
+  const sessionToolsMcp = await mintRemoteSessionToolsMcpConfig(
     { storage: deps.storage },
     { sessionId: localSessionId, projectId, userId },
   );
@@ -231,7 +231,7 @@ export async function createRemoteAgentSession(
       agentMode,
       "POST",
       `/api/path/agent-sessions/new`,
-      { path: remoteConfig.remote_path, branch, permissionMode, agentType, force, sessionId: remoteSessionId, crossRemoteMcp, model, purpose, operationId, ...(taskToolsMcp ? { taskToolsMcp } : {}) },
+      { path: remoteConfig.remote_path, branch, permissionMode, agentType, force, sessionId: remoteSessionId, crossRemoteMcp, model, purpose, operationId, ...(sessionToolsMcp ? { sessionToolsMcp } : {}) },
       { reverseConnectManager: deps.reverseConnectManager ?? undefined },
     );
     if (!result.ok) {
@@ -351,7 +351,7 @@ export async function createRemoteBranchedSession(
     { storage: deps.storage },
     { userId: params.userId, sessionId: localSessionId, sourceRemoteServerId: params.agentMode },
   );
-  const taskToolsMcp = await mintRemoteTaskToolsMcpConfig(
+  const sessionToolsMcp = await mintRemoteSessionToolsMcpConfig(
     { storage: deps.storage },
     { sessionId: localSessionId, projectId: params.projectId, userId: params.userId },
   );
@@ -366,7 +366,7 @@ export async function createRemoteBranchedSession(
       params.agentMode,
       "POST",
       `/api/path/agent-sessions/${params.sourceRemoteSessionId}/branch`,
-      { agentType: params.agentType, sessionId: remoteSessionId, crossRemoteMcp, upToEntryIndex: params.upToEntryIndex, ...(taskToolsMcp ? { taskToolsMcp } : {}) },
+      { agentType: params.agentType, sessionId: remoteSessionId, crossRemoteMcp, upToEntryIndex: params.upToEntryIndex, ...(sessionToolsMcp ? { sessionToolsMcp } : {}) },
       { reverseConnectManager: deps.reverseConnectManager ?? undefined },
     );
     if (!result.ok) {

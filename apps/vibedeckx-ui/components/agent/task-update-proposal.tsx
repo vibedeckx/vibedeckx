@@ -13,9 +13,9 @@ import { useAgentConversation } from "./agent-conversation";
 
 /**
  * Canonical name both CLIs' update proposals arrive under. Mirrors
- * CANONICAL_PROPOSE_TASK_UPDATE_TOOL in packages/vibedeckx/src/task-tools-mcp.ts.
+ * CANONICAL_PROPOSE_TASK_UPDATE_TOOL in packages/vibedeckx/src/session-tools-mcp.ts.
  */
-export const PROPOSE_TASK_UPDATE_TOOL = "mcp__vibedeckx-tasks__propose_task_update";
+export const PROPOSE_TASK_UPDATE_TOOL = "mcp__vibedeckx__propose_task_update";
 
 type Field = "title" | "status" | "priority" | "description";
 const FIELDS: Field[] = ["title", "status", "priority", "description"];
@@ -29,7 +29,7 @@ export interface ProposedUpdate {
   priority?: TaskPriority;
 }
 
-/** Mirrors the limits parseProposeTaskUpdateArgs enforces in packages/vibedeckx/src/task-tools-mcp.ts. */
+/** Mirrors the limits parseProposeTaskUpdateArgs enforces in packages/vibedeckx/src/session-tools-mcp.ts. */
 const MAX_ITEMS = 10;
 const TASK_ID_MAX = 200;
 const TASK_TITLE_MAX = 200;
@@ -53,7 +53,7 @@ const itemsOf = (input: unknown): unknown[] | null => {
  * Why the server rejected this call on shape alone, or null. Replayed here for
  * the same reason as proposalRejection: the card never sees the tool result.
  * Shape is the server's only whole-batch rejection; an unknown task or a no-op
- * only drops that entry (task-tools-mcp-routes.ts), and the card renders the
+ * only drops that entry (session-mcp-routes.ts), and the card renders the
  * same rows as "no longer exists" / "up to date", so the two always agree.
  */
 export function updateProposalRejection(input: unknown): string | null {
