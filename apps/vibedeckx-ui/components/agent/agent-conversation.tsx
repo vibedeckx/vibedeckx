@@ -44,7 +44,7 @@ import {
 import type { AttachmentItem, PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Loader } from "@/components/ai-elements/loader";
 import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
-import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, CalendarClock, ListPlus } from "lucide-react";
+import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, CalendarClock, ListPlus, Check } from "lucide-react";
 import { appendScheduleIntent } from "@/lib/schedule-intent";
 import { appendTaskIntent } from "@/lib/task-intent";
 import { appendSelectedTasks } from "@/lib/selected-tasks";
@@ -1891,7 +1891,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2.5 py-0.5 text-xs font-medium hover:bg-blue-500/20 transition-colors"
                 >
                   {scheduleArmed ? <CalendarClock className="size-3" /> : <ListPlus className="size-3" />}
-                  {scheduleArmed ? "Schedule" : "Task"}
+                  {scheduleArmed ? "Schedule" : "Add task"}
                   <X className="size-3" />
                 </button>
               </div>
@@ -1910,17 +1910,24 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       sourceRemoteId={sourceRemoteId}
                     />
                   )}
+                  {/* Toggles: a fixed label with a check while armed; picking it again disarms. */}
                   <PromptInputActionMenuItem
+                    role="menuitemcheckbox"
+                    aria-checked={scheduleArmed}
                     onSelect={() => toggleIntent("schedule")}
                   >
                     <CalendarClock className="mr-2 size-4" />
-                    {scheduleArmed ? "Cancel schedule" : "Schedule"}
+                    Schedule
+                    {scheduleArmed && <Check className="ml-auto size-4" />}
                   </PromptInputActionMenuItem>
                   <PromptInputActionMenuItem
+                    role="menuitemcheckbox"
+                    aria-checked={taskArmed}
                     onSelect={() => toggleIntent("task")}
                   >
                     <ListPlus className="mr-2 size-4" />
-                    {taskArmed ? "Cancel task" : "Task"}
+                    Add task
+                    {taskArmed && <Check className="ml-auto size-4" />}
                   </PromptInputActionMenuItem>
                   <SelectTaskMenuItem
                     projectId={projectId}

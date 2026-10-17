@@ -284,8 +284,12 @@ vi.mock("@/components/ai-elements/prompt-input", async () => {
     PromptInputActionMenuTrigger: () => null,
     PromptInputActionMenuContent: Pass,
     PromptInputActionAddAttachments: () => null,
-    PromptInputActionMenuItem: ({ children, onSelect }: Kids & { onSelect?: () => void }) => (
-      <button type="button" data-testid="prompt-action" onClick={() => onSelect?.()}>{children}</button>
+    PromptInputActionMenuItem: ({ children, onSelect, role, "aria-checked": checked }: Kids & {
+      onSelect?: () => void; role?: string; "aria-checked"?: boolean;
+    }) => (
+      <button type="button" data-testid="prompt-action" role={role} aria-checked={checked} onClick={() => onSelect?.()}>
+        {children}
+      </button>
     ),
     PromptInputHeader: Pass,
     usePromptInputAttachments: () => ({
@@ -559,13 +563,13 @@ describe("AgentConversation pendingModel", () => {
 
         await render("pA", "featA");
         await act(async () => { scheduleAction(container).click(); });
-        expect(scheduleAction(container).textContent).toBe("Cancel schedule");
+        expect(scheduleAction(container).getAttribute("aria-checked")).toBe("true");
         await act(async () => {
           await promptState.submit!({ text: "", files: [] });
         });
 
         expect(sendMessage.mock.calls[0]?.[0]).toBe(SCHEDULE_INTENT_BLOCK);
-        expect(scheduleAction(container).textContent).toBe("Schedule");
+        expect(scheduleAction(container).getAttribute("aria-checked")).toBe("false");
       });
 
       it("appends the block after what was typed", async () => {
@@ -594,7 +598,7 @@ describe("AgentConversation pendingModel", () => {
           await promptState.submit!({ text: "nightly", files: [] });
         });
 
-        expect(scheduleAction(container).textContent).toBe("Cancel schedule");
+        expect(scheduleAction(container).getAttribute("aria-checked")).toBe("true");
       });
 
       it("stays with the latest session when New Conversation clears it (no URL session)", async () => {
@@ -605,7 +609,7 @@ describe("AgentConversation pendingModel", () => {
         // No sessionId prop: the window shows the branch's latest session.
         await render("pA", "featA", null);
         await act(async () => { scheduleAction(container).click(); });
-        expect(scheduleAction(container).textContent).toBe("Cancel schedule");
+        expect(scheduleAction(container).getAttribute("aria-checked")).toBe("true");
 
         // New Conversation: the hook drops its session, the URL stays empty.
         hookState.session = null;
@@ -613,7 +617,7 @@ describe("AgentConversation pendingModel", () => {
         hookState.messages = [];
         await render("pA", "featA", null);
 
-        expect(scheduleAction(container).textContent).toBe("Schedule");
+        expect(scheduleAction(container).getAttribute("aria-checked")).toBe("false");
       });
 
       it("does not follow the user to another execution target", async () => {
@@ -632,10 +636,10 @@ describe("AgentConversation pendingModel", () => {
 
         await renderOn("local");
         await act(async () => { scheduleAction(container).click(); });
-        expect(scheduleAction(container).textContent).toBe("Cancel schedule");
+        expect(scheduleAction(container).getAttribute("aria-checked")).toBe("true");
         await renderOn("remote-1");
 
-        expect(scheduleAction(container).textContent).toBe("Schedule");
+        expect(scheduleAction(container).getAttribute("aria-checked")).toBe("false");
       });
 
       it("does not follow the user to another branch", async () => {
@@ -647,7 +651,7 @@ describe("AgentConversation pendingModel", () => {
         await act(async () => { scheduleAction(container).click(); });
         await render("pA", "featB");
 
-        expect(scheduleAction(container).textContent).toBe("Schedule");
+        expect(scheduleAction(container).getAttribute("aria-checked")).toBe("false");
       });
     });
 
@@ -665,13 +669,13 @@ describe("AgentConversation pendingModel", () => {
 
         await render("pA", "featA");
         await act(async () => { taskAction(container).click(); });
-        expect(taskAction(container).textContent).toBe("Cancel task");
+        expect(taskAction(container).getAttribute("aria-checked")).toBe("true");
         await act(async () => {
           await promptState.submit!({ text: "the skipped remote test", files: [] });
         });
 
         expect(sendMessage.mock.calls[0]?.[0]).toBe(`the skipped remote test\n\n${TASK_INTENT_BLOCK}`);
-        expect(taskAction(container).textContent).toBe("Task");
+        expect(taskAction(container).getAttribute("aria-checked")).toBe("false");
       });
 
       it("sends an empty message as the bare block on an existing conversation", async () => {
@@ -696,8 +700,8 @@ describe("AgentConversation pendingModel", () => {
         await render("pA", "featA");
         await act(async () => { scheduleAction(container).click(); });
         await act(async () => { taskAction(container).click(); });
-        expect(taskAction(container).textContent).toBe("Cancel task");
-        expect(scheduleAction(container).textContent).toBe("Schedule");
+        expect(taskAction(container).getAttribute("aria-checked")).toBe("true");
+        expect(scheduleAction(container).getAttribute("aria-checked")).toBe("false");
 
         await act(async () => {
           await promptState.submit!({ text: "x", files: [] });
