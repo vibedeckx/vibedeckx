@@ -20,6 +20,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Hint } from "@/components/ui/hint";
 import { cn } from "@/lib/utils";
 import { hasPriorReview, subscribeReviewedSessions } from "@/lib/workflow-runs-fetch";
 import {
@@ -565,15 +566,13 @@ export function ReviewDialog({
 
   return (
     <Dialog open={open} onOpenChange={setDialogOpen}>
-      <DialogTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          title={`让另一个 agent review 这个 session 的最新成果 (${comboShortcutHint(isMac, REVIEW_SHORTCUT_CODE)})`}
-        >
-          <SearchCheck className="h-4 w-4" />
-        </Button>
-      </DialogTrigger>
+      <Hint label={`Ask another agent to review this session's latest work (${comboShortcutHint(isMac, REVIEW_SHORTCUT_CODE)})`}>
+        <DialogTrigger asChild>
+          <Button variant="ghost" size="sm" aria-label="Review this session">
+            <SearchCheck className="h-4 w-4" />
+          </Button>
+        </DialogTrigger>
+      </Hint>
       <DialogContent
         showCloseButton={false}
         className="bg-card w-[calc(100%-2rem)] min-w-0 gap-0 overflow-hidden p-0 sm:w-full sm:max-w-md"

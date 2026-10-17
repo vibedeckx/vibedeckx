@@ -62,6 +62,7 @@ import { BackgroundTasksBar } from "./background-tasks-bar";
 import { ModelPicker } from "./model-picker";
 import { RemoteAccessMenuItem, RemoteAccessChips } from "./remote-access-menu";
 import { SelectTaskMenuItem, SelectedTaskChips } from "./select-task-menu";
+import { Hint } from "@/components/ui/hint";
 import { useSessionRemoteGrants } from "@/hooks/use-session-remote-grants";
 import { useAppConfig } from "@/hooks/use-app-config";
 import { cn } from "@/lib/utils";
@@ -1575,9 +1576,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               // moves to the tooltip rather than being dropped: Connecting and
               // Reconnecting share an icon, as do the two disconnected states,
               // so the text is the only thing that tells them apart.
-              <span className={`flex items-center ${statusColor}`} title={statusText}>
-                {statusIcon}
-              </span>
+              <Hint label={statusText}>
+                <span className={`flex items-center ${statusColor}`} role="img" aria-label={statusText}>
+                  {statusIcon}
+                </span>
+              </Hint>
             );
           })()}
         </div>
@@ -1617,16 +1620,22 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               }}
             />
           )}
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={handleNewConversation}
-            disabled={isLoading || !session}
-            className="h-7 w-7"
-            title="New Conversation (⌘⇧O / Ctrl+Shift+O)"
-          >
-            <SquarePen className="h-3.5 w-3.5" />
-          </Button>
+          <Hint label="New Conversation (⌘⇧O / Ctrl+Shift+O)">
+            {/* span wrapper: the button is disabled with no session, and a
+                disabled button gets no hover events for the tooltip */}
+            <span className="inline-flex">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleNewConversation}
+                disabled={isLoading || !session}
+                className="h-7 w-7"
+                aria-label="New Conversation"
+              >
+                <SquarePen className="h-3.5 w-3.5" />
+              </Button>
+            </span>
+          </Hint>
           <Button
             variant="ghost"
             size="sm"

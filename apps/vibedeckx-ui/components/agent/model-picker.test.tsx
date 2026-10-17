@@ -4,6 +4,24 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ModelPicker, modelLabel, shouldOfferCustom, shouldWidenPanel } from "./model-picker";
 
+/** jsdom lays nothing out: make the chip's visible label report the given widths. */
+function setLabelGeometry(chip: Element, scrollWidth: number, clientWidth: number) {
+  const text = chip.querySelector(".truncate")!;
+  Object.defineProperty(text, "scrollWidth", { configurable: true, value: scrollWidth });
+  Object.defineProperty(text, "clientWidth", { configurable: true, value: clientWidth });
+}
+
+/** Hover a control the way a mouse does and return the tooltip it shows (Hint opens after 300ms). */
+async function hoverHint(el: Element): Promise<string | null> {
+  await act(async () => {
+    // pointerover drives React's onPointerEnter; pointermove opens Radix's tooltip.
+    el.dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
+    el.dispatchEvent(new MouseEvent("pointermove", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 350));
+  });
+  return document.querySelector("[data-slot='tooltip-content']")?.textContent ?? null;
+}
+
 describe("model picker logic", () => {
   it("labels a null model as Default", () => {
     expect(modelLabel(null)).toBe("Default");
@@ -133,7 +151,7 @@ describe("ModelPicker rendering", () => {
     // Locking changes colour and clickability, not geometry — the box has to
     // stay the same size and shape as the live picker, or the header row shifts
     // the moment a session starts.
-    const chip = container.querySelector("[title]")!;
+    const chip = container.querySelector("[data-model-chip='locked']")!;
     expect(chip.className).toContain("border");
     expect(chip.className).toContain("px-2");
     expect(chip.className).toContain("text-muted-foreground");
@@ -143,7 +161,7 @@ describe("ModelPicker rendering", () => {
     // Locking is now temporary — the turn ending is enough — so it must not
     // send the user off to start a new conversation, and must not suggest
     // stopping the agent, which would spend in-flight work for nothing.
-    const tooltip = container.querySelector("[title]")?.getAttribute("title");
+    const tooltip = await hoverHint(chip);
     expect(tooltip).toContain("fixed while the agent is running");
     expect(tooltip).toContain("once the turn ends");
     expect(tooltip).not.toContain("new conversation");
@@ -162,9 +180,19 @@ describe("ModelPicker rendering", () => {
       );
     });
 
-    expect(container.querySelector("button")?.getAttribute("title")).toBe(
-      "some-very-long-custom-model-name",
-    );
+    const chip = container.querySelector("button")!;
+    setLabelGeometry(chip, 240, 120);
+    expect(await hoverHint(chip)).toContain("some-very-long-custom-model-name");
+  });
+
+  it("shows no tooltip when the name fits — it would only repeat the chip", async () => {
+    await act(async () => {
+      root.render(<ModelPicker models={["opus"]} value={null} onChange={vi.fn()} locked={false} />);
+    });
+
+    const chip = container.querySelector("button")!;
+    setLabelGeometry(chip, 50, 50);
+    expect(await hoverHint(chip)).toBeNull();
   });
 
   it("keeps the full model name reachable when the locked label clips", async () => {
@@ -179,8 +207,8 @@ describe("ModelPicker rendering", () => {
       );
     });
 
-    const chip = container.querySelector("[title]")!;
-    expect(chip.getAttribute("title")).toContain("some-very-long-custom-model-name");
+    const chip = container.querySelector("[data-model-chip='locked']")!;
+    expect(await hoverHint(chip)).toContain("some-very-long-custom-model-name");
     // The clip happens inside the reserved slot, so a hand-typed name cannot
     // stretch the chip past the width the suggestions reserved.
     const visible = Array.from(chip.querySelectorAll("span")).find(
@@ -316,7 +344,8 @@ describe("ModelPicker panel width wiring", () => {
     stubGeometry(78, 8);
     await openPicker(["gpt-5.6-codex"]);
 
-    const trigger = document.querySelector<HTMLElement>("[data-slot='tooltip-trigger']")!;
+    // The info icon's, inside the panel — the chip itself is a tooltip trigger too.
+    const trigger = document.querySelector<HTMLElement>("[data-slot='popover-content'] [data-slot='tooltip-trigger']")!;
     await act(async () => {
       trigger.click();
     });

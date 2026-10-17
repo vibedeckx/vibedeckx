@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Hint } from "@/components/ui/hint";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import {
@@ -337,25 +338,26 @@ export function SessionHistoryDropdown({
         if (next) reload();
       }}
     >
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 text-xs gap-1 w-[200px] justify-start"
-          title={triggerTitle}
-        >
-          {triggerPending ? (
-            <span
-              className="block h-3 flex-1 rounded-sm bg-accent animate-pulse"
-              role="status"
-              aria-label="Generating title"
-            />
-          ) : (
-            <span className="truncate flex-1 text-left">{triggerLabel}</span>
-          )}
-          <ChevronDown className="h-3 w-3 flex-shrink-0" />
-        </Button>
-      </DropdownMenuTrigger>
+      <Hint label={triggerTitle}>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 text-xs gap-1 w-[200px] justify-start"
+          >
+            {triggerPending ? (
+              <span
+                className="block h-3 flex-1 rounded-sm bg-accent animate-pulse"
+                role="status"
+                aria-label="Generating title"
+              />
+            ) : (
+              <span className="truncate flex-1 text-left">{triggerLabel}</span>
+            )}
+            <ChevronDown className="h-3 w-3 flex-shrink-0" />
+          </Button>
+        </DropdownMenuTrigger>
+      </Hint>
       <DropdownMenuContent align="start" className="w-80 max-h-96 overflow-y-auto">
         {sessions.length === 0 && (
           <div className="px-2 py-3 text-xs text-muted-foreground">No history yet.</div>

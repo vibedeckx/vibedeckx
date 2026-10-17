@@ -17,6 +17,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { Hint } from "@/components/ui/hint";
 import { ReservedWidthLabel } from "@/components/ui/reserved-width-label";
 import { cn } from "@/lib/utils";
 
@@ -108,6 +109,12 @@ export function shouldOfferCustom(query: string, models: string[]): boolean {
   return trimmed.length > 0 && !models.includes(trimmed);
 }
 
+/** Whether the chip's visible label (ReservedWidthLabel's truncating span) is cut off. */
+function isClipped(chip: HTMLElement): boolean {
+  const text = chip.querySelector<HTMLElement>(".truncate");
+  return !!text && text.scrollWidth > text.clientWidth;
+}
+
 export function ModelPicker({
   models,
   widthCandidates,
@@ -118,6 +125,7 @@ export function ModelPicker({
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [wide, setWide] = useState(false);
+  const [clipped, setClipped] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const mirrorRef = useRef<HTMLSpanElement>(null);
   /**
@@ -156,19 +164,21 @@ export function ModelPicker({
       // mouse events in most browsers, which would swallow the tooltip — the
       // only place the "start a new conversation" explanation lives. Greying it
       // out is the affordance; there is nothing to click.
-      <span
-        className={cn(CHIP_CLASS, "text-muted-foreground cursor-default")}
-        // Names the one condition that has to clear, not an action to take:
-        // the turn ending is enough, and telling the user to stop the agent
-        // would trade their in-flight work for a change they can make a moment
-        // later for free.
-        title={`${label} — fixed while the agent is running, changeable once the turn ends`}
-      >
-        <ReservedWidthLabel candidates={slot} className="max-w-40">
-          {label}
-        </ReservedWidthLabel>
-        <ChevronDown className="h-3 w-3" />
-      </span>
+      // Names the one condition that has to clear, not an action to take:
+      // the turn ending is enough, and telling the user to stop the agent
+      // would trade their in-flight work for a change they can make a moment
+      // later for free.
+      <Hint label={`${label} — fixed while the agent is running, changeable once the turn ends`}>
+        <span
+          data-model-chip="locked"
+          className={cn(CHIP_CLASS, "text-muted-foreground cursor-default")}
+        >
+          <ReservedWidthLabel candidates={slot} className="max-w-40">
+            {label}
+          </ReservedWidthLabel>
+          <ChevronDown className="h-3 w-3" />
+        </span>
+      </Hint>
     );
   }
 
@@ -183,18 +193,23 @@ export function ModelPicker({
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <button
-          className={cn(CHIP_CLASS, "transition-colors hover:bg-muted")}
-          // Only useful once the label clips; harmless otherwise.
-          title={label}
-        >
-          <ReservedWidthLabel candidates={slot} className="max-w-40">
-            {label}
-          </ReservedWidthLabel>
-          <ChevronDown className="h-3 w-3 text-muted-foreground" />
-        </button>
-      </PopoverTrigger>
+      {/* Only once the label clips: otherwise the bubble just repeats the chip. */}
+      <Hint label={clipped ? label : null}>
+        <PopoverTrigger asChild>
+          <button
+            className={cn(CHIP_CLASS, "transition-colors hover:bg-muted")}
+            // Measured on the way in, ahead of the tooltip's delay: whether
+            // the name fits depends on the reserved slot, not on its length.
+            onPointerEnter={(e) => setClipped(isClipped(e.currentTarget))}
+            onFocus={(e) => setClipped(isClipped(e.currentTarget))}
+          >
+            <ReservedWidthLabel candidates={slot} className="max-w-40">
+              {label}
+            </ReservedWidthLabel>
+            <ChevronDown className="h-3 w-3 text-muted-foreground" />
+          </button>
+        </PopoverTrigger>
+      </Hint>
       {/* Same width as the collapsed chip, so the panel reads as that chip
           opening rather than as a separate surface. The reserved label slot makes
           that width constant, so it does not move with the choice — it only
