@@ -128,4 +128,18 @@ describe("useAgentSession sendMessage failures", () => {
 
     expect(latest!.error).toBe("Failed to send message [502] — worker offline");
   });
+
+  it("gives every send its own idempotency key so a browser-level resend replays instead of duplicating", async () => {
+    fetchMock.mockResolvedValue({ ok: true, json: async () => ({}) } as unknown as Response);
+
+    await act(async () => { await latest!.sendMessage("hi", "s1"); });
+    await act(async () => { await latest!.sendMessage("hi", "s1"); });
+
+    const keys = fetchMock.mock.calls
+      .filter(([url]) => isMessagePost(url))
+      .map(([, init]) => JSON.parse(String(init!.body)).idempotencyKey);
+    expect(keys).toHaveLength(2);
+    expect(keys.every((k) => typeof k === "string" && k.length > 0)).toBe(true);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
 });

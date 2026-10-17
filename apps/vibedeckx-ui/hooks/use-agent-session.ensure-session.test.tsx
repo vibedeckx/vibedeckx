@@ -231,6 +231,7 @@ describe("ensureSession resident-limit flow", () => {
     expect(String(url)).toContain("/api/agent-sessions/s-new/message");
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
       content: "hello",
+      idempotencyKey: expect.any(String),
     });
     // The failure belonged to branch a and must not blank or error branch b.
     expect(latest!.session).toBeNull();

@@ -244,7 +244,7 @@ describe("startConversation", () => {
     // The second content went to /message on the started session.
     const messageCalls = fetchMock.mock.calls.filter((call) => String(call[0]).endsWith("/api/agent-sessions/s-new/message"));
     expect(messageCalls).toHaveLength(1);
-    expect(JSON.parse(String((messageCalls[0][1] as RequestInit).body))).toEqual({ content: "second" });
+    expect(JSON.parse(String((messageCalls[0][1] as RequestInit).body))).toEqual({ content: "second", idempotencyKey: expect.any(String) });
   });
 
   it("hands the sender the new id before the session is ever rendered", async () => {

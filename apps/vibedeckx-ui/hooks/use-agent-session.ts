@@ -250,8 +250,9 @@ async function loadExistingSession(
   return response.json();
 }
 
-// No response doesn't mean the server never got the POST, and /message carries
-// no idempotency key — so don't promise it was lost or invite a blind resend.
+// No response doesn't mean the server never got the POST, and a resend from the
+// composer is a new message (new key) — so don't promise it was lost or invite
+// a blind resend.
 export const SEND_NETWORK_ERROR = "Network connection lost — couldn't confirm the message was delivered. Check the conversation before sending again.";
 
 async function sendMessageToSession(
@@ -260,12 +261,17 @@ async function sendMessageToSession(
   /** What the composer is showing; omitted means "no opinion, leave the grants alone". */
   grantedRemoteIds?: string[],
 ): Promise<void> {
+  // One key per send. The browser itself may resend this exact POST when the
+  // connection dies before the response arrives (Chrome does so for POSTs on
+  // a reused connection, e.g. HTTP/3 falling back to TCP); the worker's
+  // keyed delivery turns that resend into a replay instead of a second turn.
+  const idempotencyKey = crypto.randomUUID();
   let response: Response;
   try {
     response = await authFetch(`${getApiBase()}/api/agent-sessions/${sessionId}/message`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content, ...(grantedRemoteIds ? { grantedRemoteIds } : {}) }),
+      body: JSON.stringify({ content, idempotencyKey, ...(grantedRemoteIds ? { grantedRemoteIds } : {}) }),
     });
   } catch (e) {
     // fetch rejects with a TypeError only when no response came back at all
