@@ -61,6 +61,7 @@ describe("task links in agent markdown", () => {
     await render("See [Retention test](#ref:task:task-1).");
     const link = container.querySelector<HTMLAnchorElement>("[data-task-ref]")!;
     expect(link.textContent).toBe("Retention test");
+    expect(link.querySelector("svg")).not.toBeNull();
     await act(async () => { link.click(); });
     expect(openTask).toHaveBeenCalledWith(TASK);
   });
