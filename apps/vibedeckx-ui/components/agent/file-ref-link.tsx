@@ -13,6 +13,7 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/h
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useFileNavigation, type FileReadScope } from "./file-navigation-context";
+import { parseTaskRefHref, TaskRefLink } from "./task-ref-link";
 import { useRemoteServerName } from "@/hooks/use-remote-server-names";
 import { remoteServerIdOf } from "@/lib/remote-session-id";
 
@@ -72,6 +73,8 @@ export function FileRefLink({ node, children, href, className, ...rest }: Anchor
 
   // Not one of our file refs — render a normal link.
   if (!raw) {
+    const taskId = parseTaskRefHref(href);
+    if (taskId) return <TaskRefLink taskId={taskId}>{children}</TaskRefLink>;
     const isHash = typeof href === "string" && href.startsWith("#");
     if (isHash) {
       return (

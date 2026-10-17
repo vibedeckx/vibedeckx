@@ -46,6 +46,9 @@ vi.mock("@/components/ui/permission-mode-toggle", () => ({
 }));
 
 vi.mock("./model-picker", () => ({ ModelPicker: () => null }));
+// Select task is a Radix submenu that needs the real menu around it; it plays
+// no part in the permission mode (pending-model.test.tsx covers it).
+vi.mock("./select-task-menu", () => ({ SelectTaskMenuItem: () => null, SelectedTaskChips: () => null }));
 
 vi.mock("@/hooks/use-agent-session", () => ({
   createAgentWorkspaceIdentity: (

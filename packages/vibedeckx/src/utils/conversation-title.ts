@@ -18,6 +18,8 @@ const TITLE_MAX_CHARS = 60;
 const VSCHEDULE_BLOCK_RE = /<vschedule(?:\s[^>]*)?>[\s\S]*?<\/vschedule>/g;
 /** Same for the Task chip's propose_task instruction. */
 const VTASK_BLOCK_RE = /<vtask(?:\s[^>]*)?>[\s\S]*?<\/vtask>/g;
+/** And Select task's block: the picked tasks' content, for the agent (apps/vibedeckx-ui/lib/selected-tasks.ts). */
+const VSELECTED_TASKS_BLOCK_RE = /<vselected-tasks(?:\s[^>]*)?>[\s\S]*?<\/vselected-tasks>/g;
 const AI_TIMEOUT_MS = 15_000;
 const MAX_INPUT_CHARS = 2000;
 
@@ -59,9 +61,11 @@ export function extractUserText(content: string | ContentPart[]): string {
   // The hub appends a <vremotes> grant block to every user message of a
   // granted session. It is machine-addressed context, not something the user
   // wrote — titles and review briefs must not see it. Same for the Schedule
-  // and Task chips' instruction blocks, and the <vtasks-created> note.
+  // and Task chips' instruction blocks, Select task's block, and the
+  // <vtasks-created> note.
   return stripRemoteGrantContext(
-    text.replace(VSCHEDULE_BLOCK_RE, "").replace(VTASK_BLOCK_RE, "").replace(VTASKS_CREATED_BLOCK_RE, ""),
+    text.replace(VSCHEDULE_BLOCK_RE, "").replace(VTASK_BLOCK_RE, "").replace(VSELECTED_TASKS_BLOCK_RE, "")
+      .replace(VTASKS_CREATED_BLOCK_RE, ""),
   );
 }
 

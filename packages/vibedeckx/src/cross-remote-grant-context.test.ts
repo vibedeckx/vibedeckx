@@ -106,4 +106,10 @@ describe("cross-remote grant context", () => {
     expect(extractUserText("<vschedule>\nx\n</vschedule>\n\n<vremotes names=\"a\">\ny\n</vremotes>")).toBe("");
     expect(extractUserText("skip the flaky test for now\n\n<vtask>\ncall propose_task\n</vtask>")).toBe("skip the flaky test for now");
   });
+
+  it("titles also skip Select task's block, task descriptions included", () => {
+    const block = '<vselected-tasks note="n">\n<task id="t1" title="Retention" status="todo" priority="high">\nlong description\n</task>\n</vselected-tasks>';
+    expect(extractUserText(`what's left here?\n\n${block}`)).toBe("what's left here?");
+    expect(extractUserText(`<vtask>\nx\n</vtask>\n\n${block}`)).toBe("");
+  });
 });

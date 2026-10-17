@@ -119,7 +119,8 @@ const TASK_DATA_HINT =
   ` \`${CANONICAL_LIST_TASKS_TOOL}\` and \`${CANONICAL_GET_TASK_TOOL}\` read the project's existing tasks; use them`
   + " when the user refers to existing tasks, and before proposing new ones so you don't duplicate one."
   + ` To change existing tasks (status, priority, title, description), call \`${CANONICAL_PROPOSE_TASK_UPDATE_TOOL}\``
-  + " when the user asks; the user confirms each change on a card. Never claim you created or updated a task.";
+  + " when the user asks; the user confirms each change on a card. Never claim you created or updated a task."
+  + " When you mention an existing task to the user, link it as [title](#ref:task:<id>) so they can open it.";
 
 /**
  * Server-level `instructions` returned from MCP `initialize`. Claude Code folds
@@ -357,6 +358,7 @@ export const LIST_TASKS_DESCRIPTION = [
   "each description; call get_task for a task's full description and sub-tasks.",
   "",
   "By default only open tasks (todo / in_progress) are listed. Archived tasks are never listed.",
+  "When you mention a task to the user, link it as [title](#ref:task:<id>) so they can open it.",
   "Results come in pages of 50: when `next_offset` is present, call again with it as `offset`",
   "to read the rest.",
 ].join("\n");

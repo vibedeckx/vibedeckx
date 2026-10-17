@@ -26,6 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { translateText, type WorkflowRun } from "@/lib/api";
 import { SCHEDULE_INTENT_BLOCK } from "@/lib/schedule-intent";
 import { TASK_INTENT_BLOCK } from "@/lib/task-intent";
+import { buildSelectedTasksBlock } from "@/lib/selected-tasks";
 import { toast } from "sonner";
 import type { EnsuredAgentSession, PreparedConversation } from "@/hooks/use-agent-session";
 
@@ -221,6 +222,36 @@ vi.mock("@/components/ui/dropdown-menu", async (importOriginal) => {
     },
   };
 });
+
+// Select task is a Radix submenu, which needs the real menu around it. Stubbed
+// to one toggle button per fixture task — the composer's handling is what's
+// under test here, not the submenu.
+const selectTaskFixture = vi.hoisted(() => ({
+  tasks: [
+    { id: "t1", title: "Retention test", status: "todo", priority: "high", description: "Cover the remote path" },
+    { id: "t2", title: "Drop flag", status: "in_progress", priority: "low", description: null },
+  ],
+}));
+vi.mock("./select-task-menu", () => ({
+  SelectTaskMenuItem: ({ selected, onToggle }: {
+    selected: Array<{ id: string }>;
+    onToggle: (task: unknown, select: boolean) => void;
+  }) => (
+    <>
+      {selectTaskFixture.tasks.map((task) => {
+        const on = selected.some((s) => s.id === task.id);
+        return (
+          <button key={task.id} type="button" data-testid={`select-task-${task.id}`} onClick={() => onToggle(task, !on)}>
+            {on ? "selected" : "select"}
+          </button>
+        );
+      })}
+    </>
+  ),
+  SelectedTaskChips: ({ tasks }: { tasks: Array<{ id: string; title: string }> }) => (
+    <div data-testid="selected-task-chips">{tasks.map((t) => t.title).join(",")}</div>
+  ),
+}));
 
 // The composer builds its attachment menu out of the REAL DropdownMenu, which
 // the stub above cannot host. It plays no part in the model choice, so it is
@@ -672,6 +703,72 @@ describe("AgentConversation pendingModel", () => {
           await promptState.submit!({ text: "x", files: [] });
         });
         expect(sendMessage.mock.calls[0]?.[0]).toBe(`x\n\n${TASK_INTENT_BLOCK}`);
+      });
+    });
+
+    describe("Select task", () => {
+      const pick = (container: HTMLElement, id: string) =>
+        act(async () => { container.querySelector<HTMLElement>(`[data-testid="select-task-${id}"]`)!.click(); });
+      const chips = (container: HTMLElement) => container.querySelector('[data-testid="selected-task-chips"]')!.textContent;
+
+      beforeEach(() => {
+        hookState.session = { id: "s1" };
+        hookState.status = "stopped";
+        hookState.messages = [{ type: "user" }];
+      });
+
+      it("appends the picked tasks' block, in pick order, and clears them after sending", async () => {
+        await render("pA", "featA");
+        await pick(container, "t2");
+        await pick(container, "t1");
+        expect(chips(container)).toBe("Drop flag,Retention test");
+
+        await act(async () => {
+          await promptState.submit!({ text: "what's left here?", files: [] });
+        });
+
+        const [t1, t2] = selectTaskFixture.tasks as never[];
+        expect(sendMessage.mock.calls[0]?.[0]).toBe(`what's left here?\n\n${buildSelectedTasksBlock([t2, t1])}`);
+        expect(chips(container)).toBe("");
+      });
+
+      it("drops a task picked twice, and combines with the Task chip", async () => {
+        await render("pA", "featA");
+        await pick(container, "t1");
+        await pick(container, "t2");
+        await pick(container, "t2");
+        await act(async () => {
+          Array.from(container.querySelectorAll<HTMLElement>('[data-testid="prompt-action"]'))
+            .find((el) => /task$/i.test(el.textContent ?? ""))!.click();
+        });
+
+        await act(async () => {
+          await promptState.submit!({ text: "follow-up under this", files: [] });
+        });
+
+        const [t1] = selectTaskFixture.tasks as never[];
+        expect(sendMessage.mock.calls[0]?.[0])
+          .toBe(`follow-up under this\n\n${TASK_INTENT_BLOCK}\n\n${buildSelectedTasksBlock([t1])}`);
+      });
+
+      it("puts the picked tasks back when delivery fails", async () => {
+        sendMessage.mockResolvedValueOnce(false);
+        await render("pA", "featA");
+        await pick(container, "t1");
+
+        await act(async () => {
+          await promptState.submit!({ text: "x", files: [] }).catch(() => {});
+        });
+
+        expect(chips(container)).toBe("Retention test");
+      });
+
+      it("does not follow the user to another branch", async () => {
+        await render("pA", "featA");
+        await pick(container, "t1");
+        await render("pA", "featB");
+
+        expect(chips(container)).toBe("");
       });
     });
 

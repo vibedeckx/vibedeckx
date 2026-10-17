@@ -47,6 +47,7 @@ import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
 import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, CalendarClock, ListPlus } from "lucide-react";
 import { appendScheduleIntent } from "@/lib/schedule-intent";
 import { appendTaskIntent } from "@/lib/task-intent";
+import { appendSelectedTasks } from "@/lib/selected-tasks";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
   DropdownMenu,
@@ -60,6 +61,7 @@ import { extractTurnAnswer } from "./turn-answer";
 import { BackgroundTasksBar } from "./background-tasks-bar";
 import { ModelPicker } from "./model-picker";
 import { RemoteAccessMenuItem, RemoteAccessChips } from "./remote-access-menu";
+import { SelectTaskMenuItem, SelectedTaskChips } from "./select-task-menu";
 import { useSessionRemoteGrants } from "@/hooks/use-session-remote-grants";
 import { useAppConfig } from "@/hooks/use-app-config";
 import { cn } from "@/lib/utils";
@@ -184,6 +186,11 @@ export function useAgentConversation() {
   const ctx = useContext(AgentConversationContext);
   if (!ctx) throw new Error("useAgentConversation must be used within AgentConversationContext");
   return ctx;
+}
+
+/** For renderers that also appear outside a conversation (markdown links): null there. */
+export function useOptionalAgentConversation() {
+  return useContext(AgentConversationContext);
 }
 
 interface AgentConversationProps {
@@ -424,6 +431,16 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const taskArmed = activeIntent === "task";
   const toggleIntent = (kind: "schedule" | "task") =>
     setArmedIntent(activeIntent === kind ? null : { key: intentKey, kind });
+
+  // Select task: the tasks the next message points at. Held against the same
+  // conversation as the chips above and one-shot like them, but independent of
+  // them — "record a follow-up under this task" uses both.
+  const [taskSelection, setTaskSelection] = useState<{ key: string; tasks: Task[] } | null>(null);
+  const selectedTasks = taskSelection?.key === intentKey ? taskSelection.tasks : [];
+  const toggleSelectedTask = (task: Task, select: boolean) => {
+    const rest = selectedTasks.filter((t) => t.id !== task.id);
+    setTaskSelection({ key: intentKey, tasks: select ? [...rest, task] : rest });
+  };
 
   // Older test doubles/plugins may not expose window metadata yet.
   const messageEntryIndices = loadedMessageEntryIndices ?? messages.map((_, index) => index);
@@ -1064,6 +1081,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // With the Schedule or Task chip on an existing conversation the message
     // may be empty: "schedule / record what we just did" is the whole request.
     const intent = activeIntent;
+    const pickedTasks = selectedTasks;
     const intentFromHistory = intent !== null && !!session;
     if (!trimmedRaw && !hasFiles && !intentFromHistory) return;
 
@@ -1074,8 +1092,10 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     setInput("");
     if (trimmedRaw) inputHistory.push(trimmedRaw);
     if (intent) setArmedIntent(null);
+    if (pickedTasks.length > 0) setTaskSelection(null);
     const restoreIntent = () => {
       if (intent) setArmedIntent({ key: intentKey, kind: intent });
+      if (pickedTasks.length > 0) setTaskSelection({ key: intentKey, tasks: pickedTasks });
     };
 
     // Always overlay "working" — even when the session is already running, the
@@ -1297,6 +1317,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // After translation: the block is written for the agent, not the user.
     if (intent === "schedule") content = appendScheduleIntent(content);
     if (intent === "task") content = appendTaskIntent(content);
+    content = appendSelectedTasks(content, pickedTasks);
 
     if (!session) {
       // An identity prepared for an upload is activated with the instruction;
@@ -1837,6 +1858,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 onRevoke={(server) => remoteGrants.toggle(server, false)}
               />
             )}
+            <SelectedTaskChips tasks={selectedTasks} onRemove={(task) => toggleSelectedTask(task, false)} />
             {/* Translate badge row — only when enabled */}
             {translateEnabled && (
               <div className="flex items-center pl-12 pr-2 pt-1.5 pb-0.5">
@@ -1891,6 +1913,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     <ListPlus className="mr-2 size-4" />
                     {taskArmed ? "Cancel task" : "Task"}
                   </PromptInputActionMenuItem>
+                  <SelectTaskMenuItem
+                    projectId={projectId}
+                    selected={selectedTasks}
+                    onToggle={toggleSelectedTask}
+                  />
                   <PromptInputActionMenuItem
                     onSelect={() => {
                       setTranslateEnabled(!translateEnabled);

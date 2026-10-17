@@ -45,6 +45,8 @@ import { MessageRow } from "./message-row";
 import { VPasteChip, VFileCard, RemoteGrantMeta, ScheduleIntentMeta, TaskIntentMeta, splitVPasteMarkers, takeRemotesMarker, type VPasteSegment } from "./vpaste-chip";
 import { takeScheduleMarker } from "@/lib/schedule-intent";
 import { stripTasksCreatedNote, takeTaskMarker } from "@/lib/task-intent";
+import { takeSelectedTasksMarker, type SelectedTaskRef } from "@/lib/selected-tasks";
+import { SelectedTasksMeta } from "./task-ref-link";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
 interface AgentMessageProps {
@@ -154,12 +156,17 @@ function renderBody(message: AgentMessage, messageIndex: number, streaming: bool
  */
 function takeHeaderBlocks(text: string): {
   text: string; remoteNames: string | null; scheduled: boolean; tasked: boolean; hadNote: boolean;
+  selectedTasks: SelectedTaskRef[] | null;
 } {
   const note = stripTasksCreatedNote(text);
   const remotes = takeRemotesMarker(note.text);
   const schedule = takeScheduleMarker(remotes.text);
   const task = takeTaskMarker(schedule.text);
-  return { text: task.text, remoteNames: remotes.names, scheduled: schedule.found, tasked: task.found, hadNote: note.found };
+  const selected = takeSelectedTasksMarker(task.text);
+  return {
+    text: selected.text, remoteNames: remotes.names, scheduled: schedule.found, tasked: task.found, hadNote: note.found,
+    selectedTasks: selected.refs,
+  };
 }
 
 function renderTextWithVPaste(text: string) {
@@ -232,12 +239,14 @@ function UserMessage({
   let remoteNames: string | null = null;
   let scheduled = false;
   let tasked = false;
+  let selectedTasks: SelectedTaskRef[] | null = null;
   let body: string | ContentPart[];
   if (typeof content === "string") {
     const taken = takeHeaderBlocks(content);
     remoteNames = taken.remoteNames;
     scheduled = taken.scheduled;
     tasked = taken.tasked;
+    selectedTasks = taken.selectedTasks;
     body = taken.text;
   } else {
     body = [];
@@ -250,8 +259,10 @@ function UserMessage({
       if (taken.remoteNames !== null) remoteNames = taken.remoteNames;
       if (taken.scheduled) scheduled = true;
       if (taken.tasked) tasked = true;
+      if (taken.selectedTasks) selectedTasks = [...(selectedTasks ?? []), ...taken.selectedTasks];
       // A part that was only a block leaves nothing to render.
-      const hadBlock = taken.remoteNames !== null || taken.scheduled || taken.tasked || taken.hadNote;
+      const hadBlock = taken.remoteNames !== null || taken.scheduled || taken.tasked || taken.hadNote
+        || taken.selectedTasks !== null;
       if (!hadBlock || taken.text.length > 0) body.push({ ...part, text: taken.text });
     }
   }
@@ -275,6 +286,12 @@ function UserMessage({
             <>
               <span className="shrink-0 text-muted-foreground/60" aria-hidden>·</span>
               <TaskIntentMeta />
+            </>
+          )}
+          {selectedTasks && selectedTasks.length > 0 && (
+            <>
+              <span className="shrink-0 text-muted-foreground/60" aria-hidden>·</span>
+              <SelectedTasksMeta refs={selectedTasks} />
             </>
           )}
           {remoteNames && (
