@@ -12,6 +12,7 @@ import {
 import { api, type Task, type TaskStatus } from "@/lib/api";
 import { buildUrl } from "@/lib/url-state";
 import { cn } from "@/lib/utils";
+import { directSubtasks, type SelectedTaskSubtask } from "@/lib/selected-tasks";
 import { PRIORITY_DOT } from "./task-proposal";
 
 const STATUS_ICON: Record<TaskStatus, { Icon: typeof Circle; tone: string }> = {
@@ -39,7 +40,8 @@ export function SelectTaskMenuItem({
 }: {
   projectId: string | null;
   selected: Task[];
-  onToggle: (task: Task, select: boolean) => void;
+  /** A pick carries the task's direct sub-tasks from the loaded list (lib/selected-tasks.ts). */
+  onToggle: (task: Task & { subtasks: SelectedTaskSubtask[] }, select: boolean) => void;
   disabled?: boolean;
 }) {
   const [tasks, setTasks] = useState<Task[] | null>(null);
@@ -123,7 +125,7 @@ export function SelectTaskMenuItem({
                 // Keep the menu open: picking two tasks should take two clicks.
                 onSelect={(e) => {
                   e.preventDefault();
-                  onToggle(task, !isSelected);
+                  onToggle({ ...task, subtasks: directSubtasks(tasks ?? [], task.id) }, !isSelected);
                 }}
                 className="gap-2.5 py-1.5"
               >

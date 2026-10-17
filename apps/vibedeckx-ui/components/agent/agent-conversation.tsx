@@ -47,7 +47,7 @@ import { fetchActiveWorkflowRuns } from "@/lib/workflow-runs-fetch";
 import { Bot, Square, AlertCircle, Wifi, WifiOff, SquarePen, Monitor, Languages, X, Loader2, ChevronDown, CalendarClock, ListPlus, Check } from "lucide-react";
 import { appendScheduleIntent } from "@/lib/schedule-intent";
 import { appendTaskIntent } from "@/lib/task-intent";
-import { appendSelectedTasks } from "@/lib/selected-tasks";
+import { appendSelectedTasks, type SelectedTask } from "@/lib/selected-tasks";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import {
   DropdownMenu,
@@ -436,9 +436,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   // Select task: the tasks the next message points at. Held against the same
   // conversation as the chips above and one-shot like them, but independent of
   // them — "record a follow-up under this task" uses both.
-  const [taskSelection, setTaskSelection] = useState<{ key: string; tasks: Task[] } | null>(null);
+  const [taskSelection, setTaskSelection] = useState<{ key: string; tasks: (Task & SelectedTask)[] } | null>(null);
   const selectedTasks = taskSelection?.key === intentKey ? taskSelection.tasks : [];
-  const toggleSelectedTask = (task: Task, select: boolean) => {
+  const toggleSelectedTask = (task: Task & SelectedTask, select: boolean) => {
     const rest = selectedTasks.filter((t) => t.id !== task.id);
     setTaskSelection({ key: intentKey, tasks: select ? [...rest, task] : rest });
   };
