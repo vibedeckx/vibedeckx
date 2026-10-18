@@ -1,7 +1,7 @@
 "use client";
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useSyncExternalStore, type ReactNode } from "react";
-import { getWebSocketUrl, getFreshToken, type LogMessage, type MuxClientMessage, type MuxServerMessage } from "@/lib/api";
+import { getWebSocketUrl, getFreshToken, hasUsableStreamToken, type LogMessage, type MuxClientMessage, type MuxServerMessage } from "@/lib/api";
 import type { ConnectionStatus } from "./use-executor-logs";
 import type { UseExecutorLogsResult } from "./use-executor-logs";
 
@@ -232,11 +232,25 @@ export function ExecutorLogsProvider({
 
     // Token-refreshing entry point: every (re)connect first fetches a
     // guaranteed-valid token (cache-hit = no network) so the WS upgrade never
-    // carries an expired JWT in its query string.
+    // carries an expired JWT in its query string. If the mint failed and only a
+    // dead token is left (network blip), wait and mint again — without spending
+    // the reconnect budget on a socket the server could only reject.
+    let tokenRetryAttempt = 0;
     const connect = () => {
       if (cancelled) return;
       void getFreshToken().then(() => {
-        if (!cancelled) openSocket();
+        if (cancelled) return;
+        if (!hasUsableStreamToken()) {
+          const delay = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** Math.min(tokenRetryAttempt, 4));
+          tokenRetryAttempt += 1;
+          reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null;
+            connect();
+          }, delay);
+          return;
+        }
+        tokenRetryAttempt = 0;
+        openSocket();
       });
     };
 

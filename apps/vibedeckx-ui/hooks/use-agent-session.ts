@@ -5,6 +5,7 @@ import { produce } from "immer";
 import { toast } from "sonner";
 import {
   getWebSocketUrl, getFreshToken, authFetch, createNewAgentSession, ResidentLimitError,
+  hasUsableStreamToken, isStreamAuthError, STREAM_AUTH_FAILED_MESSAGE, STREAM_AUTH_REJECTS_BEFORE_ERROR,
   startAgentSession, prepareAgentSession, activateAgentSession, cancelPreparedAgentSession, lifecycleSessionReady,
   type RunningResidentSession, type LifecycleResponse,
 } from "@/lib/api";
@@ -927,9 +928,16 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // per frame. Weak so a closed socket is not retained for the warning's sake.
   const reportedRetiredDropRef = useRef<WeakSet<WebSocket>>(new WeakSet());
   const openSocketRef = useRef<(sessionId: string) => void>(() => {});
+  const connectWebSocketRef = useRef<(sessionId: string, forceRefresh?: boolean) => void>(() => {});
   const replaceSilentSocketRef = useRef<(socket: WebSocket) => void>(() => {});
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptRef = useRef(0);
+  // Token-wait retries (no usable token to open with) and server auth rejections.
+  // Both are kept off reconnectAttemptRef / the short-lived detector: a network
+  // blip must neither exhaust the reconnect budget nor get the session recreated.
+  const tokenRetryAttemptRef = useRef(0);
+  const authRejectsRef = useRef(0);
+  const authRejectedSocketRef = useRef<WebSocket | null>(null);
   const containerRef = useRef<PatchContainer>({ sessionId: null, entries: {}, status: "stopped" });
   const historyRef = useRef<SessionHistoryWindow | null>(null);
   const [hasEarlierHistory, setHasEarlierHistory] = useState(false);
@@ -1072,7 +1080,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   // no reconnect, and the session silently has no stream for the rest of its
   // life. On timeout we open anyway with the last known token; if the server
   // rejects it, `onclose` reconnects with `skipCache` — a loop that recovers,
-  // unlike a promise that never settles.
+  // unlike a promise that never settles. When even the last known token is dead
+  // (the mint failed or stalled past its expiry), opening would only earn an
+  // "Invalid authentication token" rejection, so we wait and mint again instead.
   const TOKEN_WAIT_TIMEOUT_MS = 5000;
   const connectWebSocket = useCallback((sessionId: string, forceRefresh = false) => {
     // Claim the stream, and retire a socket belonging to another session now
@@ -1102,6 +1112,20 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           console.log(`[AgentSession] Dropping stale connect for ${sessionId} (now ${desiredSessionIdRef.current})`);
           return;
         }
+        if (!hasUsableStreamToken()) {
+          const delay = getReconnectDelay(Math.min(tokenRetryAttemptRef.current, 4));
+          tokenRetryAttemptRef.current++;
+          console.log(`[AgentSession] No usable auth token (network?) — retrying connect in ${Math.round(delay)}ms`);
+          if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = setTimeout(() => {
+            reconnectTimeoutRef.current = null;
+            if (desiredSessionIdRef.current === sessionId && !finishedRef.current) {
+              connectWebSocketRef.current(sessionId, true);
+            }
+          }, delay);
+          return;
+        }
+        tokenRetryAttemptRef.current = 0;
         openSocketRef.current(sessionId);
       });
   }, []);
@@ -1249,6 +1273,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       armSilenceTimer(ws);
       try {
         const msg = JSON.parse(event.data) as AgentWsMessage;
+
+        // Anything but an error frame means the server accepted our token.
+        if (!("error" in msg)) authRejectsRef.current = 0;
 
         // Liveness-only frame — already accounted for above.
         if ("keepalive" in msg) return;
@@ -1415,6 +1442,17 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         // Handle error
         if ("error" in msg) {
           console.error("[AgentSession] Server error:", msg.error);
+          // Token rejected: the server closes next and onclose reconnects with a
+          // fresh mint. Usually the token expired during a network blip — not
+          // worth alarming the user over unless fresh tokens keep failing.
+          if (isStreamAuthError(msg.error)) {
+            authRejectedSocketRef.current = ws;
+            authRejectsRef.current++;
+            if (authRejectsRef.current >= STREAM_AUTH_REJECTS_BEFORE_ERROR) {
+              setError(STREAM_AUTH_FAILED_MESSAGE);
+            }
+            return;
+          }
           setError(msg.error);
 
           // If session not found, invalidate cache and clear state so auto-start creates a fresh session
@@ -1452,6 +1490,22 @@ export function useAgentSession(projectId: string | null, branch: string | null,
         ? Date.now() - connectionStartTimeRef.current
         : 0;
       connectionStartTimeRef.current = null;
+
+      // An auth rejection says nothing about the session itself: keep it out of
+      // the short-lived detector (which would recreate the session) and out of
+      // the reconnect budget, and retry with a freshly minted token.
+      if (authRejectedSocketRef.current === ws) {
+        authRejectedSocketRef.current = null;
+        if (finishedRef.current) return;
+        const delay = getReconnectDelay(Math.min(authRejectsRef.current - 1, 4));
+        console.log(`[AgentSession] Auth token rejected — reconnecting with a fresh token in ${Math.round(delay)}ms`);
+        reconnectTimeoutRef.current = setTimeout(() => {
+          reconnectTimeoutRef.current = null;
+          const currentSessionId = wsSessionIdRef.current;
+          if (currentSessionId && !finishedRef.current) connectWebSocket(currentSessionId, true);
+        }, delay);
+        return;
+      }
 
       if (connectionDuration > 0 && connectionDuration < MIN_STABLE_CONNECTION_MS) {
         shortLivedConnectionsRef.current++;
@@ -1519,6 +1573,9 @@ export function useAgentSession(projectId: string | null, branch: string | null,
   useEffect(() => {
     openSocketRef.current = openSocket;
   }, [openSocket]);
+  useEffect(() => {
+    connectWebSocketRef.current = connectWebSocket;
+  }, [connectWebSocket]);
 
   // A silence timeout proves the old socket can no longer be trusted. Detach it
   // from shared state before calling close(), then reconnect immediately. This
@@ -3025,8 +3082,28 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       }
     };
 
+    // Network back: reconnect now rather than at the end of a backoff that may
+    // have grown while the token mint kept failing offline.
+    const handleOnline = () => {
+      if (!session?.id || finishedRef.current) return;
+      const ws = wsRef.current;
+      if (ws && ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) return;
+      console.log("[AgentSession] Network online, WebSocket disconnected - reconnecting");
+      reconnectAttemptRef.current = 0;
+      tokenRetryAttemptRef.current = 0;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      connectWebSocket(session.id, true);
+    };
+
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleOnline);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleOnline);
+    };
   }, [session?.id, connectWebSocket]);
 
   // Connect WebSocket when session ID becomes available (initial connection only).

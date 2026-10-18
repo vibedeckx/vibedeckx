@@ -4,6 +4,8 @@ import {
   createNewAgentSession,
   getAuthToken,
   getFreshToken,
+  hasUsableStreamToken,
+  isStreamAuthError,
   parseProjectChatOperationMessage,
   setAuthToken,
   setTokenGetter,
@@ -641,5 +643,105 @@ describe("lifecycle requests across a server restart", () => {
 
     expect(res.kind).toBe("retryable_failure");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("hasUsableStreamToken", () => {
+  it("is true when auth is off (no token getter)", () => {
+    expect(hasUsableStreamToken()).toBe(true);
+  });
+
+  it("is false when the cached token is expired or missing", () => {
+    setTokenGetter(vi.fn());
+    setAuthToken(makeJwt(-5));
+    expect(hasUsableStreamToken()).toBe(false);
+    setAuthToken(null);
+    expect(hasUsableStreamToken()).toBe(false);
+  });
+
+  it("is true when the cached token still has life", () => {
+    setTokenGetter(vi.fn());
+    setAuthToken(makeJwt(30));
+    expect(hasUsableStreamToken()).toBe(true);
+  });
+});
+
+describe("isStreamAuthError", () => {
+  it("matches the server's WS auth rejections only", () => {
+    expect(isStreamAuthError("Invalid authentication token")).toBe(true);
+    expect(isStreamAuthError("Authentication required")).toBe(true);
+    expect(isStreamAuthError("Session not found")).toBe(false);
+  });
+});
+
+// A JWT as issued by a server whose clock is `skewSeconds` behind ours: `iat`
+// and `exp` read that far in the past from this (fast) client's point of view.
+function makeSkewedJwt(lifetimeSeconds: number, skewSeconds: number): string {
+  const header = Buffer.from(JSON.stringify({ alg: "RS256" })).toString("base64url");
+  const iat = Math.floor(Date.now() / 1000) - skewSeconds;
+  const payload = Buffer.from(JSON.stringify({ sub: "u", iat, exp: iat + lifetimeSeconds })).toString("base64url");
+  return `${header}.${payload}.sig`;
+}
+
+describe("stream token under clock skew and stalled mints", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("trusts a just-minted token even when the device clock runs ahead of the issuer", async () => {
+    vi.useFakeTimers();
+    // Client 90s fast: by its clock this fresh 60s token expired 30s ago.
+    const minted = makeSkewedJwt(60, 90);
+    setTokenGetter(vi.fn().mockResolvedValue(minted));
+
+    await getFreshToken({ skipCache: true });
+    expect(hasUsableStreamToken()).toBe(true);
+
+    // Held past its issued lifetime: genuinely stale now, whatever the clocks.
+    vi.advanceTimersByTime(61_000);
+    expect(hasUsableStreamToken()).toBe(false);
+  });
+
+  it("stops joining a hung mint and lets the next forced call mint again", async () => {
+    vi.useFakeTimers();
+    setAuthToken(null);
+    const minted = makeJwt(60);
+    const getter = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<string>(() => {})) // network stall: never settles
+      .mockResolvedValue(minted);
+    setTokenGetter(getter);
+
+    const first = getFreshToken({ skipCache: true });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await first).toBeNull(); // bounded: falls back to the (empty) cache
+    expect(hasUsableStreamToken()).toBe(false);
+
+    // Network back (e.g. the `online` reconnect): a new mint, not the hung one.
+    expect(await getFreshToken({ skipCache: true })).toBe(minted);
+    expect(getter).toHaveBeenCalledTimes(2);
+    expect(hasUsableStreamToken()).toBe(true);
+  });
+
+  it("does not let an abandoned mint that lands late overwrite a newer token", async () => {
+    vi.useFakeTimers();
+    setAuthToken(null);
+    const oldToken = makeJwt(60);
+    const newToken = makeJwt(61);
+    let resolveOld!: (t: string) => void;
+    const getter = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise<string>((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValue(newToken);
+    setTokenGetter(getter);
+
+    const first = getFreshToken({ skipCache: true });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await first;
+    expect(await getFreshToken({ skipCache: true })).toBe(newToken);
+
+    resolveOld(oldToken);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(getAuthToken()).toBe(newToken);
   });
 });

@@ -5,6 +5,10 @@ import {
   api,
   getFreshToken,
   getWebSocketUrl,
+  hasUsableStreamToken,
+  isStreamAuthError,
+  STREAM_AUTH_FAILED_MESSAGE,
+  STREAM_AUTH_REJECTS_BEFORE_ERROR,
   type ProjectChatMessage,
   type ProjectChatMessagePage,
   type ProjectChatContextRef,
@@ -370,6 +374,8 @@ export function useProjectChat(projectId: string | null, threadId: string | null
     let fatal = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectAttempt = 0;
+    // Consecutive server rejections of our token; reset by the next snapshot.
+    let authRejects = 0;
     let lastFrameAt: number | null = null;
     type ConnectAttempt = {
       controller: AbortController;
@@ -520,6 +526,13 @@ export function useProjectChat(projectId: string | null, threadId: string | null
           throw new Error("Invalid Project Chat thread context");
         }
         publishStreamState({ ...streamStateRef.current, thread: ownedThread, contextRefs });
+        // Even the last known token is dead (the mint failed during a network
+        // blip): the server could only reject it, so wait and mint again.
+        if (!hasUsableStreamToken()) {
+          cancelAttempt(attempt);
+          scheduleReconnect();
+          return;
+        }
         const socket = new WebSocket(getWebSocketUrl(`/api/project-chat/threads/${activeThreadId}/stream`, token));
         attempt.socket = socket;
         socketRef.current = socket;
@@ -555,6 +568,7 @@ export function useProjectChat(projectId: string | null, threadId: string | null
                 return;
               }
               receivedSnapshot = true;
+              authRejects = 0;
               lastFrameAt = Date.now();
               completeAttempt(attempt);
               reconnectAttempt = 0;
@@ -621,6 +635,13 @@ export function useProjectChat(projectId: string | null, threadId: string | null
             } else if ("error" in message) {
               if (message.error === "Thread not found") {
                 stopAsNotFound(socket);
+                return;
+              }
+              // Token rejected — usually expired during a network blip; the
+              // reconnect mints a fresh one. Only surface it if that keeps failing.
+              if (isStreamAuthError(message.error)) {
+                authRejects += 1;
+                failSocket(socket, authRejects >= STREAM_AUTH_REJECTS_BEFORE_ERROR ? STREAM_AUTH_FAILED_MESSAGE : undefined);
                 return;
               }
               failSocket(socket, typeof message.error === "string" ? message.error : "Project Chat stream failed");

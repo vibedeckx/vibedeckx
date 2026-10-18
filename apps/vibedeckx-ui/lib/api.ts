@@ -8,12 +8,22 @@ import { appendTargetFailures, type RetainedBranch, type WorkspaceMachineCheck, 
 // background only when the cached JWT is near/after expiry). Always prefer
 // `getFreshToken()` over the bare cache for anything that can await.
 let _authToken: string | null = null;
+// Client-clock time `_authToken` was received from the getter (0 = set from
+// outside, unknown). Lets token age be judged without comparing the client
+// clock to the issuer's — see cachedTokenUsable.
+let _authTokenReceivedAt = 0;
+
+function cacheToken(token: string | null) {
+  if (token !== _authToken) _authTokenReceivedAt = token ? Date.now() : 0;
+  _authToken = token;
+}
 let _tokenGetter:
   | ((opts?: { skipCache?: boolean }) => Promise<string | null>)
   | null = null;
 
 export function setAuthToken(token: string | null) {
   _authToken = token;
+  _authTokenReceivedAt = 0;
 }
 
 export function getAuthToken(): string | null {
@@ -45,6 +55,17 @@ let _tokenGeneration = 0;
 // that arrive while a mint is in flight await that same promise instead: the
 // token it yields is just as fresh as one they would mint themselves.
 let _mintInFlight: Promise<string | null> | null = null;
+let _mintStartedAt = 0;
+// Mints are numbered so one that resolves late (after a newer mint already
+// landed) cannot overwrite the newer token in the cache.
+let _mintSeq = 0;
+let _cachedMintSeq = 0;
+
+// How long a caller waits on a network mint. On a stalled network Clerk's
+// request can hang far longer; past this the caller falls back to the cache,
+// and the hung mint stops being joined — the next forced call starts a new one
+// instead of waiting on a request that may never finish.
+const MINT_WAIT_MS = 5000;
 
 // Decode a JWT's `exp` and decide whether it is at/near expiry. The WS/SSE URL
 // builders read the warm `_authToken` cache synchronously, so a stale value here
@@ -65,6 +86,41 @@ function tokenExpiringSoon(token: string | null, withinSeconds = 10): boolean {
   }
 }
 
+// `exp - iat` in seconds: the issued lifetime, measured on the issuer's clock.
+function tokenLifetimeSeconds(token: string): number | null {
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return null;
+    const { exp, iat } = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))) as { exp?: number; iat?: number };
+    return typeof exp === "number" && typeof iat === "number" ? exp - iat : null;
+  } catch {
+    return null;
+  }
+}
+
+// Whether the cached token still has more than `marginSeconds` of life. The
+// `exp` check alone trusts the client clock: on a device running a minute
+// ahead even a just-minted JWT reads as expired. So a token that fails it is
+// still trusted while we have held it for less than its issued lifetime —
+// both sides of that comparison are clock-skew-free.
+function cachedTokenUsable(marginSeconds: number): boolean {
+  if (!_authToken) return false;
+  if (!tokenExpiringSoon(_authToken, marginSeconds)) return true;
+  const lifetime = tokenLifetimeSeconds(_authToken);
+  if (lifetime === null || _authTokenReceivedAt === 0) return false;
+  return Date.now() - _authTokenReceivedAt < (lifetime - marginSeconds) * 1000;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("token mint timed out")), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 // Returns a guaranteed-valid token. When the cached JWT is comfortably valid this
 // hits Clerk's in-memory cache with zero network cost; when it is at/near expiry
 // we force a network mint so the warm cache the synchronous WS/SSE readers see is
@@ -83,36 +139,66 @@ export async function getFreshToken(opts?: {
       let token: string | null;
       if (!skipCache) {
         token = await _tokenGetter({ skipCache: false });
-      } else if (_mintInFlight) {
-        token = await _mintInFlight;
-      } else {
+        if (generation === _tokenGeneration) cacheToken(token);
+        return token;
+      }
+      if (!_mintInFlight || Date.now() - _mintStartedAt >= MINT_WAIT_MS) {
         const getter = _tokenGetter;
+        const seq = ++_mintSeq;
         // The chain writes the cache itself, *before* the guard is cleared:
         // if the guard were dropped first, a caller landing in the microtask gap
         // before the waiters resume would see "cold cache, nothing in flight"
         // and start a second mint.
         const mint = getter({ skipCache: true })
           .then((t) => {
-            if (generation === _tokenGeneration) _authToken = t;
+            if (generation === _tokenGeneration && seq > _cachedMintSeq) {
+              _cachedMintSeq = seq;
+              cacheToken(t);
+            }
             return t;
           })
           .finally(() => {
             if (_mintInFlight === mint) _mintInFlight = null;
           });
         _mintInFlight = mint;
-        token = await mint;
+        _mintStartedAt = Date.now();
       }
-      if (generation === _tokenGeneration) _authToken = token;
-      return token;
+      return await withTimeout(_mintInFlight, MINT_WAIT_MS);
     } catch {
-      // Transient getToken() failure. The last-known token only helps while it
-      // still has real life left — handing back an already-expired JWT just earns
-      // an "Invalid token" rejection and a reconnect loop, so drop it in that case.
-      return tokenExpiringSoon(_authToken, 5) ? null : _authToken;
+      // Transient getToken() failure or stall. The last-known token only helps
+      // while it still has real life left — handing back an already-expired JWT
+      // just earns an "Invalid token" rejection and a reconnect loop.
+      return cachedTokenUsable(5) ? _authToken : null;
     }
   }
   return _authToken;
 }
+
+// WS upgrades carry the cached token in their URL. After a mint that failed or
+// stalled (flaky network), that cache can hold an already-expired JWT, and a
+// socket opened with it can only be answered "Invalid authentication token".
+// Stream openers check this first and retry later instead. No getter (auth
+// disabled, or signed out) → true: there is no better token to wait for.
+export function hasUsableStreamToken(): boolean {
+  if (!_tokenGetter) return true;
+  return cachedTokenUsable(2);
+}
+
+// The server's WS auth rejections (ws-authz.ts). They mean "this token was not
+// accepted", which after a network blip is a transient state, not something to
+// show the user verbatim.
+export function isStreamAuthError(error: unknown): boolean {
+  return error === "Invalid authentication token" || error === "Authentication required";
+}
+
+// Shown only once freshly minted tokens keep being rejected, i.e. the cause is
+// not the network: usually a skewed device clock, or a sign-in that has ended.
+export const STREAM_AUTH_FAILED_MESSAGE =
+  "Couldn't verify your sign-in. Check that this device's clock is correct, or refresh the page.";
+
+// Consecutive rejections of freshly minted tokens before the stream gives up
+// treating them as transient and surfaces STREAM_AUTH_FAILED_MESSAGE.
+export const STREAM_AUTH_REJECTS_BEFORE_ERROR = 3;
 
 // Build Authorization headers with a freshly-validated token. Use for fetch
 // calls that don't go through `authFetch` (e.g. the session hooks that build

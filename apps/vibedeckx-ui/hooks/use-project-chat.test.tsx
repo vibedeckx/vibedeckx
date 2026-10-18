@@ -13,6 +13,11 @@ const mocks = vi.hoisted(() => ({
   },
   getFreshToken: vi.fn(),
   getWebSocketUrl: vi.fn((path: string) => `ws://example.test${path}`),
+  hasUsableStreamToken: vi.fn(() => true),
+  isStreamAuthError: (error: unknown) =>
+    error === "Invalid authentication token" || error === "Authentication required",
+  STREAM_AUTH_FAILED_MESSAGE: "auth failed",
+  STREAM_AUTH_REJECTS_BEFORE_ERROR: 3,
 }));
 vi.mock("@/lib/api", () => mocks);
 

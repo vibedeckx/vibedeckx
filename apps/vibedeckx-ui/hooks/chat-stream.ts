@@ -1,6 +1,9 @@
 import { produce } from "immer";
 import { toast } from "sonner";
-import { getWebSocketUrl, getFreshToken, authFetch, api, type WorkflowRun } from "@/lib/api";
+import {
+  getWebSocketUrl, getFreshToken, authFetch, api, type WorkflowRun,
+  hasUsableStreamToken, isStreamAuthError, STREAM_AUTH_FAILED_MESSAGE, STREAM_AUTH_REJECTS_BEFORE_ERROR,
+} from "@/lib/api";
 import { sendCommandToIframe, openPreviewFrame } from "@/components/preview/browser-frames-provider";
 
 /**
@@ -261,6 +264,10 @@ const MAX_SHORT_LIVED_CONNECTIONS = 3;
 // The server sends `keepalive` every 30s, so three missed intervals means gone.
 const SILENCE_TIMEOUT_MS = 95000;
 
+// Bound on the token hop before a (re)connect, as in use-agent-session: a hung
+// Clerk getToken() must not leave the stream with no socket and no retry.
+const TOKEN_WAIT_TIMEOUT_MS = 5000;
+
 function getReconnectDelay(attempt: number): number {
   const baseDelay = Math.min(MAX_RECONNECT_DELAY_MS, 1000 * Math.pow(2, attempt));
   return baseDelay + baseDelay * Math.random() * 0.25;
@@ -291,6 +298,14 @@ export class ChatStream {
   private shortLivedConnections = 0;
   private connectionStartedAt: number | null = null;
   private lastStartFailed = false;
+  /**
+   * Token-wait retries (no usable token to open with) and server auth
+   * rejections. Kept off reconnectAttempt and the short-lived detector: a
+   * network blip must neither exhaust the reconnect budget nor reset the session.
+   */
+  private tokenRetryAttempt = 0;
+  private authRejects = 0;
+  private authRejectedSocket: WebSocket | null = null;
   /**
    * Count of local session-metadata writes. A background metadata read that
    * started before a write completed is stale by construction (it may have
@@ -336,6 +351,7 @@ export class ChatStream {
     this.finished = false;
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", this.onVisibilityChange);
+      window.addEventListener("online", this.onOnline);
     }
     void this.startSession();
   }
@@ -346,6 +362,7 @@ export class ChatStream {
     this.epoch += 1;
     if (typeof document !== "undefined") {
       document.removeEventListener("visibilitychange", this.onVisibilityChange);
+      window.removeEventListener("online", this.onOnline);
     }
     // Detach before close so this socket's late onclose is ignored (it would
     // otherwise schedule a reconnect into a workspace nobody is looking at).
@@ -450,10 +467,28 @@ export class ChatStream {
     if (!this.active) return;
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
     const epoch = this.epoch;
-    void getFreshToken(forceRefresh ? { skipCache: true } : undefined).then(() => {
-      if (epoch !== this.epoch || !this.active) return;
-      this.openSocket();
-    });
+    void Promise.race([
+      getFreshToken(forceRefresh ? { skipCache: true } : undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, TOKEN_WAIT_TIMEOUT_MS)),
+    ])
+      .catch(() => undefined)
+      .then(() => {
+        if (epoch !== this.epoch || !this.active) return;
+        // Even the last known token is dead (the mint failed or stalled): the
+        // server could only reject it, so wait and mint again instead.
+        if (!hasUsableStreamToken()) {
+          const delay = getReconnectDelay(Math.min(this.tokenRetryAttempt, 4));
+          this.tokenRetryAttempt++;
+          if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            if (this.state.session?.id && !this.finished) this.connect(true);
+          }, delay);
+          return;
+        }
+        this.tokenRetryAttempt = 0;
+        this.openSocket();
+      });
   }
 
   private openSocket(): void {
@@ -509,6 +544,19 @@ export class ChatStream {
       const connectionDuration = this.connectionStartedAt ? Date.now() - this.connectionStartedAt : 0;
       this.connectionStartedAt = null;
 
+      // An auth rejection says nothing about the session: keep it out of the
+      // short-lived detector and the reconnect budget, retry with a fresh mint.
+      if (this.authRejectedSocket === ws) {
+        this.authRejectedSocket = null;
+        if (this.finished) return;
+        const delay = getReconnectDelay(Math.min(this.authRejects - 1, 4));
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = null;
+          if (this.state.session?.id && !this.finished) this.connect(true);
+        }, delay);
+        return;
+      }
+
       if (!isVisibilityRecovery && connectionDuration > 0 && connectionDuration < MIN_STABLE_CONNECTION_MS) {
         this.shortLivedConnections++;
         if (this.shortLivedConnections >= MAX_SHORT_LIVED_CONNECTIONS) {
@@ -552,6 +600,9 @@ export class ChatStream {
   }
 
   private handleFrame(ws: WebSocket, msg: AgentWsMessage): void {
+    // Anything but an error frame means the server accepted our token.
+    if (!("error" in msg)) this.authRejects = 0;
+
     // Liveness-only frame — already accounted for by the watchdog re-arm.
     if ("keepalive" in msg) return;
 
@@ -613,6 +664,15 @@ export class ChatStream {
     }
 
     if ("error" in msg) {
+      // Token rejected: the server closes next and onclose reconnects with a
+      // fresh mint. Usually it expired during a network blip — only surface it
+      // once freshly minted tokens keep failing too.
+      if (isStreamAuthError(msg.error)) {
+        this.authRejectedSocket = ws;
+        this.authRejects++;
+        if (this.authRejects >= STREAM_AUTH_REJECTS_BEFORE_ERROR) this.set({ error: STREAM_AUTH_FAILED_MESSAGE });
+        return;
+      }
       this.set({ error: msg.error });
       if (msg.error === "Session not found") {
         sessionCache.delete(this.key);
@@ -678,6 +738,17 @@ export class ChatStream {
     // Already closed — the onclose reconnect logic will handle it.
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     ws.close(4000, "visibility-recovery");
+  };
+
+  /** Network back: reconnect now rather than at the end of a grown backoff. */
+  private onOnline = (): void => {
+    if (!this.state.session?.id || this.finished) return;
+    const ws = this.ws;
+    if (ws && ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) return;
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.reconnectAttempt = 0;
+    this.tokenRetryAttempt = 0;
+    this.connect(true);
   };
 
   // ---- actions (stable identities; safe to hand to event handlers) ----

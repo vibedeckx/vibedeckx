@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { getWebSocketUrl, getFreshToken, type LogMessage, type InputMessage } from "@/lib/api";
+import { getWebSocketUrl, getFreshToken, hasUsableStreamToken, type LogMessage, type InputMessage } from "@/lib/api";
 
 export type ConnectionStatus = "connecting" | "connected" | "closed" | "error";
 
@@ -71,14 +71,29 @@ export function useExecutorLogs(processId: string | null, resetKey?: string): Us
 
     // Per-effect cancellation flag — avoids stale reconnections when processId changes
     let cancelled = false;
+    let tokenRetryAttempt = 0;
 
     // Token-refreshing entry point: every (re)connect first fetches a
     // guaranteed-valid token (cache-hit = no network) so the WS upgrade never
-    // carries an expired JWT in its query string.
+    // carries an expired JWT in its query string. If the mint failed and only a
+    // dead token is left (network blip), wait and mint again — without spending
+    // the reconnect budget on a socket the server could only reject.
     function connect() {
       if (cancelled || finishedRef.current) return;
       void getFreshToken().then(() => {
-        if (!cancelled && !finishedRef.current) openSocket();
+        if (cancelled || finishedRef.current) return;
+        if (!hasUsableStreamToken()) {
+          setStatus("connecting");
+          const delay = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** Math.min(tokenRetryAttempt, 4));
+          tokenRetryAttempt += 1;
+          reconnectTimerRef.current = setTimeout(() => {
+            reconnectTimerRef.current = null;
+            connect();
+          }, delay);
+          return;
+        }
+        tokenRetryAttempt = 0;
+        openSocket();
       });
     }
 
