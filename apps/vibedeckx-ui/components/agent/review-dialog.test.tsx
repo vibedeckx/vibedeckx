@@ -155,6 +155,30 @@ describe("ReviewDialog reviewer reuse", () => {
   });
 });
 
+describe("ReviewDialog start error", () => {
+  it("drops a failed start's error when the dialog closes", async () => {
+    await renderAndOpen({ available: false, sessionId: null, title: null, agentType: null, reason: null });
+    createWorkflowRun.mockRejectedValueOnce(new Error("source session 正在运行"));
+    getReviewerCandidate.mockResolvedValueOnce({ available: false, sessionId: null, title: null, agentType: null, reason: null });
+    await act(async () => {
+      startButton().dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(document.body.textContent).toContain("source session 正在运行");
+
+    await act(async () => {
+      button("Cancel").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    getReviewerCandidate.mockResolvedValueOnce({ available: false, sessionId: null, title: null, agentType: null, reason: null });
+    await act(async () => {
+      container!.querySelector("button")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(document.body.querySelector('button[aria-label="Start"]')).not.toBeNull();
+    expect(document.body.textContent).not.toContain("source session 正在运行");
+  });
+});
+
 describe("ReviewDialog intent brief", () => {
   it("pre-generates on open without waiting for the reviewer candidate", async () => {
     // Distillation is the long pole (model calls, tens of seconds); anything

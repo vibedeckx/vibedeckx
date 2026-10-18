@@ -429,6 +429,10 @@ export function ReviewDialog({
       // become available and, worse, lets start() skip the in-flight check and
       // submit a reviewer id we were already told is unusable.
       setCandidateAnswer(null);
+      // Same for a failed start's error: "source session is running" is
+      // about the moment of that click, and the turn may well be over by the
+      // next open.
+      setError(null);
     }
   };
 
