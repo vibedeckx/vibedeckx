@@ -42,6 +42,7 @@ let currentTasks: Task[];
 let active: boolean;
 let openRequest: TasksOpenRequest | null;
 let onSelectedTaskChange: ReturnType<typeof vi.fn<(id: string | null) => void>>;
+let onStartSession: ReturnType<typeof vi.fn<(task: Task, branch: string | null) => void>>;
 
 beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
@@ -53,6 +54,7 @@ beforeEach(() => {
   currentTasks = tasks;
   openRequest = null;
   onSelectedTaskChange = vi.fn();
+  onStartSession = vi.fn();
   window.localStorage.clear();
   render(true);
 });
@@ -66,7 +68,7 @@ function render(nextActive = active) {
         projectId="project-1"
         tasks={currentTasks}
         loading={false}
-        worktrees={[]}
+        worktrees={[{ branch: null }, { branch: "feature-x" }]}
         onCreateTask={onCreateTask}
         onUpdateTask={onUpdateTask}
         onDeleteTask={vi.fn(async () => {})}
@@ -74,6 +76,7 @@ function render(nextActive = active) {
         onUnarchiveTask={vi.fn(async () => {})}
         openRequest={openRequest}
         onSelectedTaskChange={onSelectedTaskChange}
+        onStartSession={onStartSession}
       />,
     );
   });
@@ -101,6 +104,18 @@ const setTextareaValue = (el: HTMLTextAreaElement, value: string) =>
   });
 
 describe("TasksView detail panel", () => {
+  it("starts a session for the open task in the workspace picked from the menu", () => {
+    act(() => row("t1").click());
+    const trigger = Array.from(panel()!.querySelectorAll("button")).find((b) => b.textContent?.includes("Start session"))!;
+    act(() => {
+      trigger.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, ctrlKey: false }));
+    });
+    const items = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+    expect(items.map((el) => el.textContent)).toEqual(["main", "feature-x"]);
+    act(() => items[1].click());
+    expect(onStartSession).toHaveBeenCalledWith(expect.objectContaining({ id: "t1" }), "feature-x");
+  });
+
   it("opens on row click and toggles closed on a second click", () => {
     expect(panel()).toBeNull();
     act(() => row("t1").click());

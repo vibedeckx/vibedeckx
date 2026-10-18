@@ -251,6 +251,20 @@ interface AgentConversationProps {
   onReviewStarted?: (run: WorkflowRun, sourceTitle: string | null) => void;
   /** Open the stand-in view for a preparing review (same as clicking its sidebar row). */
   onViewPreparingReview?: (runId: string) => void;
+  taskSessionRequest?: TaskSessionRequest | null;
+  onTaskSessionRequestHandled?: () => void;
+}
+
+/**
+ * Start a new conversation in `branch` with `tasks` picked in the composer
+ * (the Tasks page's "Start session"). Applied once this window shows that
+ * workspace; a new object is a new request.
+ */
+export interface TaskSessionRequest {
+  projectId: string;
+  branch: string | null;
+  tasks: (Task & SelectedTask)[];
+  nonce: number;
 }
 
 export interface AgentConversationHandle {
@@ -303,7 +317,7 @@ function pasteTokenFor(id: number, bytes: number): string {
 }
 
 export const AgentConversation = forwardRef<AgentConversationHandle, AgentConversationProps>(
-  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onActiveSessionResultAtChange, onActiveSessionTurnEndAtChange, onOpenSchedule, onOpenTask, preparingReviews, onReviewStarted, onViewPreparingReview }, ref) {
+  function AgentConversation({ projectId, branch, sessionId, navPending, setSessionUrlParam, project, onAgentModeChange, onTaskCompleted, onSessionStarted, onSessionTitleUpdated, onSessionSelected, onStatusChange, onNewConversation, onActiveSessionChange, onActiveSessionResultAtChange, onActiveSessionTurnEndAtChange, onOpenSchedule, onOpenTask, preparingReviews, onReviewStarted, onViewPreparingReview, taskSessionRequest, onTaskSessionRequestHandled }, ref) {
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
@@ -923,6 +937,30 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     // stays mounted through the reset, so a plain focus is enough.
     focusComposer();
   }, [isLoading, session, startNewConversation, onNewConversation, setSessionUrlParam, focusComposer]);
+
+  // Tasks page "Start session": wait for the target workspace to be on screen
+  // and settled, detach from whatever session it shows (page.tsx pre-marks it
+  // a placeholder, so usually there is none), then pick the tasks into the
+  // composer of the empty conversation. Picked under the post-reset key, so
+  // the chip belongs to the new conversation, not the one left behind.
+  const appliedTaskSessionNonceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!taskSessionRequest || navPending) return;
+    if (appliedTaskSessionNonceRef.current === taskSessionRequest.nonce) return;
+    if (taskSessionRequest.projectId !== projectId || taskSessionRequest.branch !== branch) return;
+    if (isLoading || !isInitialized) return;
+    if (session) {
+      void handleNewConversation();
+      return;
+    }
+    // A fresh start: an empty conversation already on screen keeps its key, so
+    // a Schedule / Task chip armed there earlier must be dropped by hand.
+    appliedTaskSessionNonceRef.current = taskSessionRequest.nonce;
+    setArmedIntent(null);
+    setTaskSelection({ key: intentKey, tasks: taskSessionRequest.tasks });
+    onTaskSessionRequestHandled?.();
+    focusComposer();
+  }, [taskSessionRequest, navPending, projectId, branch, isLoading, isInitialized, session, intentKey, handleNewConversation, onTaskSessionRequestHandled, focusComposer]);
 
   useImperativeHandle(ref, () => ({
     startNewConversation: handleNewConversation,

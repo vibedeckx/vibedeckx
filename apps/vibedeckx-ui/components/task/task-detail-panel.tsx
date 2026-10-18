@@ -3,7 +3,15 @@
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { Archive, ArchiveRestore, ChevronDown, ChevronRight, ChevronUp, MessageSquare, Plus, Trash2, X } from "lucide-react";
+import { Archive, ArchiveRestore, ChevronDown, ChevronRight, ChevronUp, GitBranch, MessageSquare, MessageSquarePlus, Plus, Trash2, X } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { MarkdownField } from "./markdown-field";
 import { agoPhrase, footerDate, selfAndDescendantIds, subtaskProgress, taskFileBranch } from "./task-utils";
@@ -23,6 +31,8 @@ interface TaskDetailPanelProps {
   worktrees: Worktree[];
   assignedBranches: Set<string | null>;
   onOpenSourceSession?: (task: Task) => void;
+  /** Open a new conversation in a workspace with this task already picked in its composer. */
+  onStartSession?: (task: Task, branch: string | null) => void;
   /** Open a file linked from the description, in the task's source workspace. */
   onOpenFile?: (branch: string | null, path: string, line: number | null) => void;
   /** The project's tasks: the parent chain, the sub-tasks and the Parent picker's choices. */
@@ -54,6 +64,7 @@ export function TaskDetailPanel({
   worktrees,
   assignedBranches,
   onOpenSourceSession,
+  onStartSession,
   onOpenFile,
   tasks,
   onSelectTask,
@@ -105,6 +116,12 @@ export function TaskDetailPanel({
           </span>
         )}
         <span className="flex-1" />
+        {onStartSession && !archived && (
+          <>
+            <StartSessionMenu worktrees={worktrees} onPick={(branch) => onStartSession(task, branch)} />
+            <span className="mx-1 h-4 w-px bg-border" aria-hidden />
+          </>
+        )}
         {!archived && (
           <RowAction title="Archive" onClick={() => onArchive(task.id)}><Archive className="size-[13px]" /></RowAction>
         )}
@@ -302,6 +319,41 @@ export function TaskDetailPanel({
         <KeyHint keys={["Esc"]} className="ml-2">close</KeyHint>
       </div>
     </div>
+  );
+}
+
+/**
+ * "Start session ▾": the Tasks page has no current workspace, so the user
+ * names the one the new conversation opens in.
+ */
+function StartSessionMenu({ worktrees, onPick }: { worktrees: Worktree[]; onPick: (branch: string | null) => void }) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex h-[26px] items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-muted-foreground outline-none hover:bg-border/60 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 data-[state=open]:bg-border/60 data-[state=open]:text-foreground"
+        >
+          <MessageSquarePlus className="size-[13px]" aria-hidden />
+          Start session
+          <ChevronDown className="size-3 text-muted-foreground/70" aria-hidden />
+        </button>
+      </DropdownMenuTrigger>
+      {/* As wide as the button; long branch names truncate, full name on hover. */}
+      <DropdownMenuContent align="end" className="max-h-72 w-(--radix-dropdown-menu-trigger-width) min-w-0 overflow-y-auto">
+        <DropdownMenuLabel className="text-[11px] font-normal text-muted-foreground">Select workspace</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {worktrees.map((wt) => (
+          <DropdownMenuItem key={wt.branch ?? ""} onClick={() => onPick(wt.branch)} title={wt.branch ?? "main"} className="gap-2 font-mono text-[12px]">
+            <GitBranch className="size-3 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 truncate">{wt.branch ?? "main"}</span>
+          </DropdownMenuItem>
+        ))}
+        {worktrees.length === 0 && (
+          <div className="px-2 py-1.5 text-xs text-muted-foreground">No workspaces</div>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

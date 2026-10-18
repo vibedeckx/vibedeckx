@@ -341,7 +341,7 @@ vi.mock("./user-input-markers", () => ({ UserInputMarkers: () => null }));
 vi.mock("./quote-popover", () => ({ QuotePopover: () => null, appendQuote: vi.fn() }));
 vi.mock("./turn-end-divider", () => ({ TurnEndDivider: () => null }));
 
-import { AgentConversation } from "./agent-conversation";
+import { AgentConversation, type TaskSessionRequest } from "./agent-conversation";
 
 function makeRun(status: WorkflowRun["status"]): WorkflowRun {
   return {
@@ -765,6 +765,37 @@ describe("AgentConversation pendingModel", () => {
         });
 
         expect(chips(container)).toBe("Retention test");
+      });
+
+      it("Start session from Tasks drops a chip armed in the same empty conversation", async () => {
+        hookState.session = null;
+        hookState.messages = [];
+        const onHandled = vi.fn();
+        const [t1] = selectTaskFixture.tasks as never[];
+        const renderWith = (request: TaskSessionRequest | null) => act(async () => {
+          root.render(
+            <AgentConversation
+              projectId="pA"
+              branch="featA"
+              project={{ id: "pA", name: "pA", path: "/tmp/pA" } as never}
+              taskSessionRequest={request}
+              onTaskSessionRequestHandled={onHandled}
+            />,
+          );
+        });
+        const scheduleAction = () =>
+          Array.from(container.querySelectorAll<HTMLElement>('[data-testid="prompt-action"]'))
+            .find((el) => /schedule/i.test(el.textContent ?? ""))!;
+
+        await renderWith(null);
+        await act(async () => { scheduleAction().click(); });
+        expect(scheduleAction().getAttribute("aria-checked")).toBe("true");
+
+        await renderWith({ projectId: "pA", branch: "featA", tasks: [t1], nonce: 1 });
+
+        expect(onHandled).toHaveBeenCalledTimes(1);
+        expect(chips(container)).toBe("Retention test");
+        expect(scheduleAction().getAttribute("aria-checked")).toBe("false");
       });
 
       it("does not follow the user to another branch", async () => {

@@ -66,9 +66,12 @@ import {
   computeWorkspaceStatuses,
 } from '@/lib/workspace-status';
 import {
+  addPlaceholder,
   usePlaceholderWorkspaces,
   workspaceKey,
 } from '@/lib/placeholder-workspaces';
+import { directSubtasks } from '@/lib/selected-tasks';
+import type { TaskSessionRequest } from '@/components/agent/agent-conversation';
 import {
   selectionForProjectSwitch,
   workspacePlacement,
@@ -592,6 +595,25 @@ export default function Home() {
       await agentRef.current?.submitMessage(task.description ?? task.title);
     });
   }, []);
+
+  // Tasks page "Start session ▾": a new conversation in the picked workspace
+  // with the task already picked in its composer. Marking the workspace a
+  // placeholder first makes it open empty instead of loading (and flashing)
+  // its latest session; AgentConversation applies the chip once it is there.
+  const [taskSessionRequest, setTaskSessionRequest] = useState<TaskSessionRequest | null>(null);
+  const handleStartTaskSession = useCallback((task: Task, branch: string | null) => {
+    if (!currentProject) return;
+    addPlaceholder(workspaceKey(currentProject.id, branch, currentProject.agent_mode));
+    setTaskSessionRequest({
+      projectId: currentProject.id,
+      branch,
+      tasks: [{ ...task, subtasks: directSubtasks(tasks, task.id) }],
+      nonce: Date.now(),
+    });
+    setActiveView('workspace');
+    selectWorkspace(branch);
+    setActivateAgentTabNonce((nonce) => nonce + 1);
+  }, [currentProject, tasks, selectWorkspace]);
 
   const handleResetTask = useCallback((taskId: string) => {
     // Unassigning a task is metadata-only — agent_sessions stays put, so
@@ -1349,6 +1371,8 @@ Please proceed step by step and let me know if there are any issues or conflicts
                           setActiveView("schedules");
                         }}
                         onOpenTask={setProjectChatContextTask}
+                        taskSessionRequest={taskSessionRequest}
+                        onTaskSessionRequestHandled={() => setTaskSessionRequest(null)}
                       />
                         </div>
                       </>
@@ -1378,6 +1402,7 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 setActiveView("workspace");
                 selectBranchSession(task.source_session?.branch ?? null, task.source_session_id);
               }}
+              onStartSession={handleStartTaskSession}
               onOpenFile={openFileInWorkspace}
               openRequest={taskOpenRequest}
               onSelectedTaskChange={setSelectedTaskId}

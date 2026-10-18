@@ -48,6 +48,8 @@ interface TasksViewProps {
   onUnarchiveTask: (id: string) => Promise<void>;
   /** Jump to the conversation a proposed task came from, at its card. */
   onOpenSourceSession?: (task: Task) => void;
+  /** Open a new conversation in a workspace with the task picked in its composer. */
+  onStartSession?: (task: Task, branch: string | null) => void;
   /** Open a repo file in a workspace's Files tab (file links in descriptions). */
   onOpenFile?: (branch: string | null, path: string, line: number | null) => void;
   /** Open a task or the draft from outside (the sidebar); a new object re-opens. */
@@ -58,7 +60,7 @@ interface TasksViewProps {
 
 export type TasksOpenRequest = { kind: "task"; taskId: string; status: TaskStatus } | { kind: "draft" };
 
-export function TasksView({ active = true, projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession, onOpenFile, openRequest, onSelectedTaskChange }: TasksViewProps) {
+export function TasksView({ active = true, projectId, tasks, loading, worktrees, onCreateTask, onUpdateTask, onDeleteTask, onArchiveTask, onUnarchiveTask, onOpenSourceSession, onStartSession, onOpenFile, openRequest, onSelectedTaskChange }: TasksViewProps) {
   const { settings: convSettings } = useConversationSettings();
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [sort, setSort] = useState<TaskSort>(null);
@@ -374,6 +376,7 @@ export function TasksView({ active = true, projectId, tasks, loading, worktrees,
                       worktrees={worktrees}
                       assignedBranches={assignedBranches}
                       onOpenSourceSession={onOpenSourceSession}
+                      onStartSession={onStartSession}
                       onOpenFile={onOpenFile}
                       tasks={tasks}
                       onSelectTask={selectTask}
