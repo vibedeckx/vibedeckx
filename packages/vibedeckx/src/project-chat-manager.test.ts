@@ -1290,7 +1290,7 @@ describe("ProjectChatManager", () => {
       return { sessionId: requestedId };
     });
     const remoteSessions = {
-      listByProject: vi.fn(async () => []), getMapping: vi.fn(async () => mapping),
+      getMapping: vi.fn(async () => mapping),
       getDetail: vi.fn(async () => ({ status: "running" })),
     };
     const manager = new ProjectChatManager(storage, reply("unused"), {

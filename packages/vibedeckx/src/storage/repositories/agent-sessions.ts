@@ -23,6 +23,7 @@ import {
 import { WORKFLOW_ACTIVE_STATUSES } from "../workflow-run-status.js";
 import { VISIBLE_LIFECYCLE_STATES } from "../types.js";
 import { deleteSessionSideRows } from "./session-side-rows.js";
+import { escapeLike } from "./search-cache.js";
 // NotificationOutboxEvent is referenced only through Storage's method
 // signatures, which this factory's return type already pins.
 
@@ -642,9 +643,18 @@ export const createAgentSessionRepos = (
       return rows.map(mapAgentSession);
     },
 
-    listRecentActivityByProject: async (projectId, limit, consumer) => {
-      const rows = await localActivityBase(kdb, projectId)
-        .where(visibleLifecycleOf("s"))
+    listRecentActivityByProject: async (projectId, limit, consumer, filter) => {
+      let query = localActivityBase(kdb, projectId).where(visibleLifecycleOf("s"));
+      // Same projection as the selected `projected_branch`: WHERE cannot
+      // reference select aliases portably.
+      if (filter?.branch !== undefined) {
+        query = query.where(sql<boolean>`coalesce(case when s.workspace_checkout_id is null then s.branch else workspace.branch end, '') = ${filter.branch ?? ""}`);
+      }
+      if (filter?.titleQuery) {
+        const pattern = `%${escapeLike(filter.titleQuery.toLowerCase())}%`;
+        query = query.where(sql<boolean>`lower(coalesce(s.title, '')) like ${pattern} escape '\\'`);
+      }
+      const rows = await query
         .orderBy("s.activity_at", "desc")
         .orderBy("s.id", "desc")
         .limit(limit)

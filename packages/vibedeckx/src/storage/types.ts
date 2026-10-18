@@ -811,6 +811,14 @@ export type AgentSessionActivityStatus = AgentSessionStatus | "unknown";
 export type RemoteSessionActivityUpdateResult = true | "stale" | false;
 
 /** Project Overview projection shared by local rows and cached remote rows. */
+/** Optional narrowing for the recent-activity session lists. */
+export interface AgentSessionActivityFilter {
+  /** Exact workspace branch; null selects the branch-less main workspace. */
+  branch?: string | null;
+  /** Substring match against the session title. */
+  titleQuery?: string;
+}
+
 export interface AgentSessionActivity {
   id: string;
   projectId: string;
@@ -1319,7 +1327,7 @@ export interface Storage {
     /** Project Overview recency list; insertion order breaks sub-millisecond timestamp ties. */
     listRecentByProject: (projectId: string, limit: number) => Promise<AgentSession[]>;
     /** Checkout-first Project Overview projection. Dangling bound rows never fall back to snapshots. */
-    listRecentActivityByProject: (projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer) => Promise<AgentSessionActivity[]>;
+    listRecentActivityByProject: (projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer, filter?: AgentSessionActivityFilter) => Promise<AgentSessionActivity[]>;
     /** Checkout-first projection for one local session; undefined for missing or dangling bindings. */
     getActivityById: (id: string, consumer?: WorkspaceBindingReadConsumer) => Promise<AgentSessionActivity | undefined>;
     /** Newest stopped/error sessions, independent of the recent-sessions card window. */
@@ -1798,7 +1806,7 @@ export interface Storage {
   searchCache: {
     /** Active workspace catalog rows for exactly one project, in stable target/branch order. */
     listWorkspacesByProject(projectId: string, limit: number): Promise<Array<{ targetId: string; branch: string | null }>>;
-    listRemoteSessionActivityByProject(projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer): Promise<AgentSessionActivity[]>;
+    listRemoteSessionActivityByProject(projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer, filter?: AgentSessionActivityFilter): Promise<AgentSessionActivity[]>;
     listRemoteSessionAttentionByProject(projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer): Promise<AgentSessionActivity[]>;
     /** Cached remote sessions the user starred, newest star first. */
     listRemoteSessionFavoritesByProject(projectId: string, limit: number, consumer?: WorkspaceBindingReadConsumer): Promise<AgentSessionActivity[]>;

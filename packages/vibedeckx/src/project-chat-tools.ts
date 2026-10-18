@@ -11,6 +11,8 @@ import { sanitizeProjectChatPublicError } from "./project-chat-public-error.js";
 import { revertTaskPatch } from "./retention-holds.js";
 
 const LIST_LIMIT = 20;
+// Deepest page list_agent_sessions serves; filters reach older sessions.
+const SESSION_LIST_MAX_OFFSET = 500;
 const TRANSCRIPT_ENTRY_LIMIT = 20;
 const TRANSCRIPT_CHAR_LIMIT = 6_000;
 const RUN_PREVIEW_CHAR_LIMIT = 4_000;
@@ -73,7 +75,6 @@ export interface ProjectSessionDetail extends ProjectSessionSummary {
  * opaque local id through the persisted mapping; tool handlers never decode it.
  */
 export interface RemoteProjectSessionReader {
-  listByProject(projectId: string, limit: number): Promise<ProjectSessionSummary[]>;
   getMapping(sessionId: string): Promise<RemoteProjectSessionMapping | undefined>;
   getDetail(
     mapping: RemoteProjectSessionMapping,
@@ -92,17 +93,6 @@ export function createRemoteProjectSessionReader(options: {
   proxy(remoteServerId: string, method: string, path: string): Promise<RemoteProxyResult>;
 }): RemoteProjectSessionReader {
   return {
-    listByProject: async (projectId, limit) => {
-      const rows = await options.storage.remoteSessionMappings.listByProject(projectId, limit, "project-chat");
-      return rows.map((row) => ({
-        id: row.local_session_id,
-        projectId: row.project_id,
-        branch: row.branch,
-        title: null,
-        status: "unknown",
-        target: row.remote_server_id,
-      }));
-    },
     getMapping: async (sessionId) => {
       const unscoped = await options.storage.remoteSessionMappings.getByLocal(sessionId);
       if (!unscoped) return undefined;
@@ -175,7 +165,10 @@ export type ProjectChatTools = {
   list_tasks: ProjectChatTool<{ query?: string; status?: "todo" | "in_progress" | "done" | "cancelled" }, ListResult<Record<string, unknown>>>;
   get_task: ProjectChatTool<{ taskId: string }, Record<string, unknown>>;
   list_workspaces: ProjectChatTool<Record<string, never>, ListResult<{ id: string; target: string; branch: string | null }>>;
-  list_agent_sessions: ProjectChatTool<Record<string, never>, ListResult<ProjectSessionSummary>>;
+  list_agent_sessions: ProjectChatTool<
+    { branch?: string | null; query?: string; offset?: number },
+    ListResult<ProjectSessionSummary & { lastActiveAt: string | null }> & { nextOffset?: number }
+  >;
   list_starred_sessions: ProjectChatTool<Record<string, never>, ListResult<ProjectSessionSummary & { starredAt: string }>>;
   get_agent_session: ProjectChatTool<{ sessionId: string }, ProjectSessionDetail>;
   list_schedules: ProjectChatTool<Record<string, never>, ListResult<Record<string, unknown>>>;
@@ -340,17 +333,6 @@ function safeProperty(value: Record<PropertyKey, unknown>, key: PropertyKey): un
   }
 }
 
-function safePropertyRead(
-  value: Record<PropertyKey, unknown>,
-  key: PropertyKey,
-): { readable: true; value: unknown } | { readable: false } {
-  try {
-    return { readable: true, value: value[key] };
-  } catch {
-    return { readable: false };
-  }
-}
-
 function normalizeCollectionLimit(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
@@ -368,10 +350,6 @@ function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
-function isOptionalNullableString(value: unknown): value is string | null | undefined {
-  return value === undefined || isNullableString(value);
-}
-
 function safeArrayTail(value: unknown, requestedLimit: number): unknown[] {
   if (!safeIsArray(value)) return [];
   let rawLength: unknown;
@@ -385,27 +363,6 @@ function safeArrayTail(value: unknown, requestedLimit: number): unknown[] {
   const start = Math.max(0, rawLength - limit);
   const result: unknown[] = [];
   for (let index = start; index < rawLength; index++) {
-    try {
-      result.push(value[index]);
-    } catch {
-      result.push(undefined);
-    }
-  }
-  return result;
-}
-
-function safeArrayPrefix(value: unknown, requestedLimit: number): unknown[] {
-  if (!safeIsArray(value)) return [];
-  let rawLength: unknown;
-  try {
-    rawLength = value.length;
-  } catch {
-    return [];
-  }
-  if (typeof rawLength !== "number" || !Number.isSafeInteger(rawLength) || rawLength < 0) return [];
-  const count = Math.min(rawLength, normalizeCollectionLimit(requestedLimit));
-  const result: unknown[] = [];
-  for (let index = 0; index < count; index++) {
     try {
       result.push(value[index]);
     } catch {
@@ -1214,17 +1171,51 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       }),
     },
     list_agent_sessions: {
-      description: "List recent agent sessions across local and remote project workspaces.",
-      inputSchema: emptySchema,
-      execute: readInScope(async () => {
-        const [localRows, untrustedRemoteRows] = await Promise.all([
-          storage.agentSessions.listRecentActivityByProject(projectId, LIST_LIMIT / 2, "project-chat"),
-          remoteSessions?.listByProject(projectId, LIST_LIMIT / 2) ?? Promise.resolve([]),
+      description: "List agent sessions across local and remote project workspaces, most recently active first. "
+        + "Filter by workspace `branch` (null = the main workspace) and/or a title substring `query`; "
+        + "pass the returned `nextOffset` as `offset` to read older sessions.",
+      inputSchema: z.object({
+        branch: z.string().max(BRANCH_CHAR_LIMIT).nullable().optional(),
+        query: z.string().trim().min(1).max(256).optional(),
+        offset: z.number().int().min(0).max(SESSION_LIST_MAX_OFFSET).optional(),
+      }).strict(),
+      execute: readInScope(async ({ branch, query, offset = 0 }) => {
+        const filter = { branch, titleQuery: query };
+        // Each source is fetched through the page end plus one probe row, so
+        // the merged order is exact for this window. Without a remote reader,
+        // remote ids could not be opened by get_agent_session, so they are not
+        // offered.
+        const window = offset + LIST_LIMIT + 1;
+        const [localRows, remoteRows] = await Promise.all([
+          storage.agentSessions.listRecentActivityByProject(projectId, window, "project-chat", filter),
+          remoteSessions
+            ? storage.searchCache.listRemoteSessionActivityByProject(projectId, window, "project-chat", filter)
+            : Promise.resolve([]),
         ]);
-        const remoteRows = safeArrayPrefix(untrustedRemoteRows, LIST_LIMIT / 2);
-        const local = localRows.flatMap((row) => isToolSelectorId(row.id) ? [{
-          canonicalId: row.id,
-          item: {
+        // Interleave the two already-ordered streams instead of re-sorting:
+        // each output prefix then depends only on the same-length prefix of
+        // each source, so consecutive pages neither repeat nor skip rows even
+        // though the sources break ties (and rank) differently in SQL.
+        const merged: Array<(typeof localRows)[number]> = [];
+        const seen = new Set<string>();
+        let localIndex = 0;
+        let remoteIndex = 0;
+        while (localIndex < localRows.length || remoteIndex < remoteRows.length) {
+          const local = localRows[localIndex];
+          const remote = remoteRows[remoteIndex];
+          const takeLocal = remote === undefined
+            || (local !== undefined && (local.lastActiveAt ?? 0) >= (remote.lastActiveAt ?? 0));
+          const row = takeLocal ? local! : remote!;
+          if (takeLocal) localIndex++; else remoteIndex++;
+          if (row.projectId !== projectId || !isToolSelectorId(row.id) || seen.has(row.id)) continue;
+          seen.add(row.id);
+          merged.push(row);
+        }
+        const rows = merged.slice(offset, offset + LIST_LIMIT);
+        const hasMore = merged.length > offset + LIST_LIMIT;
+        await touchAll("agent_session", rows.map((row) => row.id));
+        return {
+          items: rows.map((row) => ({
             id: preview(row.id, ID_CHAR_LIMIT),
             projectId: preview(row.projectId, ID_CHAR_LIMIT),
             branch: nullablePreview(row.branch, LIST_BRANCH_CHAR_LIMIT),
@@ -1233,55 +1224,10 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
             target: preview(row.target, LIST_TARGET_CHAR_LIMIT),
             agentType: nullablePreview(row.agentType, ENUM_CHAR_LIMIT),
             model: nullablePreview(row.model, LIST_MODEL_CHAR_LIMIT),
-          } satisfies ProjectSessionSummary,
-        }] : []);
-        const authorizedRemote: Array<{ canonicalId: string; item: ProjectSessionSummary }> = [];
-        for (const rowValue of remoteRows) {
-          const row = safeRecord(rowValue);
-          if (!row) continue;
-          const projectIdRead = safePropertyRead(row, "projectId");
-          if (!projectIdRead.readable || projectIdRead.value !== projectId) continue;
-          const idRead = safePropertyRead(row, "id");
-          const statusRead = safePropertyRead(row, "status");
-          const targetRead = safePropertyRead(row, "target");
-          const branchRead = safePropertyRead(row, "branch");
-          const titleRead = safePropertyRead(row, "title");
-          const agentTypeRead = safePropertyRead(row, "agentType");
-          const modelRead = safePropertyRead(row, "model");
-          if (!idRead.readable || !statusRead.readable || !targetRead.readable
-            || !branchRead.readable || !titleRead.readable
-            || !agentTypeRead.readable || !modelRead.readable) continue;
-          const rowProjectId = projectIdRead.value;
-          const rowId = idRead.value;
-          const rowStatus = statusRead.value;
-          const rowTarget = targetRead.value;
-          const rowBranch = branchRead.value;
-          const rowTitle = titleRead.value;
-          const rowAgentType = agentTypeRead.value;
-          const rowModel = modelRead.value;
-          if (!isToolSelectorId(rowId) || !isCanonicalId(rowProjectId)
-            || typeof rowStatus !== "string" || typeof rowTarget !== "string"
-            || !isNullableString(rowBranch) || !isNullableString(rowTitle)
-            || !isOptionalNullableString(rowAgentType) || !isOptionalNullableString(rowModel)) continue;
-          authorizedRemote.push({
-            canonicalId: rowId,
-            item: {
-              id: preview(rowId, ID_CHAR_LIMIT),
-              projectId: preview(rowProjectId, ID_CHAR_LIMIT),
-              branch: nullablePreview(rowBranch, LIST_BRANCH_CHAR_LIMIT),
-              title: nullablePreview(rowTitle, LIST_NAME_CHAR_LIMIT),
-              status: preview(rowStatus, ENUM_CHAR_LIMIT),
-              target: preview(rowTarget, LIST_TARGET_CHAR_LIMIT),
-              agentType: nullablePreview(rowAgentType, ENUM_CHAR_LIMIT),
-              model: nullablePreview(rowModel, LIST_MODEL_CHAR_LIMIT),
-            },
-          });
-        }
-        const entries = [...local, ...authorizedRemote].slice(0, LIST_LIMIT);
-        await touchAll("agent_session", entries.map((entry) => entry.canonicalId));
-        return {
-          items: entries.map((entry) => entry.item),
-          truncated: localRows.length === LIST_LIMIT / 2 || remoteRows.length === LIST_LIMIT / 2,
+            lastActiveAt: row.lastActiveAt ? new Date(row.lastActiveAt).toISOString() : null,
+          })),
+          truncated: hasMore,
+          ...(hasMore && offset + LIST_LIMIT <= SESSION_LIST_MAX_OFFSET ? { nextOffset: offset + LIST_LIMIT } : {}),
         };
       }),
     },

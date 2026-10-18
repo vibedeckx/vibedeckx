@@ -1,6 +1,6 @@
 import { sql, type Kysely } from "kysely";
 import type { DB } from "../schema.js";
-import type { AgentSessionActivity, AgentSessionActivityStatus, Storage, SearchResultProjectRow, SearchResultSessionRow, SearchResultWorkspaceRow } from "../types.js";
+import type { AgentSessionActivity, AgentSessionActivityFilter, AgentSessionActivityStatus, Storage, SearchResultProjectRow, SearchResultSessionRow, SearchResultWorkspaceRow } from "../types.js";
 import type { DialectHelpers } from "../dialect.js";
 import { recordWorkspaceBindingRead, type WorkspaceBindingReadConsumer } from "../../workspace-binding-metrics.js";
 
@@ -9,7 +9,7 @@ export const fromDbBranch = (branch: string): string | null => (branch === "" ? 
 
 // Escapes LIKE metacharacters so user-typed '%'/'_' are matched literally
 // rather than acting as wildcards; paired with `escape '\'` at call sites.
-const escapeLike = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+export const escapeLike = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 
 // 0 exact, 1 prefix, 2 substring, 3 no match. `q` is expected pre-lowercased.
 const matchTier = (text: string | null | undefined, q: string): number => {
@@ -204,6 +204,23 @@ const remoteActivityBase = (kdb: Kysely<DB>, projectId: string) => remoteSession
     sql<string>`case when mapping.workspace_checkout_id is null then coalesce(mapping.branch, '') else workspace.branch end`.as("branch"),
   ]);
 
+// Same projection as the selected `branch`/`title` columns: WHERE cannot
+// reference select aliases portably.
+const withRemoteActivityFilter = <Q extends ReturnType<typeof remoteActivityBase>>(
+  query: Q,
+  filter: AgentSessionActivityFilter | undefined,
+): Q => {
+  let filtered = query;
+  if (filter?.branch !== undefined) {
+    filtered = filtered.where(sql<boolean>`(case when mapping.workspace_checkout_id is null then coalesce(mapping.branch, '') else workspace.branch end) = ${toDbBranch(filter.branch)}`) as Q;
+  }
+  if (filter?.titleQuery) {
+    const pattern = `%${escapeLike(filter.titleQuery.toLowerCase())}%`;
+    filtered = filtered.where(sql<boolean>`lower(coalesce(c.title, '')) like ${pattern} escape '\\'`) as Q;
+  }
+  return filtered;
+};
+
 export const createSearchCacheRepos = (
   kdb: Kysely<DB>,
   _h: DialectHelpers,
@@ -221,8 +238,8 @@ export const createSearchCacheRepos = (
       return rows.map((row) => ({ targetId: row.target_id, branch: fromDbBranch(row.branch) }));
     },
 
-    listRemoteSessionActivityByProject: async (projectId, limit, consumer) => {
-      const rows = await remoteActivityBase(kdb, projectId)
+    listRemoteSessionActivityByProject: async (projectId, limit, consumer, filter) => {
+      const rows = await withRemoteActivityFilter(remoteActivityBase(kdb, projectId), filter)
         .orderBy("c.last_active_at", "desc")
         .orderBy("c.local_session_id", "asc")
         .limit(limit)
