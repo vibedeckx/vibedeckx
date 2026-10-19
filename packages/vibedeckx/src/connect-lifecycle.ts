@@ -45,6 +45,7 @@ import {
   type RuntimeSource,
 } from "./connect-runtime.js";
 import { compareUpdateStatus, fetchLatestPublishedVersion } from "./update-check.js";
+import { describeShim, installShim, removeShim } from "./connect-shim.js";
 
 /**
  * `vibedeckx connect` lifecycle commands (worker-supervision-design §3.7).
@@ -629,6 +630,18 @@ export async function installService(options: InstallServiceOptions): Promise<Da
     if (adapter.tryEnableLinger()) lines.push("Enabled lingering so the worker starts at boot.");
   }
   lines.push(...adapter.notes());
+  try {
+    const shim = installShim({
+      dataDir,
+      launcher,
+      home: env.HOME ?? os.homedir(),
+      pathEnv: env.PATH ?? "",
+    });
+    lines.push(...describeShim(shim, dataDir, launcher));
+  } catch (error) {
+    // The service is up; a missing convenience command is not a failure.
+    lines.push(`Could not create the \`vibedeckx\` command: ${errorMessage(error)}`);
+  }
   return ok(lines.join("\n"));
 }
 
@@ -690,6 +703,7 @@ export async function uninstallService(options: LifecycleOptions): Promise<Daemo
   try {
     adapter.uninstall();
     removeServiceRecord(options.dataDir);
+    removeShim({ dataDir: options.dataDir, home: (options.env ?? process.env).HOME ?? os.homedir() });
   } catch (error) {
     return failed(`Uninstalling ${adapter.name} failed: ${errorMessage(error)}`);
   }

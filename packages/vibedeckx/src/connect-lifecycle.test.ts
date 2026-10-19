@@ -363,6 +363,36 @@ describe.runIf(process.platform === "linux")("installService", () => {
       expect.stringMatching(/^systemctl --user start vibedeckx-connect-/),
     ]);
     expect(log.join("\n")).toMatch(/`claude` is not on PATH/);
+    // A non-default data dir gets no `vibedeckx` command, just the launcher path.
+    expect(result.message).toContain(`${path.join(dataDir, "runtime", "launcher")} connect status --data-dir ${dataDir}`);
+  });
+
+  it("creates the `vibedeckx` command for the default data dir and removes it on uninstall", async () => {
+    dataDir = path.join(workDir, ".vibedeckx");
+    fs.mkdirSync(dataDir);
+    writeSavedConfig(dataDir, "https://hub.example");
+    writeSavedToken(dataDir, "tok");
+    const { exec } = fakeSystemd();
+    const env = { ...baseEnv(), PATH: `${path.join(workDir, ".local", "bin")}:/usr/bin` };
+
+    const result = await installService({
+      dataDir,
+      env,
+      exec,
+      platform: "linux",
+      runtimeSource: fakeRelease(),
+      sleep: async () => {},
+      log: () => {},
+      verifyTimeoutMs: 1_000,
+    });
+
+    const shim = path.join(workDir, ".local", "bin", "vibedeckx");
+    expect(result.exitCode).toBe(0);
+    expect(result.message).toContain("Manage it with `vibedeckx connect status|stop|start|restart`");
+    expect(fs.readFileSync(shim, "utf8")).toContain(path.join(dataDir, "runtime", "launcher"));
+
+    expect((await uninstallService({ dataDir, env, exec })).exitCode).toBe(0);
+    expect(fs.existsSync(shim)).toBe(false);
   });
 
   it("reports a start that never heartbeats and keeps data and runtime intact", async () => {

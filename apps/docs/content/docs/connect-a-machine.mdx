@@ -37,15 +37,17 @@ To pass the token without typing it, use `--token-file <path>` or `--token-stdin
 
 ### Managing the worker
 
+`install-service` also creates a `vibedeckx` command in `~/.local/bin` that runs the installed worker directly, without npx or a download. If `~/.local/bin` is not on your `PATH`, the installer tells you what to add.
+
 | Command | What it does |
 |---|---|
-| `npx vibedeckx connect status` | Shows whether the worker is running and connected, and how to fix it if not |
-| `npx vibedeckx connect stop` | Stops it until the next boot or `start` |
-| `npx vibedeckx connect start` | Starts it again |
-| `npx vibedeckx connect restart` | Restarts it |
-| `npx vibedeckx connect disable` | Stops it and keeps it off across reboots |
-| `npx vibedeckx connect enable` | Turns auto-start back on and starts it |
-| `npx vibedeckx connect uninstall-service` | Removes the service; your data and token are kept |
+| `vibedeckx connect status` | Shows whether the worker is running and connected, and how to fix it if not |
+| `vibedeckx connect stop` | Stops it until the next boot or `start` |
+| `vibedeckx connect start` | Starts it again |
+| `vibedeckx connect restart` | Restarts it |
+| `vibedeckx connect disable` | Stops it and keeps it off across reboots |
+| `vibedeckx connect enable` | Turns auto-start back on and starts it |
+| `vibedeckx connect uninstall-service` | Removes the service and the `vibedeckx` command; your data and token are kept |
 
 `status` only looks at this machine. Add `--check-update` to also check for a newer version.
 
@@ -54,7 +56,7 @@ To pass the token without typing it, use `--token-file <path>` or `--token-stdin
 If you rotate the token in **Settings → Remote Servers**, save the new one on the machine:
 
 ```bash
-npx vibedeckx connect setup
+vibedeckx connect setup
 ```
 
 It asks for the new token (press Enter to keep the current one). A running worker picks it up without a restart. While the token is invalid, `connect status` shows `auth-failed`.

@@ -509,6 +509,13 @@ Where the implementation made a choice the design left open, or deviated:
   on the host by rename never reaches the container. Verified with Compose
   `secrets:`, which is a single-file mount. The image has not been published
   yet, so the public docs do not mention it.
+- **Management command**: on success `install-service` writes
+  `~/.local/bin/vibedeckx`, a two-line shim that execs the runtime launcher.
+  Day-to-day `connect status/stop/...` therefore needs no npx, no network,
+  and always matches the running worker's version. It is only created for the
+  default data-dir, never over a `vibedeckx` it did not write (marker line),
+  and it is removed by `uninstall-service`. The installer prints what to add
+  when `~/.local/bin` is not on PATH, or when another `vibedeckx` comes first.
 - **Not done**: the install-mode handshake field (§6.4) and the Windows
   backend (§4.3). The launchd adapter is unit-tested only and has not run on a
   real Mac. A reboot was not exercised; boot start relies on `enable` plus
