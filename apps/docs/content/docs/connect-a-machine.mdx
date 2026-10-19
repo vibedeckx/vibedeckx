@@ -16,7 +16,7 @@ That runs the worker in your terminal until you close it. For a machine that sho
 ## Keep it running (Linux and macOS)
 
 ```bash
-npx vibedeckx@latest connect install-service --connect-to https://vibedeckx.dev
+npx vibedeckx@latest connect install --connect-to https://vibedeckx.dev
 ```
 
 It asks for the token (input is hidden), then installs the worker as a service of your user: **systemd** on Linux, **launchd** on macOS. The worker then:
@@ -28,7 +28,7 @@ It asks for the token (input is hidden), then installs the worker as a service o
 To pass the token without typing it, use `--token-file <path>` or `--token-stdin`. Avoid `--token` on the command line: other users on the machine can see it in the process list.
 
 <Callout title="Linux: start at boot">
-  systemd user services only start at boot when lingering is enabled for your user. `install-service` turns it on when it can; otherwise it prints the command, typically `sudo loginctl enable-linger $USER`.
+  systemd user services only start at boot when lingering is enabled for your user. `connect install` turns it on when it can; otherwise it prints the command, typically `sudo loginctl enable-linger $USER`.
 </Callout>
 
 <Callout title="macOS: after login">
@@ -37,7 +37,7 @@ To pass the token without typing it, use `--token-file <path>` or `--token-stdin
 
 ### Managing the worker
 
-`install-service` also creates a `vibedeckx` command in `~/.local/bin` that runs the installed worker directly, without npx or a download. If `~/.local/bin` is not on your `PATH`, the installer tells you what to add.
+`connect install` also creates a `vibedeckx` command in `~/.local/bin` that runs the installed worker directly, without npx or a download. If `~/.local/bin` is not on your `PATH`, the installer tells you what to add.
 
 | Command | What it does |
 |---|---|
@@ -47,7 +47,7 @@ To pass the token without typing it, use `--token-file <path>` or `--token-stdin
 | `vibedeckx connect restart` | Restarts it |
 | `vibedeckx connect disable` | Stops it and keeps it off across reboots |
 | `vibedeckx connect enable` | Turns auto-start back on and starts it |
-| `vibedeckx connect uninstall-service` | Removes the service and the `vibedeckx` command; your data and token are kept |
+| `vibedeckx connect uninstall` | Removes the service and the `vibedeckx` command; your data and token are kept |
 
 `status` only looks at this machine. Add `--check-update` to also check for a newer version.
 

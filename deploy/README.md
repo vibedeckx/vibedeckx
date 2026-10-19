@@ -156,4 +156,4 @@ VIBEDECKX_CONNECT_TO=https://vibedeckx.dev docker compose up -d
 ```
 
 See the comments in `deploy/worker/docker-compose.yml` for lifecycle and token
-rotation. On a regular machine, prefer `vibedeckx connect install-service`.
+rotation. On a regular machine, prefer `vibedeckx connect install`.

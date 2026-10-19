@@ -69,7 +69,7 @@ describe("connect command help", () => {
   it("offers token sources that keep the token off the command line", () => {
     const run = commandHelp("vibedeckx connect run");
     expect(run).toContain("--token-file");
-    for (const route of ["vibedeckx connect setup", "vibedeckx connect install-service"]) {
+    for (const route of ["vibedeckx connect setup", "vibedeckx connect install"]) {
       const help = commandHelp(route);
       expect(help).toContain("--token-file");
       expect(help).toContain("--token-stdin");
@@ -90,7 +90,7 @@ describe("connect command help", () => {
     "vibedeckx connect restart",
     "vibedeckx connect enable",
     "vibedeckx connect disable",
-    "vibedeckx connect uninstall-service",
+    "vibedeckx connect uninstall",
   ])(
     "exposes %s without connection credentials",
     (route) => {

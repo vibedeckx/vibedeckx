@@ -226,8 +226,8 @@ describe("lifecycle commands", () => {
   });
 
   it("requires a service for enable/disable", async () => {
-    expect((await lifecycleEnable({ dataDir, env: {} })).message).toMatch(/install-service/);
-    expect((await lifecycleDisable({ dataDir, env: {} })).message).toMatch(/install-service/);
+    expect((await lifecycleEnable({ dataDir, env: {} })).message).toMatch(/connect install/);
+    expect((await lifecycleDisable({ dataDir, env: {} })).message).toMatch(/connect install/);
   });
 
   it("routes through the installed service", async () => {
@@ -258,7 +258,7 @@ describe("lifecycle commands", () => {
   it("refuses a manual background start outside Linux", async () => {
     const result = await lifecycleStart({ dataDir, env: {}, platform: "darwin" });
     expect(result.exitCode).toBe(1);
-    expect(result.message).toMatch(/install-service/);
+    expect(result.message).toMatch(/connect install/);
   });
 
   it("uninstall without a service is a no-op success", async () => {
@@ -413,7 +413,7 @@ describe.runIf(process.platform === "linux")("installService", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.message).toMatch(/did not report a heartbeat.*journalctl --user -u/);
-    expect(result.message).toMatch(/re-run `vibedeckx connect install-service`/);
+    expect(result.message).toMatch(/re-run `vibedeckx connect install`/);
     expect(readCurrentVersion(dataDir)).toMatch(/^3\.0\.0\+[0-9a-f]{12}$/);
     expect(fs.existsSync(savedTokenPath(dataDir))).toBe(true);
   });

@@ -512,7 +512,7 @@ const connectDisableCommand = lifecycleCommand(
 );
 const connectUninstallServiceCommand = lifecycleCommand(
   uninstallService,
-  "Remove the auto-start service (keeps data, token and runtime)",
+  "Remove the auto-start service and the `vibedeckx` command (keeps data, token and runtime)",
 );
 
 const connectInstallServiceCommand = buildCommand({
@@ -534,8 +534,8 @@ const connectRoutes = buildRouteMap({
     restart: connectRestartCommand,
     enable: connectEnableCommand,
     disable: connectDisableCommand,
-    "install-service": connectInstallServiceCommand,
-    "uninstall-service": connectUninstallServiceCommand,
+    install: connectInstallServiceCommand,
+    uninstall: connectUninstallServiceCommand,
   },
   defaultCommand: "run",
   docs: { brief: "Connect to a Vibedeckx server as an inbound node" },

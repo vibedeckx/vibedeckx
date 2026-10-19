@@ -323,7 +323,7 @@ async function startManual(options: LifecycleOptions): Promise<DaemonCommandResu
   const platform = options.platform ?? process.platform;
   if (platform !== "linux") {
     return failed(
-      "No service is installed for this data directory. Run `vibedeckx connect install-service`, " +
+      "No service is installed for this data directory. Run `vibedeckx connect install`, " +
         "or run `vibedeckx connect` in the foreground.",
     );
   }
@@ -400,7 +400,7 @@ export async function lifecycleEnable(options: LifecycleOptions): Promise<Daemon
   const refused = refuseInDocker(options.env ?? process.env);
   if (refused) return refused;
   const adapter = serviceAdapter(options);
-  if (!adapter) return failed("No service is installed. Run `vibedeckx connect install-service` first.");
+  if (!adapter) return failed("No service is installed. Run `vibedeckx connect install` first.");
   return runServiceAction(() => adapter.enable(), `Enabled and started ${adapter.name}`);
 }
 
@@ -408,7 +408,7 @@ export async function lifecycleDisable(options: LifecycleOptions): Promise<Daemo
   const refused = refuseInDocker(options.env ?? process.env);
   if (refused) return refused;
   const adapter = serviceAdapter(options);
-  if (!adapter) return failed("No service is installed. Run `vibedeckx connect install-service` first.");
+  if (!adapter) return failed("No service is installed. Run `vibedeckx connect install` first.");
   return runServiceAction(
     () => adapter.disable(),
     `Stopped ${adapter.name} and disabled auto-start. It stays off across reboots until \`vibedeckx connect enable\`.`,
@@ -416,7 +416,7 @@ export async function lifecycleDisable(options: LifecycleOptions): Promise<Daemo
 }
 
 // ---------------------------------------------------------------------------
-// install-service / uninstall-service
+// install / uninstall
 // ---------------------------------------------------------------------------
 
 export interface InstallServiceOptions extends SetupOptions {
@@ -666,7 +666,7 @@ async function afterFailedStart(
         : "The previously running worker could not be restarted.",
     );
   }
-  parts.push("Fix the cause and re-run `vibedeckx connect install-service`.");
+  parts.push("Fix the cause and re-run `vibedeckx connect install`.");
   return parts.join(" ");
 }
 
@@ -711,7 +711,7 @@ export async function uninstallService(options: LifecycleOptions): Promise<Daemo
     [
       `Removed ${adapter.name}; the worker is stopped and will not start at boot.`,
       `Data, token and runtime are kept in ${options.dataDir}. ` +
-        "Re-run `vibedeckx connect install-service` to bring it back.",
+        "Re-run `vibedeckx connect install` to bring it back.",
     ].join("\n"),
   );
 }
