@@ -242,7 +242,14 @@ definition* (user-level or system-level) is a separate, per-platform choice.
 Also required:
 
 - **Idempotent.** Re-running it updates the definition in place and never
-  creates a second service.
+  creates a second service. A running service is restarted only when
+  something it uses changed (runtime build/`current`, launcher, saved token
+  or hub URL, the rendered definition, or `--force`), or when its heartbeat
+  shows an older version; otherwise it is left running, since a restart
+  kills its agent sessions. A stopped service is always started.
+- **Connected, not just running.** If the worker's first settled state is
+  `blocked` or `auth-failed`, install exits non-zero with the status
+  `detail`/`fix`. The service stays installed and recovers by itself.
 - **Recoverable.** If it fails part-way, the data-dir and every previously
   installed runtime version stay intact, and it reports what happened.
   Re-running `connect install` brings the service up; `connect uninstall`

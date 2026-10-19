@@ -59,8 +59,12 @@ export interface ServiceAdapter {
   readonly definitionPath: string;
   /** Validate the platform (versions, tools). Throws with an actionable message. */
   preflight(): void;
-  /** Write the definition and register auto-start. Does not start the worker. */
-  install(spec: ServiceSpec): void;
+  /**
+   * Write the definition and register auto-start. Does not start the worker.
+   * Returns whether the definition on disk changed; an unchanged one is left
+   * alone so a running worker keeps running.
+   */
+  install(spec: ServiceSpec): boolean;
   start(): void;
   stop(): void;
   restart(): void;
@@ -70,6 +74,14 @@ export interface ServiceAdapter {
   isActive(): boolean;
   /** Human-readable notes about platform limits (linger, login). */
   notes(): string[];
+}
+
+function readIfExists(file: string): string | undefined {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return undefined;
+  }
 }
 
 export function serviceRecordPath(dataDir: string): string {
@@ -222,12 +234,17 @@ export class SystemdUserAdapter implements ServiceAdapter {
     }
   }
 
-  install(spec: ServiceSpec): void {
+  install(spec: ServiceSpec): boolean {
     if (this.version === undefined) this.preflight();
-    fs.mkdirSync(path.dirname(this.definitionPath), { recursive: true });
-    writeFileAtomic(this.definitionPath, renderSystemdUnit(spec, this.version!));
-    this.systemctl(["daemon-reload"], "systemctl --user daemon-reload");
+    const unit = renderSystemdUnit(spec, this.version!);
+    const changed = readIfExists(this.definitionPath) !== unit;
+    if (changed) {
+      fs.mkdirSync(path.dirname(this.definitionPath), { recursive: true });
+      writeFileAtomic(this.definitionPath, unit);
+      this.systemctl(["daemon-reload"], "systemctl --user daemon-reload");
+    }
     this.systemctl(["enable", this.name], `systemctl --user enable ${this.name}`);
+    return changed;
   }
 
   start(): void {
@@ -383,13 +400,18 @@ export class LaunchdAgentAdapter implements ServiceAdapter {
     }
   }
 
-  install(spec: ServiceSpec): void {
+  install(spec: ServiceSpec): boolean {
     fs.mkdirSync(path.dirname(this.definitionPath), { recursive: true });
     fs.mkdirSync(path.join(spec.dataDir, "logs"), { recursive: true });
-    // Unload any previous definition so the new one is what gets bootstrapped.
-    this.exec("launchctl", ["bootout", this.target]);
-    writeFileAtomic(this.definitionPath, renderLaunchdPlist(this.name, spec));
+    const plist = renderLaunchdPlist(this.name, spec);
+    const changed = readIfExists(this.definitionPath) !== plist;
+    if (changed) {
+      // Unload any previous definition so the new one is what gets bootstrapped.
+      this.exec("launchctl", ["bootout", this.target]);
+      writeFileAtomic(this.definitionPath, plist);
+    }
     this.launchctl(["enable", this.target], `launchctl enable ${this.target}`);
+    return changed;
   }
 
   isLoaded(): boolean {

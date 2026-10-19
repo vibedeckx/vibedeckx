@@ -23,7 +23,9 @@ It installs the worker as a service of your user: **systemd** on Linux, **launch
 
 The token is saved privately in the worker's data directory; the running worker never has it on its command line. To keep it out of your shell history as well, leave `--token` out and paste the token when prompted, or use `--token-file <path>`.
 
-Running the same command again with a newer version upgrades the worker.
+Running the same command again with a newer version upgrades the worker. The worker restarts only when something changed (a new version, token or server URL); otherwise the command reports that it is already up to date and leaves running sessions alone.
+
+If the worker starts but cannot connect, for example because the token was revoked or belongs to another remote server, the command fails and prints the reason and how to fix it. The service stays installed and connects by itself once the token is fixed.
 
 <Callout title="Linux: start at boot">
   systemd user services only start at boot when lingering is enabled for your user. `connect install` turns it on when it can; otherwise it prints the command, typically `sudo loginctl enable-linger $USER`.

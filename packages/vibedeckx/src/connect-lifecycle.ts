@@ -42,6 +42,8 @@ import {
 import {
   detectRuntimeSource,
   installRuntime,
+  launcherPath,
+  readCurrentVersion,
   type RuntimeSource,
 } from "./connect-runtime.js";
 import { compareUpdateStatus, fetchLatestPublishedVersion } from "./update-check.js";
@@ -541,6 +543,13 @@ export async function installService(options: InstallServiceOptions): Promise<Da
     return failed(errorMessage(error));
   }
 
+  // What a running worker uses, so a re-run with identical inputs can leave it
+  // running (a restart kills its agent sessions).
+  const configBefore = readIfExists(savedConfigPath(dataDir));
+  const tokenBefore = readIfExists(savedTokenPath(dataDir));
+  const runtimeBefore = readCurrentVersion(dataDir);
+  const launcherBefore = readIfExists(launcherPath(dataDir));
+
   // 1. Configuration. The service only sees the saved config (plus PATH/HOME),
   //    never this shell's environment, so it must be complete on disk.
   const hasSaved = readSavedConfig(dataDir) !== undefined && fs.existsSync(savedTokenPath(dataDir));
@@ -562,10 +571,14 @@ export async function installService(options: InstallServiceOptions): Promise<Da
 
   // 2. Runtime.
   let launcher: string;
+  let runtimeVersion: string;
+  let runtimeChanged: boolean;
   try {
     const source = options.runtimeSource ?? detectRuntimeSource();
     const runtime = installRuntime(dataDir, source);
     launcher = runtime.launcher;
+    runtimeVersion = runtime.version;
+    runtimeChanged = runtime.buildId !== runtimeBefore || readIfExists(launcher) !== launcherBefore;
     log(
       `Runtime ${runtime.version} ${runtime.copied ? "installed" : "already installed"} at ${runtime.versionDir}`,
     );
@@ -587,8 +600,9 @@ export async function installService(options: InstallServiceOptions): Promise<Da
       return false;
     }
   })();
+  let definitionChanged: boolean;
   try {
-    adapter.install({ dataDir, launcher, pathEnv, home: env.HOME ?? os.homedir() });
+    definitionChanged = adapter.install({ dataDir, launcher, pathEnv, home: env.HOME ?? os.homedir() });
     writeServiceRecord(dataDir, adapter);
   } catch (error) {
     return failed(`Writing the service definition failed: ${errorMessage(error)}`);
@@ -611,7 +625,33 @@ export async function installService(options: InstallServiceOptions): Promise<Da
     log(`Stopped the manually started worker (PID ${inspection.state.pid}).`);
   }
 
-  // 5. Start (or restart onto the new definition/runtime) and verify.
+  // 5. Start (or restart onto the new definition/runtime) and verify. A
+  //    running service whose inputs are all unchanged is left alone.
+  if (wasActive) {
+    const running = readWorkerStatus(dataDir);
+    const upToDate =
+      !runtimeChanged &&
+      !definitionChanged &&
+      !options.force &&
+      readIfExists(savedConfigPath(dataDir)) === configBefore &&
+      readIfExists(savedTokenPath(dataDir)) === tokenBefore &&
+      // A worker left on an older build (e.g. an earlier restart failed).
+      (running === undefined || running.version === runtimeVersion);
+    if (upToDate) {
+      const state = running && judgeLiveness(running, running.pid)?.live ? running : undefined;
+      const unhealthy = connectionFailure(state);
+      if (unhealthy) return unhealthy;
+      return ok(
+        [
+          `${adapter.name} is already up to date and running` +
+            (state ? ` (PID ${state.pid}, connection: ${state.state}).` : "."),
+          "Nothing changed, so the worker was not restarted. Check it with `vibedeckx connect status`.",
+          ...finishInstall(adapter, dataDir, launcher, env),
+        ].join("\n"),
+      );
+    }
+  }
+
   const startedAt = Date.now();
   try {
     if (wasActive) adapter.restart();
@@ -635,10 +675,48 @@ export async function installService(options: InstallServiceOptions): Promise<Da
     );
   }
 
+  // The service stays installed either way: it keeps retrying and connects
+  // by itself once the token is fixed.
+  const unhealthy = connectionFailure(status);
+  if (unhealthy) return unhealthy;
+
+  return ok(
+    [
+      `Installed and started ${adapter.name} (PID ${status.pid}, connection: ${status.state}).`,
+      "It restarts on crashes and starts at boot. Check it with `vibedeckx connect status`.",
+      ...finishInstall(adapter, dataDir, launcher, env),
+    ].join("\n"),
+  );
+}
+
+function readIfExists(file: string): string | undefined {
+  try {
+    return fs.readFileSync(file, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/** A failed install result for a worker that is up but cannot connect. */
+function connectionFailure(status: WorkerStatus | undefined): DaemonCommandResult | undefined {
+  if (!status || (status.state !== "blocked" && status.state !== "auth-failed")) return undefined;
   const lines = [
-    `Installed and started ${adapter.name} (PID ${status.pid}, connection: ${status.state}).`,
-    "It restarts on crashes and starts at boot. Check it with `vibedeckx connect status`.",
+    `The service is installed and running (PID ${status.pid}), but the worker is not connected: ` +
+      `${status.state}${status.detail ? ` — ${status.detail}` : ""}.`,
   ];
+  if (status.fix) lines.push(`Fix: ${status.fix}`);
+  lines.push("It connects by itself once this is fixed. Check it with `vibedeckx connect status`.");
+  return failed(lines.join("\n"));
+}
+
+/** Linger, platform notes and the `vibedeckx` command, after the service is up. */
+function finishInstall(
+  adapter: ServiceAdapter,
+  dataDir: string,
+  launcher: string,
+  env: NodeJS.ProcessEnv,
+): string[] {
+  const lines: string[] = [];
   if (adapter instanceof SystemdUserAdapter && adapter.lingerEnabled() === false) {
     if (adapter.tryEnableLinger()) lines.push("Enabled lingering so the worker starts at boot.");
   }
@@ -655,7 +733,7 @@ export async function installService(options: InstallServiceOptions): Promise<Da
     // The service is up; a missing convenience command is not a failure.
     lines.push(`Could not create the \`vibedeckx\` command: ${errorMessage(error)}`);
   }
-  return ok(lines.join("\n"));
+  return lines;
 }
 
 function logHint(adapter: ServiceAdapter): string {

@@ -291,7 +291,15 @@ describe("lifecycle commands", () => {
 });
 
 /** A fake systemd whose `start` brings up a "worker" (this process) that heartbeats. */
-function fakeSystemd(options: { startFails?: boolean; neverHeartbeats?: boolean } = {}): {
+function fakeSystemd(
+  options: {
+    startFails?: boolean;
+    neverHeartbeats?: boolean;
+    /** The service is already running. */
+    active?: boolean;
+    status?: Partial<WorkerStatus>;
+  } = {},
+): {
   exec: Exec;
   calls: string[];
 } {
@@ -300,13 +308,18 @@ function fakeSystemd(options: { startFails?: boolean; neverHeartbeats?: boolean 
     calls.push([command, ...args].join(" "));
     const ok = { status: 0, stdout: "", stderr: "" };
     if (command === "systemctl" && args[0] === "--version") return { ...ok, stdout: "systemd 255 (255.4)" };
-    if (command === "systemctl" && args.includes("is-active")) return { ...ok, status: 3 };
+    if (command === "systemctl" && args.includes("is-active")) return { ...ok, status: options.active ? 0 : 3 };
     if (command === "loginctl") return { ...ok, stdout: "Linger=yes" };
     if (command === "systemctl" && (args[1] === "start" || args[1] === "restart")) {
       if (options.startFails) return { status: 1, stdout: "", stderr: "Job failed" };
       if (!options.neverHeartbeats) {
         writeRunState();
-        writeStatus({ state: "connecting", startedAt: new Date(Date.now() + 5).toISOString() });
+        writeStatus({
+          state: "connecting",
+          version: "3.0.0",
+          startedAt: new Date(Date.now() + 5).toISOString(),
+          ...options.status,
+        });
       }
     }
     return ok;
@@ -314,10 +327,10 @@ function fakeSystemd(options: { startFails?: boolean; neverHeartbeats?: boolean 
   return { exec, calls };
 }
 
-function fakeRelease(): ReturnType<typeof validateRuntimeSource> {
-  const root = path.join(workDir, "pkg");
+function fakeRelease(version = "3.0.0"): ReturnType<typeof validateRuntimeSource> {
+  const root = path.join(workDir, `pkg-${version}`);
   fs.mkdirSync(path.join(root, "dist"), { recursive: true });
-  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ version: "3.0.0" }));
+  fs.writeFileSync(path.join(root, "package.json"), JSON.stringify({ version }));
   fs.writeFileSync(path.join(root, "dist", "bin.js"), "");
   for (const nativeModule of ["better-sqlite3", "node-pty"]) {
     fs.mkdirSync(path.join(root, "node_modules", nativeModule), { recursive: true });
@@ -441,6 +454,102 @@ describe.runIf(process.platform === "linux")("installService", () => {
     expect(readCurrentVersion(dataDir)).toMatch(/^3\.0\.0\+[0-9a-f]{12}$/);
     expect(fs.existsSync(savedTokenPath(dataDir))).toBe(true);
   });
+
+  describe("re-running", () => {
+    async function install(
+      exec: Exec,
+      overrides: Partial<Parameters<typeof installService>[0]> = {},
+    ): Promise<Awaited<ReturnType<typeof installService>>> {
+      return installService({
+        dataDir,
+        env: baseEnv(),
+        exec,
+        platform: "linux",
+        runtimeSource: fakeRelease(),
+        sleep: async () => {},
+        log: () => {},
+        verifyTimeoutMs: 1_000,
+        ...overrides,
+      });
+    }
+    const startCalls = (calls: string[]) => calls.filter((call) => / (start|restart) vibedeckx/.test(call));
+
+    beforeEach(async () => {
+      writeSavedConfig(dataDir, "https://hub.example");
+      writeSavedToken(dataDir, "tok");
+      expect((await install(fakeSystemd().exec)).exitCode).toBe(0);
+    });
+
+    it("leaves a running worker alone when nothing changed", async () => {
+      const unit = readServiceRecord(dataDir)!.definitionPath;
+      const unitMtime = fs.statSync(unit).mtimeMs;
+      const { exec, calls } = fakeSystemd({ active: true });
+
+      const result = await install(exec, { token: "tok", connectTo: "https://hub.example" });
+
+      expect(result.exitCode).toBe(0);
+      expect(result.message).toContain("already up to date");
+      expect(result.message).toContain(`PID ${process.pid}`);
+      expect(startCalls(calls)).toEqual([]);
+      expect(calls.some((call) => call.includes("daemon-reload"))).toBe(false);
+      expect(fs.statSync(unit).mtimeMs).toBe(unitMtime);
+    });
+
+    it("starts a stopped service even when nothing changed", async () => {
+      // The worker is gone (its "PID" is this test process: never stop it).
+      fs.rmSync(daemonStatePath(dataDir));
+      const { exec, calls } = fakeSystemd();
+      expect((await install(exec)).exitCode).toBe(0);
+      expect(startCalls(calls)).toEqual([expect.stringMatching(/ start /)]);
+    });
+
+    it.each([
+      ["a new version", () => ({ runtimeSource: fakeRelease("3.0.1") })],
+      ["a new token", () => ({ token: "tok-2" })],
+      ["a new hub URL", () => ({ connectTo: "https://other.example" })],
+      ["a changed unit", () => ({ env: { ...baseEnv(), PATH: `${workDir}:/usr/bin:/bin` } })],
+      ["--force", () => ({ force: true })],
+    ])("restarts a running worker for %s", async (_label, overrides) => {
+      const { exec, calls } = fakeSystemd({ active: true });
+      const result = await install(exec, overrides());
+      expect(result.exitCode).toBe(0);
+      expect(startCalls(calls)).toEqual([expect.stringMatching(/ restart /)]);
+    });
+
+    it("restarts a running worker that is still on an older build", async () => {
+      writeStatus({ version: "2.9.0" });
+      const { exec, calls } = fakeSystemd({ active: true });
+      expect((await install(exec)).exitCode).toBe(0);
+      expect(startCalls(calls)).toEqual([expect.stringMatching(/ restart /)]);
+    });
+  });
+
+  it.each(["blocked", "auth-failed"] as const)(
+    "fails with the fix when the worker comes up %s, keeping the service",
+    async (state) => {
+      writeSavedConfig(dataDir, "https://hub.example");
+      writeSavedToken(dataDir, "tok");
+      const { exec } = fakeSystemd({
+        status: { state, detail: "token belongs to another remote", fix: "re-run with --force" },
+      });
+
+      const result = await installService({
+        dataDir,
+        env: baseEnv(),
+        exec,
+        platform: "linux",
+        runtimeSource: fakeRelease(),
+        sleep: async () => {},
+        log: () => {},
+        verifyTimeoutMs: 1_000,
+      });
+
+      expect(result.exitCode).toBe(1);
+      expect(result.message).toContain(`${state} — token belongs to another remote`);
+      expect(result.message).toContain("Fix: re-run with --force");
+      expect(readServiceRecord(dataDir)).toMatchObject({ kind: "systemd" });
+    },
+  );
 
   it("fails before touching anything when the platform check fails", async () => {
     const exec: Exec = () => ({ status: 1, stdout: "", stderr: "" });
