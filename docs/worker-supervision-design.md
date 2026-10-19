@@ -533,7 +533,26 @@ Where the implementation made a choice the design left open, or deviated:
   default data-dir, never over a `vibedeckx` it did not write (marker line),
   and it is removed by `connect uninstall`. The installer prints what to add
   when `~/.local/bin` is not on PATH, or when another `vibedeckx` comes first.
+- **launchd on a real Mac (2026-10-19)**: macOS 26.5 arm64, 0.3.52 from npm,
+  throwaway data-dirs against a local hub. Passed: install, re-install
+  (unchanged → no restart), SIGKILL and SIGTERM recovery, stop/start/restart,
+  disable (the override survives; launchd refuses to load the job), duplicate
+  start, revoke → `auth-failed` → recovery on token rename, pin mismatch →
+  `blocked`, hub outage, repeated startup failure (bad `current`: retried every
+  10s, recovered by itself), wedged loop (SIGSTOP → stale heartbeat, `status`
+  exit 1), interrupted install, uninstall. launchd also kills the job's
+  leftover children when the worker dies, and only the worker held
+  `instance.lock`. Two fixes came out of it:
+  - `bootout` is asynchronous: it returns while the job is still listed, so a
+    re-install with a changed plist hit `kickstart` "Could not find service"
+    (113) in 2 of 3 runs and **left the worker unloaded** until the next login.
+    `LaunchdAgentAdapter.bootout()` now waits until `launchctl print` no longer
+    finds the job (0/6 failures after the fix).
+  - launchd refuses to bootstrap a disabled job with a bare "Input/output
+    error" (5); `start`/`restart` now say to run `connect enable`, and `status`
+    shows the auto-start state as on systemd.
 - **Not done**: the install-mode handshake field (§6.4) and the Windows
-  backend (§4.3). The launchd adapter is unit-tested only and has not run on a
-  real Mac. A reboot was not exercised; boot start relies on `enable` plus
-  linger, both checked.
+  backend (§4.3). Reboot was not exercised on either platform (Linux boot start
+  relies on `enable` plus linger, both checked), nor was a macOS logout/login.
+  x64 Macs and `--daemon` migration on macOS (`--daemon` is Linux-only) are
+  untested.

@@ -35,6 +35,7 @@ import {
   readServiceRecord,
   removeServiceRecord,
   writeServiceRecord,
+  LaunchdAgentAdapter,
   SystemdUserAdapter,
   type Exec,
   type ServiceAdapter,
@@ -249,7 +250,7 @@ function describeService(dataDir: string, exec?: Exec): string | undefined {
   if (!record) return undefined;
   const adapter = adapterForRecord(dataDir, record, { exec });
   let autoStart = "";
-  if (adapter instanceof SystemdUserAdapter) {
+  if (adapter instanceof SystemdUserAdapter || adapter instanceof LaunchdAgentAdapter) {
     autoStart = adapter.isEnabled() ? ", auto-start enabled" : ", auto-start disabled";
   }
   return `Service: ${record.kind} (${record.name}${autoStart})`;

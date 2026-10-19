@@ -194,15 +194,89 @@ describe("launchd", () => {
     adapter.disable();
     expect(calls).toEqual([
       "launchctl print gui/501/dev.vibedeckx.connect",
+      "launchctl print-disabled gui/501",
       `launchctl bootstrap gui/501 ${adapter.definitionPath}`,
       "launchctl print gui/501/dev.vibedeckx.connect",
       "launchctl kickstart -k gui/501/dev.vibedeckx.connect",
       "launchctl print gui/501/dev.vibedeckx.connect",
       "launchctl bootout gui/501/dev.vibedeckx.connect",
+      "launchctl print gui/501/dev.vibedeckx.connect",
       "launchctl disable gui/501/dev.vibedeckx.connect",
       "launchctl print gui/501/dev.vibedeckx.connect",
     ]);
     // stop keeps the plist, so the agent loads again at the next login.
     expect(fs.existsSync(adapter.definitionPath)).toBe(true);
+  });
+
+  it("waits for an asynchronous bootout before loading a changed definition", () => {
+    // Real launchd: bootout returns while the job is still listed for a while.
+    let loaded = true;
+    let lingering = 0;
+    const { exec, calls } = recordingExec((command, args) => {
+      if (args[0] === "print" && args[1]?.includes("/dev.vibedeckx")) {
+        if (lingering > 0) lingering--;
+        else if (!loaded) return { status: 113 };
+        return { status: 0 };
+      }
+      if (args[0] === "bootout") {
+        loaded = false;
+        lingering = 2;
+      }
+      if (args[0] === "bootstrap") {
+        expect(lingering).toBe(0);
+        loaded = true;
+      }
+      return undefined;
+    });
+    const sleeps: number[] = [];
+    const adapter = new LaunchdAgentAdapter(VIBEDECKX_HOME, exec, 501, path.join(workDir, "home"), (ms) =>
+      sleeps.push(ms),
+    );
+    fs.mkdirSync(path.dirname(adapter.definitionPath), { recursive: true });
+    fs.writeFileSync(adapter.definitionPath, "old definition");
+
+    expect(adapter.install(spec({ dataDir: path.join(workDir, "data") }))).toBe(true);
+    expect(sleeps.length).toBeGreaterThan(0);
+    calls.length = 0;
+    adapter.restart();
+    expect(calls).toEqual([
+      "launchctl print gui/501/dev.vibedeckx.connect",
+      "launchctl print gui/501/dev.vibedeckx.connect",
+      "launchctl print-disabled gui/501",
+      `launchctl bootstrap gui/501 ${adapter.definitionPath}`,
+    ]);
+  });
+
+  it("gives up on a bootout that never completes", () => {
+    const { exec } = recordingExec((_command, args) =>
+      args[0] === "bootout" ? { status: 5, stderr: "Boot-out failed: 5: Input/output error" } : undefined,
+    );
+    const adapter = new LaunchdAgentAdapter(VIBEDECKX_HOME, exec, 501, path.join(workDir, "home"), () => {});
+    expect(() => adapter.stop()).toThrow(/bootout .* failed: Boot-out failed: 5/);
+  });
+
+  it("refuses to start a disabled agent with a pointer to enable", () => {
+    const { exec, calls } = recordingExec((_command, args) => {
+      if (args[0] === "print") return { status: 113 };
+      if (args[0] === "print-disabled") {
+        return { stdout: '\t"dev.vibedeckx.connect-other" => enabled\n\t"dev.vibedeckx.connect" => disabled\n' };
+      }
+      return undefined;
+    });
+    const adapter = new LaunchdAgentAdapter(VIBEDECKX_HOME, exec, 501, path.join(workDir, "home"));
+    expect(() => adapter.start()).toThrow("dev.vibedeckx.connect is disabled. Run `vibedeckx connect enable` to start it.");
+    expect(calls.some((call) => call.includes("bootstrap"))).toBe(false);
+  });
+
+  it("reads both print-disabled formats", () => {
+    const withOutput = (stdout: string) =>
+      new LaunchdAgentAdapter(VIBEDECKX_HOME, recordingExec(() => ({ stdout })).exec, 501, workDir);
+    expect(withOutput('"dev.vibedeckx.connect" => disabled').isEnabled()).toBe(false);
+    expect(withOutput('"dev.vibedeckx.connect" => true').isEnabled()).toBe(false);
+    expect(withOutput('"dev.vibedeckx.connect" => enabled').isEnabled()).toBe(true);
+    expect(withOutput('"dev.vibedeckx.connect" => false').isEnabled()).toBe(true);
+    // A prefix of another label must not match it.
+    expect(withOutput('"dev.vibedeckx.connect-1a2b3c4d" => disabled').isEnabled()).toBe(true);
+    expect(withOutput("").isEnabled()).toBe(true);
   });
 });

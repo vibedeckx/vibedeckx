@@ -51,6 +51,8 @@ If the worker starts but cannot connect, for example because the token was revok
 
 `status` only looks at this machine. Add `--check-update` to also check for a newer version.
 
+On macOS, launchd does not run a disabled worker at all, so `start` and `restart` refuse until you run `enable`.
+
 ### Changing the token
 
 If you rotate the token in **Settings → Remote Servers**, save the new one on the machine:

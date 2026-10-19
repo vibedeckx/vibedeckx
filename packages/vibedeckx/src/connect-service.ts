@@ -364,6 +364,14 @@ ${envXml}
 `;
 }
 
+/** Blocks the (synchronous) lifecycle commands while launchd finishes an unload. */
+const sleepSync = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+const BOOTOUT_WAIT_MS = 15_000;
+const BOOTOUT_POLL_MS = 100;
+
 export class LaunchdAgentAdapter implements ServiceAdapter {
   readonly kind = "launchd" as const;
   readonly name: string;
@@ -375,6 +383,7 @@ export class LaunchdAgentAdapter implements ServiceAdapter {
     private readonly exec: Exec = defaultExec,
     uid: number = process.getuid?.() ?? 0,
     home: string = os.homedir(),
+    private readonly sleep: (ms: number) => void = sleepSync,
   ) {
     this.name = `dev.vibedeckx.connect${serviceSuffix(dataDir)}`;
     this.definitionPath = path.join(home, "Library", "LaunchAgents", `${this.name}.plist`);
@@ -389,6 +398,28 @@ export class LaunchdAgentAdapter implements ServiceAdapter {
     const result = this.exec("launchctl", args);
     if (result.status !== 0) fail(action, result);
     return result;
+  }
+
+  /**
+   * `launchctl bootout` returns while the job is still being torn down: a
+   * `kickstart` then finds no service (113) and a `bootstrap` fails with
+   * "Input/output error" (5). Wait until the job is really gone.
+   */
+  private bootout(): void {
+    if (!this.isLoaded()) return;
+    const result = this.exec("launchctl", ["bootout", this.target]);
+    for (let waited = 0; this.isLoaded(); waited += BOOTOUT_POLL_MS) {
+      if (waited >= BOOTOUT_WAIT_MS) fail(`launchctl bootout ${this.target}`, result);
+      this.sleep(BOOTOUT_POLL_MS);
+    }
+  }
+
+  /** `print-disabled` says "disabled"/"enabled" (macOS 13+) or "true"/"false" (older). */
+  isEnabled(): boolean {
+    const result = this.exec("launchctl", ["print-disabled", this.domain]);
+    const escaped = this.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = new RegExp(`"${escaped}"\\s*=>\\s*(\\w+)`).exec(result.stdout);
+    return !match || match[1] === "enabled" || match[1] === "false";
   }
 
   preflight(): void {
@@ -407,7 +438,7 @@ export class LaunchdAgentAdapter implements ServiceAdapter {
     const changed = readIfExists(this.definitionPath) !== plist;
     if (changed) {
       // Unload any previous definition so the new one is what gets bootstrapped.
-      this.exec("launchctl", ["bootout", this.target]);
+      this.bootout();
       writeFileAtomic(this.definitionPath, plist);
     }
     this.launchctl(["enable", this.target], `launchctl enable ${this.target}`);
@@ -423,13 +454,16 @@ export class LaunchdAgentAdapter implements ServiceAdapter {
       this.launchctl(["kickstart", this.target], `launchctl kickstart ${this.target}`);
       return;
     }
+    // launchd refuses to load a disabled job with a bare "Input/output error".
+    if (!this.isEnabled()) {
+      throw new Error(`${this.name} is disabled. Run \`vibedeckx connect enable\` to start it.`);
+    }
     this.launchctl(["bootstrap", this.domain, this.definitionPath], `launchctl bootstrap ${this.domain}`);
   }
 
   /** bootout leaves the plist in place, so it loads again at the next login. */
   stop(): void {
-    if (!this.isLoaded()) return;
-    this.launchctl(["bootout", this.target], `launchctl bootout ${this.target}`);
+    this.bootout();
   }
 
   restart(): void {
@@ -451,7 +485,7 @@ export class LaunchdAgentAdapter implements ServiceAdapter {
   }
 
   uninstall(): void {
-    this.exec("launchctl", ["bootout", this.target]);
+    this.bootout();
     fs.rmSync(this.definitionPath, { force: true });
   }
 
