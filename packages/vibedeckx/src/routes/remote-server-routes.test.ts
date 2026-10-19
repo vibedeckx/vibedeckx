@@ -108,10 +108,12 @@ describe("inbound server lifecycle (create → id → connect token)", () => {
 
     const res = await app.inject({ method: "POST", url: `/api/remote-servers/${id}/connect-token` });
     expect(res.statusCode).toBe(200);
-    const { token, connectCommand } = res.json();
+    const { token, connectCommand, installCommand } = res.json();
     expect(token).toBeTypeOf("string");
     expect(token.length).toBeGreaterThan(0);
     expect(connectCommand).toContain("connect --connect-to");
+    // The service install takes the same arguments, behind `connect install`.
+    expect(installCommand).toBe(connectCommand.replace(" connect --", " connect install --"));
     expect(connectCommand).toContain(`--token ${token}`);
 
     // Token is persisted and resolvable — the worker will authenticate with it.

@@ -66,13 +66,16 @@ not caused by an explicit stop. The adapter-by-adapter mapping is in §4.
   `--daemon` remains, but only for starting a worker by hand over SSH.
 - `vibedeckx connect setup` saves the configuration in `<data-dir>`. After
   that, `vibedeckx connect` with no flags runs from the saved config.
-- **Token input never goes on the command line.** `setup` reads the token
-  from a hidden interactive prompt, from stdin (`--token-stdin`), or from
-  `--token-file <path>`, then stores it in its own file: mode `0600` on Unix, an
-  ACL limited to the user on Windows. The existing `--token` flag
-  ([`resolveConnectToken`](../packages/vibedeckx/src/connect-daemon.ts)) keeps
-  working for compatibility but prints a warning that the value is visible in
-  `ps` / `/proc/<pid>/cmdline`. Generated service files never contain a token.
+- **The running worker never has the token on its command line.** `setup` /
+  `install` take it from `--token` (the command copied from Settings → Remote
+  Servers), a hidden interactive prompt, stdin (`--token-stdin`), or
+  `--token-file <path>`, and store it in its own file: mode `0600` on Unix, an
+  ACL limited to the user on Windows. `--token` on these short-lived commands
+  is visible in `ps` only for the seconds they run (the same shell-history
+  exposure as before). On a long-running foreground `connect --token`
+  ([`resolveConnectToken`](../packages/vibedeckx/src/connect-daemon.ts)) it
+  keeps working for compatibility, with a warning. Generated service files
+  never contain a token.
 - **Precedence**, from highest to lowest: CLI flags > environment variables >
   saved config. Environment variables: `VIBEDECKX_CONNECT_TO`,
   `VIBEDECKX_CONNECT_TOKEN`, `VIBEDECKX_CONNECT_TOKEN_FILE` (Docker secrets
@@ -509,6 +512,13 @@ Where the implementation made a choice the design left open, or deviated:
   on the host by rename never reaches the container. Verified with Compose
   `secrets:`, which is a single-file mount. The image has not been published
   yet, so the public docs do not mention it.
+- **Copy-paste install**: the connect-token endpoints return `installCommand`
+  (`npx vibedeckx@latest connect install --connect-to … --token …`) next to the
+  existing `connectCommand`. The Remote Servers dialog shows both, install
+  first; the run-in-terminal command stays for systems without `install`.
+  This is hub ↔ browser only, not a tunnel change. The hub must ship after a
+  worker release that has `connect install`, because `@latest` resolves on the
+  user's machine.
 - **Management command**: on success `connect install` writes
   `~/.local/bin/vibedeckx`, a two-line shim that execs the runtime launcher.
   Day-to-day `connect status/stop/...` therefore needs no npx, no network,

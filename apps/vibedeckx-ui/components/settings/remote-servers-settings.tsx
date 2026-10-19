@@ -76,8 +76,9 @@ export function RemoteServersSettings() {
   const [tokenDialogServer, setTokenDialogServer] = useState<RemoteServer | null>(null);
   const [generatedToken, setGeneratedToken] = useState<string | null>(null);
   const [connectCommand, setConnectCommand] = useState<string | null>(null);
+  const [installCommand, setInstallCommand] = useState<string | null>(null);
   const [generatingToken, setGeneratingToken] = useState(false);
-  const [tokenCopied, setTokenCopied] = useState(false);
+  const [copiedCommand, setCopiedCommand] = useState<"install" | "run" | null>(null);
   const [rotating, setRotating] = useState(false);
   const [rotateConfirm, setRotateConfirm] = useState(false);
   // Server the in-flight token request belongs to. A request can outlive the
@@ -218,7 +219,8 @@ export function RemoteServersSettings() {
     setTokenDialogServer(server);
     setGeneratedToken(null);
     setConnectCommand(null);
-    setTokenCopied(false);
+    setInstallCommand(null);
+    setCopiedCommand(null);
     setRotateConfirm(false);
     setRotating(false);
     setGeneratingToken(true);
@@ -227,6 +229,7 @@ export function RemoteServersSettings() {
       if (tokenRequestRef.current !== server.id) return;
       setGeneratedToken(result.token);
       setConnectCommand(result.connectCommand);
+      setInstallCommand(result.installCommand ?? null);
     } catch (e) {
       if (tokenRequestRef.current !== server.id) return;
       tokenRequestRef.current = null;
@@ -239,12 +242,13 @@ export function RemoteServersSettings() {
 
   const handleRotateToken = async (server: RemoteServer) => {
     setRotating(true);
-    setTokenCopied(false);
+    setCopiedCommand(null);
     try {
       const result = await api.rotateRemoteServerConnectToken(server.id);
       if (tokenRequestRef.current === server.id) {
         setGeneratedToken(result.token);
         setConnectCommand(result.connectCommand);
+        setInstallCommand(result.installCommand ?? null);
         setRotateConfirm(false);
       }
       await loadServers();
@@ -264,10 +268,10 @@ export function RemoteServersSettings() {
     }
   };
 
-  const copyToClipboard = (text: string) => {
+  const copyCommand = (which: "install" | "run", text: string) => {
     navigator.clipboard.writeText(text);
-    setTokenCopied(true);
-    setTimeout(() => setTokenCopied(false), 2000);
+    setCopiedCommand(which);
+    setTimeout(() => setCopiedCommand((current) => (current === which ? null : current)), 2000);
   };
 
   // --- Cross-remote access ---
@@ -528,6 +532,7 @@ export function RemoteServersSettings() {
             setTokenDialogServer(null);
             setGeneratedToken(null);
             setConnectCommand(null);
+            setInstallCommand(null);
             setRotateConfirm(false);
           }
         }}
@@ -549,31 +554,33 @@ export function RemoteServersSettings() {
             </div>
           ) : generatedToken ? (
             <div className="space-y-4">
+              {installCommand && (
+                <CommandBox
+                  label="Install as a service (Linux, macOS)"
+                  value={installCommand}
+                  copied={copiedCommand === "install"}
+                  onCopy={() => copyCommand("install", installCommand)}
+                  hint="Recommended. Runs the worker in the background, starts it at boot and restarts it if it crashes. Manage it afterwards with `vibedeckx connect status`."
+                />
+              )}
               <div className="space-y-2">
-                <label className="text-sm font-medium">Connect Command</label>
-                <div className="flex gap-2">
-                  <Input
-                    readOnly
-                    value={connectCommand || ''}
-                    className="font-mono text-xs"
-                  />
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    className="shrink-0"
-                    onClick={() => copyToClipboard(connectCommand || '')}
-                    title="Copy command"
-                  >
-                    {tokenCopied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
-                  </Button>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Run this command on the remote machine to establish the reverse connection.
-                </p>
+                <CommandBox
+                  label={installCommand ? "Run in this terminal only" : "Connect Command"}
+                  value={connectCommand || ''}
+                  copied={copiedCommand === "run"}
+                  onCopy={() => copyCommand("run", connectCommand || '')}
+                  hint={
+                    installCommand
+                      ? "Any OS. Stops when you close the terminal."
+                      : "Run this command on the remote machine to establish the reverse connection."
+                  }
+                />
                 {rotateConfirm && (
                   <p className="text-xs text-destructive">
                     Rotating invalidates the current token immediately. Any worker
-                    still using it will fail to reconnect until you re-run the new command.
+                    still using it will fail to reconnect until it gets the new one: run
+                    `vibedeckx connect setup` on a machine installed as a service, or re-run
+                    the new command.
                   </p>
                 )}
               </div>
@@ -619,6 +626,7 @@ export function RemoteServersSettings() {
                 setTokenDialogServer(null);
                 setGeneratedToken(null);
                 setConnectCommand(null);
+                setInstallCommand(null);
                 setRotateConfirm(false);
               }}
             >
@@ -663,6 +671,33 @@ export function RemoteServersSettings() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
+
+function CommandBox({
+  label,
+  value,
+  copied,
+  onCopy,
+  hint,
+}: {
+  label: string;
+  value: string;
+  copied: boolean;
+  onCopy: () => void;
+  hint: string;
+}) {
+  return (
+    <div className="space-y-2">
+      <label className="text-sm font-medium">{label}</label>
+      <div className="flex gap-2">
+        <Input readOnly value={value} aria-label={label} className="font-mono text-xs" />
+        <Button variant="outline" size="icon" className="shrink-0" onClick={onCopy} title="Copy command">
+          {copied ? <Check className="h-4 w-4 text-green-500" /> : <Copy className="h-4 w-4" />}
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">{hint}</p>
     </div>
   );
 }

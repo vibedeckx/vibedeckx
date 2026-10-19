@@ -170,11 +170,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   );
 
-  // Derive the worker-facing server URL from the incoming request.
-  const connectCommandFor = (request: FastifyRequest, token: string) => {
+  // Ready-to-paste worker commands, with the worker-facing server URL derived
+  // from the incoming request:
+  //  - installCommand: install as a service that starts at boot and restarts
+  //    on crashes (Linux/macOS);
+  //  - connectCommand: run in the current terminal only (any OS).
+  const commandsFor = (request: FastifyRequest, token: string) => {
     const proto = request.headers["x-forwarded-proto"] || request.protocol || "http";
     const host = request.headers["x-forwarded-host"] || request.headers.host || "localhost";
-    return `npx vibedeckx@latest connect --connect-to ${proto}://${host} --token ${token}`;
+    const args = `--connect-to ${proto}://${host} --token ${token}`;
+    return {
+      installCommand: `npx vibedeckx@latest connect install ${args}`,
+      connectCommand: `npx vibedeckx@latest connect ${args}`,
+    };
   };
 
   // Shared body of the two connect-token endpoints: resolve the server, run the
@@ -194,7 +202,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const token = await op(id, userId);
     if (!token) return reply.code(500).send({ error: failure });
 
-    return reply.send({ token, connectCommand: connectCommandFor(request, token) });
+    return reply.send({ token, ...commandsFor(request, token) });
   };
 
   // POST /api/remote-servers/:id/connect-token — read the connect token, minting

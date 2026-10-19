@@ -66,14 +66,14 @@ describe("connect command help", () => {
     expect(help).toContain("--daemon");
   });
 
-  it("offers token sources that keep the token off the command line", () => {
+  it("accepts the token inline, from a file, or from stdin on setup and install", () => {
     const run = commandHelp("vibedeckx connect run");
     expect(run).toContain("--token-file");
     for (const route of ["vibedeckx connect setup", "vibedeckx connect install"]) {
       const help = commandHelp(route);
+      expect(help).toMatch(/--token\s/);
       expect(help).toContain("--token-file");
       expect(help).toContain("--token-stdin");
-      expect(help).not.toMatch(/--token\s/);
     }
   });
 

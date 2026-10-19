@@ -368,6 +368,15 @@ export type CrossRemoteAccess = 'off' | 'read' | 'exec';
 
 export type WorkerUpdateStatus = 'unreported' | 'behind-min' | 'behind-latest' | 'current';
 
+/** A connect token plus the ready-to-paste worker commands built from it. */
+export interface ConnectTokenResult {
+  token: string;
+  /** Install as a service: starts at boot, restarts on crash (Linux/macOS). */
+  installCommand: string;
+  /** Run in the current terminal only (any OS). */
+  connectCommand: string;
+}
+
 export interface RemoteServer {
   id: string;
   name: string;
@@ -3477,7 +3486,7 @@ export const api = {
   },
 
   /** Current connect token (minted on first call). Idempotent — safe to re-open the dialog. */
-  async getRemoteServerConnectToken(id: string): Promise<{ token: string; connectCommand: string }> {
+  async getRemoteServerConnectToken(id: string): Promise<ConnectTokenResult> {
     const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/connect-token`, {
       method: "POST",
     });
@@ -3489,7 +3498,7 @@ export const api = {
   },
 
   /** Replaces the connect token — the previous one stops working immediately. */
-  async rotateRemoteServerConnectToken(id: string): Promise<{ token: string; connectCommand: string }> {
+  async rotateRemoteServerConnectToken(id: string): Promise<ConnectTokenResult> {
     const res = await authFetch(`${getApiBase()}/api/remote-servers/${id}/connect-token/rotate`, {
       method: "POST",
     });

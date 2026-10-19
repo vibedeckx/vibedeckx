@@ -82,6 +82,8 @@ function errorMessage(error: unknown): string {
 export interface SetupOptions {
   dataDir: string;
   connectTo?: string;
+  /** Token value from the command line (copy-pasted install command). */
+  token?: string;
   tokenFile?: string;
   tokenStdin?: boolean;
   force?: boolean;
@@ -107,8 +109,13 @@ export interface SetupOutcome {
  */
 export async function runSetup(options: SetupOptions): Promise<SetupOutcome> {
   const env = options.env ?? process.env;
-  if (options.tokenFile !== undefined && options.tokenStdin) {
-    throw new Error("Use either --token-file or --token-stdin, not both");
+  const sources = [
+    options.token !== undefined && "--token",
+    options.tokenFile !== undefined && "--token-file",
+    options.tokenStdin && "--token-stdin",
+  ].filter(Boolean);
+  if (sources.length > 1) {
+    throw new Error(`Use only one of ${sources.join(", ")}`);
   }
 
   const connectTo = resolveConnectTo({ dataDir: options.dataDir, flag: options.connectTo, env });
@@ -117,7 +124,12 @@ export async function runSetup(options: SetupOptions): Promise<SetupOutcome> {
   }
 
   let token: string | undefined;
-  if (options.tokenFile !== undefined) {
+  if (options.token !== undefined) {
+    // Fine here, unlike on a long-running `connect --token`: the value is on
+    // this short-lived command line only and is stored privately from now on.
+    token = options.token.trim();
+    if (!token) throw new Error("--token is empty");
+  } else if (options.tokenFile !== undefined) {
     token = readToken({ kind: "file", path: path.resolve(options.tokenFile), origin: "--token-file" });
   } else if (options.tokenStdin) {
     token = (await (options.readStdin ?? readAllStdin)()).trim();
@@ -535,6 +547,7 @@ export async function installService(options: InstallServiceOptions): Promise<Da
   const wantsSetup =
     !hasSaved ||
     options.connectTo !== undefined ||
+    options.token !== undefined ||
     options.tokenFile !== undefined ||
     options.tokenStdin ||
     options.force;

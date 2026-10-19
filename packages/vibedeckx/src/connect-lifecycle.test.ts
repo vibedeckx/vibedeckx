@@ -88,6 +88,30 @@ describe("runSetup", () => {
     expect(fs.readFileSync(savedTokenPath(dataDir), "utf8").trim()).toBe("tok-file");
   });
 
+  it("takes a token pasted on the command line and never prompts", async () => {
+    writeSavedToken(dataDir, "old");
+    const promptToken = vi.fn(async () => "never");
+    const outcome = await runSetup({
+      dataDir,
+      connectTo: "https://hub.example",
+      token: "  tok-inline ",
+      env: {},
+      promptToken,
+    });
+    expect(outcome.tokenUpdated).toBe(true);
+    expect(promptToken).not.toHaveBeenCalled();
+    expect(fs.readFileSync(savedTokenPath(dataDir), "utf8").trim()).toBe("tok-inline");
+  });
+
+  it("refuses more than one token source", async () => {
+    await expect(
+      runSetup({ dataDir, connectTo: "https://hub.example", token: "a", tokenFile: "/x", env: {} }),
+    ).rejects.toThrow("Use only one of --token, --token-file");
+    await expect(
+      runSetup({ dataDir, connectTo: "https://hub.example", token: "a", tokenStdin: true, env: {} }),
+    ).rejects.toThrow("--token, --token-stdin");
+  });
+
   it("reads the token from stdin, the environment, or a hidden prompt", async () => {
     await runSetup({
       dataDir,

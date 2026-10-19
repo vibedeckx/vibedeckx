@@ -261,6 +261,12 @@ const setupFlags = {
     brief: `URL of the Vibedeckx server to connect to. Env: ${CONNECT_TO_ENV}`,
     optional: true as const,
   },
+  token: {
+    kind: "parsed" as const,
+    parse: String,
+    brief: "Connect token, as in the command copied from Settings → Remote Servers. It is saved privately; the worker never runs with it on its command line",
+    optional: true as const,
+  },
   "token-file": {
     kind: "parsed" as const,
     parse: String,
@@ -282,6 +288,7 @@ const setupFlags = {
 
 interface SetupFlags {
   "connect-to": string | undefined;
+  token: string | undefined;
   "token-file": string | undefined;
   "token-stdin": boolean | undefined;
   force: boolean | undefined;
@@ -292,6 +299,7 @@ function setupOptionsFromFlags(flags: SetupFlags) {
   return {
     dataDir: resolveDataDir(flags["data-dir"]),
     connectTo: flags["connect-to"],
+    token: flags.token,
     tokenFile: flags["token-file"],
     tokenStdin: flags["token-stdin"] ?? false,
     force: flags.force ?? false,

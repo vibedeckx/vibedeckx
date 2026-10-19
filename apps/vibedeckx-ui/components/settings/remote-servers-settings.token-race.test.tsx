@@ -81,7 +81,10 @@ const click = async (el: Element | null | undefined) => {
 
 const tokenButtons = () => Array.from(document.querySelectorAll('[title="Connect token"]'));
 const dialogDescription = () => document.querySelector('[data-testid="dialog-description"]')?.textContent ?? "";
-const commandInput = () => document.querySelector("input.font-mono") as HTMLInputElement | null;
+const commandInput = () =>
+  document.querySelector('input[aria-label="Run in this terminal only"]') as HTMLInputElement | null;
+const installInput = () =>
+  document.querySelector('input[aria-label="Install as a service (Linux, macOS)"]') as HTMLInputElement | null;
 const closeButton = () =>
   Array.from(document.querySelectorAll("button")).find((b) => b.textContent === "Close");
 
@@ -100,8 +103,8 @@ afterEach(() => {
 describe("connect token dialog with slow responses", () => {
   it("ignores a response that belongs to a remote the dialog has moved on from", async () => {
     getRemoteServers.mockResolvedValue([makeServer("a", "alpha"), makeServer("b", "bravo")]);
-    const first = deferred<{ token: string; connectCommand: string }>();
-    const second = deferred<{ token: string; connectCommand: string }>();
+    const first = deferred<{ token: string; connectCommand: string; installCommand: string }>();
+    const second = deferred<{ token: string; connectCommand: string; installCommand: string }>();
     getRemoteServerConnectToken.mockImplementation((id: string) =>
       id === "a" ? first.promise : second.promise,
     );
@@ -117,18 +120,19 @@ describe("connect token dialog with slow responses", () => {
 
     // Bravo answers first, so the dialog is showing bravo's command...
     await act(async () => {
-      second.resolve({ token: "token-b", connectCommand: "connect --token token-b" });
+      second.resolve({ token: "token-b", connectCommand: "connect --token token-b", installCommand: "connect install --token token-b" });
       await second.promise;
     });
     expect(commandInput()?.value).toBe("connect --token token-b");
 
     // ...and alpha's late response must not overwrite it.
     await act(async () => {
-      first.resolve({ token: "token-a", connectCommand: "connect --token token-a" });
+      first.resolve({ token: "token-a", connectCommand: "connect --token token-a", installCommand: "connect install --token token-a" });
       await first.promise;
     });
     expect(dialogDescription()).toContain("bravo");
     expect(commandInput()?.value).toBe("connect --token token-b");
+    expect(installInput()?.value).toBe("connect install --token token-b");
   });
 
   it("renders the token for the remote that was actually opened", async () => {
@@ -136,6 +140,7 @@ describe("connect token dialog with slow responses", () => {
     getRemoteServerConnectToken.mockImplementation(async (id: string) => ({
       token: `token-${id}`,
       connectCommand: `connect --token token-${id}`,
+      installCommand: `connect install --token token-${id}`,
     }));
 
     await act(async () => { root.render(<RemoteServersSettings />); });
@@ -145,5 +150,6 @@ describe("connect token dialog with slow responses", () => {
     await flush();
     expect(dialogDescription()).toContain("alpha");
     expect(commandInput()?.value).toBe("connect --token token-a");
+    expect(installInput()?.value).toBe("connect install --token token-a");
   });
 });
