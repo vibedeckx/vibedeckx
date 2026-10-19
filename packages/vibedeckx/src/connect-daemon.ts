@@ -4,9 +4,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { redactSecretForms } from "./secret-redaction.js";
 import {
-  compareUpdateStatus,
-  fetchLatestPublishedVersion,
-} from "./update-check.js";
+  parseLinuxProcessStartTicks,
+  readLinuxProcessStartTicks,
+  readProcessStartTicks,
+} from "./process-identity.js";
 
 export const CONNECT_DAEMON_CHILD_ENV = "VIBEDECKX_INTERNAL_CONNECT_DAEMON";
 export const CONNECT_DAEMON_TOKEN_ENV = "VIBEDECKX_INTERNAL_CONNECT_TOKEN";
@@ -97,7 +98,11 @@ export function assertConnectDaemonPlatform(
 export interface StartConnectDaemonOptions {
   dataDir: string;
   connectTo: string;
-  token: string;
+  /**
+   * Literal token to hand to the child through the environment. Omitted when
+   * the child resolves its own (token file, saved config, environment).
+   */
+  token?: string;
   argv: string[];
   entrypoint?: string;
   timeoutMs?: number;
@@ -288,7 +293,7 @@ function waitForChildIdentityExit(
         if (
           child.exitCode !== null ||
           child.signalCode !== null ||
-          readLinuxProcessStartTicks(pid) !== processStartTicks
+          readProcessStartTicks(pid) !== processStartTicks
         ) {
           finish(true);
         }
@@ -310,10 +315,10 @@ function signalFailedChild(
   processStartTicks: string,
   signal: NodeJS.Signals,
 ): boolean {
-  if (readLinuxProcessStartTicks(pid) !== processStartTicks) return false;
+  if (readProcessStartTicks(pid) !== processStartTicks) return false;
   try {
     const sent = child.kill(signal);
-    if (!sent && readLinuxProcessStartTicks(pid) === processStartTicks) {
+    if (!sent && readProcessStartTicks(pid) === processStartTicks) {
       throw new Error(`Failed to send ${signal} to daemon child PID ${pid}`);
     }
     return sent;
@@ -444,7 +449,9 @@ export async function startConnectDaemon(
         ...process.env,
         ...options.extraEnv,
         [CONNECT_DAEMON_CHILD_ENV]: "1",
-        [CONNECT_DAEMON_TOKEN_ENV]: options.token,
+        ...(options.token !== undefined
+          ? { [CONNECT_DAEMON_TOKEN_ENV]: options.token }
+          : {}),
       },
     },
   );
@@ -453,7 +460,7 @@ export async function startConnectDaemon(
 
   try {
     childStartTicks = childPid
-      ? readLinuxProcessStartTicks(childPid)
+      ? readProcessStartTicks(childPid)
       : undefined;
     await waitForDaemonReady(
       child,
@@ -511,7 +518,7 @@ export async function startConnectDaemon(
       );
     }
     const message = [startupMessage, ...cleanupMessages].join("; ");
-    throw new Error(redactSecretForms(message, options.token));
+    throw new Error(redactSecretForms(message, options.token ?? ""));
   }
 }
 
@@ -546,35 +553,6 @@ export type StopDaemonOptions = Partial<StopDaemonRuntime> & {
   firstTimeoutMs?: number;
   forceTimeoutMs?: number;
 };
-
-export function parseLinuxProcessStartTicks(stat: string): string {
-  const closeParen = stat.lastIndexOf(")");
-  if (closeParen < 0) throw new Error("Malformed Linux process stat");
-
-  const fieldsFromThree = stat.slice(closeParen + 1).trim().split(/\s+/);
-  const startTicks = fieldsFromThree[19];
-  if (!startTicks || !/^\d+$/.test(startTicks)) {
-    throw new Error("Malformed Linux process stat");
-  }
-  return startTicks;
-}
-
-export function readLinuxProcessStartTicks(pid: number): string | undefined {
-  try {
-    return parseLinuxProcessStartTicks(
-      fs.readFileSync(`/proc/${pid}/stat`, "utf8"),
-    );
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      "code" in error &&
-      (error.code === "ENOENT" || error.code === "ESRCH")
-    ) {
-      return undefined;
-    }
-    throw error;
-  }
-}
 
 export function daemonStatePath(dataDir: string): string {
   return path.join(dataDir, "run", "connect.json");
@@ -639,10 +617,10 @@ function createDaemonStateLockCandidate(lockPath: string): {
   path: string;
   owner: DaemonStateLockOwner;
 } {
-  const processStartTicks = readLinuxProcessStartTicks(process.pid);
+  const processStartTicks = readProcessStartTicks(process.pid);
   if (!processStartTicks) {
     throw new Error(
-      `Cannot read Linux process start ticks for lock owner PID ${process.pid}`,
+      `Cannot read process start ticks for lock owner PID ${process.pid}`,
     );
   }
 
@@ -681,7 +659,7 @@ function quarantineRecoverableDaemonStateLock(lockPath: string): void {
   const owner = readDaemonStateLockOwner(lockPath);
   if (
     owner &&
-    readLinuxProcessStartTicks(owner.pid) === owner.processStartTicks
+    readProcessStartTicks(owner.pid) === owner.processStartTicks
   ) {
     throw new Error(
       `daemon state operation already in progress at ${lockPath} (PID ${owner.pid})`,
@@ -766,7 +744,7 @@ function sweepLockQuarantine(lockPath: string): void {
       removable =
         !Number.isInteger(pid) ||
         pid <= 0 ||
-        readLinuxProcessStartTicks(pid) === undefined;
+        readProcessStartTicks(pid) === undefined;
     }
     if (!removable) continue;
     try {
@@ -878,64 +856,14 @@ export function inspectDaemonState(dataDir: string): ConnectDaemonInspection {
     };
   }
 
-  const actualTicks = readLinuxProcessStartTicks(parsed.pid);
+  const actualTicks = readProcessStartTicks(parsed.pid);
   return actualTicks === parsed.processStartTicks
     ? { kind: "running", state: parsed }
     : { kind: "stale", state: parsed };
 }
 
-function describeUpdateStatus(
-  current: string,
-  latest: string | undefined,
-): string {
-  switch (compareUpdateStatus(current, latest)) {
-    case "update-available":
-      return `(update available: ${latest})`;
-    case "up-to-date":
-      return "(up to date)";
-    case "unknown":
-      return "(update check failed)";
-  }
-}
-
-export async function describeConnectDaemon(
-  dataDir: string,
-  fetchLatestVersion: () => Promise<
-    string | undefined
-  > = fetchLatestPublishedVersion,
-): Promise<DaemonCommandResult> {
-  const inspection = inspectDaemonState(dataDir);
-
-  switch (inspection.kind) {
-    case "running": {
-      const latest = await fetchLatestVersion();
-      return {
-        exitCode: 0,
-        message: [
-          `Running (PID ${inspection.state.pid}, since ${inspection.state.startedAt})`,
-          `Version: ${inspection.state.version} ${describeUpdateStatus(inspection.state.version, latest)}`,
-          `Target: ${inspection.state.connectTo}`,
-          `Logs: ${path.join(dataDir, "logs", "vibedeckx.log")}`,
-        ].join("\n"),
-      };
-    }
-    case "missing":
-      return { exitCode: 1, message: "Vibedeckx connect is not running" };
-    case "stale":
-      return {
-        exitCode: 1,
-        message: `Vibedeckx connect has stale daemon state for PID ${inspection.state.pid}`,
-      };
-    case "invalid":
-      return {
-        exitCode: 1,
-        message: `Invalid daemon state at ${inspection.path}: ${inspection.reason}`,
-      };
-  }
-}
-
 const defaultStopDaemonRuntime: StopDaemonRuntime = {
-  readStartTicks: readLinuxProcessStartTicks,
+  readStartTicks: (pid) => readProcessStartTicks(pid),
   sendSignal: (pid, signal) => {
     process.kill(pid, signal);
   },
@@ -1122,10 +1050,10 @@ function claimDaemonStateUnlocked(
   connectTo: string,
   version: string,
 ): ConnectDaemonState {
-  const processStartTicks = readLinuxProcessStartTicks(process.pid);
+  const processStartTicks = readProcessStartTicks(process.pid);
   if (!processStartTicks) {
     throw new Error(
-      `Cannot read Linux process start ticks for current PID ${process.pid}`,
+      `Cannot read process start ticks for current PID ${process.pid}`,
     );
   }
 
@@ -1217,3 +1145,5 @@ function removeVerifiedStaleStateUnlocked(dataDir: string): boolean {
       );
   }
 }
+
+export { parseLinuxProcessStartTicks, readLinuxProcessStartTicks };

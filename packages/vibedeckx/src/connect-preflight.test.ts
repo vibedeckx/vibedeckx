@@ -7,6 +7,7 @@ import type { Storage } from "./storage/types.js";
 import {
   canonicalizeHubUrl,
   preflightIdentityCheck,
+  PreflightUnavailableError,
   CONNECT_IDENTITY_HEADER,
   PINNED_IDENTITY_SETTING_PREFIX,
 } from "./connect-preflight.js";
@@ -96,12 +97,35 @@ describe("preflightIdentityCheck", () => {
     expect(calls.some((u) => u.includes("/identity"))).toBe(false);
   });
 
-  it("skips the check when config is unreachable or unauthorized (old API-key hub)", async () => {
+  it("refuses to skip the check when the hub cannot be asked", async () => {
     const failing = (async () => {
       throw new Error("ECONNREFUSED");
     }) as typeof fetch;
-    expect((await run({ token: "t", fetchImpl: failing })).checked).toBe(false);
+    await expect(run({ token: "t", fetchImpl: failing })).rejects.toBeInstanceOf(PreflightUnavailableError);
 
+    const unavailable = (async () => new Response("bad gateway", { status: 502 })) as typeof fetch;
+    await expect(run({ token: "t", fetchImpl: unavailable })).rejects.toBeInstanceOf(PreflightUnavailableError);
+ 
+    const rateLimited = (async () => new Response("slow down", { status: 429 })) as typeof fetch;
+    await expect(run({ token: "t", fetchImpl: rateLimited })).rejects.toBeInstanceOf(PreflightUnavailableError);
+
+    const notJson = (async () => new Response("<html>", { status: 200 })) as typeof fetch;
+    await expect(run({ token: "t", fetchImpl: notJson })).rejects.toBeInstanceOf(PreflightUnavailableError);
+
+    // 200, but the connection drops while the body is read.
+    const brokenBody = (async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error("socket hang up"));
+          },
+        }),
+        { status: 200 },
+      )) as typeof fetch;
+    await expect(run({ token: "t", fetchImpl: brokenBody })).rejects.toBeInstanceOf(PreflightUnavailableError);
+  });
+
+  it("skips the check when config is unauthorized (old API-key hub)", async () => {
     const unauthorized = (async () =>
       new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 })) as typeof fetch;
     expect((await run({ token: "t", fetchImpl: unauthorized })).checked).toBe(false);

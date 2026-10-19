@@ -666,12 +666,14 @@ describe.runIf(runIntegration)("built connect daemon CLI", () => {
     expect(fs.existsSync(statePath(dataDir))).toBe(false);
     expect(await waitForNoProcessesWithArgument(dataDir)).toEqual([]);
 
-    const logContents = fs.readFileSync(
-      path.join(dataDir, "logs", "vibedeckx.log"),
-      "utf8",
-    );
-    expect(logContents).not.toContain(token);
-    expect(logContents).not.toContain(encodedToken);
+    // The URL is now rejected before a child is spawned, so usually no log
+    // exists at all; if one does, it must not carry the token.
+    const logPath = path.join(dataDir, "logs", "vibedeckx.log");
+    if (fs.existsSync(logPath)) {
+      const logContents = fs.readFileSync(logPath, "utf8");
+      expect(logContents).not.toContain(token);
+      expect(logContents).not.toContain(encodedToken);
+    }
   }, integrationTestTimeoutMs);
 
   it("fails daemon startup when its persistent log cannot be established", async () => {

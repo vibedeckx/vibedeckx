@@ -28,7 +28,7 @@ function resolveEnvFilePath(argv: string[]): { envPath: string; explicit: boolea
 
   // Default alongside the data directory so config travels with the DB; falls
   // back to ~/.vibedeckx so the location is stable regardless of launch cwd.
-  const dataDir = getArg(argv, "--data-dir");
+  const dataDir = getArg(argv, "--data-dir") ?? process.env.VIBEDECKX_DATA_DIR;
   const baseDir = dataDir ? path.resolve(dataDir) : VIBEDECKX_HOME;
   return { envPath: path.join(baseDir, ".env"), explicit: false };
 }

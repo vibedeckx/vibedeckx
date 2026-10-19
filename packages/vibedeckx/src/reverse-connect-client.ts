@@ -94,6 +94,19 @@ function isTextualContentType(contentType: string): boolean {
   );
 }
 
+export interface ReverseConnectClientCallbacks {
+  /** First hub frame on a freshly opened socket: the tunnel is live. */
+  onConnected?: () => void;
+  /** A previously live tunnel dropped; the client is reconnecting on its own. */
+  onDisconnected?: (reason: string) => void;
+  /**
+   * The hub rejected the token or machine identity (close 4001/4003). When set,
+   * the client stops retrying and hands recovery to the caller, which can wait
+   * for a new token instead of hammering the hub with a dead one.
+   */
+  onAuthRejected?: (code: number, reason: string) => void;
+}
+
 export class ReverseConnectClient {
   private ws: WebSocket | null = null;
   private localServer: FastifyInstance;
@@ -112,12 +125,22 @@ export class ReverseConnectClient {
   /** First tick that observed CLOSING, so a stalled teardown can be forced. */
   private closingSince = 0;
   private shuttingDown = false;
+  /** Whether onConnected fired for the current socket. */
+  private liveNotified = false;
+  private callbacks: ReverseConnectClientCallbacks;
 
-  constructor(localServer: FastifyInstance, serverUrl: string, token: string, localPort: number) {
+  constructor(
+    localServer: FastifyInstance,
+    serverUrl: string,
+    token: string,
+    localPort: number,
+    callbacks: ReverseConnectClientCallbacks = {},
+  ) {
     this.localServer = localServer;
     this.serverUrl = serverUrl;
     this.token = token;
     this.localPort = localPort;
+    this.callbacks = callbacks;
   }
 
   connect(): void {
@@ -177,6 +200,10 @@ export class ReverseConnectClient {
       // Any frame proves the hub is alive, so this is a superset of "last ping"
       // and is what the liveness check measures against.
       this.lastFrameAt = Date.now();
+      if (!this.liveNotified && ws === this.ws) {
+        this.liveNotified = true;
+        this.callbacks.onConnected?.();
+      }
       try {
         const frame = JSON.parse(data.toString()) as ControlFrame;
         this.handleFrame(frame);
@@ -214,8 +241,13 @@ export class ReverseConnectClient {
 
     const rejected = code !== undefined && AUTH_REJECT_CODES.has(code);
     const uptime = this.openedAt === null ? 0 : Date.now() - this.openedAt;
+    const wasLive = this.liveNotified;
+    this.liveNotified = false;
+    const handOff = rejected && this.callbacks.onAuthRejected !== undefined;
 
-    if (rejected) {
+    if (rejected && handOff) {
+      console.error(`[ReverseClient] Server rejected this connection (${reason}).`);
+    } else if (rejected) {
       console.error(
         `[ReverseClient] Server rejected this connection (${reason}). ` +
           (code === 4001
@@ -253,6 +285,13 @@ export class ReverseConnectClient {
     }
 
     if (this.shuttingDown) return;
+    if (handOff) {
+      // The caller owns recovery from here (slow retry, wait for a new token).
+      this.shutdown();
+      this.callbacks.onAuthRejected?.(code!, reason);
+      return;
+    }
+    if (wasLive) this.callbacks.onDisconnected?.(reason);
     if (this.reconnectTimer) return;
     this.scheduleReconnect();
   }

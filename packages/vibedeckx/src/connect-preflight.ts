@@ -15,6 +15,41 @@ export interface RemoteIdentity {
   name: string;
 }
 
+/**
+ * The hub rejected the token (401) or its remote does not accept inbound
+ * connections (403). Retrying with the same token cannot help; a new token or
+ * a hub-side change can.
+ */
+export class PreflightAuthError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "PreflightAuthError";
+  }
+}
+
+/**
+ * The token belongs to a different remote than the one this data-dir is pinned
+ * to. Never retried against the hub: only a different token or an explicit
+ * re-pin resolves it.
+ */
+export class PinMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PinMismatchError";
+  }
+}
+
+/**
+ * The hub could not be asked (network error, 5xx). Not "old hub": the caller
+ * must retry the check before using the token, never connect unchecked.
+ */
+export class PreflightUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PreflightUnavailableError";
+  }
+}
+
 export interface PreflightResult {
   /** false = old hub without the identity endpoint; nothing was verified. */
   checked: boolean;
@@ -78,11 +113,30 @@ export async function preflightIdentityCheck(opts: {
   const hubUrl = canonicalizeHubUrl(opts.connectTo);
 
   let config: { reverseConnectIdentity?: boolean } | undefined;
+  let configRes: Response;
   try {
-    const res = await fetchImpl(`${hubUrl}/api/config`);
-    if (res.ok) config = (await res.json()) as { reverseConnectIdentity?: boolean };
-  } catch {
-    // Hub unreachable — let the WS connect path surface the real error.
+    configRes = await fetchImpl(`${hubUrl}/api/config`);
+  } catch (error) {
+    // Unreachable is not "old hub": skipping here would let a token be used
+    // unchecked once the hub comes back.
+    throw new PreflightUnavailableError(
+      `Hub unreachable: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  // Only two responses mean "this hub predates identity checks": config hidden
+  // behind API-key auth (401/403), or readable config without the capability
+  // flag. Anything else (429, other statuses, a body that cannot be read or
+  // parsed) is transient and must be retried, never treated as "skip".
+  if (configRes.status === 401 || configRes.status === 403) return { checked: false };
+  if (!configRes.ok) {
+    throw new PreflightUnavailableError(`Hub config returned status ${configRes.status}`);
+  }
+  try {
+    config = JSON.parse(await configRes.text()) as { reverseConnectIdentity?: boolean };
+  } catch (error) {
+    throw new PreflightUnavailableError(
+      `Hub config could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
   if (config?.reverseConnectIdentity !== true) return { checked: false };
 
@@ -92,10 +146,10 @@ export async function preflightIdentityCheck(opts: {
     headers: { [CONNECT_IDENTITY_HEADER]: opts.token },
   });
   if (res.status === 401) {
-    throw new Error("Connect token was rejected by the server (invalid or revoked)");
+    throw new PreflightAuthError("Connect token was rejected by the server (invalid or revoked)", 401);
   }
   if (res.status === 403) {
-    throw new Error("This token's remote is not configured for inbound connections");
+    throw new PreflightAuthError("This token's remote is not configured for inbound connections", 403);
   }
   if (!res.ok) {
     throw new Error(`Identity preflight failed with status ${res.status}`);
@@ -119,10 +173,10 @@ export async function preflightIdentityCheck(opts: {
   if (pinned.serverId && pinned.serverId !== identity.serverId) {
     const pinnedLabel = pinned.name || pinned.serverId;
     const tokenLabel = identity.name || identity.serverId;
-    throw new Error(
+    throw new PinMismatchError(
       `This machine previously served remote "${pinnedLabel}" on ${hubUrl}, ` +
         `but the provided token belongs to "${tokenLabel}". ` +
-        `If this is intentional, re-run with --force to re-pin.`,
+        `If this is intentional, re-pin with \`vibedeckx connect setup --force\` (or re-run with --force).`,
     );
   }
   if (!pinned.serverId || pinned.name !== identity.name) {

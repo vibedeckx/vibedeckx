@@ -143,3 +143,17 @@ to a registry and set `VIBEDECKX_IMAGE`).
 - **Performance vs systemd:** negligible for this app (CPU/RAM within noise)
   with a bind-mounted data dir and host networking. The choice is operational,
   not performance.
+
+## Reverse-connect worker in Docker
+
+`deploy/worker/` builds and runs a **worker** (runs agents, dials out to a hub).
+It is separate from the server image above:
+
+```bash
+./deploy/worker/build.sh                     # → vibedeckx-worker:local
+cd deploy/worker && mkdir -p secrets && $EDITOR secrets/connect-token
+VIBEDECKX_CONNECT_TO=https://vibedeckx.dev docker compose up -d
+```
+
+See the comments in `deploy/worker/docker-compose.yml` for lifecycle and token
+rotation. On a regular machine, prefer `vibedeckx connect install-service`.

@@ -1,0 +1,407 @@
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { fsyncDirectory, writeFileAtomic } from "./utils/atomic-file.js";
+
+/**
+ * Installed runtime layout (worker-supervision-design §6):
+ *
+ *   <data-dir>/runtime/
+ *   ├── launcher            fixed entry point every service definition runs
+ *   ├── current             names the version the launcher starts
+ *   ├── previous            the version that was current before (rollback)
+ *   └── <version>+<hash>/   one build: node + package + manifest (never rewritten)
+ *
+ * The launcher resolves `current` once and execs that version's own Node, so
+ * the user's Node (fnm/nvm upgrades, ABI changes) can never break a service,
+ * and switching `current` never mixes two versions inside one process.
+ */
+
+export const LAUNCHER_NAME = "launcher";
+const MANIFEST_NAME = "manifest.json";
+const VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z._+-]*$/;
+
+export function runtimeRoot(dataDir: string): string {
+  return path.join(dataDir, "runtime");
+}
+
+export function launcherPath(dataDir: string): string {
+  return path.join(runtimeRoot(dataDir), LAUNCHER_NAME);
+}
+
+export interface RuntimeSource {
+  /** Platform package root: contains package.json, dist/bin.js, node_modules/. */
+  packageRoot: string;
+  version: string;
+  /** Node binary to pin into the runtime. */
+  nodePath: string;
+}
+
+/**
+ * The package this process runs from must be a self-contained release (the
+ * npm platform package or the Docker/tarball install): its native modules have
+ * to live inside it so the copy in runtime/<build>/ works on its own. A
+ * source checkout (pnpm symlinks) does not qualify.
+ */
+export function detectRuntimeSource(
+  options: { entryUrl?: string; nodePath?: string } = {},
+): RuntimeSource {
+  const entry = fileURLToPath(options.entryUrl ?? import.meta.url);
+  const packageRoot = path.resolve(path.dirname(entry), "..");
+  return validateRuntimeSource(packageRoot, options.nodePath ?? process.execPath);
+}
+
+export function validateRuntimeSource(packageRoot: string, nodePath: string): RuntimeSource {
+  const notRelease = (reason: string): Error =>
+    new Error(
+      `Cannot install the worker runtime from ${packageRoot}: ${reason}. ` +
+        "Run install-service from an installed release, e.g. `npx vibedeckx@latest connect install-service`.",
+    );
+  let pkg: { version?: unknown };
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8"));
+  } catch {
+    throw notRelease("package.json is missing");
+  }
+  if (typeof pkg.version !== "string" || !VERSION_PATTERN.test(pkg.version)) {
+    throw notRelease("package version is missing or invalid");
+  }
+  if (!fs.existsSync(path.join(packageRoot, "dist", "bin.js"))) {
+    throw notRelease("dist/bin.js is missing");
+  }
+  for (const nativeModule of ["better-sqlite3", "node-pty"]) {
+    const modulePath = path.join(packageRoot, "node_modules", nativeModule);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(modulePath);
+    } catch {
+      throw notRelease(`bundled ${nativeModule} is missing`);
+    }
+    if (stat.isSymbolicLink()) {
+      throw notRelease(`${nativeModule} is a symlink (source checkout)`);
+    }
+  }
+  return { packageRoot, version: pkg.version, nodePath };
+}
+
+interface RuntimeManifest {
+  schemaVersion: 1;
+  version: string;
+  files: Record<string, string>;
+}
+
+function sha256File(filePath: string): string {
+  const hash = createHash("sha256");
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(1 << 20);
+    for (;;) {
+      const read = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (read === 0) break;
+      hash.update(buffer.subarray(0, read));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest("hex");
+}
+
+/** Relative paths of regular files under root, symlinks recorded separately. */
+function walk(root: string): { files: string[]; links: string[]; dirs: string[] } {
+  const files: string[] = [];
+  const links: string[] = [];
+  const dirs: string[] = [];
+  const visit = (relative: string): void => {
+    const absolute = path.join(root, relative);
+    for (const entry of fs.readdirSync(absolute, { withFileTypes: true })) {
+      const child = relative ? path.join(relative, entry.name) : entry.name;
+      if (entry.isSymbolicLink()) links.push(child);
+      else if (entry.isDirectory()) {
+        dirs.push(child);
+        visit(child);
+      } else if (entry.isFile()) files.push(child);
+    }
+  };
+  visit("");
+  return { files, links, dirs };
+}
+
+function hashTree(root: string, relativeFiles: string[]): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const file of relativeFiles) {
+    result[file.split(path.sep).join("/")] = sha256File(path.join(root, file));
+  }
+  return result;
+}
+
+function fsyncTree(root: string): void {
+  const { files, dirs } = walk(root);
+  for (const file of files) {
+    const fd = fs.openSync(path.join(root, file), "r");
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  for (const dir of [...dirs].reverse()) fsyncDirectory(path.join(root, dir));
+  fsyncDirectory(root);
+}
+
+function readManifest(versionDir: string): RuntimeManifest | undefined {
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(path.join(versionDir, MANIFEST_NAME), "utf8"),
+    ) as RuntimeManifest;
+    if (parsed.schemaVersion !== 1 || typeof parsed.files !== "object") return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Every file listed in the manifest exists with the recorded hash. */
+export function verifyRuntimeVersion(versionDir: string): boolean {
+  const manifest = readManifest(versionDir);
+  if (!manifest) return false;
+  for (const [relative, expected] of Object.entries(manifest.files)) {
+    const absolute = path.join(versionDir, ...relative.split("/"));
+    try {
+      if (sha256File(absolute) !== expected) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function readCurrentVersion(dataDir: string): string | undefined {
+  try {
+    const value = fs.readFileSync(path.join(runtimeRoot(dataDir), "current"), "utf8").trim();
+    return VERSION_PATTERN.test(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readPreviousVersion(dataDir: string): string | undefined {
+  try {
+    const value = fs.readFileSync(path.join(runtimeRoot(dataDir), "previous"), "utf8").trim();
+    return VERSION_PATTERN.test(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function renderLauncher(): string {
+  // POSIX sh: resolve `current` exactly once, then exec that version's own
+  // node with an absolute path. Exit 78 (EX_CONFIG) when the layout is broken
+  // so the cause is visible in the service manager's logs.
+  return `#!/bin/sh
+# Generated by \`vibedeckx connect install-service\`. Do not edit.
+set -eu
+RUNTIME_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+VERSION=$(cat "$RUNTIME_ROOT/current" 2>/dev/null || true)
+case "$VERSION" in
+  ''|*[!0-9A-Za-z._+-]*) echo "vibedeckx launcher: invalid or missing $RUNTIME_ROOT/current" >&2; exit 78 ;;
+esac
+VERSION_DIR="$RUNTIME_ROOT/$VERSION"
+if [ ! -x "$VERSION_DIR/node" ] || [ ! -f "$VERSION_DIR/package/dist/bin.js" ]; then
+  echo "vibedeckx launcher: runtime $VERSION_DIR is incomplete" >&2
+  exit 78
+fi
+export VIBEDECKX_RUNTIME_DIR="$VERSION_DIR"
+exec "$VERSION_DIR/node" "$VERSION_DIR/package/dist/bin.js" "$@"
+`;
+}
+
+export interface InstallRuntimeResult {
+  version: string;
+  /** Directory name under runtime/ and the value written to `current`. */
+  buildId: string;
+  versionDir: string;
+  launcher: string;
+  /** False when an intact copy of this version was already installed. */
+  copied: boolean;
+  previous?: string;
+  pruned: string[];
+}
+
+/**
+ * Install `source` as runtime/<version>+<hash>/ and make it current. Interruption at
+ * any point leaves `current` naming either the previous complete version or
+ * the new, verified one (§6.3):
+ *  1. copy into a staging dir, verify every file against hashes of the source;
+ *  2. fsync the staged tree, rename it into place, fsync runtime/;
+ *  3. write `current` via temp + fsync + rename, fsync runtime/.
+ */
+export function installRuntime(dataDir: string, source: RuntimeSource): InstallRuntimeResult {
+  if (process.platform === "win32") {
+    throw new Error("The installed worker runtime is not supported on Windows yet");
+  }
+  if (!VERSION_PATTERN.test(source.version)) {
+    throw new Error(`Invalid runtime version: ${source.version}`);
+  }
+  const root = runtimeRoot(dataDir);
+  fs.mkdirSync(root, { recursive: true, mode: 0o755 });
+
+  // Each build gets its own directory, named by version + content hash, so an
+  // install never has to delete or overwrite a directory that may be current
+  // or in use by a running worker. Old directories go only after `current`
+  // has moved off them (pruning below).
+  const expected = sourceManifestFiles(source);
+  const buildId = `${source.version}+${buildHash(expected)}`;
+  let versionDir = path.join(root, buildId);
+  let copied = false;
+  if (!isInstalledCopyOf(versionDir, expected)) {
+    if (fs.existsSync(versionDir)) {
+      // A damaged copy of this exact build: leave it alone, install beside it.
+      versionDir = path.join(root, `${buildId}.r${randomUUID().slice(0, 8)}`);
+    }
+    const staging = path.join(root, `.staging-${buildId}-${randomUUID()}`);
+    try {
+      stageRuntime(staging, source, dataDir, expected);
+      fs.renameSync(staging, versionDir);
+      fsyncDirectory(root);
+      copied = true;
+    } finally {
+      fs.rmSync(staging, { recursive: true, force: true });
+    }
+  }
+  const installedId = path.basename(versionDir);
+
+  const launcher = launcherPath(dataDir);
+  writeFileAtomic(launcher, renderLauncher(), { mode: 0o755 });
+
+  const before = readCurrentVersion(dataDir);
+  if (before !== installedId) {
+    if (before) writeFileAtomic(path.join(root, "previous"), `${before}\n`);
+    writeFileAtomic(path.join(root, "current"), `${installedId}\n`);
+  }
+  const previous = before !== installedId ? before : readPreviousVersion(dataDir);
+  const pruned = pruneRuntimeVersions(dataDir, [installedId, previous]);
+  return { version: source.version, buildId: installedId, versionDir, launcher, copied, previous, pruned };
+}
+
+function buildHash(files: Record<string, string>): string {
+  const hash = createHash("sha256");
+  for (const relative of Object.keys(files).sort()) hash.update(`${relative}\0${files[relative]}\n`);
+  return hash.digest("hex").slice(0, 12);
+}
+
+/** What runtime/<build>/ must contain for `source`, as manifest entries. */
+function sourceManifestFiles(source: RuntimeSource): Record<string, string> {
+  const expected: Record<string, string> = {};
+  const packageTree = walk(source.packageRoot);
+  for (const [relative, hash] of Object.entries(hashTree(source.packageRoot, packageTree.files))) {
+    expected[`package/${relative}`] = hash;
+  }
+  expected.node = sha256File(source.nodePath);
+  return expected;
+}
+
+/**
+ * Intact and built from the same files. A same-numbered but different build
+ * (local/dev packs) must be replaced, not silently kept.
+ */
+function isInstalledCopyOf(versionDir: string, expected: Record<string, string>): boolean {
+  const manifest = readManifest(versionDir);
+  if (!manifest) return false;
+  const installed = Object.entries(manifest.files);
+  if (installed.length !== Object.keys(expected).length) return false;
+  if (installed.some(([relative, hash]) => expected[relative] !== hash)) return false;
+  return verifyRuntimeVersion(versionDir);
+}
+
+function stageRuntime(
+  staging: string,
+  source: RuntimeSource,
+  dataDir: string,
+  expected: Record<string, string>,
+): void {
+  fs.mkdirSync(staging, { recursive: true, mode: 0o755 });
+  const nodeHash = expected.node;
+
+  // verbatimSymlinks keeps node_modules/.bin links relative and pointing
+  // inside the copy instead of back at the source install.
+  fs.cpSync(source.packageRoot, path.join(staging, "package"), {
+    recursive: true,
+    verbatimSymlinks: true,
+  });
+
+  // Node is ~100MB; versions sharing the same binary share one inode.
+  const stagedNode = path.join(staging, "node");
+  const reusable = findInstalledNode(dataDir, nodeHash);
+  let linked = false;
+  if (reusable) {
+    try {
+      fs.linkSync(reusable, stagedNode);
+      linked = true;
+    } catch {
+      linked = false;
+    }
+  }
+  if (!linked) fs.copyFileSync(source.nodePath, stagedNode);
+  fs.chmodSync(stagedNode, 0o755);
+
+  const actual = hashTree(staging, walk(staging).files);
+  for (const [relative, hash] of Object.entries(expected)) {
+    if (actual[relative] !== hash) {
+      throw new Error(`Runtime copy failed verification: ${relative} does not match the source`);
+    }
+  }
+  const manifest: RuntimeManifest = { schemaVersion: 1, version: source.version, files: expected };
+  fs.writeFileSync(path.join(staging, MANIFEST_NAME), `${JSON.stringify(manifest)}\n`);
+  fsyncTree(staging);
+}
+
+function findInstalledNode(dataDir: string, hash: string): string | undefined {
+  const root = runtimeRoot(dataDir);
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(root);
+  } catch {
+    return undefined;
+  }
+  for (const entry of entries) {
+    if (!VERSION_PATTERN.test(entry)) continue;
+    const manifest = readManifest(path.join(root, entry));
+    if (manifest?.files.node !== hash) continue;
+    const candidate = path.join(root, entry, "node");
+    // The manifest says what the file should be, not what it is: linking a
+    // damaged binary would fail verification on every reinstall.
+    try {
+      if (sha256File(candidate) === hash) return candidate;
+    } catch {
+      // missing or unreadable: not reusable
+    }
+  }
+  return undefined;
+}
+
+/** Remove version dirs other than `keep` (current + rollback fallback). */
+export function pruneRuntimeVersions(
+  dataDir: string,
+  keep: Array<string | undefined>,
+): string[] {
+  const root = runtimeRoot(dataDir);
+  const keepSet = new Set(keep.filter((value): value is string => Boolean(value)));
+  const current = readCurrentVersion(dataDir);
+  if (current) keepSet.add(current);
+  const removed: string[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    // Leftovers of an interrupted install. Young ones may belong to an install
+    // running right now, so only clearly abandoned ones go.
+    const isStaleStaging =
+      entry.name.startsWith(".staging-") &&
+      Date.now() - fs.statSync(path.join(root, entry.name)).mtimeMs > 60 * 60_000;
+    if (!isStaleStaging && (!VERSION_PATTERN.test(entry.name) || keepSet.has(entry.name))) {
+      continue;
+    }
+    fs.rmSync(path.join(root, entry.name), { recursive: true, force: true });
+    removed.push(entry.name);
+  }
+  return removed;
+}

@@ -66,7 +66,32 @@ describe("connect command help", () => {
     expect(help).toContain("--daemon");
   });
 
-  it.each(["vibedeckx connect status", "vibedeckx connect stop"])(
+  it("offers token sources that keep the token off the command line", () => {
+    const run = commandHelp("vibedeckx connect run");
+    expect(run).toContain("--token-file");
+    for (const route of ["vibedeckx connect setup", "vibedeckx connect install-service"]) {
+      const help = commandHelp(route);
+      expect(help).toContain("--token-file");
+      expect(help).toContain("--token-stdin");
+      expect(help).not.toMatch(/--token\s/);
+    }
+  });
+
+  it("documents status as local with opt-in network and readiness checks", () => {
+    const help = commandHelp("vibedeckx connect status");
+    expect(help).toContain("--check-update");
+    expect(help).toContain("--ready");
+  });
+
+  it.each([
+    "vibedeckx connect status",
+    "vibedeckx connect stop",
+    "vibedeckx connect start",
+    "vibedeckx connect restart",
+    "vibedeckx connect enable",
+    "vibedeckx connect disable",
+    "vibedeckx connect uninstall-service",
+  ])(
     "exposes %s without connection credentials",
     (route) => {
       const help = commandHelp(route);

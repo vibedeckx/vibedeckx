@@ -4,30 +4,43 @@ import { buildApplication, buildCommand, buildRouteMap } from "@stricli/core";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import { createServer, type TLSOptions } from "./server.js";
 import { resolveUiRoot } from "./ui-root.js";
-import { ReverseConnectClient } from "./reverse-connect-client.js";
 import { DEFAULT_PORT, VIBEDECKX_HOME } from "./constants.js";
 import { setupLogging, shutdownLogging } from "./logger.js";
 import {
   assertConnectDaemonPlatform,
-  claimDaemonState,
   CONNECT_DAEMON_READY_TIMEOUT_ENV,
   DEFAULT_CONNECT_DAEMON_READY_TIMEOUT_MS,
   consumeDaemonChildEnvironment,
-  describeConnectDaemon,
-  notifyDaemonParentError,
-  notifyDaemonParentReady,
-  removeDaemonStateIfOwned,
   resolveConnectDaemonReadyTimeoutMs,
-  resolveConnectToken,
   startConnectDaemon,
-  stopConnectDaemon,
-  type ConnectDaemonState,
   type DaemonCommandResult,
 } from "./connect-daemon.js";
-import { preflightIdentityCheck } from "./connect-preflight.js";
+import {
+  CONNECT_TO_ENV,
+  CONNECT_TOKEN_ENV,
+  CONNECT_TOKEN_FILE_ENV,
+  DATA_DIR_ENV,
+  NOT_CONFIGURED_HINT,
+  resolveConnectTo,
+  resolveDataDir,
+  resolveTokenSource,
+} from "./connect-config.js";
+import {
+  describeSetup,
+  describeWorker,
+  installService,
+  lifecycleDisable,
+  lifecycleEnable,
+  lifecycleRestart,
+  lifecycleStart,
+  lifecycleStop,
+  promptHidden,
+  runSetup,
+  uninstallService,
+} from "./connect-lifecycle.js";
+import { runConnectWorker } from "./connect-worker.js";
 import { readPackageVersion } from "./utils/package-version.js";
 import open from "open";
-import { redactErrorSecret } from "./secret-redaction.js";
 
 function loadTLSOptions(flags: {
   cert: string | undefined;
@@ -234,18 +247,84 @@ const startCommand = buildCommand({
   },
 });
 
+const dataDirFlag = {
+  kind: "parsed" as const,
+  parse: String,
+  brief: `Data directory (default: ~/.vibedeckx). Env: ${DATA_DIR_ENV}`,
+  optional: true as const,
+};
+
+const setupFlags = {
+  "connect-to": {
+    kind: "parsed" as const,
+    parse: String,
+    brief: `URL of the Vibedeckx server to connect to. Env: ${CONNECT_TO_ENV}`,
+    optional: true as const,
+  },
+  "token-file": {
+    kind: "parsed" as const,
+    parse: String,
+    brief: "Read the connect token from this file",
+    optional: true as const,
+  },
+  "token-stdin": {
+    kind: "boolean" as const,
+    brief: "Read the connect token from stdin",
+    optional: true as const,
+  },
+  force: {
+    kind: "boolean" as const,
+    brief: "Re-pin this machine to the token's remote on the next start, overriding the pinned-identity guard",
+    optional: true as const,
+  },
+  "data-dir": dataDirFlag,
+};
+
+interface SetupFlags {
+  "connect-to": string | undefined;
+  "token-file": string | undefined;
+  "token-stdin": boolean | undefined;
+  force: boolean | undefined;
+  "data-dir": string | undefined;
+}
+
+function setupOptionsFromFlags(flags: SetupFlags) {
+  return {
+    dataDir: resolveDataDir(flags["data-dir"]),
+    connectTo: flags["connect-to"],
+    tokenFile: flags["token-file"],
+    tokenStdin: flags["token-stdin"] ?? false,
+    force: flags.force ?? false,
+    promptToken: process.stdin.isTTY
+      ? (keepExisting: boolean) =>
+          promptHidden(
+            keepExisting
+              ? "New connect token (input hidden; Enter keeps the saved one): "
+              : "Connect token (input hidden): ",
+          )
+      : undefined,
+  };
+}
+
 const connectCommand = buildCommand({
   parameters: {
     flags: {
       "connect-to": {
         kind: "parsed",
         parse: String,
-        brief: "URL of the Vibedeckx server to connect to",
+        brief: `URL of the Vibedeckx server to connect to (default: saved by \`connect setup\`). Env: ${CONNECT_TO_ENV}`,
+        optional: true,
       },
       token: {
         kind: "parsed",
         parse: String,
-        brief: "Authentication token for the reverse connection",
+        brief: `Authentication token (visible in \`ps\`; prefer \`connect setup\` or --token-file). Env: ${CONNECT_TOKEN_ENV}`,
+        optional: true,
+      },
+      "token-file": {
+        kind: "parsed",
+        parse: String,
+        brief: `File containing the authentication token; re-read when it changes. Env: ${CONNECT_TOKEN_FILE_ENV}`,
         optional: true,
       },
       daemon: {
@@ -270,12 +349,7 @@ const connectCommand = buildCommand({
         brief: "Local port for the server (default: 5173)",
         optional: true,
       },
-      "data-dir": {
-        kind: "parsed",
-        parse: String,
-        brief: "Directory for storing database file (default: ~/.vibedeckx)",
-        optional: true,
-      },
+      "data-dir": dataDirFlag,
       "env-file": {
         kind: "parsed",
         parse: String,
@@ -291,8 +365,9 @@ const connectCommand = buildCommand({
     },
   },
   func: async (flags: {
-    "connect-to": string;
+    "connect-to": string | undefined;
     token: string | undefined;
+    "token-file": string | undefined;
     daemon: boolean | undefined;
     "daemon-ready-timeout-ms": string | undefined;
     force: boolean | undefined;
@@ -301,19 +376,30 @@ const connectCommand = buildCommand({
     "env-file": string | undefined;
     "log-level": string | undefined;
   }) => {
-    const dataDir = flags["data-dir"] ?? VIBEDECKX_HOME;
+    const dataDir = resolveDataDir(flags["data-dir"]);
     const childContext = consumeDaemonChildEnvironment(process.env);
-    const token = resolveConnectToken(flags.token, childContext);
 
     if (flags.daemon) {
+      assertConnectDaemonPlatform();
       const timeoutMs = resolveConnectDaemonReadyTimeoutMs(
         flags["daemon-ready-timeout-ms"],
         process.env[CONNECT_DAEMON_READY_TIMEOUT_ENV],
       );
+      const source = resolveTokenSource({
+        dataDir,
+        flagToken: flags.token,
+        flagTokenFile: flags["token-file"],
+      });
+      const connectTo = resolveConnectTo({ dataDir, flag: flags["connect-to"] });
+      if (!connectTo || !source) {
+        throw new Error(`${!connectTo ? "No hub URL configured" : "No connect token configured"}. ${NOT_CONFIGURED_HINT}`);
+      }
       const started = await startConnectDaemon({
         dataDir,
-        connectTo: flags["connect-to"],
-        token,
+        connectTo,
+        // A --token value is moved into the child's environment; file and
+        // saved sources are resolved by the child itself.
+        token: flags.token,
         argv: process.argv.slice(2),
         timeoutMs,
       });
@@ -325,173 +411,23 @@ const connectCommand = buildCommand({
       return;
     }
 
-    const requestedPort = flags.port ?? 0;
-    let storage:
-      | Awaited<ReturnType<typeof createSqliteStorage>>
-      | undefined;
-    let server: Awaited<ReturnType<typeof createServer>> | undefined;
-    let client: ReverseConnectClient | undefined;
-    let ownedState: ConnectDaemonState | undefined;
-
-    const removeOwnedState = (): void => {
-      if (!ownedState) return;
-      removeDaemonStateIfOwned(dataDir, ownedState);
-      ownedState = undefined;
-    };
-
-    const closeResources = async (): Promise<unknown[]> => {
-      const errors: unknown[] = [];
-      try {
-        client?.shutdown();
-      } catch (error) {
-        errors.push(error);
-      }
-      try {
-        await server?.close();
-      } catch (error) {
-        errors.push(error);
-      }
-      try {
-        await storage?.close();
-      } catch (error) {
-        errors.push(error);
-      }
-      try {
-        removeOwnedState();
-      } catch (error) {
-        errors.push(error);
-      }
-      // shutdownLogging is a no-op when file logging never started.
-      try {
-        await shutdownLogging();
-      } catch (error) {
-        errors.push(error);
-      }
-      return errors;
-    };
-
-    try {
-      if (childContext.isDaemonChild) {
-        ownedState = claimDaemonState(
-          dataDir,
-          flags["connect-to"],
-          readPackageVersion(),
-        );
-      }
-
-      setupLogging({
-        dataDir,
-        level: flags["log-level"],
-        requireFileLogging: childContext.isDaemonChild,
-      });
-      console.log("Starting vibedeckx in reverse-connect mode...");
-
-      const dbPath = path.join(dataDir, "data.sqlite");
-      storage = await createSqliteStorage(dbPath);
-
-      // Guard against running the wrong remote's token on this machine. Must
-      // complete BEFORE the WS client exists: connecting under the wrong
-      // server ID kicks the legitimate worker and can plant a server alias on
-      // the hub. Throws on mismatch (caught below → daemon parent is notified
-      // of the error, never "ready"). Old hubs without the identity endpoint
-      // skip the check.
-      const preflight = await preflightIdentityCheck({
-        connectTo: flags["connect-to"],
-        token,
-        settings: storage.settings,
-        force: flags.force ?? false,
-      });
-      if (preflight.checked && preflight.identity) {
-        console.log(
-          `Remote identity verified: ${preflight.identity.name || preflight.identity.serverId}`,
-        );
-      }
-      // Reverse-connect mode is inherently a remote-provider role: the inbound
-      // server proxies requests through the tunnel into this instance, so the
-      // path-based endpoints must be exposed. The UI is served by the upstream
-      // server, never through the tunnel — run API-only so the lean npm install
-      // (no dist/ui) works without downloading anything.
-      server = await createServer({
-        storage,
-        acceptRemote: true,
-        uiRoot: null,
-      });
-
-      // Start local server on localhost only (not publicly exposed)
-      // Port 0 lets the OS pick a random available port
-      const { instance, port: localPort } =
-        await server.startLocal(requestedPort);
-      console.log(`Local server running on 127.0.0.1:${localPort}`);
-
-      // Reverse-connect mode: the upstream vibedeckx server runs
-      // generateAndPushRemoteSessionTitle and PATCHes the resulting title back
-      // here, so locally generating one would waste tokens and emit a
-      // duplicate Langfuse trace with userId="local".
-      instance.agentSessionManager.suppressTitleGeneration = true;
-
-      client = new ReverseConnectClient(
-        instance,
-        flags["connect-to"],
-        token,
-        localPort,
-      );
-      client.connect();
-      if (childContext.isDaemonChild) notifyDaemonParentReady();
-
-      console.log(`Connecting to ${flags["connect-to"]}...`);
-    } catch (error) {
-      const safeMessage = redactErrorSecret(error, token);
-      console.error(`Error starting vibedeckx connect: ${safeMessage}`);
-      const cleanupErrors = await closeResources();
-      if (childContext.isDaemonChild) notifyDaemonParentError(error);
-      const cleanupMessages = cleanupErrors.map(
-        (cleanupError) =>
-          `cleanup failed: ${redactErrorSecret(cleanupError, token)}`,
-      );
-      throw new Error([safeMessage, ...cleanupMessages].join("; "));
-    }
-
-    // Graceful shutdown
-    let shuttingDown = false;
-    const cleanup = async () => {
-      if (shuttingDown) {
-        console.log("\nForce exiting...");
-        process.exit(1);
-      }
-      shuttingDown = true;
-      console.log("\nShutting down...");
-
-      const forceExit = setTimeout(() => {
-        console.log("Shutdown timed out, force exiting...");
-        process.exit(1);
-      }, 5000);
-      forceExit.unref();
-
-      const cleanupErrors = await closeResources();
-      for (const error of cleanupErrors) {
-        process.stderr.write(
-          `Error during shutdown: ${redactErrorSecret(error, token)}\n`,
-        );
-      }
-      process.exit(cleanupErrors.length === 0 ? 0 : 1);
-    };
-
-    process.on("SIGINT", cleanup);
-    process.on("SIGTERM", cleanup);
+    await runConnectWorker({
+      dataDir,
+      connectToFlag: flags["connect-to"],
+      tokenFlag: flags.token,
+      tokenFileFlag: flags["token-file"],
+      daemonChild: childContext,
+      force: flags.force ?? false,
+      port: flags.port,
+      logLevel: flags["log-level"],
+    });
   },
   docs: {
     brief: "Connect to a remote Vibedeckx server as an inbound node",
   },
 });
 
-const connectManagementFlags = {
-  "data-dir": {
-    kind: "parsed" as const,
-    parse: String,
-    brief: "Daemon data directory (default: ~/.vibedeckx)",
-    optional: true as const,
-  },
-};
+const connectManagementFlags = { "data-dir": dataDirFlag };
 
 function reportDaemonCommandResult(
   result: DaemonCommandResult,
@@ -500,35 +436,106 @@ function reportDaemonCommandResult(
   console.log(result.message);
 }
 
-const connectStatusCommand = buildCommand({
-  parameters: { flags: connectManagementFlags },
-  func: async (flags: { "data-dir": string | undefined }) => {
-    assertConnectDaemonPlatform();
-    const result = await describeConnectDaemon(
-      flags["data-dir"] ?? VIBEDECKX_HOME,
-    );
-    return reportDaemonCommandResult(result);
+const connectSetupCommand = buildCommand({
+  parameters: { flags: setupFlags },
+  func: async (flags: SetupFlags) => {
+    const options = setupOptionsFromFlags(flags);
+    const outcome = await runSetup(options);
+    console.log(describeSetup(options.dataDir, outcome));
   },
-  docs: { brief: "Show the connect daemon status" },
+  docs: { brief: "Save the hub URL and connect token (prompted, from stdin, or from a file)" },
 });
 
-const connectStopCommand = buildCommand({
-  parameters: { flags: connectManagementFlags },
-  func: async (flags: { "data-dir": string | undefined }) => {
-    assertConnectDaemonPlatform();
-    const result = await stopConnectDaemon(
-      flags["data-dir"] ?? VIBEDECKX_HOME,
-    );
+const connectStatusCommand = buildCommand({
+  parameters: {
+    flags: {
+      "data-dir": dataDirFlag,
+      "check-update": {
+        kind: "boolean",
+        brief: "Also check the npm registry for a newer version (network)",
+        optional: true,
+      },
+      ready: {
+        kind: "boolean",
+        brief: "Exit non-zero unless the worker is connected to the hub (readiness check)",
+        optional: true,
+      },
+    },
+  },
+  func: async (flags: {
+    "data-dir": string | undefined;
+    "check-update": boolean | undefined;
+    ready: boolean | undefined;
+  }) => {
+    const result = await describeWorker(resolveDataDir(flags["data-dir"]), {
+      checkUpdate: flags["check-update"] ?? false,
+      requireConnected: flags.ready ?? false,
+    });
     return reportDaemonCommandResult(result);
   },
-  docs: { brief: "Stop the connect daemon" },
+  docs: { brief: "Show the worker's status (local only; exit 0 = alive and responsive)" },
+});
+
+function lifecycleCommand(
+  action: (options: { dataDir: string }) => Promise<DaemonCommandResult>,
+  brief: string,
+) {
+  return buildCommand({
+    parameters: { flags: connectManagementFlags },
+    func: async (flags: { "data-dir": string | undefined }) =>
+      reportDaemonCommandResult(
+        await action({ dataDir: resolveDataDir(flags["data-dir"]) }),
+      ),
+    docs: { brief },
+  });
+}
+
+const connectStartCommand = lifecycleCommand(
+  lifecycleStart,
+  "Start the worker (through its service if installed, else in the background)",
+);
+const connectStopCommand = lifecycleCommand(
+  lifecycleStop,
+  "Stop the worker until the next boot or `connect start` (auto-start unchanged)",
+);
+const connectRestartCommand = lifecycleCommand(
+  lifecycleRestart,
+  "Restart the worker",
+);
+const connectEnableCommand = lifecycleCommand(
+  lifecycleEnable,
+  "Resume auto-start and start the worker",
+);
+const connectDisableCommand = lifecycleCommand(
+  lifecycleDisable,
+  "Stop the worker and pause auto-start across reboots",
+);
+const connectUninstallServiceCommand = lifecycleCommand(
+  uninstallService,
+  "Remove the auto-start service (keeps data, token and runtime)",
+);
+
+const connectInstallServiceCommand = buildCommand({
+  parameters: { flags: setupFlags },
+  func: async (flags: SetupFlags) =>
+    reportDaemonCommandResult(await installService(setupOptionsFromFlags(flags))),
+  docs: {
+    brief: "Install the worker as a user service (systemd/launchd): starts at boot, restarts on crash",
+  },
 });
 
 const connectRoutes = buildRouteMap({
   routes: {
     run: connectCommand,
+    setup: connectSetupCommand,
     status: connectStatusCommand,
+    start: connectStartCommand,
     stop: connectStopCommand,
+    restart: connectRestartCommand,
+    enable: connectEnableCommand,
+    disable: connectDisableCommand,
+    "install-service": connectInstallServiceCommand,
+    "uninstall-service": connectUninstallServiceCommand,
   },
   defaultCommand: "run",
   docs: { brief: "Connect to a Vibedeckx server as an inbound node" },
