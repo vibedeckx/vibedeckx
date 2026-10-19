@@ -261,7 +261,7 @@ export function installRuntime(dataDir: string, source: RuntimeSource): InstallR
     }
     const staging = path.join(root, `.staging-${buildId}-${randomUUID()}`);
     try {
-      stageRuntime(staging, source, dataDir, expected);
+      stageRuntime(staging, source, expected);
       fs.renameSync(staging, versionDir);
       fsyncDirectory(root);
       copied = true;
@@ -317,11 +317,9 @@ function isInstalledCopyOf(versionDir: string, expected: Record<string, string>)
 function stageRuntime(
   staging: string,
   source: RuntimeSource,
-  dataDir: string,
   expected: Record<string, string>,
 ): void {
   fs.mkdirSync(staging, { recursive: true, mode: 0o755 });
-  const nodeHash = expected.node;
 
   // verbatimSymlinks keeps node_modules/.bin links relative and pointing
   // inside the copy instead of back at the source install.
@@ -330,19 +328,8 @@ function stageRuntime(
     verbatimSymlinks: true,
   });
 
-  // Node is ~100MB; versions sharing the same binary share one inode.
   const stagedNode = path.join(staging, "node");
-  const reusable = findInstalledNode(dataDir, nodeHash);
-  let linked = false;
-  if (reusable) {
-    try {
-      fs.linkSync(reusable, stagedNode);
-      linked = true;
-    } catch {
-      linked = false;
-    }
-  }
-  if (!linked) fs.copyFileSync(source.nodePath, stagedNode);
+  fs.copyFileSync(source.nodePath, stagedNode);
   fs.chmodSync(stagedNode, 0o755);
 
   const actual = hashTree(staging, walk(staging).files);
@@ -354,30 +341,6 @@ function stageRuntime(
   const manifest: RuntimeManifest = { schemaVersion: 1, version: source.version, files: expected };
   fs.writeFileSync(path.join(staging, MANIFEST_NAME), `${JSON.stringify(manifest)}\n`);
   fsyncTree(staging);
-}
-
-function findInstalledNode(dataDir: string, hash: string): string | undefined {
-  const root = runtimeRoot(dataDir);
-  let entries: string[];
-  try {
-    entries = fs.readdirSync(root);
-  } catch {
-    return undefined;
-  }
-  for (const entry of entries) {
-    if (!VERSION_PATTERN.test(entry)) continue;
-    const manifest = readManifest(path.join(root, entry));
-    if (manifest?.files.node !== hash) continue;
-    const candidate = path.join(root, entry, "node");
-    // The manifest says what the file should be, not what it is: linking a
-    // damaged binary would fail verification on every reinstall.
-    try {
-      if (sha256File(candidate) === hash) return candidate;
-    } catch {
-      // missing or unreadable: not reusable
-    }
-  }
-  return undefined;
 }
 
 /** Remove version dirs other than `keep` (current + rollback fallback). */

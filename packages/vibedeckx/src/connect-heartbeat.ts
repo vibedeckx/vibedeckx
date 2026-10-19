@@ -128,10 +128,6 @@ export class HeartbeatWriter {
     this.write();
   }
 
-  setConnectTo(connectTo: string): void {
-    this.status = { ...this.status, connectTo };
-  }
-
   /** Stop beating and remove the file if it is still ours. */
   stop(): void {
     if (this.timer) {

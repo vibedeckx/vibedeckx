@@ -46,8 +46,6 @@ export interface RunConnectWorkerOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-const CONFIG_POLL_MS = 30_000;
-
 /**
  * Run a reverse-connect worker in the foreground until SIGTERM/SIGINT.
  *
@@ -64,7 +62,10 @@ export async function runConnectWorker(options: RunConnectWorkerOptions): Promis
   // hand, fail the first attempt loudly instead (nobody restarts us anyway).
   const failFast = supervisor === undefined;
 
-  // Configuration errors in manual mode surface before anything is touched.
+  // Configuration errors surface before anything is touched. A missing hub URL
+  // is fatal even under a supervisor: a restart loop on it never contacts the
+  // hub, and the error says exactly what to do. A missing token is not — the
+  // worker waits for the token file like it does after a rejected token.
   let tokenSource = resolveTokenSource({
     dataDir,
     flagToken: options.tokenFlag,
@@ -72,12 +73,12 @@ export async function runConnectWorker(options: RunConnectWorkerOptions): Promis
     daemonChildToken: options.daemonChild.isDaemonChild ? options.daemonChild.token : undefined,
     env,
   });
-  let connectTo = resolveConnectTo({ dataDir, flag: options.connectToFlag, env });
-  if (failFast && (!connectTo || !tokenSource)) {
-    throw new Error(
-      `${!connectTo ? "No hub URL configured" : "No connect token configured"}. ${NOT_CONFIGURED_HINT}`,
-    );
+  const connectTo = resolveConnectTo({ dataDir, flag: options.connectToFlag, env });
+  if (!connectTo) throw new Error(`No hub URL configured. ${NOT_CONFIGURED_HINT}`);
+  if (failFast && !tokenSource) {
+    throw new Error(`No connect token configured. ${NOT_CONFIGURED_HINT}`);
   }
+  const hubUrl = connectTo;
 
   // Token text to scrub from any error we print ("" = nothing to scrub).
   const secret = (): string => {
@@ -95,7 +96,6 @@ export async function runConnectWorker(options: RunConnectWorkerOptions): Promis
   let storage: Awaited<ReturnType<typeof createSqliteStorage>> | undefined;
   let server: Awaited<ReturnType<typeof createServer>> | undefined;
   let connection: ConnectionSupervisor | undefined;
-  let configPoll: NodeJS.Timeout | undefined;
   let stopping = false;
 
   const closeResources = async (): Promise<unknown[]> => {
@@ -107,7 +107,6 @@ export async function runConnectWorker(options: RunConnectWorkerOptions): Promis
         errors.push(error);
       }
     };
-    if (configPoll) clearTimeout(configPoll);
     await attempt(() => connection?.stop());
     await attempt(() => server?.close());
     await attempt(() => storage?.close());
@@ -147,7 +146,7 @@ export async function runConnectWorker(options: RunConnectWorkerOptions): Promis
 
   try {
     lock = acquireInstanceLock(dataDir);
-    ownedState = claimRunState(dataDir, connectTo ?? "(not configured)");
+    ownedState = claimRunState(dataDir, hubUrl);
 
     setupLogging({
       dataDir,
@@ -161,25 +160,11 @@ export async function runConnectWorker(options: RunConnectWorkerOptions): Promis
     heartbeat = new HeartbeatWriter({
       dataDir,
       version: readPackageVersion(),
-      connectTo: connectTo ?? "",
+      connectTo: hubUrl,
       supervisor,
       installMode,
     });
     heartbeat.start();
-
-    if (!connectTo) {
-      // Supervised and unconfigured: wait for `connect setup` instead of
-      // crash-looping. The saved config is re-read periodically.
-      heartbeat.setState("blocked", "No hub URL configured", NOT_CONFIGURED_HINT);
-      console.warn(`[Connect] No hub URL configured; waiting. ${NOT_CONFIGURED_HINT}`);
-      connectTo = await waitForConfig(dataDir, env, options.connectToFlag, (handle) => {
-        configPoll = handle;
-      }, () => stopping);
-      if (!connectTo) return;
-      heartbeat.setConnectTo(connectTo);
-      updateRunStateTarget(dataDir, ownedState, connectTo);
-    }
-    const hubUrl = connectTo;
 
     if (!tokenSource) {
       // Supervised with no token anywhere: wait for the saved token file.
@@ -256,48 +241,4 @@ function claimRunState(dataDir: string, connectTo: string): ConnectDaemonState |
     fs.rmSync(daemonStatePath(dataDir), { force: true });
   }
   return claimDaemonState(dataDir, connectTo, readPackageVersion());
-}
-
-function updateRunStateTarget(
-  dataDir: string,
-  state: ConnectDaemonState | undefined,
-  connectTo: string,
-): void {
-  if (!state) return;
-  const statePath = daemonStatePath(dataDir);
-  const next: ConnectDaemonState = { ...state, connectTo };
-  fs.writeFileSync(statePath, `${JSON.stringify(next)}\n`, { mode: 0o600 });
-  state.connectTo = connectTo;
-}
-
-function waitForConfig(
-  dataDir: string,
-  env: NodeJS.ProcessEnv,
-  flag: string | undefined,
-  registerTimer: (handle: NodeJS.Timeout) => void,
-  isStopping: () => boolean,
-): Promise<string | undefined> {
-  return new Promise((resolve) => {
-    const check = (): void => {
-      if (isStopping()) {
-        resolve(undefined);
-        return;
-      }
-      let found: string | undefined;
-      try {
-        found = resolveConnectTo({ dataDir, flag, env });
-      } catch (error) {
-        console.warn(
-          `[Connect] Saved config is invalid: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      if (found) {
-        console.log(`[Connect] Hub URL configured: ${found}`);
-        resolve(found);
-        return;
-      }
-      registerTimer(setTimeout(check, CONFIG_POLL_MS));
-    };
-    check();
-  });
 }

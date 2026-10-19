@@ -167,24 +167,6 @@ describe("installRuntime", () => {
     expect(versionDirs()).toEqual([b.buildId, c.buildId].sort());
   });
 
-  it("shares the node binary between builds that use the same one", () => {
-    const a = installRuntime(dataDir, fakeRelease("1.0.0", "same-node"));
-    const b = installRuntime(dataDir, fakeRelease("1.1.0", "same-node"));
-    expect(fs.statSync(path.join(a.versionDir, "node")).ino).toBe(fs.statSync(path.join(b.versionDir, "node")).ino);
-  });
-
-  it("copies a fresh node instead of linking a damaged installed one", () => {
-    const a = installRuntime(dataDir, fakeRelease("1.0.0", "same-node"));
-    // Damage the installed binary in place (same inode, wrong content).
-    fs.appendFileSync(path.join(a.versionDir, "node"), "# corrupted\n");
-
-    const b = installRuntime(dataDir, fakeRelease("1.1.0", "same-node"));
-    expect(verifyRuntimeVersion(b.versionDir)).toBe(true);
-    expect(fs.statSync(path.join(b.versionDir, "node")).ino).not.toBe(
-      fs.statSync(path.join(a.versionDir, "node")).ino,
-    );
-  });
-
   it("leaves current on the old build when installing the new one fails", () => {
     const first = installRuntime(dataDir, fakeRelease("1.0.0"));
     const broken = fakeRelease("2.0.0");

@@ -467,6 +467,11 @@ Where the implementation made a choice the design left open, or deviated:
   lock before claiming `connect.json`, logging, the database, the preflight and
   the hub. A `connect.json` naming a live process without the lock (a worker
   from before this change) is refused with "in use by an older worker".
+- **Missing hub URL is fatal everywhere**: with no hub URL from flags, env or
+  saved config the worker exits with a clear error even under a supervisor.
+  The restart loop never contacts the hub, and `install-service` / the
+  compose template always provide one. A missing *token* still waits, using
+  the same token-file watch as `auth-failed`.
 - **Fail-fast in manual mode**: without `VIBEDECKX_SUPERVISOR` (foreground,
   `--daemon`) the *first* auth/pin/token error still exits with a clear error,
   as before. Nobody restarts such a process, so failing loudly is better. Under
@@ -495,9 +500,9 @@ Where the implementation made a choice the design left open, or deviated:
   Each build gets its own directory, `runtime/<version>+<content hash>/`,
   which is never rewritten or deleted while it can be current: a rebuild with
   the same version number, or a repair of a damaged build, installs beside it
-  and then switches `current`. Node is copied in and hard-linked between builds
-  that share the same binary, but only after the installed binary's actual
-  hash is checked.
+  and then switches `current`. Node is copied into every build (no
+  hard-link sharing; pruning to current + previous bounds the cost to two
+  copies).
 - **Docker (§5)**: `deploy/worker/` (`Dockerfile`, `build.sh`,
   `docker-compose.yml`). The token is mounted as a *directory*, not a single
   file: a single-file bind mount is pinned to the inode, so replacing the file
