@@ -564,6 +564,7 @@ Where the implementation made a choice the design left open, or deviated:
     shows the auto-start state as on systemd.
 - **Not done**: the install-mode handshake field (§6.4) and the Windows
   backend (§4.3). Reboot was not exercised on either platform (Linux boot start
-  relies on `enable` plus linger, both checked), nor was a macOS logout/login.
-  x64 Macs and `--daemon` migration on macOS (`--daemon` is Linux-only) are
-  untested.
+  relies on `enable` plus linger, both checked). A macOS logout/login was:
+  after `stop` the agent came back at login, after `disable` it stayed off
+  until `enable`. x64 Macs and `--daemon` migration on macOS (`--daemon` is
+  Linux-only) are untested.
