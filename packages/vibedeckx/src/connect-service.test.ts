@@ -42,7 +42,6 @@ function recordingExec(
 const spec = (overrides: Partial<ServiceSpec> = {}): ServiceSpec => ({
   dataDir: "/home/u/.vibedeckx",
   launcher: "/home/u/.vibedeckx/runtime/launcher",
-  pathEnv: "/home/u/.local/bin:/usr/bin",
   home: "/home/u",
   ...overrides,
 });
@@ -60,8 +59,10 @@ describe("systemd unit", () => {
     expect(unit).toContain('Environment="VIBEDECKX_SUPERVISOR=systemd"');
     expect(unit).toContain('Environment="VIBEDECKX_INSTALL_MODE=native-service"');
     expect(unit).toContain(
-      'ExecStart="/home/u/.vibedeckx/runtime/launcher" "connect" "--data-dir" "/home/u/.vibedeckx"',
+      'ExecStart="/home/u/.vibedeckx/runtime/launcher" "--service-env" "connect" "--data-dir" "/home/u/.vibedeckx"',
     );
+    // PATH comes from runtime/service.env, so a new PATH never changes the unit.
+    expect(unit).not.toContain("PATH=");
   });
 
   it("falls back to a fixed restart delay before systemd 254", () => {
@@ -172,6 +173,8 @@ describe("launchd", () => {
     expect(plist).toContain("<key>ThrottleInterval</key>\n    <integer>10</integer>");
     expect(plist).toContain("<string>/Users/a&amp;b</string>");
     expect(plist).toContain("<key>VIBEDECKX_SUPERVISOR</key>\n      <string>launchd</string>");
+    // PATH comes from runtime/service.env, so a new PATH never changes the plist.
+    expect(plist).not.toContain("<key>PATH</key>");
   });
 
   it("maps lifecycle onto launchctl in the gui domain", () => {

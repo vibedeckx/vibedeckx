@@ -504,7 +504,16 @@ Where the implementation made a choice the design left open, or deviated:
   in. Entries that die with the shell are dropped (npx `_npx` bins,
   `node_modules/.bin`, node-gyp shims, fnm's per-shell `fnm_multishells`), as
   are missing directories. Found on a real install, where npx and fnm
-  contributed all of these.
+  contributed all of these. The snapshot is not part of the unit/plist: it
+  goes to `runtime/service.env`, which the launcher loads only when called
+  as `launcher --service-env …` (the form the definitions use). A different
+  PATH on a re-install therefore means a restart (`kickstart -k`, no
+  `daemon-reload`), never a launchd unload/reload. The marker is an argument
+  because the worker's environment, `VIBEDECKX_SUPERVISOR` included, is
+  inherited by every terminal and agent it spawns; the `~/.local/bin` shim
+  runs the launcher without it, so a re-install from any shell snapshots that
+  shell's PATH. Verified on the Mac: five PATH changes in a row restarted the
+  job (`runs` 1→6) without rewriting the plist.
 - **Runtime (§6)**: the source must be a self-contained release (the npm
   platform package or a tarball install); a pnpm source checkout is refused.
   Each build gets its own directory, `runtime/<version>+<content hash>/`,
@@ -547,7 +556,9 @@ Where the implementation made a choice the design left open, or deviated:
     re-install with a changed plist hit `kickstart` "Could not find service"
     (113) in 2 of 3 runs and **left the worker unloaded** until the next login.
     `LaunchdAgentAdapter.bootout()` now waits until `launchctl print` no longer
-    finds the job (0/6 failures after the fix).
+    finds the job (0/6 failures after the fix). PATH has since moved out of
+    the plist (see Service PATH), so a re-install no longer unloads at all;
+    the wait remains for stop/disable/uninstall and plist template changes.
   - launchd refuses to bootstrap a disabled job with a bare "Input/output
     error" (5); `start`/`restart` now say to run `connect enable`, and `status`
     shows the auto-start state as on systemd.

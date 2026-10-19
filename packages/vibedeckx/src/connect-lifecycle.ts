@@ -45,6 +45,7 @@ import {
   installRuntime,
   launcherPath,
   readCurrentVersion,
+  writeServiceEnv,
   type RuntimeSource,
 } from "./connect-runtime.js";
 import { compareUpdateStatus, fetchLatestPublishedVersion } from "./update-check.js";
@@ -601,9 +602,11 @@ export async function installService(options: InstallServiceOptions): Promise<Da
       return false;
     }
   })();
+  let envChanged: boolean;
   let definitionChanged: boolean;
   try {
-    definitionChanged = adapter.install({ dataDir, launcher, pathEnv, home: env.HOME ?? os.homedir() });
+    envChanged = writeServiceEnv(dataDir, pathEnv);
+    definitionChanged = adapter.install({ dataDir, launcher, home: env.HOME ?? os.homedir() });
     writeServiceRecord(dataDir, adapter);
   } catch (error) {
     return failed(`Writing the service definition failed: ${errorMessage(error)}`);
@@ -632,6 +635,7 @@ export async function installService(options: InstallServiceOptions): Promise<Da
     const running = readWorkerStatus(dataDir);
     const upToDate =
       !runtimeChanged &&
+      !envChanged &&
       !definitionChanged &&
       !options.force &&
       readIfExists(savedConfigPath(dataDir)) === configBefore &&

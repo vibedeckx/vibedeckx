@@ -10,6 +10,7 @@ import {
   runtimeRoot,
   validateRuntimeSource,
   verifyRuntimeVersion,
+  writeServiceEnv,
   type RuntimeSource,
 } from "./connect-runtime.js";
 
@@ -42,7 +43,7 @@ function fakeRelease(version: string, nodeBody = "fake-node-v1"): RuntimeSource 
   const nodePath = path.join(root, "fake-node");
   fs.writeFileSync(
     nodePath,
-    `#!/bin/sh\n# ${nodeBody}\necho "runtime=$VIBEDECKX_RUNTIME_DIR"\necho "args=$*"\n`,
+    `#!/bin/sh\n# ${nodeBody}\necho "runtime=$VIBEDECKX_RUNTIME_DIR"\necho "args=$*"\necho "path=$PATH"\n`,
   );
   fs.chmodSync(nodePath, 0o755);
   return validateRuntimeSource(root, nodePath);
@@ -94,6 +95,26 @@ describe("installRuntime", () => {
     const versionDir = fs.realpathSync(installed);
     expect(output).toContain(`runtime=${versionDir}`);
     expect(output).toContain(`args=${path.join(versionDir, "package", "dist", "bin.js")} connect --data-dir /d`);
+  });
+
+  it("loads service.env only when the service definition asks for it", () => {
+    installRuntime(dataDir, fakeRelease("1.0.0"));
+    // The fake node prints its PATH too; a quote in a directory must survive.
+    const servicePath = "/opt/it's here:/usr/bin:/bin";
+    expect(writeServiceEnv(dataDir, servicePath)).toBe(true);
+    expect(writeServiceEnv(dataDir, servicePath)).toBe(false);
+    const run = (args: string[]) =>
+      execFileSync(launcherPath(dataDir), args, {
+        encoding: "utf8",
+        // Inherited by everything the worker spawns, so it must not count.
+        env: { PATH: "/usr/bin:/bin", VIBEDECKX_SUPERVISOR: "launchd" },
+      });
+
+    const service = run(["--service-env", "connect"]);
+    expect(service).toContain(`path=${servicePath}`);
+    expect(service).toMatch(/args=\S+ connect$/m);
+    // The ~/.local/bin shim runs from the user's shell, whose PATH must win.
+    expect(run(["connect"])).toContain("path=/usr/bin:/bin");
   });
 
   it("is idempotent for an intact build", () => {

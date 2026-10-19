@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { VIBEDECKX_HOME } from "./constants.js";
 import { connectConfigDir } from "./connect-config.js";
+import { SERVICE_ENV_FLAG } from "./connect-runtime.js";
 import { writeFileAtomic } from "./utils/atomic-file.js";
 
 /**
@@ -16,7 +17,9 @@ import { writeFileAtomic } from "./utils/atomic-file.js";
  *   crash    → restarted with backoff, never parked in a terminal failed state
  *
  * The worker always runs as the installing (non-root) user: it needs that
- * user's agent CLI credentials, HOME, PATH and git config.
+ * user's agent CLI credentials, HOME, PATH and git config. PATH is not part
+ * of the definition: the launcher loads it from runtime/service.env, so a new
+ * PATH needs a restart, never a reload.
  */
 
 export interface ExecResult {
@@ -48,8 +51,6 @@ export interface ServiceRecord {
 export interface ServiceSpec {
   dataDir: string;
   launcher: string;
-  /** PATH snapshot so agent CLIs resolve inside the service environment. */
-  pathEnv: string;
   home: string;
 }
 
@@ -159,8 +160,7 @@ export function renderSystemdUnit(spec: ServiceSpec, systemdVersion: number): st
     "",
     "[Service]",
     "Type=simple",
-    `ExecStart=${[spec.launcher, "connect", "--data-dir", spec.dataDir].map(systemdQuote).join(" ")}`,
-    `Environment=${systemdQuote(`PATH=${spec.pathEnv}`)}`,
+    `ExecStart=${[spec.launcher, SERVICE_ENV_FLAG, "connect", "--data-dir", spec.dataDir].map(systemdQuote).join(" ")}`,
     `Environment=${systemdQuote(`HOME=${spec.home}`)}`,
     'Environment="VIBEDECKX_SUPERVISOR=systemd"',
     'Environment="VIBEDECKX_INSTALL_MODE=native-service"',
@@ -318,11 +318,10 @@ function xmlEscape(value: string): string {
 }
 
 export function renderLaunchdPlist(label: string, spec: ServiceSpec): string {
-  const args = [spec.launcher, "connect", "--data-dir", spec.dataDir]
+  const args = [spec.launcher, SERVICE_ENV_FLAG, "connect", "--data-dir", spec.dataDir]
     .map((arg) => `      <string>${xmlEscape(arg)}</string>`)
     .join("\n");
   const env: Record<string, string> = {
-    PATH: spec.pathEnv,
     HOME: spec.home,
     VIBEDECKX_SUPERVISOR: "launchd",
     VIBEDECKX_INSTALL_MODE: "native-service",

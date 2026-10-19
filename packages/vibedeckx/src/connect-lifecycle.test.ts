@@ -29,7 +29,7 @@ import {
 } from "./connect-config.js";
 import { workerStatusPath, type WorkerStatus } from "./connect-heartbeat.js";
 import { readServiceRecord, serviceRecordPath, type Exec, type ExecResult } from "./connect-service.js";
-import { readCurrentVersion, validateRuntimeSource } from "./connect-runtime.js";
+import { readCurrentVersion, serviceEnvPath, validateRuntimeSource } from "./connect-runtime.js";
 
 let workDir: string;
 let dataDir: string;
@@ -507,13 +507,23 @@ describe.runIf(process.platform === "linux")("installService", () => {
       ["a new version", () => ({ runtimeSource: fakeRelease("3.0.1") })],
       ["a new token", () => ({ token: "tok-2" })],
       ["a new hub URL", () => ({ connectTo: "https://other.example" })],
-      ["a changed unit", () => ({ env: { ...baseEnv(), PATH: `${workDir}:/usr/bin:/bin` } })],
+      ["a new PATH", () => ({ env: { ...baseEnv(), PATH: `${workDir}:/usr/bin:/bin` } })],
       ["--force", () => ({ force: true })],
     ])("restarts a running worker for %s", async (_label, overrides) => {
       const { exec, calls } = fakeSystemd({ active: true });
       const result = await install(exec, overrides());
       expect(result.exitCode).toBe(0);
       expect(startCalls(calls)).toEqual([expect.stringMatching(/ restart /)]);
+    });
+
+    it("applies a new PATH by restarting, leaving the unit untouched", async () => {
+      const unit = readServiceRecord(dataDir)!.definitionPath;
+      const unitBefore = fs.readFileSync(unit, "utf8");
+      const { exec, calls } = fakeSystemd({ active: true });
+      expect((await install(exec, { env: { ...baseEnv(), PATH: `${workDir}:/usr/bin:/bin` } })).exitCode).toBe(0);
+      expect(fs.readFileSync(unit, "utf8")).toBe(unitBefore);
+      expect(calls.some((call) => call.includes("daemon-reload"))).toBe(false);
+      expect(fs.readFileSync(serviceEnvPath(dataDir), "utf8")).toContain(`PATH='${workDir}:/usr/bin:/bin`);
     });
 
     it("restarts a running worker that is still on an older build", async () => {
