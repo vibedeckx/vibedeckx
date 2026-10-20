@@ -27,6 +27,16 @@ describe("runOneShot", () => {
     expect(result.exitCode).not.toBe(0);
   });
 
+  it("returns on timeout even when a descendant outside the killed tree holds the pipes", async () => {
+    // setsid puts the sleeper outside the process group, so the group kill
+    // misses it and it keeps stdout open — the shape of a Windows orphan whose
+    // root already exited before taskkill /T could walk to it.
+    const started = Date.now();
+    const result = await runOneShot("setsid sleep 4 & sleep 4", { timeoutMs: 200 });
+    expect(result.timedOut).toBe(true);
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+
   it("truncates output beyond the cap and keeps the process from hanging", async () => {
     const result = await runOneShot(`head -c ${MAX_OUTPUT_BYTES * 2} /dev/zero | tr '\\0' 'x'`, { timeoutMs: 10000 });
     expect(result.truncated).toBe(true);

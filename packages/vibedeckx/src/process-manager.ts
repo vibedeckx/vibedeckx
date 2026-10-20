@@ -14,6 +14,7 @@ import {
   buildClaudeStreamExecutorSpawn,
 } from "./protocol/claude-code/cli.js";
 import { serializeUserInput } from "./protocol/claude-code/codec.js";
+import { killProcessTree, treeSpawnOptions } from "./utils/process-tree.js";
 
 export type LogMessage =
   | { type: "stdout"; data: string }
@@ -632,7 +633,7 @@ export class ProcessManager {
     const childProcess = spawn(executor.command, {
       shell: true,
       cwd,
-      detached: true,
+      ...treeSpawnOptions(),
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, FORCE_COLOR: "1" },
     });
@@ -739,7 +740,7 @@ export class ProcessManager {
 
     const childProcess = spawn(command, fullArgs, {
       cwd,
-      detached: true,
+      ...treeSpawnOptions(),
       stdio: ['pipe', 'pipe', 'pipe'],
       env: { ...process.env, FORCE_COLOR: '1' },
     });
@@ -955,7 +956,7 @@ export class ProcessManager {
         killed = true;
       }
     } else {
-      // For regular processes, kill the process group (detached: true makes them group leaders)
+      // For regular processes, kill the process tree (treeSpawnOptions makes them group leaders)
       const childProcess = runningProcess.process as ChildProcess;
       const pid = childProcess.pid;
       if (pid) {
@@ -975,16 +976,8 @@ export class ProcessManager {
     return killed;
   }
 
-  /**
-   * Kill a process group by sending SIGTERM to the negative PID
-   */
   private killProcessGroup(pid: number): boolean {
-    try {
-      process.kill(-pid, "SIGTERM");
-      return true;
-    } catch {
-      return false;
-    }
+    return killProcessTree(pid, "SIGTERM");
   }
 
   /**
@@ -1000,11 +993,10 @@ export class ProcessManager {
     console.log(`[ProcessManager] Process ${processId} not in memory (db status=${dbProcess.status}), attempting to kill by PID ${dbProcess.pid}`);
 
     let killed = false;
-    // Try process group kill first
-    try {
-      process.kill(-dbProcess.pid, "SIGTERM");
+    // Try process tree kill first
+    if (killProcessTree(dbProcess.pid, "SIGTERM")) {
       killed = true;
-    } catch {
+    } else {
       // Process group kill failed, try direct kill
       try {
         process.kill(dbProcess.pid, "SIGTERM");
@@ -1343,9 +1335,7 @@ export class ProcessManager {
       ? (runningProcess.process as IPty).pid
       : (runningProcess.process as ChildProcess).pid;
     if (!pid) return;
-    try {
-      process.kill(-pid, signal);
-    } catch {
+    if (!killProcessTree(pid, signal)) {
       // Group signal failed (already reaped, or never a group leader) — fall
       // back to signalling the process itself.
       try { process.kill(pid, signal); } catch { /* already dead */ }

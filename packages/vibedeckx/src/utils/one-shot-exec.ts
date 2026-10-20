@@ -1,6 +1,10 @@
 import { spawn } from "child_process";
+import { killProcessTree, treeSpawnOptions } from "./process-tree.js";
 
 export const MAX_OUTPUT_BYTES = 65536;
+
+// How long to wait for "close" after a timeout kill before giving up on the pipes.
+const CLOSE_GRACE_MS = 1000;
 
 export interface OneShotResult {
   stdout: string;
@@ -23,7 +27,7 @@ export function runOneShot(
     const child = spawn(command, {
       shell: true,
       cwd: opts.cwd,
-      detached: true, // own process group, so the kill below reaches grandchildren
+      ...treeSpawnOptions(), // so the kill below reaches grandchildren
       stdio: ["ignore", "pipe", "pipe"],
       env: { ...process.env },
     });
@@ -55,16 +59,20 @@ export function runOneShot(
 
     const killTree = () => {
       if (child.pid === undefined) return;
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
+      if (!killProcessTree(child.pid, "SIGKILL")) child.kill("SIGKILL");
     };
 
     const timer = setTimeout(() => {
       timedOut = true;
       killTree();
+      // A descendant the kill could not reach (it left the process group, or on
+      // Windows its root exited before taskkill /T could walk to it) keeps our
+      // pipes open and withholds "close" — stop waiting for it.
+      setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        settle(124);
+      }, CLOSE_GRACE_MS).unref();
     }, opts.timeoutMs);
 
     const settle = (exitCode: number | null) => {

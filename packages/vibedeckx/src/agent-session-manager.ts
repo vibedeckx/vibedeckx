@@ -60,6 +60,7 @@ import {
   type CompletionAction,
   type CompletionPayload,
 } from "./turn-completion.js";
+import { killProcessTree, treeSpawnOptions } from "./utils/process-tree.js";
 
 /**
  * Build a user-facing message for when an agent process fails to start.
@@ -1586,16 +1587,13 @@ export class AgentSessionManager {
 
   /**
    * Kill an agent process and its entire process tree.
-   * Uses negative PID to signal the process group (requires detached: true at spawn).
+   * Requires treeSpawnOptions() at spawn.
    */
   private killProcess(proc: ChildProcess | null, signal: NodeJS.Signals = "SIGTERM"): void {
     const pid = proc?.pid;
-    // Negating PID 1 broadcasts to every process we can signal on POSIX.
     // Only accept real child PIDs; invalid IDs must not reach either kill path.
     if (!proc || pid === undefined || !Number.isSafeInteger(pid) || pid <= 1) return;
-    try {
-      process.kill(-pid, signal);
-    } catch {
+    if (!killProcessTree(pid, signal)) {
       // Process group kill failed (e.g. already dead) — try direct kill as fallback
       try { proc.kill(signal); } catch { /* already dead */ }
     }
@@ -1712,7 +1710,7 @@ export class AgentSessionManager {
       env: { ...process.env, FORCE_COLOR: "1", ...config.env },
       stdio: ["pipe", "pipe", "pipe"],
       shell: config.shell ?? false,
-      detached: true, // Own process group so we can kill the entire tree
+      ...treeSpawnOptions(), // so we can kill the entire tree
     });
 
     session.process = childProcess;

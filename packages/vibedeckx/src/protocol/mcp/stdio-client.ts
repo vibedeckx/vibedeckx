@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
 import { mcpLine, parseMcpLine } from "./codec.js";
 import { McpClientError, McpTimeoutError, normalizeMcpInstructions, type McpTool, type RemoteMcpClient } from "./client.js";
+import { killProcessTree, treeSpawnOptions } from "../../utils/process-tree.js";
 
 export interface McpServerSpec { command: string; args?: string[]; cwd?: string }
 export { McpClientError, McpTimeoutError, type McpTool };
@@ -50,9 +51,9 @@ export class McpStdioClient implements RemoteMcpClient {
       cwd: spec.cwd,
       stdio: ["pipe", "pipe", "pipe"],
       env: process.env,
-      // Give the MCP server its own process group so wrappers such as npx and
-      // their grandchildren can all be terminated when the session closes.
-      detached: true,
+      // Make the MCP server's tree killable so wrappers such as npx and their
+      // grandchildren can all be terminated when the session closes.
+      ...treeSpawnOptions(),
     });
     const client = new McpStdioClient(child);
     try {
@@ -121,11 +122,7 @@ export class McpStdioClient implements RemoteMcpClient {
   private killTree(signal: NodeJS.Signals): void {
     const pid = this.child.pid;
     if (pid === undefined) return;
-    try {
-      process.kill(-pid, signal);
-    } catch {
-      this.child.kill(signal);
-    }
+    if (!killProcessTree(pid, signal)) this.child.kill(signal);
   }
 
   private request(method: string, params: unknown, timeoutMs: number): Promise<unknown> {
