@@ -189,10 +189,25 @@ function hashTree(root: string, relativeFiles: string[]): Record<string, string>
   return result;
 }
 
+/**
+ * Windows flushes only through a handle opened for writing (FlushFileBuffers),
+ * so open read-write there; a copied read-only file is ours to make writable.
+ */
+function openForFsync(filePath: string): number {
+  if (process.platform !== "win32") return fs.openSync(filePath, "r");
+  try {
+    return fs.openSync(filePath, "r+");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+    fs.chmodSync(filePath, 0o644);
+    return fs.openSync(filePath, "r+");
+  }
+}
+
 function fsyncTree(root: string): void {
   const { files, dirs } = walk(root);
   for (const file of files) {
-    const fd = fs.openSync(path.join(root, file), "r");
+    const fd = openForFsync(path.join(root, file));
     try {
       fs.fsyncSync(fd);
     } finally {
