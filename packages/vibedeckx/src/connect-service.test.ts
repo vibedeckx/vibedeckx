@@ -20,7 +20,7 @@ import {
   type ServiceSpec,
 } from "./connect-service.js";
 import { VIBEDECKX_HOME } from "./constants.js";
-import { stoppedThisBoot } from "./connect-windows-supervise.js";
+import { stopMarkerActive, stopMarkerPath } from "./connect-windows-supervise.js";
 
 let workDir: string;
 
@@ -373,13 +373,26 @@ describe("Task Scheduler", () => {
     await instance.stop();
     expect(sent).toContain("quit");
     expect(supervisor.running).toBe(false);
-    expect(stoppedThisBoot(workDir)).toBe(true);
+    expect(stopMarkerActive(workDir)).toBe(true);
     expect(calls.some((call) => call.includes("/End"))).toBe(false);
 
     await instance.start();
-    expect(stoppedThisBoot(workDir)).toBe(false);
+    expect(stopMarkerActive(workDir)).toBe(false);
     expect(calls.filter((call) => call.startsWith("schtasks /Run"))).toHaveLength(1);
     expect(await instance.isActive()).toBe(true);
+  });
+
+  it("stop records the supervisor's logon session, not the caller's", async () => {
+    const pinging = new TaskSchedulerAdapter(
+      workDir,
+      recordingExec().exec,
+      winEnv,
+      async (_dir, command) => (command === "ping" ? JSON.stringify({ logonId: "S-1-5-5-0-4242" }) : undefined),
+      async () => {},
+      "10.0.19045",
+    );
+    await pinging.stop();
+    expect(JSON.parse(fs.readFileSync(stopMarkerPath(workDir), "utf8")).logonId).toBe("S-1-5-5-0-4242");
   });
 
   it("start refuses a disabled task", async () => {
@@ -397,7 +410,7 @@ describe("Task Scheduler", () => {
     await instance.disable();
     expect(calls).toContain(`schtasks /Change /TN ${instance.name} /DISABLE`);
     expect(supervisor.running).toBe(false);
-    expect(stoppedThisBoot(workDir)).toBe(false);
+    expect(stopMarkerActive(workDir)).toBe(false);
   });
 
   it("restart quits the supervisor and runs the task again", async () => {

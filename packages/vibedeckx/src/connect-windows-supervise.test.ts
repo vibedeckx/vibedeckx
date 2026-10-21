@@ -5,10 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   clearStopMarker,
   nextBackoffMs,
+  parseLogonId,
   resolveWorkerCommand,
   runSupervise,
   sendSuperviseCommand,
-  stoppedThisBoot,
+  stopMarkerActive,
   supervisePipePath,
   writeStopMarker,
   type WorkerCommand,
@@ -66,13 +67,27 @@ async function waitFor<T>(probe: () => T | undefined | false, timeoutMs = 10_000
 }
 
 describe("stop marker", () => {
+  const session = { bootTimeMs: 1_000_000, logonId: "S-1-5-5-0-1111" };
+
   it("holds for the boot it was written in and lapses on another", () => {
-    expect(stoppedThisBoot(dataDir, 1_000_000)).toBe(false);
-    writeStopMarker(dataDir, 1_000_000);
-    expect(stoppedThisBoot(dataDir, 1_000_000 + 30_000)).toBe(true);
-    expect(stoppedThisBoot(dataDir, 1_000_000 + 60 * 60_000)).toBe(false);
+    expect(stopMarkerActive(dataDir, session)).toBe(false);
+    writeStopMarker(dataDir, session);
+    expect(stopMarkerActive(dataDir, { ...session, bootTimeMs: 1_000_000 + 30_000 })).toBe(true);
+    expect(stopMarkerActive(dataDir, { ...session, bootTimeMs: 1_000_000 + 60 * 60_000 })).toBe(false);
     clearStopMarker(dataDir);
-    expect(stoppedThisBoot(dataDir, 1_000_000)).toBe(false);
+    expect(stopMarkerActive(dataDir, session)).toBe(false);
+  });
+
+  it("lapses with a new logon session even when the boot time survives (Fast Startup)", () => {
+    writeStopMarker(dataDir, session);
+    expect(stopMarkerActive(dataDir, { ...session, logonId: "S-1-5-5-0-2222" })).toBe(false);
+    // Unknown on either side: fall back to the boot time.
+    expect(stopMarkerActive(dataDir, { bootTimeMs: session.bootTimeMs })).toBe(true);
+  });
+
+  it("finds the logon SID in whoami /logonid output", () => {
+    expect(parseLogonId("S-1-5-5-0-6187241\r\n")).toBe("S-1-5-5-0-6187241");
+    expect(parseLogonId("ERROR: Access is denied.")).toBeUndefined();
   });
 });
 

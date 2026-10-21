@@ -402,8 +402,7 @@ export async function lifecycleStop(options: LifecycleOptions): Promise<DaemonCo
   if (adapter) {
     return runServiceAction(
       () => adapter.stop(),
-      `Stopped ${adapter.name}. It starts again at the next ${adapter.kind === "schtasks" ? "boot" : "boot/login"}; ` +
-        "use `vibedeckx connect disable` to keep it off.",
+      `Stopped ${adapter.name}. It starts again at the next boot/login; use \`vibedeckx connect disable\` to keep it off.`,
     );
   }
   return stopConnectDaemon(options.dataDir);

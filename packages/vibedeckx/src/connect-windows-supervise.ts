@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
@@ -42,8 +42,20 @@ export function supervisePipePath(dataDir: string, platform: NodeJS.Platform = p
 }
 
 // ---------------------------------------------------------------------------
-// Stop marker: `connect stop` holds until the next boot (§3.1)
+// Stop marker: `connect stop` holds until the next login or boot (§3.1, §4.3)
+//
+// Boot time alone is not enough: with Fast Startup (the Windows default) a
+// shutdown hibernates the kernel, so uptime and LastBootUpTime survive it.
+// It does log every user off, so the logon session the supervisor ran in is
+// what tells "same session" apart. As on macOS (a LaunchAgent bootout lasts
+// until the next login), a logoff and logon start the worker again.
 // ---------------------------------------------------------------------------
+
+export interface StopScope {
+  bootTimeMs: number;
+  /** Logon SID (S-1-5-5-X-Y) of the session the supervisor runs in. */
+  logonId?: string;
+}
 
 export function stopMarkerPath(dataDir: string): string {
   return path.join(connectConfigDir(dataDir), "service-stopped.json");
@@ -53,22 +65,46 @@ export function currentBootTimeMs(now: number = Date.now(), uptimeSeconds: numbe
   return now - uptimeSeconds * 1000;
 }
 
-export function writeStopMarker(dataDir: string, bootTimeMs: number = currentBootTimeMs()): void {
-  writeFileAtomic(stopMarkerPath(dataDir), `${JSON.stringify({ bootTimeMs })}\n`);
+export function parseLogonId(whoamiOutput: string): string | undefined {
+  return /S-1-5-5-\d+-\d+/.exec(whoamiOutput)?.[0];
+}
+
+let cachedLogonId: string | undefined;
+
+/** This process's logon session; undefined off Windows or if whoami fails. */
+export function currentLogonId(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+  if (cachedLogonId) return cachedLogonId;
+  const result = spawnSync("whoami", ["/logonid"], { encoding: "utf8", windowsHide: true, timeout: 15_000 });
+  cachedLogonId = result.status === 0 ? parseLogonId(result.stdout ?? "") : undefined;
+  return cachedLogonId;
+}
+
+export function currentStopScope(): StopScope {
+  return { bootTimeMs: currentBootTimeMs(), logonId: currentLogonId() };
+}
+
+export function writeStopMarker(dataDir: string, scope: StopScope = currentStopScope()): void {
+  writeFileAtomic(stopMarkerPath(dataDir), `${JSON.stringify(scope)}\n`);
 }
 
 export function clearStopMarker(dataDir: string): void {
   fs.rmSync(stopMarkerPath(dataDir), { force: true });
 }
 
-/** A marker from an earlier boot is void: a reboot starts the worker again. */
-export function stoppedThisBoot(dataDir: string, bootTimeMs: number = currentBootTimeMs()): boolean {
+/** A marker from an earlier boot or logon session is void. */
+export function stopMarkerActive(dataDir: string, scope: StopScope = currentStopScope()): boolean {
+  let marker: Partial<StopScope>;
   try {
-    const parsed = JSON.parse(fs.readFileSync(stopMarkerPath(dataDir), "utf8")) as { bootTimeMs?: unknown };
-    return typeof parsed.bootTimeMs === "number" && Math.abs(parsed.bootTimeMs - bootTimeMs) < BOOT_TOLERANCE_MS;
+    marker = JSON.parse(fs.readFileSync(stopMarkerPath(dataDir), "utf8")) as Partial<StopScope>;
   } catch {
     return false;
   }
+  if (typeof marker.bootTimeMs !== "number" || Math.abs(marker.bootTimeMs - scope.bootTimeMs) >= BOOT_TOLERANCE_MS) {
+    return false;
+  }
+  // Compare sessions only when both sides know theirs.
+  return !marker.logonId || !scope.logonId || marker.logonId === scope.logonId;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,8 +213,8 @@ export async function runSupervise(options: SuperviseOptions): Promise<number> {
     fs.writeSync(logFd, `${new Date().toISOString()} [${process.pid}] ${message}\n`);
   };
 
-  if (stoppedThisBoot(dataDir)) {
-    log("stopped by `connect stop` during this boot; not starting the worker");
+  if (stopMarkerActive(dataDir)) {
+    log("stopped by `connect stop` in this logon session; not starting the worker");
     return 0;
   }
 
@@ -273,7 +309,9 @@ export async function runSupervise(options: SuperviseOptions): Promise<number> {
       const command = buffer.slice(0, newline).trim();
       buffer = "";
       if (command === "ping") {
-        socket.end(`${JSON.stringify({ pid: process.pid, workerPid: worker?.pid ?? null })}\n`);
+        socket.end(
+          `${JSON.stringify({ pid: process.pid, workerPid: worker?.pid ?? null, logonId: currentLogonId() ?? null })}\n`,
+        );
         return;
       }
       if (command === "quit") {

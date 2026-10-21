@@ -8,6 +8,7 @@ import { connectConfigDir } from "./connect-config.js";
 import { SERVICE_ENV_FLAG } from "./connect-runtime.js";
 import {
   clearStopMarker,
+  currentStopScope,
   sendSuperviseCommand,
   writeStopMarker,
   type SuperviseCommand,
@@ -724,9 +725,20 @@ export class TaskSchedulerAdapter implements ServiceAdapter {
     );
   }
 
-  /** Stopped until the next boot (the marker) or `start`; auto-start is kept. */
+  /**
+   * Stopped until the next login or boot (the marker) or `start`; auto-start
+   * is kept. The marker names the supervisor's logon session, which need not
+   * be ours (e.g. `connect stop` over SSH).
+   */
   async stop(): Promise<void> {
-    writeStopMarker(this.dataDir);
+    const scope = currentStopScope();
+    try {
+      const reply = JSON.parse((await this.client(this.dataDir, "ping")) ?? "{}") as { logonId?: unknown };
+      if (typeof reply.logonId === "string") scope.logonId = reply.logonId;
+    } catch {
+      // Not running, or an older supervisor: our own session is the best guess.
+    }
+    writeStopMarker(this.dataDir, scope);
     await this.quit();
   }
 
