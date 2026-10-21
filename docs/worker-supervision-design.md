@@ -329,12 +329,16 @@ Why not the native options alone:
   channel: `stop`, `quit`, `restart`. Windows has no SIGTERM (§3.4), so a
   graceful worker stop is "close the worker's stdin", with a forced
   `taskkill /T /F` after a timeout.
-- **Stop marker.** `connect stop` records the current boot time in the
-  data-dir, then sends `stop`. A `supervise` launched by the repetition during
-  the same boot exits immediately. Logoff and logon keep it stopped; a reboot
-  clears it, as §3.1 requires. `connect start` deletes the marker and runs the
-  task. Phase 2 must check how Fast Startup affects the boot time: with Fast
-  Startup, a shutdown is a hibernation and may not reset uptime.
+- **Stop marker.** `connect stop` records the boot time and the logon SID of
+  the session `supervise` runs in (asked over the pipe, so a stop over SSH
+  still names the right session), then sends `quit`. A `supervise` launched
+  in the same boot and logon session exits immediately. Boot time alone is
+  not enough: with Fast Startup (the Windows default) a shutdown hibernates
+  the kernel and uptime survives it, which kept a stopped worker stopped
+  indefinitely in testing. A shutdown does log every user off, so the session
+  check covers it. As with a macOS LaunchAgent, the stop therefore lasts until
+  the next login or boot: a logoff and logon start the worker again.
+  `connect start` deletes the marker and runs the task.
 - **Do not use `schtasks /End` as stop.** It terminates only the task's own
   process (conhost). `supervise` and the worker keep running, outside the
   task's tracking, and no new `supervise` started in the next 100 s. This is
@@ -364,12 +368,36 @@ Why not the native options alone:
 - A worker crash costs about 2 s. A `supervise` crash costs up to about
   1 minute, the minimum repetition interval. `supervise` must stay small.
 
-**Phase 2 must verify**, with the real implementation:
+**Phase 2 results (2026-10-21, `0.3.54-win.2`/`-win.3` from npm on Windows 10
+22H2, separate data-dir, unreachable hub):**
 
-- logon after logoff, reboot (including Fast Startup), sleep and wake;
-- the single-instance lock (§3.5), including that a child does not inherit it;
-- runtime install and `current` switch (§6.3) with `launcher.cmd`;
-- a token file that only the user can read (`icacls`);
+| Scenario | Result |
+|---|---|
+| `npx vibedeckx@… connect install` (no admin) | OK, about 110 s including the npx download and runtime copy |
+| Visible windows | None for the whole tree (conhost → cmd → supervise → worker) |
+| Worker / `supervise` killed with `taskkill /F` | Back in about 5 s / within a minute; the worker dies with `supervise` |
+| `stop`, `start`, `restart`, `disable`, `enable`, re-install, `uninstall` | As specified; re-install leaves a running worker alone |
+| Graceful stop (stdin EOF) | The worker ran its shutdown on every stop, restart, disable and uninstall |
+| Upgrade `-win.2` → `-win.3` by re-running install | New runtime, `supervise` and worker running again within 2 s |
+| Logoff and logon | Starts again after logon |
+| Reboot after `stop` | Starts again after logon |
+| Fast Startup shutdown after `stop` | `-win.2` (boot time only): stayed stopped, a bug. `-win.3` (logon session): starts again after logon |
+| Sleep and wake | Same `supervise` and worker before and after |
+
+Startup right after a boot is slow: about 50 s from node starting to
+`supervise` listening. The machine is busy then; this is not a failure.
+
+**Still open**, with the real implementation:
+
+- the worker's single-instance lock (§3.5): a second worker on the same
+  data-dir, and that a child does not inherit the lock. The `supervise`
+  pipe guard was exercised;
+- a hard reset during a runtime install or `current` switch (§6.3);
+- a real hub connection and agent sessions on Windows (the test used an
+  unreachable hub);
+- the token file ACL on a machine where files inherit their ACL. On the test
+  machine new files carried explicit SYSTEM/Administrators/user entries,
+  which `/inheritance:r` keeps;
 - the remaining §8 rows.
 
 ## 5. Docker worker image
