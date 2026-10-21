@@ -362,6 +362,30 @@ describe("sanitizeServicePath", () => {
   });
 });
 
+describe("sanitizeServicePath on Windows", () => {
+  it("drops npx/node-gyp entries case-insensitively and keeps System32", () => {
+    // The PATH of a worker started with `npx vibedeckx@latest connect` from cmd.
+    const input = [
+      "C:\\Users\\me\\AppData\\Local\\npm-cache\\_npx\\3c02d57a\\node_modules\\.bin",
+      "C:\\Users\\me\\node_modules\\.bin",
+      "C:\\Program Files\\nodejs\\node_modules\\npm\\node_modules\\@npmcli\\run-script\\lib\\node-gyp-bin",
+      "C:\\WINDOWS\\system32",
+      "C:\\WINDOWS",
+      "C:\\Program Files\\nodejs\\",
+      "C:\\Users\\me\\AppData\\Roaming\\npm",
+    ].join(";");
+    expect(sanitizeServicePath(input, () => true, "win32", { SystemRoot: "C:\\WINDOWS" })).toBe(
+      [
+        "C:\\WINDOWS\\system32",
+        "C:\\WINDOWS",
+        "C:\\Program Files\\nodejs\\",
+        "C:\\Users\\me\\AppData\\Roaming\\npm",
+        "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0",
+      ].join(";"),
+    );
+  });
+});
+
 describe.runIf(process.platform === "linux")("installService", () => {
   const baseEnv = () => ({
     XDG_CONFIG_HOME: path.join(workDir, "config"),

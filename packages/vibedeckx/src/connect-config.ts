@@ -115,7 +115,7 @@ export function writeSavedToken(dataDir: string, token: string): void {
   if (!trimmed) throw new Error("Connect token is empty");
   if (/\s/.test(trimmed)) throw new Error("Connect token must not contain whitespace");
   ensureConfigDir(dataDir);
-  writeFileAtomic(savedTokenPath(dataDir), `${trimmed}\n`, { mode: 0o600 });
+  writeFileAtomic(savedTokenPath(dataDir), `${trimmed}\n`, { mode: 0o600, private: true });
 }
 
 export function requestRepin(dataDir: string): void {

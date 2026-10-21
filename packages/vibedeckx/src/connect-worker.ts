@@ -31,6 +31,7 @@ import { acquireInstanceLock, type InstanceLock } from "./connect-instance-lock.
 import { HeartbeatWriter } from "./connect-heartbeat.js";
 import { ConnectionSupervisor } from "./connect-supervisor.js";
 import { processIdentitySupported } from "./process-identity.js";
+import { SUPERVISOR_NAME as WINDOWS_SUPERVISOR } from "./connect-windows-supervise.js";
 import { readPackageVersion } from "./utils/package-version.js";
 import { redactErrorSecret } from "./secret-redaction.js";
 
@@ -143,6 +144,13 @@ export async function runConnectWorker(options: RunConnectWorkerOptions): Promis
   // still releases the lock and run state cleanly.
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  // Windows has no SIGTERM: `connect supervise` asks for a graceful stop by
+  // closing our stdin.
+  if (supervisor === WINDOWS_SUPERVISOR) {
+    process.stdin.on("end", () => void cleanup());
+    process.stdin.on("error", () => void cleanup());
+    process.stdin.resume();
+  }
 
   try {
     lock = acquireInstanceLock(dataDir);

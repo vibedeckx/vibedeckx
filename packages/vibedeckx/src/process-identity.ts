@@ -78,11 +78,52 @@ function readDarwinProcessStartTicks(pid: number): string | undefined {
   return parsePsLstart(output);
 }
 
+/** PowerShell prints the creation time as a FILETIME (100 ns units since 1601, UTC). */
+export function parseWindowsFileTime(output: string): string | undefined {
+  const value = output.trim();
+  return /^\d+$/.test(value) ? value : undefined;
+}
+
+// Our own creation time cannot change; the worker asks for it several times at startup.
+let ownWindowsStartTicks: string | undefined;
+
+function readWindowsProcessStartTicks(pid: number): string | undefined {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
+  if (pid === process.pid && ownWindowsStartTicks) return ownWindowsStartTicks;
+  const ticks = queryWindowsProcessStartTicks(pid);
+  if (pid === process.pid) ownWindowsStartTicks = ticks;
+  return ticks;
+}
+
+function queryWindowsProcessStartTicks(pid: number): string | undefined {
+  let output: string;
+  try {
+    // wmic is gone from Windows 11; PowerShell is the built-in that still
+    // reports a process's creation time. About half a second per call, which
+    // is fine for status/stop and the worker's own startup.
+    output = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToFileTimeUtc()`,
+      ],
+      { encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "ignore"], timeout: 30_000 },
+    );
+  } catch {
+    // Exits non-zero when the PID does not exist (or is not ours to inspect).
+    return undefined;
+  }
+  return parseWindowsFileTime(output);
+}
+
 /**
  * Platform-aware start ticks. Linux reads /proc (clock ticks since boot);
- * macOS uses `ps` (start time, one-second resolution). Undefined means the
- * process does not exist — or, on unsupported platforms, that identity cannot
- * be established at all (callers treat that as "not verifiable").
+ * macOS uses `ps` (start time, one-second resolution); Windows asks
+ * PowerShell for the creation FILETIME. Undefined means the process does not
+ * exist — or, on unsupported platforms, that identity cannot be established
+ * at all (callers treat that as "not verifiable").
  */
 export function readProcessStartTicks(
   pid: number,
@@ -90,11 +131,12 @@ export function readProcessStartTicks(
 ): string | undefined {
   if (platform === "linux") return readLinuxProcessStartTicks(pid);
   if (platform === "darwin") return readDarwinProcessStartTicks(pid);
+  if (platform === "win32") return readWindowsProcessStartTicks(pid);
   return undefined;
 }
 
 export function processIdentitySupported(
   platform: NodeJS.Platform = process.platform,
 ): boolean {
-  return platform === "linux" || platform === "darwin";
+  return platform === "linux" || platform === "darwin" || platform === "win32";
 }

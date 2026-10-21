@@ -4,6 +4,11 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   LaunchdAgentAdapter,
+  parseTaskEnabled,
+  parseWindowsBuild,
+  renderTaskXml,
+  TaskSchedulerAdapter,
+  taskCommandLine,
   parseSystemdVersion,
   renderLaunchdPlist,
   renderSystemdUnit,
@@ -15,6 +20,7 @@ import {
   type ServiceSpec,
 } from "./connect-service.js";
 import { VIBEDECKX_HOME } from "./constants.js";
+import { stoppedThisBoot } from "./connect-windows-supervise.js";
 
 let workDir: string;
 
@@ -281,5 +287,174 @@ describe("launchd", () => {
     // A prefix of another label must not match it.
     expect(withOutput('"dev.vibedeckx.connect-1a2b3c4d" => disabled').isEnabled()).toBe(true);
     expect(withOutput("").isEnabled()).toBe(true);
+  });
+});
+
+describe("Task Scheduler", () => {
+  const taskSpec = {
+    dataDir: "C:\\Users\\me\\.vibedeckx",
+    launcher: "C:\\Users\\me\\.vibedeckx\\runtime\\launcher.cmd",
+    home: "C:\\Users\\me",
+    user: "PC\\me",
+    systemRoot: "C:\\Windows",
+  };
+  const winEnv = { USERNAME: "me", USERDOMAIN: "PC", SystemRoot: "C:\\Windows" };
+
+  it("launches supervise windowless, relaunches it every minute, never in parallel", () => {
+    const xml = renderTaskXml(taskSpec);
+    expect(xml).toContain("<Command>C:\\Windows\\System32\\conhost.exe</Command>");
+    expect(xml).toContain(
+      "<Arguments>--headless &quot;C:\\Windows\\System32\\cmd.exe&quot; /d /s /c &quot;&quot;C:\\Users\\me\\.vibedeckx\\runtime\\launcher.cmd&quot; --service-env connect supervise --data-dir &quot;C:\\Users\\me\\.vibedeckx&quot;&quot;</Arguments>",
+    );
+    expect(xml).toMatch(/<LogonTrigger><Enabled>true<\/Enabled><Repetition>[^]*<\/Repetition><UserId>PC\\me<\/UserId><\/LogonTrigger>/);
+    expect(xml.match(/<Interval>PT1M<\/Interval>/g)).toHaveLength(3);
+    expect(xml).toContain("<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>");
+    expect(xml).toContain("<LogonType>InteractiveToken</LogonType>");
+    expect(xml).toContain("<RunLevel>LeastPrivilege</RunLevel>");
+    expect(xml).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
+    expect(xml).toContain("<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>");
+  });
+
+  it("quotes the launcher and data-dir inside cmd /s /c", () => {
+    expect(taskCommandLine(taskSpec)).toBe(
+      '/d /s /c ""C:\\Users\\me\\.vibedeckx\\runtime\\launcher.cmd" --service-env connect supervise --data-dir "C:\\Users\\me\\.vibedeckx""',
+    );
+  });
+
+  it("reads the task's own Enabled, not a trigger's", () => {
+    const query = (enabled: string) =>
+      `<Task><Triggers><TimeTrigger><Enabled>true</Enabled></TimeTrigger></Triggers><Settings><IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd></IdleSettings><Enabled>${enabled}</Enabled></Settings></Task>`;
+    expect(parseTaskEnabled(query("false"))).toBe(false);
+    expect(parseTaskEnabled(query("true"))).toBe(true);
+    expect(parseTaskEnabled("not xml")).toBeUndefined();
+  });
+
+  it("needs Windows 10 1809 or newer", () => {
+    expect(parseWindowsBuild("10.0.19045")).toBe(19045);
+    const exec = recordingExec().exec;
+    expect(() => new TaskSchedulerAdapter(workDir, exec, winEnv, async () => undefined, async () => {}, "10.0.17134").preflight()).toThrow(
+      /needs Windows 10 1809/,
+    );
+    expect(() => new TaskSchedulerAdapter(workDir, exec, winEnv, async () => undefined, async () => {}, "10.0.19045").preflight()).not.toThrow();
+  });
+
+  function adapter(options: {
+    supervisor?: { running: boolean };
+    responses?: (command: string, args: string[]) => Partial<ExecResult> | undefined;
+  } = {}) {
+    const supervisor = options.supervisor ?? { running: false };
+    const sent: string[] = [];
+    const { exec, calls } = recordingExec((command, args) => {
+      if (args[0] === "/Run") supervisor.running = true;
+      return options.responses?.(command, args);
+    });
+    const client = async (_dir: string, command: string): Promise<string | undefined> => {
+      sent.push(command);
+      if (!supervisor.running) return undefined;
+      if (command === "quit") supervisor.running = false;
+      return command === "ping" ? "{}" : "ok";
+    };
+    const instance = new TaskSchedulerAdapter(workDir, exec, winEnv, client, async () => {}, "10.0.19045");
+    return { instance, calls, sent, supervisor };
+  }
+
+  it("registers the task only when the definition changed or the task is missing", () => {
+    const { instance, calls } = adapter();
+    const install = { dataDir: workDir, launcher: path.join(workDir, "runtime", "launcher.cmd"), home: workDir };
+    expect(instance.install(install)).toBe(true);
+    expect(calls.filter((call) => call.includes("/Create"))).toHaveLength(1);
+    expect(fs.readFileSync(instance.definitionPath).subarray(0, 2)).toEqual(Buffer.from([0xff, 0xfe]));
+    expect(instance.install(install)).toBe(false);
+    expect(calls.filter((call) => call.includes("/Create"))).toHaveLength(1);
+  });
+
+  it("stop records this boot and quits the supervisor; start clears it and runs the task", async () => {
+    const { instance, calls, sent, supervisor } = adapter({ supervisor: { running: true } });
+    await instance.stop();
+    expect(sent).toContain("quit");
+    expect(supervisor.running).toBe(false);
+    expect(stoppedThisBoot(workDir)).toBe(true);
+    expect(calls.some((call) => call.includes("/End"))).toBe(false);
+
+    await instance.start();
+    expect(stoppedThisBoot(workDir)).toBe(false);
+    expect(calls.filter((call) => call.startsWith("schtasks /Run"))).toHaveLength(1);
+    expect(await instance.isActive()).toBe(true);
+  });
+
+  it("start refuses a disabled task", async () => {
+    const { instance } = adapter({
+      responses: (_command, args) =>
+        args.includes("/XML") && args[0] === "/Query"
+          ? { stdout: "<Task><Settings><Enabled>false</Enabled></Settings></Task>" }
+          : undefined,
+    });
+    await expect(instance.start()).rejects.toThrow(/is disabled/);
+  });
+
+  it("disable pauses the task and stops the supervisor without a stop marker", async () => {
+    const { instance, calls, supervisor } = adapter({ supervisor: { running: true } });
+    await instance.disable();
+    expect(calls).toContain(`schtasks /Change /TN ${instance.name} /DISABLE`);
+    expect(supervisor.running).toBe(false);
+    expect(stoppedThisBoot(workDir)).toBe(false);
+  });
+
+  it("restart quits the supervisor and runs the task again", async () => {
+    const { instance, calls, sent } = adapter({ supervisor: { running: true } });
+    await instance.restart();
+    expect(sent.indexOf("quit")).toBeGreaterThanOrEqual(0);
+    expect(calls.filter((call) => call.startsWith("schtasks /Run"))).toHaveLength(1);
+  });
+
+  it("uninstall fails, keeping the definition, when the task cannot be deleted", async () => {
+    const { instance } = adapter({
+      responses: (_command, args) => (args[0] === "/Delete" ? { status: 1, stderr: "Access is denied." } : undefined),
+    });
+    fs.mkdirSync(path.dirname(instance.definitionPath), { recursive: true });
+    fs.writeFileSync(instance.definitionPath, "x");
+    await expect(instance.uninstall()).rejects.toThrow(/Access is denied/);
+    expect(fs.existsSync(instance.definitionPath)).toBe(true);
+  });
+
+  it("uninstall tolerates a task the full listing confirms is gone", async () => {
+    const { instance } = adapter({
+      responses: (_command, args) => {
+        if (args[0] === "/Delete") return { status: 1 };
+        if (args[0] === "/Query" && args.includes("/TN")) return { status: 1 };
+        if (args[0] === "/Query") return { stdout: '"\\Microsoft\\Other","N/A","Ready"\r\n' };
+        return undefined;
+      },
+    });
+    await expect(instance.uninstall()).resolves.toBeUndefined();
+  });
+
+  it("uninstall fails, keeping the definition, when absence cannot be established", async () => {
+    const { instance } = adapter({
+      responses: (_command, args) =>
+        args[0] === "/Delete" || args[0] === "/Query" ? { status: 1, stderr: "The service is not available." } : undefined,
+    });
+    fs.mkdirSync(path.dirname(instance.definitionPath), { recursive: true });
+    fs.writeFileSync(instance.definitionPath, "x");
+    await expect(instance.uninstall()).rejects.toThrow(/not available/);
+    expect(fs.existsSync(instance.definitionPath)).toBe(true);
+  });
+
+  it("finds the task in the full listing when /Query /TN fails", () => {
+    const { instance } = adapter({
+      responses: (_command, args) => {
+        if (args[0] === "/Query" && args.includes("/TN")) return { status: 1 };
+        if (args[0] === "/Query") return { stdout: `"\\${instance.name}","N/A","Ready"\r\n` };
+        return undefined;
+      },
+    });
+    expect(instance.taskState()).toBe("present");
+  });
+
+  it("uninstall stops the supervisor and deletes the task", async () => {
+    const { instance, calls, supervisor } = adapter({ supervisor: { running: true } });
+    await instance.uninstall();
+    expect(supervisor.running).toBe(false);
+    expect(calls).toContain(`schtasks /Delete /TN ${instance.name} /F`);
   });
 });

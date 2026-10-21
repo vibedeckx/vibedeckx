@@ -37,6 +37,7 @@ import {
   writeServiceRecord,
   LaunchdAgentAdapter,
   SystemdUserAdapter,
+  TaskSchedulerAdapter,
   type Exec,
   type ServiceAdapter,
 } from "./connect-service.js";
@@ -251,7 +252,11 @@ function describeService(dataDir: string, exec?: Exec): string | undefined {
   if (!record) return undefined;
   const adapter = adapterForRecord(dataDir, record, { exec });
   let autoStart = "";
-  if (adapter instanceof SystemdUserAdapter || adapter instanceof LaunchdAgentAdapter) {
+  if (
+    adapter instanceof SystemdUserAdapter ||
+    adapter instanceof LaunchdAgentAdapter ||
+    adapter instanceof TaskSchedulerAdapter
+  ) {
     autoStart = adapter.isEnabled() ? ", auto-start enabled" : ", auto-start disabled";
   }
   return `Service: ${record.kind} (${record.name}${autoStart})`;
@@ -364,9 +369,12 @@ async function startManual(options: LifecycleOptions): Promise<DaemonCommandResu
   );
 }
 
-function runServiceAction(action: () => void, done: string): DaemonCommandResult {
+async function runServiceAction(
+  action: () => void | Promise<void>,
+  done: string,
+): Promise<DaemonCommandResult> {
   try {
-    action();
+    await action();
     return ok(done);
   } catch (error) {
     return failed(errorMessage(error));
@@ -394,7 +402,8 @@ export async function lifecycleStop(options: LifecycleOptions): Promise<DaemonCo
   if (adapter) {
     return runServiceAction(
       () => adapter.stop(),
-      `Stopped ${adapter.name}. It starts again at the next boot/login; use \`vibedeckx connect disable\` to keep it off.`,
+      `Stopped ${adapter.name}. It starts again at the next ${adapter.kind === "schtasks" ? "boot" : "boot/login"}; ` +
+        "use `vibedeckx connect disable` to keep it off.",
     );
   }
   return stopConnectDaemon(options.dataDir);
@@ -458,33 +467,58 @@ const EPHEMERAL_PATH_ENTRY =
  * be gone once it exits, minus missing/relative/duplicate directories, with
  * the system directories guaranteed.
  */
-export function sanitizeServicePath(pathEnv: string, exists: (dir: string) => boolean = fs.existsSync): string {
+export function sanitizeServicePath(
+  pathEnv: string,
+  exists: (dir: string) => boolean = fs.existsSync,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const windows = platform === "win32";
+  const p = windows ? path.win32 : path.posix;
   const out: string[] = [];
   const seen = new Set<string>();
   const add = (directory: string): void => {
-    if (seen.has(directory)) return;
-    seen.add(directory);
+    // Windows paths are case-insensitive.
+    const key = windows ? directory.toLowerCase() : directory;
+    if (seen.has(key)) return;
+    seen.add(key);
     out.push(directory);
   };
-  for (const directory of pathEnv.split(path.delimiter)) {
-    if (!directory || !path.isAbsolute(directory)) continue;
+  for (const directory of pathEnv.split(p.delimiter)) {
+    if (!directory || !p.isAbsolute(directory)) continue;
     if (EPHEMERAL_PATH_ENTRY.test(directory)) continue;
     if (!exists(directory)) continue;
     add(directory);
   }
-  for (const directory of ["/usr/local/bin", "/usr/bin", "/bin"]) add(directory);
-  return out.join(path.delimiter);
+  if (windows) {
+    const systemRoot = env.SystemRoot ?? "C:\\Windows";
+    for (const directory of [
+      p.join(systemRoot, "System32"),
+      systemRoot,
+      p.join(systemRoot, "System32", "WindowsPowerShell", "v1.0"),
+    ]) {
+      add(directory);
+    }
+  } else {
+    for (const directory of ["/usr/local/bin", "/usr/bin", "/bin"]) add(directory);
+  }
+  return out.join(p.delimiter);
 }
 
-function findOnPath(command: string, pathEnv: string): string | undefined {
+function findOnPath(command: string, pathEnv: string, env: NodeJS.ProcessEnv): string | undefined {
+  // Windows finds `git` as git.exe/git.cmd through PATHEXT.
+  const extensions =
+    process.platform === "win32" ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean) : [""];
   for (const directory of pathEnv.split(path.delimiter)) {
     if (!directory) continue;
-    const candidate = path.join(directory, command);
-    try {
-      fs.accessSync(candidate, fs.constants.X_OK);
-      return candidate;
-    } catch {
-      // keep looking
+    for (const extension of extensions) {
+      const candidate = path.join(directory, command + extension);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch {
+        // keep looking
+      }
     }
   }
   return undefined;
@@ -591,13 +625,13 @@ export async function installService(options: InstallServiceOptions): Promise<Da
   // 3. Service definition (registered for auto-start, not started yet).
   const pathEnv = sanitizeServicePath(env.PATH ?? "");
   for (const cli of ["claude", "codex", "git"]) {
-    if (!findOnPath(cli, pathEnv)) {
+    if (!findOnPath(cli, pathEnv, env)) {
       log(`Note: \`${cli}\` is not on PATH; the service will not find it either.`);
     }
   }
-  const wasActive = (() => {
+  const wasActive = await (async () => {
     try {
-      return adapter.isActive();
+      return await adapter.isActive();
     } catch {
       return false;
     }
@@ -659,8 +693,8 @@ export async function installService(options: InstallServiceOptions): Promise<Da
 
   const startedAt = Date.now();
   try {
-    if (wasActive) adapter.restart();
-    else adapter.start();
+    if (wasActive) await adapter.restart();
+    else await adapter.start();
   } catch (error) {
     return failed(await afterFailedStart(options, stoppedManualPid, errorMessage(error)));
   }
@@ -742,9 +776,14 @@ function finishInstall(
 }
 
 function logHint(adapter: ServiceAdapter): string {
-  return adapter.kind === "systemd"
-    ? `see \`journalctl --user -u ${adapter.name}\``
-    : "see logs/launchd.log in the data directory";
+  switch (adapter.kind) {
+    case "systemd":
+      return `see \`journalctl --user -u ${adapter.name}\``;
+    case "launchd":
+      return "see logs/launchd.log in the data directory";
+    case "schtasks":
+      return "see logs\\supervise.log and logs\\worker-console.log in the data directory";
+  }
 }
 
 async function afterFailedStart(
@@ -773,7 +812,7 @@ async function lifecycleStartManualBestEffort(options: InstallServiceOptions): P
     const record = readServiceRecord(options.dataDir);
     if (record) {
       try {
-        adapterForRecord(options.dataDir, record, { exec: options.exec, env: options.env }).stop();
+        await adapterForRecord(options.dataDir, record, { exec: options.exec, env: options.env }).stop();
       } catch {
         // ignore
       }
@@ -797,7 +836,7 @@ export async function uninstallService(options: LifecycleOptions): Promise<Daemo
   if (!record) return ok("No service is installed for this data directory.");
   const adapter = adapterForRecord(options.dataDir, record, { exec: options.exec, env: options.env });
   try {
-    adapter.uninstall();
+    await adapter.uninstall();
     removeServiceRecord(options.dataDir);
     removeShim({ dataDir: options.dataDir, home: (options.env ?? process.env).HOME ?? os.homedir() });
   } catch (error) {

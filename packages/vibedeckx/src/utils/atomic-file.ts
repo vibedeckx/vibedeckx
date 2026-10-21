@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -17,8 +18,28 @@ export function fsyncDirectory(directory: string): void {
   }
 }
 
+/**
+ * Windows ignores POSIX modes: a new file inherits its directory's ACL. Strip
+ * the inherited entries and grant only the current user. Throws if icacls
+ * fails, so a secret is never left readable by others.
+ */
+export function restrictToCurrentUser(filePath: string, env: NodeJS.ProcessEnv = process.env): void {
+  const user = env.USERDOMAIN ? `${env.USERDOMAIN}\\${env.USERNAME}` : env.USERNAME;
+  if (!user) throw new Error(`Cannot restrict ${filePath}: USERNAME is not set`);
+  const result = spawnSync("icacls", [filePath, "/inheritance:r", "/grant:r", `${user}:F`], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.status !== 0) {
+    const detail = (result.error?.message ?? `${result.stderr ?? ""}${result.stdout ?? ""}`).trim();
+    throw new Error(`Restricting access to ${filePath} failed${detail ? `: ${detail}` : ""}`);
+  }
+}
+
 export interface AtomicWriteOptions {
   mode?: number;
+  /** Windows: readable by the current user only (the ACL counterpart of mode 0600). */
+  private?: boolean;
   /** fsync file and parent directory. Off only for high-frequency, disposable files. */
   durable?: boolean;
 }
@@ -49,6 +70,9 @@ export function writeFileAtomic(
     } finally {
       fs.closeSync(fd);
     }
+    // Before the rename, so the file is never visible with the inherited ACL;
+    // a rename within the volume keeps the file's own ACL.
+    if (options.private && process.platform === "win32") restrictToCurrentUser(tempPath);
     fs.renameSync(tempPath, filePath);
   } catch (error) {
     fs.rmSync(tempPath, { force: true });

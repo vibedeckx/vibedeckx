@@ -39,6 +39,7 @@ import {
   uninstallService,
 } from "./connect-lifecycle.js";
 import { runConnectWorker } from "./connect-worker.js";
+import { runSupervise } from "./connect-windows-supervise.js";
 import { readPackageVersion } from "./utils/package-version.js";
 import open from "open";
 
@@ -528,8 +529,20 @@ const connectInstallServiceCommand = buildCommand({
   func: async (flags: SetupFlags) =>
     reportDaemonCommandResult(await installService(setupOptionsFromFlags(flags))),
   docs: {
-    brief: "Install the worker as a user service (systemd/launchd): starts at boot, restarts on crash",
+    brief: "Install the worker as a user service (systemd/launchd/Task Scheduler): starts at boot, restarts on crash",
   },
+});
+
+// Started by the Windows scheduled task (worker-supervision-design §4.3); not for users.
+const connectSuperviseCommand = buildCommand({
+  parameters: { flags: connectManagementFlags },
+  func: async (flags: { "data-dir": string | undefined }) => {
+    if (process.platform !== "win32") {
+      return new Error("`connect supervise` is only used by the Windows service; use `connect install` instead");
+    }
+    process.exit(await runSupervise({ dataDir: resolveDataDir(flags["data-dir"]) }));
+  },
+  docs: { brief: "Run and restart the worker (used by the Windows scheduled task)" },
 });
 
 const connectRoutes = buildRouteMap({
@@ -544,9 +557,13 @@ const connectRoutes = buildRouteMap({
     disable: connectDisableCommand,
     install: connectInstallServiceCommand,
     uninstall: connectUninstallServiceCommand,
+    supervise: connectSuperviseCommand,
   },
   defaultCommand: "run",
-  docs: { brief: "Connect to a Vibedeckx server as an inbound node" },
+  docs: {
+    brief: "Connect to a Vibedeckx server as an inbound node",
+    hideRoute: { supervise: true },
+  },
 });
 
 const routes = buildRouteMap({

@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { describeShim, installShim, removeShim, shimPath } from "./connect-shim.js";
+import { describeShim, installShim, removeShim, renderShim, SHIM_MARKER, shimPath } from "./connect-shim.js";
 
 let home: string;
 let dataDir: string;
@@ -80,5 +80,15 @@ describe("installShim", () => {
     expect(removeShim({ dataDir: path.join(home, "worker-b"), home })).toBe(false);
     expect(removeShim({ dataDir, home })).toBe(true);
     expect(fs.existsSync(shimPath(home))).toBe(false);
+  });
+});
+
+describe("Windows shim", () => {
+  it("is a .cmd that forwards every argument to launcher.cmd", () => {
+    expect(shimPath("C:\\Users\\me", "win32")).toMatch(/vibedeckx\.cmd$/);
+    const shim = renderShim("C:\\Users\\100%\\.vibedeckx\\runtime\\launcher.cmd", "win32");
+    expect(shim).toContain(`rem ${SHIM_MARKER}`);
+    expect(shim).toContain('"C:\\Users\\100%%\\.vibedeckx\\runtime\\launcher.cmd" %*');
+    expect(shim).toContain("\r\n");
   });
 });

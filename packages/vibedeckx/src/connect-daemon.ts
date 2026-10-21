@@ -676,7 +676,8 @@ function quarantineRecoverableDaemonStateLock(lockPath: string): void {
     if (
       hasErrorCode(error, "ENOENT") ||
       hasErrorCode(error, "EEXIST") ||
-      hasErrorCode(error, "ENOTEMPTY")
+      hasErrorCode(error, "ENOTEMPTY") ||
+      (process.platform === "win32" && hasErrorCode(error, "EPERM") && fs.existsSync(quarantinePath))
     ) {
       return;
     }
@@ -700,7 +701,9 @@ function acquireDaemonStateLock(lockPath: string): DaemonStateLockOwner {
           !hasErrorCode(error, "EEXIST") &&
           !hasErrorCode(error, "ENOTEMPTY") &&
           !hasErrorCode(error, "ENOTDIR") &&
-          !hasErrorCode(error, "EISDIR")
+          !hasErrorCode(error, "EISDIR") &&
+          // Windows reports a rename onto an existing directory as EPERM.
+          !(process.platform === "win32" && hasErrorCode(error, "EPERM") && fs.existsSync(lockPath))
         ) {
           throw error;
         }
