@@ -7,17 +7,17 @@ Agents run on machines you connect. The machine dials out to the Vibedeckx serve
 
 In **Settings → Remote Servers**, add a server for the machine and open its connect token. The dialog shows two commands to copy and run on that machine.
 
-## Install as a service (Linux and macOS)
+## Install as a service
 
-This is the one to use for a machine that should stay connected:
+This is the one to use for a machine that should stay connected. It works on Linux, macOS and Windows; on Windows, run it from Command Prompt or PowerShell (no administrator rights needed):
 
 ```bash
 npx vibedeckx@latest connect install --connect-to https://vibedeckx.dev --token <token>
 ```
 
-It installs the worker as a service of your user: **systemd** on Linux, **launchd** on macOS. The worker then:
+It installs the worker as a service of your user: **systemd** on Linux, **launchd** on macOS, a **Task Scheduler** task on Windows. The worker then:
 
-- starts when the machine boots,
+- starts when the machine boots (macOS and Windows: when you log in),
 - restarts by itself if it crashes or is killed,
 - keeps its own copy of Node and the worker, so later Node upgrades on the machine don't affect it.
 
@@ -35,14 +35,18 @@ If the worker starts but cannot connect, for example because the token was revok
   A launchd agent starts when you log in. For an unattended Mac, enable automatic login.
 </Callout>
 
+<Callout title="Windows: after sign-in">
+  The task runs in the background, without a window, and starts when you sign in to Windows. For an unattended PC, enable automatic sign-in. If the worker crashes it is back within seconds; if its supervisor process is killed, the task brings both back within a minute. Requires Windows 10 version 1809 or later.
+</Callout>
+
 ### Managing the worker
 
-`connect install` also creates a `vibedeckx` command in `~/.local/bin` that runs the installed worker directly, without npx or a download. If `~/.local/bin` is not on your `PATH`, the installer tells you what to add.
+`connect install` also creates a `vibedeckx` command in `~/.local/bin` (`vibedeckx.cmd` in `%USERPROFILE%\.local\bin` on Windows) that runs the installed worker directly, without npx or a download. If that folder is not on your `PATH`, the installer tells you what to add.
 
 | Command | What it does |
 |---|---|
 | `vibedeckx connect status` | Shows whether the worker is running and connected, and how to fix it if not |
-| `vibedeckx connect stop` | Stops it until the next boot or `start` |
+| `vibedeckx connect stop` | Stops it until `start` or the next boot (macOS and Windows: the next login) |
 | `vibedeckx connect start` | Starts it again |
 | `vibedeckx connect restart` | Restarts it |
 | `vibedeckx connect disable` | Stops it and keeps it off across reboots |
@@ -51,7 +55,9 @@ If the worker starts but cannot connect, for example because the token was revok
 
 `status` only looks at this machine. Add `--check-update` to also check for a newer version.
 
-On macOS, launchd does not run a disabled worker at all, so `start` and `restart` refuse until you run `enable`.
+On macOS and Windows, a disabled worker does not start at all, so `start` and `restart` refuse until you run `enable`.
+
+On Windows the worker's logs are in `%USERPROFILE%\.vibedeckx\logs`: `vibedeckx.log`, plus `supervise.log` and `worker-console.log` from the supervisor.
 
 ### Changing the token
 
