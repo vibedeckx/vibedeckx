@@ -1,4 +1,10 @@
 {
   "title": "Vibedeckx",
-  "pages": ["index", "---Getting started---", "quickstart", "connect-a-machine"]
+  "pages": [
+    "index",
+    "---Getting started---",
+    "quickstart",
+    "connect-a-machine",
+    "remote-access"
+  ]
 }

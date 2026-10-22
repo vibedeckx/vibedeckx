@@ -137,6 +137,34 @@ If your projects build or run containers, give the worker the host's Docker sock
   Whoever can use the Docker socket can start a container that mounts the host's whole filesystem. With these options, an agent session effectively has root access to the machine, not just to the container. Only add them on a machine you are prepared to hand over to agents.
 </Callout>
 
+### Let agents on other machines inspect this host
+
+You can run the container only so that agents on your other machines can reach this one through [remote access](/remote-access), without running agents in it. Remote access works inside the container: by default an agent sees the container's files and processes, not the host's. Add what it should see:
+
+| To let agents | Add |
+|---|---|
+| Read the host's files | `-v /:/host:ro` (the host's files appear under `/host`) |
+| List the host's processes | `--pid=host` |
+| Reach services that listen only on the host's `localhost`, such as a local MCP server | `--network=host` |
+| Read files that only root can read, such as most of `/var/log` | `--user root` |
+| Inspect the host's other containers (needs Command execution) | The three options from [Let agents use the host's Docker](#let-agents-use-the-hosts-docker) |
+
+For read-only diagnosis of the host, this is a good start, paired with the **Diagnostic read** level:
+
+```bash
+docker run -d --name vibedeckx-worker --restart unless-stopped --init \
+  --pid=host -v /:/host:ro \
+  -v "$PWD/secrets:/run/vibedeckx-secrets:ro" \
+  -v vibedeckx-data:/data \
+  ghcr.io/vibedeckx/worker:latest
+```
+
+Agents don't know about `/host` on their own. Tell them, for example: "the host's files are under /host on that machine". In the process list, users show as numeric IDs, because the container doesn't have the host's user names.
+
+<Callout type="warn" title="Root in the container">
+  `--user root` lets agents with access read every file on the host, including private keys and other users' files. The host's files stay read-only with `:ro`, but with Command execution an agent can still change whatever the container itself can reach. Don't use `--user root` if you also run agents in this container: Claude Code refuses to run unattended as root.
+</Callout>
+
 ### Sign in to the agents
 
 A new container has no agent logins yet. Sign in once from the host; the login is kept in the `vibedeckx-home` volume:

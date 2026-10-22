@@ -1,0 +1,38 @@
+---
+title: Remote access
+description: Let an agent on one of your machines inspect or operate another.
+---
+
+An agent session runs on one machine. With remote access, it can also reach your other connected machines: read their files and logs, list their processes, run commands, or use MCP servers that are reachable from there. A typical use is letting an agent diagnose the server your code is deployed to.
+
+Two settings decide what an agent can do:
+
+- **Each machine's access level** is the upper limit. It is set once per machine and is off by default.
+- **Each session's grants** pick which of those machines this particular session may use. A session has no grants until you add them.
+
+## Set a machine's access level
+
+Open **Remote Servers** in the sidebar. In the **Cross-remote access** column, pick a level for the machine that agents should be able to reach:
+
+| Level | What agents on your other machines can do |
+|---|---|
+| **Off** | Nothing (default) |
+| **Diagnostic read** | Read files, list directories, look up file details and list processes |
+| **Command execution** | Everything above, plus run shell commands and use MCP servers on that machine |
+
+<Callout type="warn">
+  Diagnostic read exposes everything the worker can read, including secrets in logs and config files. Command execution lets an agent run any command as the worker's user. Turn on only what you need.
+</Callout>
+
+## Grant a machine to a session
+
+In the session's message box, open the **+** menu and choose **Remote access**. It lists the machines whose level is not Off, with their level (**Read only** or **Run commands**) and whether they are online. Switch on the machines this session may use; you can pick several.
+
+Each granted machine appears as a chip above the message box. Click a chip to revoke it.
+
+- Grants apply from the next message you send, and stay until you change them. They are not copied to new or branched sessions.
+- A revoked machine is refused from the agent's next call on; the agent does not need to restart.
+- Each of your messages shows which machines it was sent with.
+- The machine the session runs on is never listed; the agent already works there.
+
+The target machine must be online when the agent uses it. Using MCP servers on it requires a recent worker version there; an older one tells the agent to upgrade.
