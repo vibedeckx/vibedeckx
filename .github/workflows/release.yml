@@ -369,14 +369,19 @@ jobs:
             echo "IMAGE_TAGS=$IMAGE:$VERSION,$IMAGE:$CHANNEL"
           } >> "$GITHUB_ENV"
 
-      # The registry can lag a fresh publish by a minute or two.
+      # The registry can lag a fresh publish by a minute or two. Wait for the
+      # linux-x64 platform package too: it is an optionalDependency, so npm
+      # would silently install vibedeckx without it.
       - name: Wait for vibedeckx@${{ github.ref_name }} on npm
         run: |
           for i in $(seq 1 30); do
-            if npm view "vibedeckx@$VERSION" version >/dev/null 2>&1; then exit 0; fi
+            if npm view "vibedeckx@$VERSION" version >/dev/null 2>&1 \
+              && npm view "@vibedeckx/linux-x64@$VERSION" version >/dev/null 2>&1; then
+              exit 0
+            fi
             sleep 10
           done
-          echo "vibedeckx@$VERSION did not appear on npm" >&2
+          echo "vibedeckx@$VERSION or @vibedeckx/linux-x64@$VERSION did not appear on npm" >&2
           exit 1
 
       - uses: docker/setup-buildx-action@v3
@@ -406,10 +411,10 @@ jobs:
             org.opencontainers.image.description=Vibedeckx reverse-connect worker
 
       # The agent CLIs are whatever was current at build time; record them.
-      # Also a smoke check: any CLI that fails to run fails the job.
+      # (The Dockerfile already fails the build if one of them cannot run.)
       - name: Record agent CLI versions
         run: |
           VERSIONS="$(docker run --rm --entrypoint sh "$IMAGE:$VERSION" -ec '
-            v=$(vibedeckx --version 2>/dev/null); c=$(claude --version); x=$(codex --version)
+            v=$(vibedeckx --version); c=$(claude --version); x=$(codex --version)
             printf "vibedeckx %s\nclaude %s\ncodex %s\n" "$(printf "%s" "$v" | tail -n1)" "$c" "$x"')"
           printf '### %s:%s\n\n```\n%s\n```\n' "$IMAGE" "$VERSION" "$VERSIONS" >> "$GITHUB_STEP_SUMMARY"

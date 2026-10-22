@@ -34,11 +34,15 @@ RUN apt-get update \
 
 # Bind-mounted, not COPY'd: the tarball stays out of the image layers, and an
 # empty dist-out/ (CI) is fine.
+# The --version calls fail the build if a CLI cannot run. npm silently skips an
+# optionalDependency it cannot fetch (e.g. @vibedeckx/linux-x64 seconds after
+# publishing), which otherwise yields an image whose `vibedeckx` is broken.
 RUN --mount=type=bind,source=dist-out,target=/tmp/dist-out \
     npm install -g "${VIBEDECKX_PACKAGE}" \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
- && npm cache clean --force
+ && npm cache clean --force \
+ && vibedeckx --version && claude --version && codex --version
 
 # Run as a normal user: Claude Code refuses --dangerously-skip-permissions as
 # root. The node image's `node` user (uid 1000) is used.
