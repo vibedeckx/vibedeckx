@@ -58,11 +58,15 @@ VOLUME ["/data", "/home/node", "/var/tmp/vibedeckx/worktrees", "/projects"]
 USER node
 WORKDIR /home/node
 
-# The worker reads everything from the environment; nothing goes on argv.
-#   VIBEDECKX_CONNECT_TO           hub URL (required)
-#   VIBEDECKX_CONNECT_TOKEN_FILE   token file, e.g. a Docker secret (preferred)
-#   VIBEDECKX_CONNECT_TOKEN        token value (alternative)
-ENV VIBEDECKX_DATA_DIR=/data \
+# Defaults so a plain `docker run` needs no connect settings:
+#   VIBEDECKX_CONNECT_TO   the hosted hub; override with -e for a self-hosted one
+#   CMD --token-file       the token in the mounted secrets DIRECTORY (see
+#                          docker-compose.yml for why a directory)
+# The token default is CMD, not ENV VIBEDECKX_CONNECT_TOKEN_FILE: setting that
+# env and VIBEDECKX_CONNECT_TOKEN together is an error, while any arguments
+# after the image name (e.g. `--token <token>`) simply replace CMD.
+ENV VIBEDECKX_CONNECT_TO=https://vibedeckx.dev \
+    VIBEDECKX_DATA_DIR=/data \
     VIBEDECKX_INSTALL_MODE=docker \
     VIBEDECKX_SUPERVISOR=docker \
     NODE_ENV=production
@@ -84,3 +88,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD ["vibedeckx", "connect", "status"]
 
 ENTRYPOINT ["vibedeckx", "connect"]
+CMD ["--token-file", "/run/vibedeckx-secrets/connect-token"]

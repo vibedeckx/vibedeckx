@@ -154,7 +154,7 @@ only). Users follow the public docs (`connect-a-machine.mdx`, "Run in Docker").
 
 ```bash
 cd deploy/worker && mkdir -p secrets && $EDITOR secrets/connect-token
-VIBEDECKX_CONNECT_TO=https://vibedeckx.dev docker compose up -d
+docker compose up -d     # hub: https://vibedeckx.dev unless VIBEDECKX_CONNECT_TO is set
 ```
 
 To run a local build instead: `./deploy/worker/build.sh` (→

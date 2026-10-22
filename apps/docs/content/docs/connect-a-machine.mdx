@@ -88,8 +88,6 @@ Then start the worker:
 
 ```bash
 docker run -d --name vibedeckx-worker --restart unless-stopped --init \
-  -e VIBEDECKX_CONNECT_TO=https://vibedeckx.dev \
-  -e VIBEDECKX_CONNECT_TOKEN_FILE=/run/vibedeckx-secrets/connect-token \
   -v "$PWD/secrets:/run/vibedeckx-secrets:ro" \
   -v vibedeckx-data:/data \
   -v vibedeckx-home:/home/node \
@@ -100,11 +98,15 @@ docker run -d --name vibedeckx-worker --restart unless-stopped --init \
 
 Docker restarts the worker if it crashes and starts it again when the machine boots. Everything worth keeping lives in volumes: the worker's data and identity (`/data`), agent logins and settings (`/home/node`), the worktrees it creates, and project checkouts (`/projects`).
 
+The image connects to `https://vibedeckx.dev` and reads the token from `secrets/connect-token` by default. For a self-hosted server, add `-e VIBEDECKX_CONNECT_TO=<server URL>`.
+
 Mount the token's directory, not the file itself: to change the token, overwrite `secrets/connect-token` and the running worker picks it up without a restart. The file now belongs to user 1000, so unless that is you, overwrite it with sudo; `tee` keeps its owner and permissions:
 
 ```bash
 printf '%s' '<new token>' | sudo tee secrets/connect-token > /dev/null
 ```
+
+To pass the token directly instead of mounting `secrets`, put `--token <token>` after the image name. It is then visible in `docker inspect` and `ps`, and changing it means recreating the container. `-e VIBEDECKX_CONNECT_TOKEN` does not work here: the image's default token file takes precedence over it.
 
 If you prefer Compose, the repository has a ready-made [docker-compose.yml](https://github.com/vibedeckx/vibedeckx/blob/main/deploy/worker/docker-compose.yml) with the same settings.
 

@@ -7,7 +7,8 @@
 #      Settings → Remote Servers). The container user is uid 1000, so make it
 #      readable by that uid (`chmod 600` + owned by uid 1000, or `chmod 644`
 #      on a single-user host).
-#   2. set VIBEDECKX_CONNECT_TO below (or in a .env file next to this one).
+#   2. only for a self-hosted hub: set VIBEDECKX_CONNECT_TO (here or in a .env
+#      file next to this one); it defaults to https://vibedeckx.dev.
 #   3. docker compose up -d
 #
 # Lifecycle (host side):
@@ -30,9 +31,10 @@ services:
     # tini as PID 1 reaps orphaned agent processes.
     init: true
     # Outbound-only: the worker dials the hub; nothing needs to be published.
+    # The image reads the token from /run/vibedeckx-secrets/connect-token by
+    # default (its CMD).
     environment:
-      VIBEDECKX_CONNECT_TO: ${VIBEDECKX_CONNECT_TO:?set VIBEDECKX_CONNECT_TO to the hub URL}
-      VIBEDECKX_CONNECT_TOKEN_FILE: /run/vibedeckx-secrets/connect-token
+      VIBEDECKX_CONNECT_TO: ${VIBEDECKX_CONNECT_TO:-https://vibedeckx.dev}
     volumes:
       - ${VIBEDECKX_SECRETS_DIR:-./secrets}:/run/vibedeckx-secrets:ro
       - vibedeckx-data:/data
