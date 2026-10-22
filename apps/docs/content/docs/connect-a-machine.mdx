@@ -176,6 +176,14 @@ docker exec -it vibedeckx-worker npm install -g @openai/codex@latest
 docker restart vibedeckx-worker
 ```
 
+From then on, upgrading the image no longer changes that CLI: your copy keeps winning. Claude Code installed this way updates itself (or run `claude update`), but Codex stays at the version you installed until you run the `npm install` again. To go back to the versions that come with the image, remove your copies and restart:
+
+```bash
+docker exec vibedeckx-worker npm uninstall -g @openai/codex
+docker exec vibedeckx-worker rm -f /home/node/.local/bin/claude
+docker restart vibedeckx-worker
+```
+
 Your projects will usually need more tools than the image has (language toolchains, build tools). Build your own image on top of it with `FROM ghcr.io/vibedeckx/worker:latest` and install them there.
 
 ## Run in the terminal only
