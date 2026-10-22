@@ -1,39 +1,33 @@
-import { execFileSync } from "child_process";
+import { rethrowGitTimeout, runGit } from "./utils/git-exec.js";
 import { parseGitWorktreeList } from "./utils/worktree-paths.js";
 
 /**
  * Merged-ness detection for workspace branches vs a target branch.
  * See docs/superpowers/specs/2026-07-12-branch-merge-status-design.md.
+ *
+ * All git runs async (the sidebar polls this every 30–60s per workspace). A
+ * catch that reads a git failure as "no" rethrows timeouts first, so a slow
+ * repo fails the request with a 504 instead of showing a wrong badge.
  */
 
 export type MergeStatusValue = "merged" | "partial" | "unmerged" | "no-unique-commits";
 
-const MAX_BUFFER = 10 * 1024 * 1024;
-
-function git(cwd: string, args: string[]): string {
-  return execFileSync("git", args, {
-    cwd,
-    encoding: "utf-8",
-    maxBuffer: MAX_BUFFER,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-}
-
-function revParse(repoPath: string, ref: string): string | null {
+async function revParse(repoPath: string, ref: string): Promise<string | null> {
   try {
-    return git(repoPath, ["rev-parse", "--verify", ref]).trim();
-  } catch {
+    return (await runGit(repoPath, ["rev-parse", "--verify", ref])).trim();
+  } catch (err) {
+    rethrowGitTimeout(err);
     return null;
   }
 }
 
-export function validateBranchExists(repoPath: string, branch: string): boolean {
-  return revParse(repoPath, `refs/heads/${branch}`) !== null;
+export async function validateBranchExists(repoPath: string, branch: string): Promise<boolean> {
+  return (await revParse(repoPath, `refs/heads/${branch}`)) !== null;
 }
 
-export function detectDefaultBranch(repoPath: string): string {
+export async function detectDefaultBranch(repoPath: string): Promise<string> {
   for (const candidate of ["main", "master"]) {
-    if (validateBranchExists(repoPath, candidate)) return candidate;
+    if (await validateBranchExists(repoPath, candidate)) return candidate;
   }
   throw Object.assign(new Error("No default branch (main/master) found"), { statusCode: 400 });
 }
@@ -54,11 +48,12 @@ export function clearMergeStatusCache(): void {
   statusCache.clear();
 }
 
-function isAncestor(repoPath: string, ancestor: string, descendant: string): boolean {
+async function isAncestor(repoPath: string, ancestor: string, descendant: string): Promise<boolean> {
   try {
-    git(repoPath, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    await runGit(repoPath, ["merge-base", "--is-ancestor", ancestor, descendant]);
     return true;
-  } catch {
+  } catch (err) {
+    rethrowGitTimeout(err);
     return false;
   }
 }
@@ -78,14 +73,19 @@ function isAncestor(repoPath: string, ancestor: string, descendant: string): boo
  * result — this check only ever downgrades "unmerged/partial" to "merged", it
  * never hides real unmerged work.
  */
-function branchContentContainedInTarget(repoPath: string, branch: string, target: string): boolean {
+async function branchContentContainedInTarget(
+  repoPath: string,
+  branch: string,
+  target: string,
+): Promise<boolean> {
   try {
-    const mergedTree = git(repoPath, ["merge-tree", "--write-tree", target, branch])
+    const mergedTree = (await runGit(repoPath, ["merge-tree", "--write-tree", target, branch]))
       .split("\n", 1)[0]
       .trim();
-    const targetTree = revParse(repoPath, `${target}^{tree}`);
+    const targetTree = await revParse(repoPath, `${target}^{tree}`);
     return targetTree !== null && mergedTree === targetTree;
-  } catch {
+  } catch (err) {
+    rethrowGitTimeout(err);
     return false;
   }
 }
@@ -97,13 +97,13 @@ function branchContentContainedInTarget(repoPath: string, branch: string, target
  * which patch-ids miss). Each tier is cheaper than the next and only runs when
  * the prior one is inconclusive.
  */
-export function computeBranchMergeStatus(
+export async function computeBranchMergeStatus(
   repoPath: string,
   branch: string,
   target: string,
-): { status: MergeStatusValue; unmergedCount: number } {
-  const branchTip = revParse(repoPath, `refs/heads/${branch}`);
-  const targetTip = revParse(repoPath, `refs/heads/${target}`);
+): Promise<{ status: MergeStatusValue; unmergedCount: number }> {
+  const branchTip = await revParse(repoPath, `refs/heads/${branch}`);
+  const targetTip = await revParse(repoPath, `refs/heads/${target}`);
   if (!branchTip || !targetTip) {
     const missing = !branchTip ? branch : target;
     throw Object.assign(new Error(`Branch not found: ${missing}`), { statusCode: 400 });
@@ -120,10 +120,10 @@ export function computeBranchMergeStatus(
 
   if (branchTip === targetTip) {
     status = "no-unique-commits";
-  } else if (isAncestor(repoPath, branchTip, targetTip)) {
+  } else if (await isAncestor(repoPath, branchTip, targetTip)) {
     status = "merged";
   } else {
-    const lines = git(repoPath, ["cherry", target, branch]).trim().split("\n").filter(Boolean);
+    const lines = (await runGit(repoPath, ["cherry", target, branch])).trim().split("\n").filter(Boolean);
     unmergedCount = lines.filter((l) => l.startsWith("+")).length;
     if (lines.length === 0) status = "no-unique-commits";
     else if (unmergedCount === 0) status = "merged";
@@ -133,7 +133,7 @@ export function computeBranchMergeStatus(
     // Tier 4: cherry (patch-id) misses rebases whose diff shifted and squash
     // merges even when the content already lives in target. Confirm at the
     // tree level before trusting an unmerged/partial verdict.
-    if (unmergedCount > 0 && branchContentContainedInTarget(repoPath, branch, target)) {
+    if (unmergedCount > 0 && (await branchContentContainedInTarget(repoPath, branch, target))) {
       status = "merged";
       unmergedCount = 0;
     }
@@ -143,10 +143,11 @@ export function computeBranchMergeStatus(
   return { status, unmergedCount };
 }
 
-function isDirty(worktreePath: string): boolean {
+async function isDirty(worktreePath: string): Promise<boolean> {
   try {
-    return git(worktreePath, ["status", "--porcelain"]).trim().length > 0;
-  } catch {
+    return (await runGit(worktreePath, ["status", "--porcelain"])).trim().length > 0;
+  } catch (err) {
+    rethrowGitTimeout(err);
     return false;
   }
 }
@@ -175,10 +176,10 @@ export interface MergeStatusPairEntry {
  * per branch per call, default branch resolved at most once per call.
  * Pair-level problems are reported per entry, never thrown.
  */
-export function computeMergeStatusPairs(
+export async function computeMergeStatusPairs(
   repoPath: string,
   comparisons: MergeComparison[],
-): MergeStatusPairEntry[] {
+): Promise<MergeStatusPairEntry[]> {
   // Worktree paths for dirty checks — enumerated once per call. A branch not
   // checked out in any worktree has no working tree, so dirty = false.
   const worktreePathByBranch = new Map<string, string>();
@@ -189,13 +190,22 @@ export function computeMergeStatusPairs(
   let defaultTarget: string | null | undefined; // undefined = not resolved yet
   const dirtyByBranch = new Map<string, boolean>();
 
-  return comparisons.map((cmp): MergeStatusPairEntry => {
+  // Sequential on purpose: one git at a time per request keeps a project with
+  // many workspaces from fanning out dozens of processes on every poll.
+  const entries: MergeStatusPairEntry[] = [];
+  for (const cmp of comparisons) {
+    entries.push(await computePair(cmp));
+  }
+  return entries;
+
+  async function computePair(cmp: MergeComparison): Promise<MergeStatusPairEntry> {
     let target = cmp.target;
     if (!target) {
       if (defaultTarget === undefined) {
         try {
-          defaultTarget = detectDefaultBranch(repoPath);
-        } catch {
+          defaultTarget = await detectDefaultBranch(repoPath);
+        } catch (err) {
+          rethrowGitTimeout(err);
           defaultTarget = null;
         }
       }
@@ -203,21 +213,21 @@ export function computeMergeStatusPairs(
         return { branch: cmp.branch, target: null, error: "no-default-branch" };
       }
       target = defaultTarget;
-    } else if (!validateBranchExists(repoPath, target)) {
+    } else if (!(await validateBranchExists(repoPath, target))) {
       return { branch: cmp.branch, target: null, error: "target-not-found" };
     }
 
-    if (!validateBranchExists(repoPath, cmp.branch)) {
+    if (!(await validateBranchExists(repoPath, cmp.branch))) {
       return { branch: cmp.branch, target, error: "branch-not-found" };
     }
 
-    const { status, unmergedCount } = computeBranchMergeStatus(repoPath, cmp.branch, target);
+    const { status, unmergedCount } = await computeBranchMergeStatus(repoPath, cmp.branch, target);
     let dirty = dirtyByBranch.get(cmp.branch);
     if (dirty === undefined) {
       const wtPath = worktreePathByBranch.get(cmp.branch);
-      dirty = wtPath ? isDirty(wtPath) : false;
+      dirty = wtPath ? await isDirty(wtPath) : false;
       dirtyByBranch.set(cmp.branch, dirty);
     }
     return { branch: cmp.branch, target, status, unmergedCount, dirty };
-  });
+  }
 }

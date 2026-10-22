@@ -173,7 +173,7 @@ function parseComparisons(body: unknown): MergeComparison[] | null {
   return result;
 }
 
-function sendComputed(
+async function sendComputed(
   reply: FastifyReply,
   repoPath: string,
   comparisons: MergeComparison[],
@@ -182,7 +182,7 @@ function sendComputed(
   try {
     return reply.code(200).send({
       ...(repository ? { repository } : {}),
-      entries: computeMergeStatusPairs(repoPath, comparisons),
+      entries: await computeMergeStatusPairs(repoPath, comparisons),
     });
   } catch (error) {
     const statusCode = (error as { statusCode?: number }).statusCode ?? 500;
@@ -265,7 +265,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       try {
-        const entries = computeMergeStatusPairs(project.path, resolved.comparisons);
+        const entries = await computeMergeStatusPairs(project.path, resolved.comparisons);
         return reply.code(200).send({
           repository: { kind: "local", label: "Local" } satisfies MergeStatusRepository,
           entries: annotateEntries(entries, resolved.comparisons, resolved.sources),

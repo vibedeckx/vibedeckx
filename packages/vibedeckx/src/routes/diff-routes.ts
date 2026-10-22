@@ -2,8 +2,6 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
 import { readFile } from "fs/promises";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import { parseDiffOutput, type DiffFile, type DiffLine } from "../utils/diff-parser.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
@@ -11,6 +9,7 @@ import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import type { Project } from "../storage/types.js";
 import { validateBranchExists } from "../merge-status.js";
+import { GIT_TIMEOUT_MS, GitTimeoutError, runGit } from "../utils/git-exec.js";
 
 async function getRemoteConfig(fastify: FastifyInstance, project: Project) {
   const remotes = await fastify.storage.projectRemotes.getByProject(project.id);
@@ -46,41 +45,6 @@ function parseGitLogOutput(output: string): CommitEntry[] {
   return commits;
 }
 
-const execFileAsync = promisify(execFile);
-
-const MAX_BUFFER = 10 * 1024 * 1024;
-/**
- * Per git call. Kept under the hub's 30s tunnel timeout so a slow repo comes
- * back to the user as this route's own error, not a generic proxy timeout.
- */
-const GIT_TIMEOUT_MS = 20_000;
-
-/**
- * Async so a slow git (huge repo, index lock, slow disk) holds only this
- * request — a sync exec would stall the whole event loop, and with it every
- * session stream and terminal on this machine.
- */
-async function git(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
-    cwd,
-    encoding: "utf-8",
-    maxBuffer: MAX_BUFFER,
-    timeout: timeoutMs,
-  });
-  return stdout;
-}
-
-/**
- * execFile's timeout kills the child and flags the error `killed`. An
- * over-maxBuffer kill is excluded: that's an oversized diff, not a slow one.
- */
-function isTimeout(err: unknown): boolean {
-  const e = err as { killed?: boolean; code?: unknown } | null;
-  return e?.killed === true && e.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
-}
-
-class GitTimeoutError extends Error {}
-
 function diffArgs(commit?: string): string[] {
   if (!commit) {
     // Uncommitted changes: working tree vs HEAD
@@ -97,7 +61,7 @@ function diffFallbackArgs(commit?: string): string[] {
 
 /** Three-dot diff: everything `HEAD` would bring to `compareTo` since their merge-base. */
 export function runCompareToDiff(cwd: string, compareTo: string, timeoutMs?: number): Promise<string> {
-  return git(cwd, ["diff", `${compareTo}...HEAD`, "--no-color"], timeoutMs);
+  return runGit(cwd, ["diff", `${compareTo}...HEAD`, "--no-color"], timeoutMs);
 }
 
 async function getUntrackedFiles(cwd: string, timeoutMs: number): Promise<DiffFile[]> {
@@ -108,9 +72,9 @@ async function getUntrackedFiles(cwd: string, timeoutMs: number): Promise<DiffFi
     // read below then ENOENTs on that literal string, and the catch drops the
     // file — it simply vanishes from the Diff tab. NUL separation also covers
     // names holding spaces or newlines.
-    untrackedOutput = await git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"], timeoutMs);
+    untrackedOutput = await runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z"], timeoutMs);
   } catch (err) {
-    if (isTimeout(err)) throw new GitTimeoutError();
+    if (err instanceof GitTimeoutError) throw err;
     return [];
   }
 
@@ -169,10 +133,9 @@ async function getUntrackedFiles(cwd: string, timeoutMs: number): Promise<DiffFi
 
 type DiffResult = { code: number; body: { files: DiffFile[] } | { error: string } };
 
-const TIMEOUT_RESULT: DiffResult = {
-  code: 504,
-  body: { error: "git diff timed out — the repository may be too large or busy" },
-};
+function timeoutResult(err: GitTimeoutError): DiffResult {
+  return { code: err.statusCode, body: { error: err.message } };
+}
 
 /**
  * The diff for one worktree. Git failures keep their old meaning (an empty or
@@ -186,14 +149,14 @@ export async function loadDiff(
   timeoutMs = GIT_TIMEOUT_MS,
 ): Promise<DiffResult> {
   if (compareTo) {
-    if (!validateBranchExists(cwd, compareTo)) {
-      return { code: 400, body: { error: `Branch not found: ${compareTo}` } };
-    }
     try {
+      if (!(await validateBranchExists(cwd, compareTo))) {
+        return { code: 400, body: { error: `Branch not found: ${compareTo}` } };
+      }
       // Committed content only — no untracked-file injection in compare mode.
       return { code: 200, body: { files: parseDiffOutput(await runCompareToDiff(cwd, compareTo, timeoutMs)) } };
     } catch (err) {
-      return isTimeout(err) ? TIMEOUT_RESULT : { code: 200, body: { files: [] } };
+      return err instanceof GitTimeoutError ? timeoutResult(err) : { code: 200, body: { files: [] } };
     }
   }
 
@@ -201,16 +164,16 @@ export async function loadDiff(
   try {
     untrackedFiles = !commit ? await getUntrackedFiles(cwd, timeoutMs) : [];
   } catch (err) {
-    if (err instanceof GitTimeoutError) return TIMEOUT_RESULT;
+    if (err instanceof GitTimeoutError) return timeoutResult(err);
     throw err;
   }
 
   for (const args of [diffArgs(commit), diffFallbackArgs(commit)]) {
     try {
-      const files = parseDiffOutput(await git(cwd, args, timeoutMs));
+      const files = parseDiffOutput(await runGit(cwd, args, timeoutMs));
       return { code: 200, body: { files: [...files, ...untrackedFiles] } };
     } catch (err) {
-      if (isTimeout(err)) return TIMEOUT_RESULT;
+      if (err instanceof GitTimeoutError) return timeoutResult(err);
     }
   }
   return { code: 200, body: { files: untrackedFiles } };
@@ -218,7 +181,7 @@ export async function loadDiff(
 
 async function loadCommits(cwd: string, limit: number): Promise<CommitEntry[]> {
   try {
-    const output = await git(cwd, ["log", "--format=%H%n%h%n%s%n%an%n%aI", "-n", String(limit)]);
+    const output = await runGit(cwd, ["log", "--format=%H%n%h%n%s%n%an%n%aI", "-n", String(limit)]);
     return parseGitLogOutput(output);
   } catch {
     return [];

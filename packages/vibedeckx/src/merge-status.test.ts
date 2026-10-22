@@ -48,25 +48,23 @@ describe("merge-status", () => {
   });
 
   describe("detectDefaultBranch", () => {
-    it("prefers main", () => {
-      expect(detectDefaultBranch(repo)).toBe("main");
+    it("prefers main", async () => {
+      expect(await detectDefaultBranch(repo)).toBe("main");
     });
 
-    it("falls back to master", () => {
+    it("falls back to master", async () => {
       const masterRepo = initRepo("master");
       try {
-        expect(detectDefaultBranch(masterRepo)).toBe("master");
+        expect(await detectDefaultBranch(masterRepo)).toBe("master");
       } finally {
         rmSync(masterRepo, { recursive: true, force: true });
       }
     });
 
-    it("throws 400 when neither exists", () => {
+    it("throws 400 when neither exists", async () => {
       const bare = initRepo("trunk");
       try {
-        expect(() => detectDefaultBranch(bare)).toThrowError(
-          expect.objectContaining({ statusCode: 400 }),
-        );
+        await expect(detectDefaultBranch(bare)).rejects.toMatchObject({ statusCode: 400 });
       } finally {
         rmSync(bare, { recursive: true, force: true });
       }
@@ -74,45 +72,45 @@ describe("merge-status", () => {
   });
 
   describe("validateBranchExists", () => {
-    it("true for existing, false for missing", () => {
-      expect(validateBranchExists(repo, "main")).toBe(true);
-      expect(validateBranchExists(repo, "nope")).toBe(false);
+    it("true for existing, false for missing", async () => {
+      expect(await validateBranchExists(repo, "main")).toBe(true);
+      expect(await validateBranchExists(repo, "nope")).toBe(false);
     });
   });
 
   describe("computeBranchMergeStatus", () => {
-    it("fresh branch at target tip => no-unique-commits", () => {
+    it("fresh branch at target tip => no-unique-commits", async () => {
       run(repo, ["branch", "dev1"]);
-      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+      expect(await computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
         status: "no-unique-commits",
         unmergedCount: 0,
       });
     });
 
-    it("commits not in target => unmerged with count", () => {
+    it("commits not in target => unmerged with count", async () => {
       run(repo, ["checkout", "-b", "dev1"]);
       commit(repo, "a.txt", "a", "dev commit 1");
       commit(repo, "b.txt", "b", "dev commit 2");
       run(repo, ["checkout", "main"]);
-      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+      expect(await computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
         status: "unmerged",
         unmergedCount: 2,
       });
     });
 
-    it("normal merge => merged (tier 1: ancestor)", () => {
+    it("normal merge => merged (tier 1: ancestor)", async () => {
       run(repo, ["checkout", "-b", "dev1"]);
       commit(repo, "a.txt", "a", "dev commit");
       run(repo, ["checkout", "main"]);
       commit(repo, "m.txt", "m", "main advances");
       run(repo, ["merge", "dev1", "--no-edit"]);
-      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+      expect(await computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
         status: "merged",
         unmergedCount: 0,
       });
     });
 
-    it("cherry-picked (rebase-style) => merged (tier 2: patch-id)", () => {
+    it("cherry-picked (rebase-style) => merged (tier 2: patch-id)", async () => {
       run(repo, ["checkout", "-b", "dev1"]);
       commit(repo, "a.txt", "a", "dev commit");
       const devTip = run(repo, ["rev-parse", "dev1"]).trim();
@@ -120,13 +118,13 @@ describe("merge-status", () => {
       commit(repo, "m.txt", "m", "main advances");
       run(repo, ["cherry-pick", devTip]);
       // dev1 tip is NOT an ancestor of main, but its patch is in main.
-      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+      expect(await computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
         status: "merged",
         unmergedCount: 0,
       });
     });
 
-    it("rebased onto a base that shifted only diff context => merged (tier 4)", () => {
+    it("rebased onto a base that shifted only diff context => merged (tier 4)", async () => {
       // A change and a nearby-but-non-overlapping base edit. The rebased twin
       // has a byte-identical change (`-line3 +FEATURE`) but a different context
       // line, so its patch-id differs and `git cherry` flags it — yet the
@@ -141,13 +139,13 @@ describe("merge-status", () => {
       commit(repo, "f.txt", "TARGET2\nline2\nline3\n", "main edits line1");
       run(repo, ["cherry-pick", devTip]);
       expect(run(repo, ["cherry", "main", "dev1"]).trim()).toMatch(/^\+/); // cherry alone misses it
-      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+      expect(await computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
         status: "merged",
         unmergedCount: 0,
       });
     });
 
-    it("squash-merged branch => merged (tier 4)", () => {
+    it("squash-merged branch => merged (tier 4)", async () => {
       run(repo, ["checkout", "-b", "dev1"]);
       commit(repo, "a.txt", "a", "dev commit 1");
       commit(repo, "b.txt", "b", "dev commit 2");
@@ -156,13 +154,13 @@ describe("merge-status", () => {
       run(repo, ["commit", "-m", "squash dev1"]);
       // Squash flattens both commits into one with no matching patch-ids, so
       // cherry reports them unmerged; the resulting tree is identical.
-      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+      expect(await computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
         status: "merged",
         unmergedCount: 0,
       });
     });
 
-    it("some commits cherry-picked => partial with count", () => {
+    it("some commits cherry-picked => partial with count", async () => {
       run(repo, ["checkout", "-b", "dev1"]);
       commit(repo, "a.txt", "a", "dev commit 1");
       const first = run(repo, ["rev-parse", "dev1"]).trim();
@@ -173,13 +171,13 @@ describe("merge-status", () => {
       // SHA, making the commit shared history that `git cherry` omits.
       commit(repo, "m.txt", "m", "main advances");
       run(repo, ["cherry-pick", first]);
-      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+      expect(await computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
         status: "partial",
         unmergedCount: 1,
       });
     });
 
-    it("stays unmerged with deep pre-fork history (denominator regression)", () => {
+    it("stays unmerged with deep pre-fork history (denominator regression)", async () => {
       commit(repo, "h1.txt", "1", "history 1");
       commit(repo, "h2.txt", "2", "history 2");
       commit(repo, "h3.txt", "3", "history 3");
@@ -187,26 +185,24 @@ describe("merge-status", () => {
       commit(repo, "a.txt", "a", "dev commit 1");
       commit(repo, "b.txt", "b", "dev commit 2");
       run(repo, ["checkout", "main"]);
-      expect(computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
+      expect(await computeBranchMergeStatus(repo, "dev1", "main")).toEqual({
         status: "unmerged",
         unmergedCount: 2,
       });
     });
 
-    it("throws 400 for unknown branch", () => {
-      expect(() => computeBranchMergeStatus(repo, "ghost", "main")).toThrowError(
-        expect.objectContaining({ statusCode: 400 }),
-      );
+    it("throws 400 for unknown branch", async () => {
+      await expect(computeBranchMergeStatus(repo, "ghost", "main")).rejects.toMatchObject({ statusCode: 400 });
     });
 
-    it("recomputes when the target tip moves (cache invalidation)", () => {
+    it("recomputes when the target tip moves (cache invalidation)", async () => {
       run(repo, ["checkout", "-b", "dev1"]);
       commit(repo, "a.txt", "a", "dev commit");
       run(repo, ["checkout", "main"]);
-      expect(computeBranchMergeStatus(repo, "dev1", "main").status).toBe("unmerged");
+      expect((await computeBranchMergeStatus(repo, "dev1", "main")).status).toBe("unmerged");
       commit(repo, "m.txt", "m", "main advances");
       run(repo, ["merge", "dev1", "--no-edit"]);
-      expect(computeBranchMergeStatus(repo, "dev1", "main").status).toBe("merged");
+      expect((await computeBranchMergeStatus(repo, "dev1", "main")).status).toBe("merged");
     });
   });
 
@@ -220,11 +216,11 @@ describe("merge-status", () => {
       return wtPath;
     }
 
-    it("computes each pair against its own target", () => {
+    it("computes each pair against its own target", async () => {
       const dev1 = addWorktree("dev1");
       commit(dev1, "a.txt", "a", "dev1 commit");
       run(repo, ["branch", "release"]);
-      const entries = computeMergeStatusPairs(repo, [
+      const entries = await computeMergeStatusPairs(repo, [
         { branch: "dev1" },
         { branch: "dev1", target: "release" },
       ]);
@@ -234,18 +230,18 @@ describe("merge-status", () => {
       ]);
     });
 
-    it("reports dirty from the branch's worktree; false when not checked out anywhere", () => {
+    it("reports dirty from the branch's worktree; false when not checked out anywhere", async () => {
       const dev1 = addWorktree("dev1");
       writeFileSync(path.join(dev1, "wip.txt"), "wip");
       run(repo, ["branch", "loose"]);
-      const entries = computeMergeStatusPairs(repo, [{ branch: "dev1" }, { branch: "loose" }]);
+      const entries = await computeMergeStatusPairs(repo, [{ branch: "dev1" }, { branch: "loose" }]);
       expect(entries[0].dirty).toBe(true);
       expect(entries[1].dirty).toBe(false);
     });
 
-    it("reports per-pair errors without failing the batch", () => {
+    it("reports per-pair errors without failing the batch", async () => {
       run(repo, ["branch", "dev1"]);
-      const entries = computeMergeStatusPairs(repo, [
+      const entries = await computeMergeStatusPairs(repo, [
         { branch: "dev1", target: "ghost" },
         { branch: "ghost" },
         { branch: "dev1" },
@@ -255,11 +251,11 @@ describe("merge-status", () => {
       expect(entries[2].status).toBe("no-unique-commits");
     });
 
-    it("errors no-default-branch only for pairs that need the default", () => {
+    it("errors no-default-branch only for pairs that need the default", async () => {
       const trunk = initRepo("trunk");
       try {
         run(trunk, ["branch", "dev1"]);
-        const entries = computeMergeStatusPairs(trunk, [
+        const entries = await computeMergeStatusPairs(trunk, [
           { branch: "dev1" },
           { branch: "dev1", target: "trunk" },
         ]);
@@ -270,35 +266,35 @@ describe("merge-status", () => {
       }
     });
 
-    it("memoizes a failed default detection across pairs", () => {
+    it("memoizes a failed default detection across pairs", async () => {
       const trunk = initRepo("trunk");
       try {
         run(trunk, ["branch", "dev1"]);
         run(trunk, ["branch", "dev2"]);
-        const entries = computeMergeStatusPairs(trunk, [{ branch: "dev1" }, { branch: "dev2" }]);
+        const entries = await computeMergeStatusPairs(trunk, [{ branch: "dev1" }, { branch: "dev2" }]);
         expect(entries.map((e) => e.error)).toEqual(["no-default-branch", "no-default-branch"]);
       } finally {
         rmSync(trunk, { recursive: true, force: true });
       }
     });
 
-    it("branch equal to target reads no-unique-commits", () => {
-      const entries = computeMergeStatusPairs(repo, [{ branch: "main", target: "main" }]);
+    it("branch equal to target reads no-unique-commits", async () => {
+      const entries = await computeMergeStatusPairs(repo, [{ branch: "main", target: "main" }]);
       expect(entries[0].status).toBe("no-unique-commits");
     });
 
-    it("reports the root worktree's dirty state for the branch it has checked out", () => {
+    it("reports the root worktree's dirty state for the branch it has checked out", async () => {
       // The sidebar surfaces the root workspace's uncommitted changes by
       // asking about the branch the project directory has checked out — the
       // dirty flag has to come from that directory, not from a worktree.
       writeFileSync(path.join(repo, "base.txt"), "edited but not committed");
       invalidateWorktreeListCache(repo);
-      const entries = computeMergeStatusPairs(repo, [{ branch: "main" }]);
+      const entries = await computeMergeStatusPairs(repo, [{ branch: "main" }]);
       expect(entries[0]).toMatchObject({ status: "no-unique-commits", dirty: true });
     });
 
-    it("returns an empty array for an empty batch", () => {
-      expect(computeMergeStatusPairs(repo, [])).toEqual([]);
+    it("returns an empty array for an empty batch", async () => {
+      expect(await computeMergeStatusPairs(repo, [])).toEqual([]);
     });
   });
 });
