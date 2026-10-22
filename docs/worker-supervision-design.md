@@ -630,8 +630,13 @@ Where the implementation made a choice the design left open, or deviated:
   `docker-compose.yml`). The token is mounted as a *directory*, not a single
   file: a single-file bind mount is pinned to the inode, so replacing the file
   on the host by rename never reaches the container. Verified with Compose
-  `secrets:`, which is a single-file mount. The image has not been published
-  yet, so the public docs do not mention it.
+  `secrets:`, which is a single-file mount. Published since 2026-10-22 as
+  `ghcr.io/vibedeckx/worker` (release.yml `publish-worker-image`, after
+  `publish-npm`; installs `vibedeckx@<version>` from npm; amd64 only until a
+  linux-arm64 platform package exists). Agent CLIs are whatever is current at
+  build time (recorded in the job summary); users can install newer ones into
+  the `/home/node` volume (`~/.local/bin`, `NPM_CONFIG_PREFIX=~/.npm-global`),
+  which come first on PATH, then restart — `detectBinary` caches misses.
 - **Copy-paste install**: the connect-token endpoints return `installCommand`
   (`npx vibedeckx@latest connect install --connect-to … --token …`) next to the
   existing `connectCommand`. The Remote Servers dialog shows both, install

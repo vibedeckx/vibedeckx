@@ -147,13 +147,18 @@ to a registry and set `VIBEDECKX_IMAGE`).
 ## Reverse-connect worker in Docker
 
 `deploy/worker/` builds and runs a **worker** (runs agents, dials out to a hub).
-It is separate from the server image above:
+It is separate from the server image above. Every release tag publishes it as
+`ghcr.io/vibedeckx/worker:<version>` plus `latest` (`next` for prereleases),
+built from the npm release (`publish-worker-image` in `release.yml`, amd64
+only). Users follow the public docs (`connect-a-machine.mdx`, "Run in Docker").
 
 ```bash
-./deploy/worker/build.sh                     # → vibedeckx-worker:local
 cd deploy/worker && mkdir -p secrets && $EDITOR secrets/connect-token
 VIBEDECKX_CONNECT_TO=https://vibedeckx.dev docker compose up -d
 ```
+
+To run a local build instead: `./deploy/worker/build.sh` (→
+`vibedeckx-worker:local`) and `VIBEDECKX_WORKER_IMAGE=vibedeckx-worker:local`.
 
 See the comments in `deploy/worker/docker-compose.yml` for lifecycle and token
 rotation. On a regular machine, prefer `vibedeckx connect install`.

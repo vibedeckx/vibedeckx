@@ -1,7 +1,10 @@
+# syntax=docker/dockerfile:1
 # Base image for a Vibedeckx reverse-connect WORKER (runs agents and builds
 # projects; dials out to a hub). Not the server image — see ../Dockerfile.
 #
-# Build (from the repo root; packs the platform tarball first):
+# Published as ghcr.io/vibedeckx/worker by .github/workflows/release.yml on
+# every release tag, installing vibedeckx@<version> from npm. Local build
+# (from the repo root; packs the platform tarball first):
 #     ./deploy/worker/build.sh
 #
 # Projects usually need more than this (language toolchains, build tools):
@@ -16,20 +19,25 @@
 # compiled against glibc.
 FROM node:24-bookworm-slim
 
-ARG TARBALL=vibedeckx-0.1.0-linux-x64.tar.gz
-# Agent CLIs baked into the image. Pin them for reproducible images.
+# What `npm install -g` gets for vibedeckx: an npm spec (CI passes
+# vibedeckx@<version>) or a tarball under the dist-out/ bind mount (build.sh
+# passes /tmp/dist-out/vibedeckx-<ver>-linux-<arch>.tar.gz).
+ARG VIBEDECKX_PACKAGE=vibedeckx@latest
+# Agent CLIs baked into the image: the versions current at build time. They are
+# a starting point, not the only source — see the PATH note below.
 ARG CLAUDE_CODE_VERSION=latest
 ARG CODEX_VERSION=latest
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git openssh-client ca-certificates procps \
+ && apt-get install -y --no-install-recommends git openssh-client ca-certificates procps curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY dist-out/${TARBALL} /tmp/vibedeckx.tar.gz
-RUN npm install -g /tmp/vibedeckx.tar.gz \
+# Bind-mounted, not COPY'd: the tarball stays out of the image layers, and an
+# empty dist-out/ (CI) is fine.
+RUN --mount=type=bind,source=dist-out,target=/tmp/dist-out \
+    npm install -g "${VIBEDECKX_PACKAGE}" \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@openai/codex@${CODEX_VERSION}" \
- && rm -f /tmp/vibedeckx.tar.gz \
  && npm cache clean --force
 
 # Run as a normal user: Claude Code refuses --dangerously-skip-permissions as
@@ -58,6 +66,17 @@ ENV VIBEDECKX_DATA_DIR=/data \
     VIBEDECKX_INSTALL_MODE=docker \
     VIBEDECKX_SUPERVISOR=docker \
     NODE_ENV=production
+
+# Agent CLIs the user installs later live in the /home/node volume, so they
+# survive recreating the container (= upgrading the image) and win over the
+# baked-in copies on PATH:
+#   ~/.local/bin       Claude Code's native installer (claude.ai/install.sh)
+#   ~/.npm-global/bin  `npm install -g` as `node` (the default prefix,
+#                      /usr/local, is root-owned)
+# The worker caches a "binary not found" lookup per process, so restart the
+# container after installing one.
+ENV NPM_CONFIG_PREFIX=/home/node/.npm-global \
+    PATH=/home/node/.local/bin:/home/node/.npm-global/bin:$PATH
 
 # Liveness only (local, no network): the main loop is heartbeating. An
 # unhealthy container is reported, not restarted — Docker restarts on exit.

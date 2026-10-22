@@ -1,7 +1,8 @@
 # Vibedeckx reverse-connect worker — run config.
 #
-# Build the image once from the repo: ./deploy/worker/build.sh
-# Then, next to this file:
+# Uses the published image (ghcr.io/vibedeckx/worker). To run a local build
+# from ./deploy/worker/build.sh instead, set
+# VIBEDECKX_WORKER_IMAGE=vibedeckx-worker:local. Next to this file:
 #   1. put the connect token in ./secrets/connect-token (from the hub:
 #      Settings → Remote Servers). The container user is uid 1000, so make it
 #      readable by that uid (`chmod 600` + owned by uid 1000, or `chmod 644`
@@ -14,6 +15,7 @@
 #   docker compose start | restart             start / restart
 #   docker compose exec worker vibedeckx connect status
 #   docker compose down                        remove the container (volumes kept)
+#   docker compose pull && docker compose up -d   upgrade to the newest image
 #
 # To rotate the token, replace ./secrets/connect-token (in place or by
 # rename); the worker picks it up without a restart. The secrets DIRECTORY is
@@ -22,7 +24,7 @@
 # container.
 services:
   worker:
-    image: ${VIBEDECKX_WORKER_IMAGE:-vibedeckx-worker:local}
+    image: ${VIBEDECKX_WORKER_IMAGE:-ghcr.io/vibedeckx/worker:latest}
     # Recover crashes; start with dockerd at boot. Never give up.
     restart: unless-stopped
     # tini as PID 1 reaps orphaned agent processes.

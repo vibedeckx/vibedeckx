@@ -337,3 +337,79 @@ jobs:
       - name: Publish vibedeckx
         run: npm publish --access public --tag "$NPM_DIST_TAG"
         working-directory: packages/vibedeckx
+
+  # Worker image for machines without Node/npm (deploy/worker/). Installs the
+  # vibedeckx@<version> just published above, so image and npm versions match.
+  # amd64 only: there is no linux-arm64 platform package yet.
+  publish-worker-image:
+    needs: publish-npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve version and image tags
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid version tag: $VERSION" >&2
+            exit 1
+          fi
+          IMAGE=ghcr.io/vibedeckx/worker
+          # Same channel split as the npm dist-tag: prereleases never take `latest`.
+          if [[ "$VERSION" == *-* ]]; then CHANNEL=next; else CHANNEL=latest; fi
+          {
+            echo "VERSION=$VERSION"
+            echo "IMAGE=$IMAGE"
+            echo "IMAGE_TAGS=$IMAGE:$VERSION,$IMAGE:$CHANNEL"
+          } >> "$GITHUB_ENV"
+
+      # The registry can lag a fresh publish by a minute or two.
+      - name: Wait for vibedeckx@${{ github.ref_name }} on npm
+        run: |
+          for i in $(seq 1 30); do
+            if npm view "vibedeckx@$VERSION" version >/dev/null 2>&1; then exit 0; fi
+            sleep 10
+          done
+          echo "vibedeckx@$VERSION did not appear on npm" >&2
+          exit 1
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The Dockerfile bind-mounts dist-out/ for local tarball builds; CI
+      # installs from npm, so an empty directory is enough.
+      - run: mkdir -p dist-out
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/worker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_TAGS }}
+          build-args: |
+            VIBEDECKX_PACKAGE=vibedeckx@${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.description=Vibedeckx reverse-connect worker
+
+      # The agent CLIs are whatever was current at build time; record them.
+      # Also a smoke check: any CLI that fails to run fails the job.
+      - name: Record agent CLI versions
+        run: |
+          VERSIONS="$(docker run --rm --entrypoint sh "$IMAGE:$VERSION" -ec '
+            v=$(vibedeckx --version 2>/dev/null); c=$(claude --version); x=$(codex --version)
+            printf "vibedeckx %s\nclaude %s\ncodex %s\n" "$(printf "%s" "$v" | tail -n1)" "$c" "$x"')"
+          printf '### %s:%s\n\n```\n%s\n```\n' "$IMAGE" "$VERSION" "$VERSIONS" >> "$GITHUB_STEP_SUMMARY"

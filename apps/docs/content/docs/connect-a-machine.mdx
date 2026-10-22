@@ -71,6 +71,86 @@ It asks for the new token (press Enter to keep the current one). A running worke
 
 If the machine should start serving a different remote server, run `connect setup --force` with that server's token, then `connect restart`. Without `--force` the worker refuses a token that belongs to another server and shows `blocked`.
 
+## Run in Docker
+
+For a machine without Node.js, or one where you'd rather keep the worker in a container, use the worker image `ghcr.io/vibedeckx/worker`. It contains Node, the worker, Claude Code and Codex. Only Docker is needed on the machine (Linux, x86-64).
+
+Save the token in a directory of its own. The worker runs as user 1000 inside the container, so make the file readable by that user:
+
+```bash
+mkdir -p ~/vibedeckx-worker/secrets
+cd ~/vibedeckx-worker
+(umask 077 && printf '%s' '<token>' > secrets/connect-token)
+sudo chown 1000 secrets/connect-token
+```
+
+Then start the worker:
+
+```bash
+docker run -d --name vibedeckx-worker --restart unless-stopped --init \
+  -e VIBEDECKX_CONNECT_TO=https://vibedeckx.dev \
+  -e VIBEDECKX_CONNECT_TOKEN_FILE=/run/vibedeckx-secrets/connect-token \
+  -v "$PWD/secrets:/run/vibedeckx-secrets:ro" \
+  -v vibedeckx-data:/data \
+  -v vibedeckx-home:/home/node \
+  -v vibedeckx-worktrees:/var/tmp/vibedeckx/worktrees \
+  -v vibedeckx-projects:/projects \
+  ghcr.io/vibedeckx/worker:latest
+```
+
+Docker restarts the worker if it crashes and starts it again when the machine boots. Everything worth keeping lives in volumes: the worker's data and identity (`/data`), agent logins and settings (`/home/node`), the worktrees it creates, and project checkouts (`/projects`).
+
+Mount the token's directory, not the file itself: to change the token, overwrite `secrets/connect-token` and the running worker picks it up without a restart. The file now belongs to user 1000, so unless that is you, overwrite it with sudo; `tee` keeps its owner and permissions:
+
+```bash
+printf '%s' '<new token>' | sudo tee secrets/connect-token > /dev/null
+```
+
+If you prefer Compose, the repository has a ready-made [docker-compose.yml](https://github.com/vibedeckx/vibedeckx/blob/main/deploy/worker/docker-compose.yml) with the same settings.
+
+### Sign in to the agents
+
+A new container has no agent logins yet. Sign in once from the host; the login is kept in the `vibedeckx-home` volume:
+
+```bash
+docker exec -it vibedeckx-worker claude                      # then /login
+docker exec -it vibedeckx-worker codex login --device-auth
+```
+
+### Managing the worker
+
+Manage the container from the host:
+
+| Command | What it does |
+|---|---|
+| `docker exec vibedeckx-worker vibedeckx connect status` | Shows whether the worker is running and connected |
+| `docker stop vibedeckx-worker` | Stops it; it stays stopped across reboots until you start it |
+| `docker start vibedeckx-worker` | Starts it again |
+| `docker restart vibedeckx-worker` | Restarts it |
+| `docker logs -f vibedeckx-worker` | Follows its output |
+
+`connect stop`, `restart`, `disable` and the other service commands refuse to run inside the container and point you to these.
+
+### Upgrading
+
+Each Vibedeckx release publishes an image tagged with its version, and `latest`. To upgrade, pull the new image and recreate the container with the same `docker run` command; the volumes keep the worker's identity, logins and worktrees:
+
+```bash
+docker pull ghcr.io/vibedeckx/worker:latest
+docker rm -f vibedeckx-worker
+docker run ...   # the same command as above
+```
+
+The image includes the Claude Code and Codex versions current when it was built. To use a newer one before the next image, install it inside the container. It goes into the `vibedeckx-home` volume, so it survives upgrades and takes precedence over the built-in copy:
+
+```bash
+docker exec -it vibedeckx-worker sh -c 'curl -fsSL https://claude.ai/install.sh | bash'
+docker exec -it vibedeckx-worker npm install -g @openai/codex@latest
+docker restart vibedeckx-worker
+```
+
+Your projects will usually need more tools than the image has (language toolchains, build tools). Build your own image on top of it with `FROM ghcr.io/vibedeckx/worker:latest` and install them there.
+
 ## Run in the terminal only
 
 The dialog's second command runs the worker until you close the terminal. It also works on systems where `connect install` is not available yet:

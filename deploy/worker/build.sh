@@ -37,11 +37,13 @@ if [[ ! -f "${ROOT_DIR}/dist-out/${TARBALL}" ]]; then
   exit 1
 fi
 
+# The Dockerfile uses RUN --mount (BuildKit).
+export DOCKER_BUILDKIT=1
 echo "==> Building image ${IMAGE} from ${TARBALL}..."
 docker build \
   -f "${ROOT_DIR}/deploy/worker/Dockerfile" \
   -t "${IMAGE}" \
-  --build-arg "TARBALL=${TARBALL}" \
+  --build-arg "VIBEDECKX_PACKAGE=/tmp/dist-out/${TARBALL}" \
   --build-arg "CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION:-latest}" \
   --build-arg "CODEX_VERSION=${CODEX_VERSION:-latest}" \
   "${ROOT_DIR}"
