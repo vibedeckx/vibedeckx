@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
-import { readFileSync } from "fs";
-import { execFileSync } from "child_process";
+import { readFile } from "fs/promises";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import { parseDiffOutput, type DiffFile, type DiffLine } from "../utils/diff-parser.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
@@ -45,43 +46,71 @@ function parseGitLogOutput(output: string): CommitEntry[] {
   return commits;
 }
 
-function buildDiffCommand(commit?: string): string {
-  if (!commit) {
-    // Uncommitted changes: working tree vs HEAD
-    return `git diff HEAD --no-color`;
-  }
-  // Changes made by a specific commit (compare with its parent)
-  return `git diff ${commit}^ ${commit} --no-color`;
+const execFileAsync = promisify(execFile);
+
+const MAX_BUFFER = 10 * 1024 * 1024;
+/**
+ * Per git call. Kept under the hub's 30s tunnel timeout so a slow repo comes
+ * back to the user as this route's own error, not a generic proxy timeout.
+ */
+const GIT_TIMEOUT_MS = 20_000;
+
+/**
+ * Async so a slow git (huge repo, index lock, slow disk) holds only this
+ * request — a sync exec would stall the whole event loop, and with it every
+ * session stream and terminal on this machine.
+ */
+async function git(cwd: string, args: string[], timeoutMs = GIT_TIMEOUT_MS): Promise<string> {
+  const { stdout } = await execFileAsync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    maxBuffer: MAX_BUFFER,
+    timeout: timeoutMs,
+  });
+  return stdout;
 }
 
-function buildDiffFallbackCommand(commit: string): string {
-  // Fallback for root commits that have no parent
-  return `git show ${commit} --format="" --no-color`;
+/**
+ * execFile's timeout kills the child and flags the error `killed`. An
+ * over-maxBuffer kill is excluded: that's an oversized diff, not a slow one.
+ */
+function isTimeout(err: unknown): boolean {
+  const e = err as { killed?: boolean; code?: unknown } | null;
+  return e?.killed === true && e.code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+}
+
+class GitTimeoutError extends Error {}
+
+function diffArgs(commit?: string): string[] {
+  if (!commit) {
+    // Uncommitted changes: working tree vs HEAD
+    return ["diff", "HEAD", "--no-color"];
+  }
+  // Changes made by a specific commit (compare with its parent)
+  return ["diff", `${commit}^`, commit, "--no-color"];
+}
+
+function diffFallbackArgs(commit?: string): string[] {
+  // Root commit (no parent) / repo without HEAD yet
+  return commit ? ["show", commit, "--format=", "--no-color"] : ["diff", "--no-color"];
 }
 
 /** Three-dot diff: everything `HEAD` would bring to `compareTo` since their merge-base. */
-export function runCompareToDiff(cwd: string, compareTo: string): string {
-  return execFileSync("git", ["diff", `${compareTo}...HEAD`, "--no-color"], {
-    cwd,
-    encoding: "utf-8",
-    maxBuffer: 10 * 1024 * 1024,
-  });
+export function runCompareToDiff(cwd: string, compareTo: string, timeoutMs?: number): Promise<string> {
+  return git(cwd, ["diff", `${compareTo}...HEAD`, "--no-color"], timeoutMs);
 }
 
-async function getUntrackedFiles(cwd: string): Promise<DiffFile[]> {
+async function getUntrackedFiles(cwd: string, timeoutMs: number): Promise<DiffFile[]> {
   let untrackedOutput: string;
   try {
-    const { execSync } = await import("child_process");
     // `-z` is load-bearing, not a nicety: without it `core.quotePath` (on by
     // default) hands back `"docs/\345\212\237.md"` for any non-ASCII name, the
     // read below then ENOENTs on that literal string, and the catch drops the
     // file — it simply vanishes from the Diff tab. NUL separation also covers
     // names holding spaces or newlines.
-    untrackedOutput = execSync(
-      "git ls-files --others --exclude-standard -z",
-      { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
-    );
-  } catch {
+    untrackedOutput = await git(cwd, ["ls-files", "--others", "--exclude-standard", "-z"], timeoutMs);
+  } catch (err) {
+    if (isTimeout(err)) throw new GitTimeoutError();
     return [];
   }
 
@@ -92,7 +121,7 @@ async function getUntrackedFiles(cwd: string): Promise<DiffFile[]> {
   for (const filePath of untrackedPaths) {
     try {
       const fullPath = path.join(cwd, filePath);
-      const buffer = readFileSync(fullPath);
+      const buffer = await readFile(fullPath);
 
       // Skip binary files (contain null bytes). Flagged the same way git's own
       // "Binary files ... differ" output is, so an added .xlsx reads as a
@@ -138,6 +167,64 @@ async function getUntrackedFiles(cwd: string): Promise<DiffFile[]> {
   return files;
 }
 
+type DiffResult = { code: number; body: { files: DiffFile[] } | { error: string } };
+
+const TIMEOUT_RESULT: DiffResult = {
+  code: 504,
+  body: { error: "git diff timed out — the repository may be too large or busy" },
+};
+
+/**
+ * The diff for one worktree. Git failures keep their old meaning (an empty or
+ * partial file list); only a timeout becomes an error, so a repo too slow to
+ * diff doesn't read as "no changes".
+ */
+export async function loadDiff(
+  cwd: string,
+  commit?: string,
+  compareTo?: string,
+  timeoutMs = GIT_TIMEOUT_MS,
+): Promise<DiffResult> {
+  if (compareTo) {
+    if (!validateBranchExists(cwd, compareTo)) {
+      return { code: 400, body: { error: `Branch not found: ${compareTo}` } };
+    }
+    try {
+      // Committed content only — no untracked-file injection in compare mode.
+      return { code: 200, body: { files: parseDiffOutput(await runCompareToDiff(cwd, compareTo, timeoutMs)) } };
+    } catch (err) {
+      return isTimeout(err) ? TIMEOUT_RESULT : { code: 200, body: { files: [] } };
+    }
+  }
+
+  let untrackedFiles: DiffFile[];
+  try {
+    untrackedFiles = !commit ? await getUntrackedFiles(cwd, timeoutMs) : [];
+  } catch (err) {
+    if (err instanceof GitTimeoutError) return TIMEOUT_RESULT;
+    throw err;
+  }
+
+  for (const args of [diffArgs(commit), diffFallbackArgs(commit)]) {
+    try {
+      const files = parseDiffOutput(await git(cwd, args, timeoutMs));
+      return { code: 200, body: { files: [...files, ...untrackedFiles] } };
+    } catch (err) {
+      if (isTimeout(err)) return TIMEOUT_RESULT;
+    }
+  }
+  return { code: 200, body: { files: untrackedFiles } };
+}
+
+async function loadCommits(cwd: string, limit: number): Promise<CommitEntry[]> {
+  try {
+    const output = await git(cwd, ["log", "--format=%H%n%h%n%s%n%an%n%aI", "-n", String(limit)]);
+    return parseGitLogOutput(output);
+  } catch {
+    return [];
+  }
+}
+
 const routes: FastifyPluginAsync = async (fastify) => {
   // Get diff for a path (path-based, for remote execution)
   fastify.get<{
@@ -159,44 +246,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (commit && compareTo) {
       return reply.code(400).send({ error: "commit and compareTo are mutually exclusive" });
     }
-    if (compareTo) {
-      const cwd = resolveWorktreePath(projectPath, branch ?? null);
-      if (!validateBranchExists(cwd, compareTo)) {
-        return reply.code(400).send({ error: `Branch not found: ${compareTo}` });
-      }
-      try {
-        // Committed content only — no untracked-file injection in compare mode.
-        return reply.code(200).send({ files: parseDiffOutput(runCompareToDiff(cwd, compareTo)) });
-      } catch {
-        return reply.code(200).send({ files: [] });
-      }
-    }
 
     const cwd = resolveWorktreePath(projectPath, branch ?? null);
-    const untrackedFiles = !commit ? await getUntrackedFiles(cwd) : [];
-
-    try {
-      const { execSync } = await import("child_process");
-      const diffOutput = execSync(buildDiffCommand(commit), {
-        cwd,
-        encoding: "utf-8",
-        maxBuffer: 10 * 1024 * 1024,
-      });
-      const files = parseDiffOutput(diffOutput);
-      return reply.code(200).send({ files: [...files, ...untrackedFiles] });
-    } catch {
-      try {
-        const { execSync } = await import("child_process");
-        const diffOutput = execSync(
-          commit ? buildDiffFallbackCommand(commit) : "git diff --no-color",
-          { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
-        );
-        const files = parseDiffOutput(diffOutput);
-        return reply.code(200).send({ files: [...files, ...untrackedFiles] });
-      } catch {
-        return reply.code(200).send({ files: untrackedFiles });
-      }
-    }
+    const { code, body } = await loadDiff(cwd, commit, compareTo);
+    return reply.code(code).send(body);
   });
 
   // Get commits for a path (path-based, for remote execution)
@@ -212,17 +265,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const limit = parseInt(req.query.limit || "20", 10);
     const cwd = resolveWorktreePath(projectPath, branch ?? null);
 
-    try {
-      const { execSync } = await import("child_process");
-      const output = execSync(
-        `git log --format=%H%n%h%n%s%n%an%n%aI -n ${limit}`,
-        { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
-      );
-      const commits = parseGitLogOutput(output);
-      return reply.code(200).send({ commits });
-    } catch {
-      return reply.code(200).send({ commits: [] });
-    }
+    return reply.code(200).send({ commits: await loadCommits(cwd, limit) });
   });
 
   // Get git diff for a project (uncommitted changes or single commit)
@@ -277,44 +320,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(400).send({ error: "Project has no local path" });
     }
 
-    if (compareTo) {
-      const cwd = resolveWorktreePath(project.path, branch ?? null);
-      if (!validateBranchExists(cwd, compareTo)) {
-        return reply.code(400).send({ error: `Branch not found: ${compareTo}` });
-      }
-      try {
-        // Committed content only — no untracked-file injection in compare mode.
-        return reply.code(200).send({ files: parseDiffOutput(runCompareToDiff(cwd, compareTo)) });
-      } catch {
-        return reply.code(200).send({ files: [] });
-      }
-    }
-
     const cwd = resolveWorktreePath(project.path, branch ?? null);
-    const untrackedFiles = !commit ? await getUntrackedFiles(cwd) : [];
-
-    try {
-      const { execSync } = await import("child_process");
-      const diffOutput = execSync(buildDiffCommand(commit), {
-        cwd,
-        encoding: "utf-8",
-        maxBuffer: 10 * 1024 * 1024,
-      });
-      const files = parseDiffOutput(diffOutput);
-      return reply.code(200).send({ files: [...files, ...untrackedFiles] });
-    } catch {
-      try {
-        const { execSync } = await import("child_process");
-        const diffOutput = execSync(
-          commit ? buildDiffFallbackCommand(commit) : "git diff --no-color",
-          { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
-        );
-        const files = parseDiffOutput(diffOutput);
-        return reply.code(200).send({ files: [...files, ...untrackedFiles] });
-      } catch {
-        return reply.code(200).send({ files: untrackedFiles });
-      }
-    }
+    const { code, body } = await loadDiff(cwd, commit, compareTo);
+    return reply.code(code).send(body);
   });
 
   // Get commits for a project (project-based)
@@ -361,17 +369,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     const cwd = resolveWorktreePath(project.path, branch ?? null);
 
-    try {
-      const { execSync } = await import("child_process");
-      const output = execSync(
-        `git log --format=%H%n%h%n%s%n%an%n%aI -n ${limit}`,
-        { cwd, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 }
-      );
-      const commits = parseGitLogOutput(output);
-      return reply.code(200).send({ commits });
-    } catch {
-      return reply.code(200).send({ commits: [] });
-    }
+    return reply.code(200).send({ commits: await loadCommits(cwd, limit) });
   });
 };
 

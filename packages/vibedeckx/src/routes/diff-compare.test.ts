@@ -16,7 +16,7 @@ function commit(repo: string, file: string, content: string, message: string): v
 }
 
 describe("runCompareToDiff", () => {
-  it("returns only the branch's changes since the merge-base (three-dot)", () => {
+  it("returns only the branch's changes since the merge-base (three-dot)", async () => {
     const repo = mkdtempSync(path.join(tmpdir(), "diff-compare-test-"));
     try {
       run(repo, ["init", "-b", "main"]);
@@ -29,7 +29,7 @@ describe("runCompareToDiff", () => {
       commit(repo, "mainline.txt", "main-only-change", "main advances");
       run(repo, ["checkout", "dev1"]);
 
-      const diff = runCompareToDiff(repo, "main");
+      const diff = await runCompareToDiff(repo, "main");
       expect(diff).toContain("+branch-change");
       // Three-dot must NOT show main's own advance as a deletion.
       expect(diff).not.toContain("main-only-change");
