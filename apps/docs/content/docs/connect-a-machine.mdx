@@ -108,6 +108,33 @@ printf '%s' '<new token>' | sudo tee secrets/connect-token > /dev/null
 
 If you prefer Compose, the repository has a ready-made [docker-compose.yml](https://github.com/vibedeckx/vibedeckx/blob/main/deploy/worker/docker-compose.yml) with the same settings.
 
+### Keep projects in a host directory
+
+To see and edit project checkouts from the host, mount a directory instead of the `vibedeckx-projects` volume. Create it first and give it to user 1000; a directory that Docker creates by itself belongs to root and the worker cannot write to it:
+
+```bash
+mkdir -p ~/vibedeckx-worker/projects
+sudo chown 1000:1000 ~/vibedeckx-worker/projects
+```
+
+Then replace `-v vibedeckx-projects:/projects` with `-v "$PWD/projects:/projects"`.
+
+### Let agents use the host's Docker
+
+If your projects build or run containers, give the worker the host's Docker socket and CLI by adding these options to `docker run`:
+
+```bash
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /usr/bin/docker:/usr/local/bin/docker:ro \
+  --group-add "$(stat -c %g /var/run/docker.sock)" \
+```
+
+`--group-add` lets user 1000 in the container use the socket.
+
+<Callout type="warn" title="This gives agents root on the host">
+  Whoever can use the Docker socket can start a container that mounts the host's whole filesystem. With these options, an agent session effectively has root access to the machine, not just to the container. Only add them on a machine you are prepared to hand over to agents.
+</Callout>
+
 ### Sign in to the agents
 
 A new container has no agent logins yet. Sign in once from the host; the login is kept in the `vibedeckx-home` volume:
