@@ -692,6 +692,14 @@ describe("prompts", () => {
     expect(SYSTEM_PROMPT).toMatch(/trade-offs|limitations/i);
   });
 
+  // A settled paraphrase read stricter than the user's sentence ("one model
+  // call" vs "no cleanup call, so only the translation") kept a reviewer
+  // blocking on a requirement the user never set.
+  it("asks for the user's deciding words, with their reason, on settled items", () => {
+    expect(SYSTEM_PROMPT).toMatch(/\[settled\] item, add the user's deciding words as a short verbatim quote/i);
+    expect(SYSTEM_PROMPT).toMatch(/reason or contrast/i);
+  });
+
   it("counts agent-made rejections, not just user-made ones", () => {
     expect(SYSTEM_PROMPT).toMatch(/rejected.*whether the user made it or the agent made it/is);
   });

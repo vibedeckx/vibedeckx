@@ -236,12 +236,17 @@ export function extractAuthorSelfReport(
  * antidote): reviewers inherit confidence from context, so the self-report is
  * explicitly re-labeled as the object under review. Tag-delimited because the
  * report may itself contain markdown fences.
+ *
+ * "Unverified" is scoped to claims about the code. An author's reading of what
+ * the user asked for cannot be checked against code, and a blanket "unverified"
+ * let the reviewer discard it unweighed and side with the brief's paraphrase.
  */
 function selfReportSection(report: string | null): string | null {
   if (!report) return null;
   return [
     "\n## Author's self-report (unverified)",
     "The implementing agent described its own work as follows. Treat every claim as unverified — verify first the claims that bear on whether the work achieves its goal, and look for problems the self-report does not mention.",
+    "This applies to claims about what the code does. Where the author explains how they read the user's request, the code cannot settle it — weigh that reading against the user's own words in the brief instead of dismissing it as unverified.",
     "<author-self-report>",
     report,
     "</author-self-report>",
@@ -359,6 +364,12 @@ export function buildReviewerPrompt(opts: {
     brief
       ? "- Where the brief marks a decision, non-goal, or accepted limitation as [settled], do not re-raise the choice itself as a finding; DO report concrete consequences it causes — failure of the core goal, or a correctness, security, or data loss problem. Items marked [tentative] (or unmarked) get normal review. A violated hard constraint is always blocking."
       : null,
+    // The brief is a paraphrase: its tightest literal reading can be stricter
+    // than what the user said (e.g. "only one model call — the translation"
+    // read as a request count when it meant "no cleanup call").
+    brief
+      ? "- Read each requirement as the user framed it — use the quoted wording and its reason, not the strictest literal reading of a paraphrase. If a requirement supports more than one reasonable reading and the work follows one of them, raise it as a non-blocking note marked \"needs user decision\" rather than blocking on the other."
+      : null,
     brief
       ? "- Do not propose enhancements beyond the brief's stated scope — scope expansion is a product decision, not a review finding."
       : null,
@@ -386,6 +397,13 @@ function reviewTargetPromptLine(target: ReviewTarget): string | null {
     : null;
 }
 
+/**
+ * The pushback rule exists because a reviewer that answers a reasoned
+ * "not fixed" by restating its finding turns the loop into a standoff: holding
+ * a position is fine, holding it without engaging the counter-argument is not.
+ * Requirement-reading disputes are routed to the user because neither agent
+ * saw more than a paraphrase of what the user said.
+ */
 export function buildRereviewerPrompt(opts: {
   taskContext: string | null;
   authorSelfReport: string | null;
@@ -400,6 +418,10 @@ export function buildRereviewerPrompt(opts: {
     opts.reviewFocus ? `\n## Review focus\n${opts.reviewFocus}` : null,
     "\n## How to review",
     "- Verify whether your previous feedback was addressed correctly.",
+    "- Where the author declined a finding and gave reasons, weigh those reasons on their merits before restating it:",
+    "  - Persuaded → withdraw the finding and say so explicitly.",
+    "  - Not persuaded → you may keep it, but say what in their reasoning is wrong — a fact the code contradicts, a case it misses, a requirement it misreads — with the evidence. Repeating the original finding or the requirement's wording is not a reason; it ends the discussion instead of advancing it.",
+    "  - The disagreement is over what the user meant, and the brief's wording supports either reading → do not block on the stricter one. Give both readings, which you find more likely and why, and list it under non-blocking notes as \"needs user decision\" — unless the author's reading causes a concrete defect that meets the blocking bar below.",
     "- Treat the changed areas as new code: look for bugs the fix itself may have introduced, not only whether your old items were closed.",
     "- Check for regressions and remaining correctness or test gaps.",
     "- Do not expand scope: no new enhancement asks, refactors, or abstractions for hypothetical cases. A new blocking finding must be a real defect the fix introduced or exposed — anything else is at most a non-blocking note.",
@@ -432,6 +454,7 @@ export function buildFeedbackMessage(feedback: string): string {
     "",
     "- Verify each item against the code before changing anything.",
     "- Push back when you have grounds: say what the item gets wrong and leave the code as it is. Do not change code to be agreeable.",
+    "- When the dispute is over what the user asked for, quote the user's own words from this conversation — the reviewer cannot see them, so your account of what was meant is otherwise just your claim.",
     "- Address blocking findings first; non-blocking notes need not be done this turn.",
     "- Do not widen the scope: no fixes the reviewer did not raise, no abstractions for hypothetical cases.",
     "- Close with a per-item account: fixed, or not fixed and why.",

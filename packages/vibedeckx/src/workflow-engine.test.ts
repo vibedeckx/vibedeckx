@@ -324,6 +324,38 @@ describe("buildReviewerPrompt verdict & settled semantics", () => {
     expect(prompt).toMatch(/real defect the fix introduced or exposed/i);
   });
 
+  // A reasoned "not fixed" answered by a restated finding is a standoff, not a
+  // review: the reviewer may hold its position, but only by engaging the
+  // author's reasoning; requirement-reading disputes go to the user.
+  it("rereviewer prompt weighs the author's pushback instead of restating the finding", () => {
+    const prompt = buildRereviewerPrompt({ taskContext: null, authorSelfReport: "not fixed: ...", reviewFocus: null, target });
+    expect(prompt).toMatch(/weigh those reasons on their merits/i);
+    expect(prompt).toMatch(/persuaded → withdraw/i);
+    expect(prompt).toMatch(/say what in their reasoning is wrong/i);
+    expect(prompt).toMatch(/repeating the original finding .* is not a reason/i);
+    expect(prompt).toMatch(/do not block on the stricter one/i);
+    expect(prompt).toContain("needs user decision");
+  });
+
+  // "Unverified" must not license discarding the author's reading of the
+  // request — the code cannot settle that either way.
+  it("scopes 'unverified' to code claims, not the author's reading of the request", () => {
+    for (const prompt of [
+      buildReviewerPrompt({ ...base, authorSelfReport: "I read the request as X" }),
+      buildRereviewerPrompt({ taskContext: null, authorSelfReport: "I read the request as X", reviewFocus: null, target }),
+    ]) {
+      expect(prompt).toMatch(/applies to claims about what the code does/i);
+      expect(prompt).toMatch(/weigh that reading against the user's own words/i);
+    }
+  });
+
+  it("with a brief: an ambiguous requirement is a 'needs user decision' note, not a blocker", () => {
+    const withBrief = buildReviewerPrompt({ ...base, intentBrief: "0. Dominant question: does X work" });
+    expect(withBrief).toMatch(/not the strictest literal reading of a paraphrase/i);
+    expect(withBrief).toContain("needs user decision");
+    expect(buildReviewerPrompt(base)).not.toMatch(/strictest literal reading/i);
+  });
+
   // The suppression is scoped to the *choice itself*: a settled "no retries"
   // must not silence a data-loss consequence that choice turns out to cause.
   it("with a brief: settled choices are not re-raised, but their consequences must be reported", () => {
@@ -376,6 +408,12 @@ describe("buildFeedbackMessage", () => {
   it("pairs the right to push back with a per-item accounting duty", () => {
     expect(msg).toMatch(/push back when you have grounds/i);
     expect(msg).toMatch(/per-item account.*fixed, or not fixed and why/i);
+  });
+
+  // The author can see the user's words; the reviewer only sees a paraphrase.
+  // "What I meant" without a quote reads as the author's own claim.
+  it("asks the author to quote the user when disputing what was asked for", () => {
+    expect(msg).toMatch(/quote the user's own words/i);
   });
 
   it("separates blocking from non-blocking and forbids widening the scope", () => {
