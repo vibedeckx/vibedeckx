@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { extractTitleSource, snippetTitle } from "./conversation-title.js";
+import { buildTitlePromptForTest, extractTitleSource, snippetTitle, snippetTitleFromSource } from "./conversation-title.js";
+
+const SEP = "\n\n<<<vibedeckx:attached-context>>>\n\n";
 import {
   clearTitleExcerptCache,
   getTitleExcerpt,
@@ -41,13 +43,13 @@ describe("extractTitleSource", () => {
       { type: "text", text: `<vfile path="/tmp/f/x/notes.md" name="notes.md" size="20" />` },
     ]);
     expect(source).toBe(
-      "看看这个\n\n[Pasted text]\nStack trace: TypeError at parseConfig\n\n[Attached file: notes.md]\n# Q3 migration plan",
+      `看看这个${SEP}[Pasted text]\nStack trace: TypeError at parseConfig\n\n[Attached file: notes.md]\n# Q3 migration plan`,
     );
   });
 
   it("falls back to the label when no excerpt was recorded", () => {
     const source = extractTitleSource(`<vfile path="/tmp/f/y/report.pdf" name="report.pdf" size="9000" />`);
-    expect(source).toBe("[Attached file: report.pdf]");
+    expect(source).toBe(`${SEP}[Attached file: report.pdf]`);
   });
 
   it("still strips machine-addressed blocks", () => {
@@ -94,6 +96,34 @@ describe("textExcerptFromBytes", () => {
   it("tolerates a multibyte character split at the sniff boundary", () => {
     const text = "汉".repeat(5000); // 15 000 bytes, cut at 8 KB mid-character
     expect(textExcerptFromBytes(Buffer.from(text))).toBe("汉".repeat(TITLE_EXCERPT_MAX_CHARS));
+  });
+});
+
+describe("title prompt", () => {
+  it("keeps a plain message in the original single-section prompt", () => {
+    expect(buildTitlePromptForTest("fix the flaky test")).toBe(
+      "Generate a title for a conversation that begins with this user message:\n\nfix the flaky test",
+    );
+  });
+
+  it("presents the user's words and the attached context as separate sections", () => {
+    const prompt = buildTitlePromptForTest(extractTitleSource(`把这个翻译成英文\n\n${tasksBlock}`));
+    expect(prompt).toMatch(/User's message:\n把这个翻译成英文\n\nAttached context \(reference material[^\n]*\n\[Task: Fix "login" redirect\]/);
+    expect(prompt).not.toContain("<<<vibedeckx");
+  });
+
+  it("says so when the user sent only the attached context", () => {
+    expect(buildTitlePromptForTest(`${SEP}[Pasted text]\nhello`)).toContain(
+      "User's message:\n(none — the user sent only the attached context)",
+    );
+  });
+});
+
+describe("snippetTitleFromSource", () => {
+  it("prefers the user's words, falling back to the context", () => {
+    expect(snippetTitleFromSource(`看看${SEP}[Task: X]\nbody`)).toBe("看看");
+    expect(snippetTitleFromSource(`${SEP}[Task: X]\nbody`)).toBe("[Task: X] body");
+    expect(snippetTitleFromSource("plain")).toBe("plain");
   });
 });
 

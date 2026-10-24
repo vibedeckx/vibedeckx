@@ -33,7 +33,7 @@ import {
   type SessionHistoryWindow,
 } from "./session-history-window.js";
 import { getRegisteredWorktreeBranches, resolveWorktreePath } from "./utils/worktree-paths.js";
-import { generateConversationTitle, snippetTitle, extractUserText, extractTitleSource } from "./utils/conversation-title.js";
+import { generateConversationTitle, snippetTitle, snippetTitleFromSource, extractUserText, extractTitleSource } from "./utils/conversation-title.js";
 import { recordTurnSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
 import { logSessionLifecycle, type SessionPurpose } from "./session-lifecycle-log.js";
 import {
@@ -4956,7 +4956,7 @@ export class AgentSessionManager {
     userText: string,
     userId: string,
   ): Promise<void> {
-    const fallback = snippetTitle(userText);
+    const fallback = snippetTitleFromSource(userText);
     let title: string | null = null;
     try {
       title = await generateConversationTitle(this.storage, userText, userId);

@@ -1,6 +1,6 @@
 import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
 import { ConversationPatch } from "./conversation-patch.js";
-import { generateConversationTitle, snippetTitle } from "./utils/conversation-title.js";
+import { generateConversationTitle, snippetTitleFromSource } from "./utils/conversation-title.js";
 import type { AgentMessage } from "./agent-types.js";
 import type { RemoteReviewerCreationIntent, RemoteSessionActivityUpdateResult, RemoteSessionCreationIntent, ReviewSpan, Storage, WorkflowRun } from "./storage/types.js";
 import type { RemoteSessionInfo } from "./server-types.js";
@@ -1432,7 +1432,7 @@ export async function generateAndPushRemoteSessionTitle(
       (error as Error).message,
     );
   }
-  const finalTitle = aiTitle && aiTitle.length > 0 ? aiTitle : snippetTitle(userText);
+  const finalTitle = aiTitle && aiTitle.length > 0 ? aiTitle : snippetTitleFromSource(userText);
   if (!finalTitle) return;
 
   const result = await proxyToRemoteAuto(
