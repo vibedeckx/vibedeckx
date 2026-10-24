@@ -6,6 +6,7 @@ import { ArrowLeft, Clock } from "lucide-react";
 import { setAuthToken, setTokenGetter, getFreshToken } from "@/lib/api";
 import { isSessionExpirySignOut } from "@/lib/session-expiry";
 import { setQuickSwitcherCacheUser } from "@/lib/quick-switcher-cache";
+import { setLastLocationUser } from "@/lib/last-location";
 import { useAppConfig } from "@/hooks/use-app-config";
 import { Button } from "@/components/ui/button";
 import { LandingPage } from "./landing-page";
@@ -51,7 +52,7 @@ function AuthTokenSync({ children }: { children: React.ReactNode }) {
 const CLERK_CARD_WIDTH = "w-full max-w-[min(25rem,calc(100vw_-_2.5rem))]";
 
 function AuthGate({ children }: { children: React.ReactNode }) {
-  const { isSignedIn, isLoaded } = useAuth();
+  const { isSignedIn, isLoaded, userId } = useAuth();
   const clerk = useClerk();
   const [showSignIn, setShowSignIn] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
@@ -140,6 +141,11 @@ function AuthGate({ children }: { children: React.ReactNode }) {
       </div>
     );
   }
+
+  // Set during render, not in an effect: the app's very first render reads
+  // the remembered location (useUrlState's initializer), and child renders
+  // run before any effect here. Idempotent, so re-renders are harmless.
+  setLastLocationUser(userId ?? null);
 
   return <>{children}</>;
 }

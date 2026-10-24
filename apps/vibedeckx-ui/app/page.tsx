@@ -61,6 +61,7 @@ import { NotificationInboxProvider } from '@/hooks/notification-inbox-context';
 import { ConnectionStatusIndicator } from '@/components/layout/connection-status-indicator';
 import { useUrlState } from '@/hooks/use-url-state';
 import { buildUrl } from '@/lib/url-state';
+import { saveLastLocation, settleRestoredLocation } from '@/lib/last-location';
 import {
   toBranchKey,
   computeWorkspaceStatuses,
@@ -962,14 +963,27 @@ export default function Home() {
       branch: selectedBranch,
       threadId: selectedProjectChatThreadId,
     });
+    let next = url;
     if (urlSessionId) {
       const u = new URL(url, window.location.origin);
       u.searchParams.set('session', urlSessionId);
-      window.history.replaceState(null, '', u.pathname + u.search);
-    } else {
-      window.history.replaceState(null, '', url);
+      next = u.pathname + u.search;
     }
+    window.history.replaceState(null, '', next);
+    saveLastLocation(next);
   }, [currentProject?.id, activeView, selectedBranch, selectedProjectChatThreadId, projectsLoading, routeProjectPending, routeProjectNotFound, urlSessionId]);
+
+  // The remembered location (lib/last-location) points at a project that is
+  // gone or no longer shared with this user. The user never asked for it, so
+  // don't show "Project not found" — forget it and land on the bare root,
+  // which opens the first project as before.
+  useEffect(() => {
+    if (routeProjectPending) return;
+    if (!settleRestoredLocation(!routeProjectNotFound)) return;
+    selectWorkspace(null);
+    window.history.replaceState(null, '', '/');
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }, [routeProjectPending, routeProjectNotFound, selectWorkspace]);
 
   const handleWorktreeCreated = useCallback((branch: string) => {
     refetchWorktrees();
