@@ -33,7 +33,7 @@ import {
   type SessionHistoryWindow,
 } from "./session-history-window.js";
 import { getRegisteredWorktreeBranches, resolveWorktreePath } from "./utils/worktree-paths.js";
-import { generateConversationTitle, snippetTitle, extractUserText } from "./utils/conversation-title.js";
+import { generateConversationTitle, snippetTitle, extractUserText, extractTitleSource } from "./utils/conversation-title.js";
 import { recordTurnSnapshot, type SnapshotState } from "./utils/review-snapshot.js";
 import { logSessionLifecycle, type SessionPurpose } from "./session-lifecycle-log.js";
 import {
@@ -749,6 +749,11 @@ export class AgentSessionManager {
     if (this.titleResolved.has(sessionId)) return false;
     this.titleResolved.add(sessionId);
     return true;
+  }
+
+  /** Read-only view of the guard above: whether a title path has claimed the session. */
+  isTitleResolved(sessionId: string): boolean {
+    return this.titleResolved.has(sessionId);
   }
 
   /**
@@ -2855,7 +2860,7 @@ export class AgentSessionManager {
         if (!this.suppressTitleGeneration) {
           const dbRow = await this.storage.agentSessions.getById(session.id);
           if (dbRow && (dbRow.title === null || dbRow.title === undefined)) {
-            const text = extractUserText(message.content);
+            const text = extractTitleSource(message.content);
             if (text.trim().length > 0 && this.markTitleResolved(session.id)) {
               void this.ensureSessionTitle(session, text, userId);
             }

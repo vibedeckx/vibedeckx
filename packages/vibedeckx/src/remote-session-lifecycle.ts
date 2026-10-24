@@ -19,7 +19,7 @@ import type { EventBus } from "./event-bus.js";
 import { mintCrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { mintRemoteSessionToolsMcpConfig } from "./session-tools-mcp.js";
 import { proxyToRemoteAuto } from "./utils/remote-proxy.js";
-import { extractUserText } from "./utils/conversation-title.js";
+import { extractTitleSource } from "./utils/conversation-title.js";
 import { appendContextBlock, buildRemoteGrantContext } from "./cross-remote-grant-context.js";
 import { WATCH_WINDOW_MS as NOTIFICATION_WATCH_WINDOW_MS } from "./remote-notification-sync.js";
 import {
@@ -527,7 +527,7 @@ export class RemoteSessionLifecycleAdapter {
       if (remoteInfo) {
         void generateAndPushRemoteSessionTitle(
           { storage: deps.storage, agentSessionManager: deps.agentSessionManager, remotePatchCache: deps.remotePatchCache, reverseConnectManager: deps.reverseConnectManager },
-          opts.localSessionId, extractUserText(opts.instruction), remoteInfo, opts.userId,
+          opts.localSessionId, extractTitleSource(opts.instruction), remoteInfo, opts.userId,
         ).catch((err) => console.error("[RemoteLifecycle] title generation failed:", err));
       }
     }

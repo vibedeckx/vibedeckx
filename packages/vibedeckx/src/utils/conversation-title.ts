@@ -4,6 +4,7 @@ import type { ContentPart } from "../agent-types.js";
 import { getChatProviderConfig, isModelConfigured, resolveFastChatModel } from "./chat-model.js";
 import { stripRemoteGrantContext } from "../cross-remote-grant-context.js";
 import { VTASKS_CREATED_BLOCK_RE } from "../tasks-created-context.js";
+import { getTitleExcerpt } from "./title-excerpt-cache.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLanguageModel = any;
@@ -20,13 +21,23 @@ const VSCHEDULE_BLOCK_RE = /<vschedule(?:\s[^>]*)?>[\s\S]*?<\/vschedule>/g;
 const VTASK_BLOCK_RE = /<vtask(?:\s[^>]*)?>[\s\S]*?<\/vtask>/g;
 /** And Select task's block: the picked tasks' content, for the agent (apps/vibedeckx-ui/lib/selected-tasks.ts). */
 const VSELECTED_TASKS_BLOCK_RE = /<vselected-tasks(?:\s[^>]*)?>[\s\S]*?<\/vselected-tasks>/g;
+/** Long-paste and attachment markers (apps/vibedeckx-ui/components/agent/vpaste-chip.tsx). */
+const VPASTE_MARKER_RE = /<vpaste path="([^"]+)" size="(\d+)" \/>/g;
+const VFILE_MARKER_RE = /<vfile path="([^"]+)" name="([^"]*)" size="(\d+)" \/>/g;
+const SELECTED_TASK_RE = /<task id="[^"]*" title="([^"]*)"[^>]*>([\s\S]*?)<\/task>/g;
 const AI_TIMEOUT_MS = 15_000;
 const MAX_INPUT_CHARS = 2000;
+/** Share of MAX_INPUT_CHARS the attached context may take, split across its pieces. */
+const CONTEXT_BUDGET_CHARS = 1600;
+const MIN_PIECE_CHARS = 200;
 
 const SYSTEM_PROMPT =
   "You write very short, descriptive titles for chat conversations. " +
   "Reply with the title only — no quotes, no trailing punctuation, no markdown, no prefixes like 'Title:'. " +
-  "Use the same language as the user's message. Keep it under 8 words and 50 characters.";
+  "Use the same language as the user's message. Keep it under 8 words and 50 characters. " +
+  "The message may be followed by context the user attached: selected tasks, pasted text, attached files. " +
+  "When the user's own words are a generic instruction (\"look at this\", \"do this task\"), " +
+  "title the subject of that context rather than the instruction.";
 
 function buildPrompt(userMessage: string): string {
   const trimmed = userMessage.trim();
@@ -69,12 +80,61 @@ export function extractUserText(content: string | ContentPart[]): string {
   );
 }
 
+const unescapeAttr = (value: string) =>
+  value.replace(/&(amp|lt|gt|quot);/g, (_m, e: string) => ({ amp: "&", lt: "<", gt: ">", quot: '"' })[e]!);
+
+/**
+ * What a session title is generated from: the user's words plus the content
+ * they attached, which the message itself only references. Selected tasks
+ * contribute their title and description; long pastes and text attachments
+ * the excerpt their upload route recorded (title-excerpt-cache.ts), binary
+ * attachments their file name. Everything else machine-addressed is stripped
+ * as in extractUserText. Titles only — the agent's message is unchanged.
+ */
+export function extractTitleSource(content: string | ContentPart[]): string {
+  const pieces: { label: string; body: string }[] = [];
+  const raw = typeof content === "string"
+    ? content
+    : content
+      .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+      .map((p) => p.text)
+      .join(" ");
+  const withoutContext = raw
+    .replace(VSELECTED_TASKS_BLOCK_RE, (block) => {
+      for (const m of block.matchAll(SELECTED_TASK_RE)) {
+        const body = m[2]!
+          .replace(/<subtask [^>]*\/>/g, "")
+          .replace(/^\(no description\)$/m, "")
+          .replace(/\s+/g, " ")
+          .trim();
+        pieces.push({ label: `[Task: ${unescapeAttr(m[1]!)}]`, body });
+      }
+      return "";
+    })
+    .replace(VPASTE_MARKER_RE, (_m, path: string) => {
+      pieces.push({ label: "[Pasted text]", body: getTitleExcerpt(path) ?? "" });
+      return "";
+    })
+    .replace(VFILE_MARKER_RE, (_m, path: string, name: string) => {
+      pieces.push({ label: `[Attached file: ${name}]`, body: getTitleExcerpt(path) ?? "" });
+      return "";
+    });
+  const userText = extractUserText(withoutContext).trim();
+  if (pieces.length === 0) return userText;
+  const perPiece = Math.max(MIN_PIECE_CHARS, Math.floor(CONTEXT_BUDGET_CHARS / pieces.length));
+  const context = pieces.map(({ label, body }) => {
+    const clipped = body.length > perPiece ? body.slice(0, perPiece) + "…" : body;
+    return clipped ? `${label}\n${clipped}` : label;
+  });
+  return [userText, ...context].filter(Boolean).join("\n\n");
+}
+
 /**
  * Truncate a free-form string to a conversation-title-sized snippet. Used both as
  * the AI fallback and to normalize the AI's own output.
  */
 export function snippetTitle(text: string): string {
-  const trimmed = text.trim();
+  const trimmed = text.replace(/\s+/g, " ").trim();
   if (trimmed.length === 0) return "";
   if (trimmed.length <= TITLE_MAX_CHARS) return trimmed;
   return trimmed.slice(0, TITLE_MAX_CHARS) + "…";

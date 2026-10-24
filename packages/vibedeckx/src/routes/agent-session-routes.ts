@@ -1,4 +1,5 @@
-import type { FastifyPluginAsync } from "fastify";
+import type { FastifyPluginAsync, FastifyRequest } from "fastify";
+import { getAuth } from "@clerk/fastify";
 import fp from "fastify-plugin";
 import type { AgentMessage, AgentType, ContentPart } from "../agent-types.js";
 import { ConversationPatch } from "../conversation-patch.js";
@@ -10,7 +11,8 @@ import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 import { writePasteToTempFile } from "../utils/paste-file.js";
 import { writeAttachmentToTempFile, MAX_ATTACHMENT_BYTES, ATTACHMENT_BODY_LIMIT } from "../utils/attachment-file.js";
-import { extractUserText } from "../utils/conversation-title.js";
+import { extractTitleSource } from "../utils/conversation-title.js";
+import { rememberTitleExcerpt, textExcerptFromBytes } from "../utils/title-excerpt-cache.js";
 import { appendContextBlock, appendRemoteGrantContext } from "../cross-remote-grant-context.js";
 import { buildTasksCreatedContext } from "../tasks-created-context.js";
 import { validateSessionGrantIds } from "../cross-remote-access.js";
@@ -52,6 +54,9 @@ async function resolveProjectPath(
 const MESSAGE_TEXT_CHAR_LIMIT = 64 * 1024;
 // Registry key of the worker-side attachment route (reverse-connect-capabilities.ts).
 const ATTACHMENT_CAPABILITY = "http:POST /api/agent-sessions/:param/attachment";
+// Base64 prefix decoded to sniff a forwarded attachment for its title excerpt
+// (title-excerpt-cache.ts reads at most 8 KB); a multiple of 4 decodes cleanly.
+const TITLE_SNIFF_BASE64_CHARS = 12 * 1024;
 
 function messageTextLength(content: string | ContentPart[]): number {
   if (typeof content === "string") return content.length;
@@ -63,6 +68,44 @@ function messageTextLength(content: string | ContentPart[]): number {
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  /**
+   * Whether an upload may still feed this session's title: only while no
+   * title path has claimed it (title-excerpt-cache.ts). A worker never titles
+   * its sessions — the hub does, from its own copy of the excerpt.
+   */
+  async function sessionAwaitsTitle(sessionId: string): Promise<boolean> {
+    if (fastify.agentSessionManager.isTitleResolved(sessionId)) return false;
+    if (sessionId.startsWith("remote-")) {
+      return !(await fastify.storage.remoteSessionMappings.isTitleResolved(sessionId));
+    }
+    if (fastify.agentSessionManager.suppressTitleGeneration) return false;
+    const row = await fastify.storage.agentSessions.getById(sessionId);
+    return !!row && (row.title === null || row.title === undefined);
+  }
+
+  /** Best-effort: a failed lookup only costs the title its excerpt, never the upload. */
+  async function recordTitleExcerpt(sessionId: string, owner: string, path: string, text: string | null): Promise<void> {
+    if (!text) return;
+    try {
+      if (await sessionAwaitsTitle(sessionId)) rememberTitleExcerpt(owner, path, text);
+    } catch (err) {
+      console.warn(`[API] title excerpt skipped for ${sessionId}:`, (err as Error).message);
+    }
+  }
+
+  /**
+   * The uploader, as an excerpt-quota owner, on the local upload branches —
+   * which (unlike the remote ones) don't authenticate, so this must not reply.
+   */
+  function uploaderId(req: FastifyRequest): string {
+    if (!fastify.authEnabled) return "local";
+    try {
+      return getAuth(req).userId ?? "local";
+    } catch {
+      return "local";
+    }
+  }
+
   // Helper: proxy to a remote over its reverse-connect tunnel
   function proxyAuto(
     remoteServerId: string,
@@ -1766,7 +1809,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           reverseConnectManager: fastify.reverseConnectManager,
         },
         req.params.sessionId,
-        extractUserText(content),
+        extractTitleSource(content),
         remoteInfo,
         userId,
       );
@@ -1898,6 +1941,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
         `/api/agent-sessions/${remoteInfo.remoteSessionId}/paste`,
         { content }
       );
+      const remotePath = (result.data as { path?: unknown } | undefined)?.path;
+      if (result.ok && typeof remotePath === "string") {
+        await recordTitleExcerpt(req.params.sessionId, resolveUserId(userId), remotePath, content);
+      }
       if (!result.ok) {
         const status = proxyStatus(result);
         return reply.code(status).send({
@@ -1913,6 +1960,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
 
     try {
       const written = await writePasteToTempFile(content);
+      await recordTitleExcerpt(req.params.sessionId, uploaderId(req), written.path, content);
       return reply.code(200).send(written);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1973,6 +2021,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
         `/api/agent-sessions/${remoteInfo.remoteSessionId}/attachment`,
         { name, mediaType, contentBase64 }
       );
+      const remotePath = (result.data as { path?: unknown } | undefined)?.path;
+      if (result.ok && typeof remotePath === "string") {
+        await recordTitleExcerpt(req.params.sessionId, resolveUserId(userId), remotePath,
+          textExcerptFromBytes(Buffer.from(contentBase64.slice(0, TITLE_SNIFF_BASE64_CHARS), "base64")));
+      }
       if (!result.ok) {
         const status = proxyStatus(result);
         if (status === 404) {
@@ -2004,6 +2057,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
     try {
       const written = await writeAttachmentToTempFile(name, data);
+      await recordTitleExcerpt(req.params.sessionId, uploaderId(req), written.path, textExcerptFromBytes(data));
       return reply.code(200).send({ ...written, mediaType: typeof mediaType === "string" ? mediaType : null });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
