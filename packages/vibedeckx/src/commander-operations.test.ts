@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AgentDispatchLedger, CommanderOperationLedger } from "./commander-operations.js";
+import { AgentDispatchLedger, CommanderOperationLedger, isOperationInFlight } from "./commander-operations.js";
 
 const op = (id: string, processId: string, chatSessionId = "chat-1") => ({
   id, kind: "executor" as const, chatSessionId, planId: null, stepId: null,
@@ -76,6 +76,26 @@ describe("CommanderOperationLedger", () => {
   });
 });
 
+describe("CommanderOperationLedger in-flight queries", () => {
+  it("lists a chat's unsettled operations and the latest one per plan step", () => {
+    const ledger = new CommanderOperationLedger();
+    const base = { kind: "executor" as const, chatSessionId: "chat", planId: "plan", executorId: "e1", executorName: "build", target: "local" };
+    ledger.register({ ...base, id: "op-1", stepId: "build", processId: "p1" });
+    ledger.register({ ...base, id: "op-2", stepId: "build", processId: "p2" });
+    ledger.register({ ...base, id: "other", chatSessionId: "elsewhere", stepId: null, processId: "p3" });
+    expect(ledger.inFlight("chat").map((operation) => operation.id)).toEqual(["op-1", "op-2"]);
+    expect(ledger.allInFlight()).toHaveLength(3);
+    expect(ledger.latestForStep("chat", "plan", "build")?.id).toBe("op-2");
+    expect(ledger.latestForStep("chat", "plan", "test")).toBeUndefined();
+
+    ledger.finishExecutor("p2", 0);
+    ledger.settleStart("op-1", "rejected");
+    expect(ledger.inFlight("chat")).toEqual([]);
+    expect(isOperationInFlight(ledger.latestForStep("chat", "plan", "build")!)).toBe(false);
+    expect(ledger.allInFlight().map((operation) => operation.id)).toEqual(["other"]);
+  });
+});
+
 describe("CommanderOperationLedger unknown starts", () => {
   it("finds this chat's unknown start and hands its identity over", () => {
     const ledger = new CommanderOperationLedger();
@@ -139,6 +159,16 @@ describe("AgentDispatchLedger", () => {
     const other = new AgentDispatchLedger<string>();
     other.finishTurn("agent-1", 3, "old");
     expect(other.register(dispatch("d1", 3))).toBeNull();
+  });
+
+  it("reports whether a chat still has a pending dispatch", () => {
+    const ledger = new AgentDispatchLedger<string>();
+    expect(ledger.hasPending("chat")).toBe(false);
+    ledger.register({ id: "d1", chatSessionId: "chat", agentSessionId: "agent", afterEntryIndex: 2 });
+    expect(ledger.hasPending("chat")).toBe(true);
+    expect(ledger.hasPending("other")).toBe(false);
+    ledger.finishTurn("agent", 5, "done");
+    expect(ledger.hasPending("chat")).toBe(false);
   });
 
   it("a cancelled or forgotten dispatch owns nothing", () => {

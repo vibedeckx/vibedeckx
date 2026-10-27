@@ -19,7 +19,7 @@ import {
 } from "@/components/ai-elements/message";
 import { useChatSession, type AgentMessage } from "@/hooks/use-chat-session";
 import { TaskPlanCard, readPlanResult } from "./task-plan-card";
-import { TaskPlanPanel, collectTaskPlans } from "./task-plan-panel";
+import { PLAN_CONTINUATION_PREFIX, PLAN_STALLED_PREFIX, TaskPlanPanel, collectTaskPlans } from "./task-plan-panel";
 import { ToolApprovalCard } from "./tool-approval-card";
 import { ReviewRunPanel } from "./review-run-panel";
 import { NewLoopDialog } from "./new-loop-dialog";
@@ -245,8 +245,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             // System-injected watchdog correction — render as a distinct
             // warning row, not a plain user bubble, so it's obvious this came
             // from the system, not the user.
-            if (msg.type === "user" && msg.content.startsWith("[System Invariant Violation]")) {
-              const body = msg.content.replace(/^\[System Invariant Violation\]\n?/, "");
+            if (msg.type === "user" && (msg.content.startsWith("[System Invariant Violation]") || msg.content.startsWith(PLAN_CONTINUATION_PREFIX))) {
+              const continuation = msg.content.startsWith(PLAN_CONTINUATION_PREFIX);
+              const body = msg.content.replace(/^\[(System Invariant Violation|Plan Continuation)\]\n?/, "");
               return (
                 <div
                   key={index}
@@ -255,7 +256,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
                   <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
                   <div className="min-w-0">
                     <div className="text-xs font-medium text-amber-600 dark:text-amber-400">
-                      System invariant correction
+                      {continuation ? "Plan continuation" : "System invariant correction"}
                     </div>
                     <div
                       className="mt-0.5 whitespace-pre-wrap text-muted-foreground"
@@ -370,6 +371,23 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
                   input={msg.input}
                   resolved={msg.resolved}
                 />
+              );
+            }
+
+            if (msg.type === "system" && msg.content.startsWith(PLAN_STALLED_PREFIX)) {
+              return (
+                <div
+                  key={index}
+                  className="mx-4 my-2 flex gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2"
+                >
+                  <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-amber-600 dark:text-amber-400">Plan stalled</div>
+                    <div className="mt-0.5 whitespace-pre-wrap text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+                      {msg.content.slice(PLAN_STALLED_PREFIX.length).trim()}
+                    </div>
+                  </div>
+                </div>
               );
             }
 

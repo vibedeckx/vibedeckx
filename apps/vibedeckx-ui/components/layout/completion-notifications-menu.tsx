@@ -46,6 +46,9 @@ async function navigateTo(
   onNavigate: (projectId: string, branch: string | null, sessionId: string | null) => void,
 ): Promise<void> {
   let sessionId = n.session_id;
+  // A commander stall names the Main Chat session, which is not an agent
+  // session the page can open: land on the workspace itself.
+  if (n.kind === "commander_stalled") sessionId = null;
   if (n.workflow_run_id && (n.kind === "workflow_failed" || n.kind === "loop_done")) {
     const run = await api.getWorkflowRun(n.workflow_run_id).catch(() => null);
     if (run?.kind === "repeat") sessionId = run.source_session_id;
@@ -59,6 +62,7 @@ export const KIND_META: Record<NotificationKind, { label: string; dot: string }>
   session_failed: { label: "Session failed", dot: "bg-destructive" },
   workflow_failed: { label: "Workflow needs attention", dot: "bg-destructive" },
   loop_done: { label: "Loop finished — nothing left to process", dot: "bg-emerald-500" },
+  commander_stalled: { label: "Commander stalled — the plan needs you to continue it", dot: "bg-amber-500" },
   // "Stop & send", never "restart": the Restart action wipes conversation
   // history, whereas stopping and sending a message renews the token losslessly.
   cross_remote_token_expired: { label: "Cross-remote expired — stop & send a message to renew", dot: "bg-amber-500" },

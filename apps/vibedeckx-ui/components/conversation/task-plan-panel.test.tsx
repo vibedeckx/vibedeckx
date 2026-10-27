@@ -16,6 +16,21 @@ const plan = (): TaskPlan => ({
 const result = (value: TaskPlan): AgentMessage => ({ type: "tool_result", tool: "setPlan", output: JSON.stringify({ success: true, plan: value }), timestamp: 0 });
 const task = (value = plan()): PinnedTaskPlan => ({ key: `plan:${value.planId}`, plan: value });
 
+describe("collectTaskPlans", () => {
+  it("stops showing waitingOn once the user has replied, until the next plan snapshot", () => {
+    const asking = { ...plan(), waitingOn: "Which suite?" };
+    const messages: AgentMessage[] = [result(asking)];
+    expect(collectTaskPlans(messages).current?.plan.waitingOn).toBe("Which suite?");
+    messages.push({ type: "user", content: "The unit suite", timestamp: 1 });
+    expect(collectTaskPlans(messages).current?.plan.waitingOn).toBeUndefined();
+    messages.push(result(asking));
+    expect(collectTaskPlans(messages).current?.plan.waitingOn).toBe("Which suite?");
+    // System-injected turns are not the user's answer.
+    messages.push({ type: "user", content: "[Plan Continuation]\nact", timestamp: 2 });
+    expect(collectTaskPlans(messages).current?.plan.waitingOn).toBe("Which suite?");
+  });
+});
+
 describe("pinned task plan", () => {
   let host: HTMLDivElement;
   let root: Root;

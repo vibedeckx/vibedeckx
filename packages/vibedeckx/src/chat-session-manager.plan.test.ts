@@ -69,7 +69,7 @@ function currentPlan(options: CallOptions): ChatPlan | null {
 }
 
 describe("Commander plans across real SDK turns", () => {
-  it("keeps an approved plan in later user and event turns, then clears it after completion", async () => {
+  it("keeps an approved plan across turns, re-drives it while it idles, then clears it after completion", async () => {
     let phase = 0;
     let approvedId = "";
     const seen: ChatPlan[] = [];
@@ -82,8 +82,11 @@ describe("Commander plans across real SDK turns", () => {
           approvedId = plan.planId;
           return call("progress", "setPlan", { ...plan, steps: [{ ...plan.steps[0], status: "in_progress" }] });
         }
+        // Talking without starting anything: the plan still owes a step and
+        // nothing is in flight, so the watchdog re-drives the model.
         case 2: return text("Tests are running.");
         case 3: {
+          expect(JSON.stringify(options.prompt)).toContain("[Plan Continuation]");
           const plan = currentPlan(options)!;
           seen.push(plan);
           return call("still-running", "setPlan", plan);
@@ -111,19 +114,19 @@ describe("Commander plans across real SDK turns", () => {
     expect(approval?.type).toBe("tool_approval_request");
     if (approval?.type !== "tool_approval_request") throw new Error("Missing approval");
     expect(manager.resolveToolApproval(id, approval.approvalId, true)).toBe(true);
+    await vi.waitFor(() => expect(manager.getSession(id)!.taskCompleted).toBe(true));
     await vi.waitFor(() => expect(manager.getSession(id)!.abortController).toBeNull());
-    expect(manager.getSession(id)!.planState.current?.steps[0].status).toBe("in_progress");
 
-    await manager.sendMessage(id, "How is the task progressing?");
-    await manager.sendMessage(id, "[Agent Event: Task Completed]\nTests exited with code 0");
     expect(seen).toHaveLength(2);
     for (const snapshot of seen) {
       expect(snapshot.planId).toBe(approvedId);
       expect(snapshot.steps[0]).toMatchObject({ id: "test", status: "in_progress" });
       expect(snapshot.completionCriteria).toEqual(["Tests pass"]);
     }
+    const continuations = manager.getMessages(id).filter((message) => message.type === "user" && message.content.startsWith("[Plan Continuation]"));
+    expect(continuations).toHaveLength(2);
     expect(manager.getMessages(id).filter((message) => message.type === "tool_approval_request")).toHaveLength(1);
-    expect(manager.getSession(id)!.taskCompleted).toBe(true);
+    expect(manager.getMessages(id).filter((message) => message.type === "system")).toEqual([]);
     expect(manager.getSession(id)!.planState.current).toBeNull();
     await manager.sendMessage(id, "An unrelated question");
     expect(manager.getSession(id)!.taskCompleted).toBe(true);
@@ -144,6 +147,20 @@ describe("Commander plans across real SDK turns", () => {
           expect(JSON.stringify(options.prompt)).toContain("Unknown plan ID");
           return call("corrected", "setPlan", { ...draft(), requireConfirmation: false });
         case 2: return text("Plan created.");
+        // Re-driven once; a plan waiting on the user is left alone.
+        case 3: {
+          const plan = currentPlan(options)!;
+          return call("ask", "setPlan", { ...plan, waitingOn: "Which test suite should run?" });
+        }
+        case 4: return text("Which test suite should run?");
+        // The user's reply clears the wait before the model sees the plan again.
+        case 5: {
+          const plan = currentPlan(options)!;
+          expect(plan.waitingOn).toBeUndefined();
+          return call("done", "setPlan", { ...plan, steps: [{ ...plan.steps[0], status: "skipped", result: "User chose not to run tests" }] });
+        }
+        case 6: return call("finish", "complete_task", { summary: "Nothing to run" });
+        case 7: return text("Nothing to run.");
         default: throw new Error(`Unexpected model call ${phase}`);
       }
     });
@@ -152,7 +169,15 @@ describe("Commander plans across real SDK turns", () => {
     expect(result?.type).toBe("tool_result");
     if (result?.type === "tool_result") expect(JSON.parse(result.output)).toMatchObject({ success: false, message: expect.stringContaining("Unknown plan ID") });
     expect(manager.getSession(id)!.planState.current?.goal).toBe("Verify the change");
-    expect(manager.getSession(id)!.abortController).toBeNull();
+    await vi.waitFor(() => expect(manager.getSession(id)!.planState.current?.waitingOn).toBe("Which test suite should run?"));
+    await vi.waitFor(() => expect(manager.getSession(id)!.abortController).toBeNull());
+    expect(phase).toBe(5);
     expect(manager.getMessages(id).filter((message) => message.type === "tool_approval_request" || message.type === "error")).toEqual([]);
+
+    await manager.sendMessage(id, "Skip the tests");
+    await vi.waitFor(() => expect(manager.getSession(id)!.abortController).toBeNull());
+    expect(phase).toBe(8);
+    expect(manager.getSession(id)!.taskCompleted).toBe(true);
+    expect(manager.getSession(id)!.planState.current).toBeNull();
   });
 });

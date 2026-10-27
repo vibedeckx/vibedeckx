@@ -470,6 +470,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   const notificationService = new NotificationService(opts.storage, eventBus);
   fastify.decorate("notificationService", notificationService);
   agentSessionManager.setMilestoneListener(() => notificationService.requestDrain());
+  chatSessionManager.setMilestoneListener(() => notificationService.requestDrain());
 
   // Pulls worker outboxes into the inbox. Independent of any session WebSocket
   // or open browser tab — that independence is the whole point: a remote result
@@ -639,6 +640,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     workflowEngine.shutdown();
     notificationService.shutdown();
     remoteNotificationSync.shutdown();
+    chatSessionManager.shutdown();
     agentSessionManager.shutdown();
     processManager.shutdown();
     remotePatchCache.shutdown();

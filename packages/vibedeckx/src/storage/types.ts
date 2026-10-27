@@ -581,6 +581,8 @@ export type NotificationKind =
   | "workflow_failed"
   /** A repeat loop reported `done`. Its "needs a human" counterpart re-uses `workflow_failed`. */
   | "loop_done"
+  /** The Main Chat commander gave up on an unfinished plan; the user has to re-drive it. */
+  | "commander_stalled"
   | "cross_remote_token_expired";
 
 /**

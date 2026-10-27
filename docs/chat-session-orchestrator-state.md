@@ -63,7 +63,10 @@ The frontend `useBranchActivity` hook applies the most-recent-by-`since` event.
 
 A "turn" is one `sendMessage(sessionId, content, eventDriven?)` invocation:
 push a user/event message, stream the model response (with up to
-`stepCountIs(3)` tool-use rounds), finalize.
+`MAX_COMMANDER_STEPS = 6` tool-use rounds, or fewer: the turn stops as soon as
+a step hands work off to an event — a successful `runExecutor`,
+`spawnAgentSession`, `sendToAgentSession` or `runInTerminal` — because the
+result arrives as an `[… Event]` message that wakes the model), finalize.
 
 ### Dot transitions on a user-initiated turn
 
@@ -144,6 +147,59 @@ Implemented inline at the end of the `sendMessage` stream loop:
 - `correctionCounts` (per session) caps consecutive corrections at
   `MAX_CHAT_CORRECTIONS = 2` to prevent infinite nudge loops. A well-formed turn
   (≥1 tool call) resets the counter.
+
+### The plan-continuation watchdog (implemented)
+
+The zero-tool watchdog only sees a turn with **no** tool at all. The common way
+a plan died in place was subtler: `setPlan`, a `getExecutorStatus`, then "Now
+I'll start step 1" — two tool calls, so the turn counted as well-formed, nothing
+was started, so no event would ever wake the model, and the plan sat with every
+step pending. The plan itself is the contract that catches this.
+
+`enforcePlanContinuation` runs in `runStream`'s `finally` (so the error path is
+covered too), after the `turn_end` entry and before `drainQueue`:
+
+- Skip when there is no plan, the plan has no unfinished steps, it is blocked on
+  confirmation, `waitingOn` is set (the model legitimately needs a user
+  decision; the task card shows it), the turn was aborted, `complete_task` ran,
+  a message is already queued (an event or the zero-tool correction), or the
+  plan is already stalled.
+- Skip — and reset the nudge budget — when the chat has **work in flight**
+  (`hasInFlightWork`): an unsettled executor operation in
+  `CommanderOperationLedger`, a pending agent dispatch, a spawn being activated,
+  or a terminal watcher. The event will wake the model.
+- Otherwise inject a `[Plan Continuation]` user message naming the unfinished
+  steps. Three flavours: plain idle; the step limit cut off the model's last
+  lookup (the results are quoted, since the rebuilt history is text-only); the
+  stream itself failed (sent after `stallRetryDelayMs` backoff).
+- Budget: `ChatPlanState.nudges`, capped at `MAX_PLAN_NUDGES = 3`, reset when
+  async work starts or the user speaks. Past the cap the plan is **stalled**:
+  a `[Plan Stalled]` system entry, the dot goes amber (`stopped`), and a durable
+  `commander_stalled` outbox milestone rings the bell. The next user message
+  clears the stall and restores the budget.
+
+Two guards make the plan's progress honest rather than narrated:
+
+- `setPlan` refuses to mark a step `completed` while the latest executor
+  operation registered for that step is still in flight.
+- `reconcileInFlight` (every `IN_FLIGHT_RECONCILE_INTERVAL_MS`) settles a
+  started operation whose process is gone but whose finish event never reached
+  the chat, taking the exit code from the process record (local
+  `executor_processes`, remote `remote_executor_processes`) and reporting the
+  run as failed with an explicit note when the record has none. Without it the
+  watchdog would see "work in flight" forever and never re-drive the plan. A
+  start that never settled (`accepted`) or was never confirmed by the worker
+  (`start_unknown`) is **not** settled by the reconciler — a lost response
+  does not prove the command did not run, and the identity is what lets a
+  runExecutor retry resume it exactly once through the idempotent start path.
+  After `UNCONFIRMED_START_AGE_MS` the chat is told once
+  (`[Executor Event: Start Unconfirmed]`), and from then on the operation no
+  longer counts as in-flight work for the watchdog, so the plan is re-driven
+  to resolve it.
+- The error-backoff re-drive is a timer that re-enters
+  `enforcePlanContinuation` with `deferred: true`: every guard is re-checked
+  at fire time (turn in progress, in-flight work, `waitingOn`, stall), and any
+  new turn starting (`sendMessage`) cancels the pending timer outright.
 
 ### Why no `since`-debounce / LLM judge here
 

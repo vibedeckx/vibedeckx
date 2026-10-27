@@ -5,6 +5,8 @@ Evalite 入口：`packages/vibedeckx/evals/commander-plan.eval.ts`。
 使用真实模型、生产 Commander 提示词、`setPlan` schema、聊天状态和确认恢复流程。
 外部工具的执行反馈是固定测试数据；不会启动终端、浏览器或 coding agent，也不会修改项目。
 因此它评估计划行为，不评估编码质量或真正的执行结果。
+模拟的动作工具会像生产一样在操作账本里登记为"在途"：回合在它之后结束、看门狗不会催促、
+关联的步骤在 `h.finishOperations()` 结算之前不能标为完成；场景要先结算再投递自己的完成事件。
 
 ## 运行
 

@@ -39,6 +39,15 @@ export interface CommanderExecutorOperation {
   processId: string;
   status: CommanderOperationStatus;
   exitCode?: number;
+  /** Epoch ms of registration, for the in-flight reconciler's minimum age. */
+  registeredAt: number;
+  /**
+   * Set once the chat has been told this start is still unconfirmed. The
+   * operation keeps its identity (a retry resumes it), but it no longer counts
+   * as work the stall watchdog should wait for. Cleared when the start is
+   * confirmed after all: a running process is in flight again.
+   */
+  unconfirmedReportedAt?: number;
 }
 
 export type ExecutorFinishMatch =
@@ -53,6 +62,9 @@ const MAX_SETTLED_OPERATIONS = 500;
 const isSettled = (status: CommanderOperationStatus) =>
   status === "finished" || status === "rejected" || status === "superseded";
 
+/** Registered, started, or started with an unknown outcome: a result may still arrive. */
+export const isOperationInFlight = (operation: CommanderExecutorOperation): boolean => !isSettled(operation.status);
+
 export class CommanderOperationLedger {
   private byId = new Map<string, CommanderExecutorOperation>();
   private byProcessId = new Map<string, string>();
@@ -62,14 +74,40 @@ export class CommanderOperationLedger {
   }
 
   /** Register before starting. Returns the existing record for a re-delivered call. */
-  register(operation: Omit<CommanderExecutorOperation, "status">): { operation: CommanderExecutorOperation; created: boolean } {
+  register(operation: Omit<CommanderExecutorOperation, "status" | "registeredAt">): { operation: CommanderExecutorOperation; created: boolean } {
     const existing = this.byId.get(operation.id);
     if (existing) return { operation: existing, created: false };
-    const created: CommanderExecutorOperation = { ...operation, status: "accepted" };
+    const created: CommanderExecutorOperation = { ...operation, status: "accepted", registeredAt: Date.now() };
     this.byId.set(created.id, created);
     this.byProcessId.set(created.processId, created.id);
     this.prune();
     return { operation: created, created: true };
+  }
+
+  /** A chat session's operations whose result may still arrive. */
+  inFlight(chatSessionId: string): CommanderExecutorOperation[] {
+    const result: CommanderExecutorOperation[] = [];
+    for (const operation of this.byId.values()) {
+      if (operation.chatSessionId === chatSessionId && isOperationInFlight(operation)) result.push(operation);
+    }
+    return result;
+  }
+
+  /** Every in-flight operation across chat sessions, for the periodic reconciler. */
+  allInFlight(): CommanderExecutorOperation[] {
+    return [...this.byId.values()].filter(isOperationInFlight);
+  }
+
+  /**
+   * The most recent operation a chat started for a plan step, whatever its
+   * status. Lets setPlan refuse to complete a step whose run is still going.
+   */
+  latestForStep(chatSessionId: string, planId: string, stepId: string): CommanderExecutorOperation | undefined {
+    let latest: CommanderExecutorOperation | undefined;
+    for (const operation of this.byId.values()) {
+      if (operation.chatSessionId === chatSessionId && operation.planId === planId && operation.stepId === stepId) latest = operation;
+    }
+    return latest;
   }
 
   /**
@@ -99,6 +137,7 @@ export class CommanderOperationLedger {
     if (!operation) return;
     if (operation.status === "finished") return;
     operation.status = status;
+    if (status === "started") delete operation.unconfirmedReportedAt;
     if (status === "rejected") this.byProcessId.delete(operation.processId);
   }
 
@@ -116,6 +155,7 @@ export class CommanderOperationLedger {
     const operation = this.byProcess(processId);
     if (operation && (operation.status === "accepted" || operation.status === "start_unknown")) {
       operation.status = "started";
+      delete operation.unconfirmedReportedAt;
     }
   }
 
@@ -255,6 +295,14 @@ export class AgentDispatchLedger<Completion> {
     else this.pending.delete(agentSessionId);
     this.settle(agentSessionId, turnEndEntryIndex, owner);
     return { kind: "matched", dispatch: owner };
+  }
+
+  /** Whether a chat still has a dispatched task whose completion has not come back. */
+  hasPending(chatSessionId: string): boolean {
+    for (const list of this.pending.values()) {
+      if (list.some((entry) => entry.chatSessionId === chatSessionId)) return true;
+    }
+    return false;
   }
 
   forgetChat(chatSessionId: string): void {

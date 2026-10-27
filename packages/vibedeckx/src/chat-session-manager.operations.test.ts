@@ -308,6 +308,35 @@ describe("commander executor operations", () => {
       expect(delivered[0]).toMatch(/Operation: call-2/);
     });
 
+    it("a start whose response was lost stays resumable after it is reported as unconfirmed", async () => {
+      const outcomes: RemoteStartOutcome["kind"][] = ["unknown", "started"];
+      const { manager, run, remoteStart, stop, settle, delivered } = setup({
+        remote: true,
+        remoteStart: async (request) => outcomes.shift() === "unknown"
+          ? { kind: "unknown", error: "Remote server unreachable" }
+          : { kind: "started", processId: `remote-e1-${request.processId}` },
+      });
+      expect(await run("call-1")).toMatchObject({ startUnknown: true });
+      // Long after: the reconciler reports it, but does not decide it did not run.
+      await manager.reconcileInFlight(Date.now() + 11 * 60_000);
+      expect(delivered).toHaveLength(1);
+      expect(delivered[0]).toMatch(/^\[Executor Event: Start Unconfirmed\]/);
+      expect(delivered[0]).toMatch(/Operation: call-1/);
+      expect(delivered[0]).not.toMatch(/nothing ran/);
+      // The retry the model is told to make resumes the SAME identity — the
+      // worker returns the process the lost request spawned (here: it had
+      // already finished) instead of running the command a second time.
+      const resumed = await run("call-2");
+      const [first, second] = remoteStart.mock.calls.map(([request]) => request.processId);
+      expect(second).toBe(first);
+      expect(resumed).toMatchObject({ success: true, operationId: "call-2", processId: `remote-e1-${first}` });
+      stop(`remote-e1-${first}`);
+      await settle();
+      expect(delivered).toHaveLength(2);
+      expect(delivered[1]).toMatch(/Process Finished/);
+      expect(delivered[1]).toMatch(/Operation: call-2/);
+    });
+
     it("does not adopt a process already running on the target", async () => {
       const { run, stop, settle, delivered } = setup({
         remote: true,

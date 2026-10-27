@@ -5,6 +5,8 @@ import { CheckCircle2, Circle, Loader2, XCircle, MinusCircle } from "lucide-reac
 export interface TaskPlan {
   planId?: string;
   goal: string;
+  /** What the commander needs from the user before the next step; cleared when they reply. */
+  waitingOn?: string;
   completionCriteria: string[];
   steps: { id: string; title: string; status: "pending" | "in_progress" | "completed" | "failed" | "skipped"; result?: string }[];
 }
@@ -18,7 +20,8 @@ export function parseTaskPlan(value: unknown): TaskPlan | null {
         typeof step.id === "string" && typeof step.title === "string" &&
         ["pending", "in_progress", "completed", "failed", "skipped"].includes(step.status) &&
         (step.result === undefined || typeof step.result === "string")) ||
-      (plan.planId !== undefined && typeof plan.planId !== "string")) return null;
+      (plan.planId !== undefined && typeof plan.planId !== "string") ||
+      (plan.waitingOn !== undefined && typeof plan.waitingOn !== "string")) return null;
   return plan;
 }
 
@@ -40,6 +43,11 @@ export function TaskPlanCard({ plan, draft = false }: { plan: TaskPlan; draft?: 
         <span className="font-medium break-words">{plan.goal}</span>
         <span className="shrink-0 text-xs text-muted-foreground">{draft ? "Plan draft" : `${done}/${plan.steps.length}`}</span>
       </div>
+      {plan.waitingOn && !draft && (
+        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-700 dark:text-amber-300 break-words">
+          Waiting for you: {plan.waitingOn}
+        </div>
+      )}
       <div className="text-xs text-muted-foreground space-y-1">
         <div className="font-medium">Completion criteria</div>
         {plan.completionCriteria.map((criterion, index) => <div key={index} className="break-words">• {criterion}</div>)}

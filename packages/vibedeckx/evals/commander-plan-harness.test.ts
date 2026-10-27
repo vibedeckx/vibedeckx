@@ -61,8 +61,13 @@ describe("Commander plan eval harness", () => {
         if (result?.type === "tool_result") expect(JSON.parse(result.output)).toMatchObject({ success: true, message: expect.stringContaining("Operation started") });
         expect(h.manager.getSession(h.id)!.planState.current?.goal).toBe("Start preview");
         expect(h.messages().some((message) => message.type === "error")).toBe(false);
+        // The started run is work in flight: the turn ended on it and the
+        // watchdog did not re-drive the plan.
+        expect(h.messages().some((message) => message.type === "user" && message.content.startsWith("[Plan Continuation]"))).toBe(false);
+        expect(h.finishOperations()).toEqual(["execute"]);
       });
-      expect(traces).toHaveLength(3);
+      // setPlan, then runExecutor — the turn ends once the run is on its way.
+      expect(traces).toHaveLength(2);
       expect(JSON.stringify(traces.map((trace) => trace.input))).toContain("reasoning");
       expect(traces.every((trace) => trace.usage?.totalTokens === 2)).toBe(true);
     } finally { h.stop(); }

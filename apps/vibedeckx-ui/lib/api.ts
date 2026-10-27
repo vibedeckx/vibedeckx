@@ -1389,6 +1389,7 @@ export type NotificationKind =
   | "session_failed"
   | "workflow_failed"
   | "loop_done"
+  | "commander_stalled"
   | "cross_remote_token_expired";
 
 /** Server row shape — snake_case, exactly as `/api/notifications` returns it. */

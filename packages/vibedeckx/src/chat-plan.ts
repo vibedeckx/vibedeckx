@@ -6,6 +6,9 @@ export const chatPlanSchema = z.object({
   goal: z.string().trim().min(1).max(500),
   completionCriteria: z.array(z.string().trim().min(1).max(500)).min(1).max(12),
   requireConfirmation: z.boolean().default(true).describe("False only for explicit user-specified steps; broad goals need confirmation."),
+  waitingOn: z.string().trim().min(1).max(300).optional().describe(
+    "Set only when the next step cannot proceed without a user decision; say what you need. Cleared automatically when the user replies.",
+  ),
   steps: z.array(z.object({
     id: z.string().min(1).max(80),
     title: z.string().trim().min(1).max(300),
@@ -28,6 +31,15 @@ export type ChatPlan = ChatPlanInput & { planId: string };
 export class ChatPlanState {
   current: ChatPlan | null = null;
   blocked = false;
+  /**
+   * Continuation nudges sent since async work last started or the user last
+   * spoke. The stall watchdog gives up — and surfaces the plan as stalled —
+   * once this passes its budget, so a model that only talks cannot burn tokens
+   * forever.
+   */
+  nudges = 0;
+  /** Set when the watchdog gave up; cleared by the next user message or plan update. */
+  stalled = false;
 
   needsConfirmation(input: ChatPlanInput): boolean {
     const samePlan = input.planId && input.planId === this.current?.planId;
@@ -46,8 +58,22 @@ export class ChatPlanState {
   apply(input: ChatPlanInput): ChatPlan {
     // Called only after the SDK's approval boundary has been satisfied.
     if (input.planId && input.planId !== this.current?.planId) throw new Error("Unknown plan ID.");
+    const samePlan = Boolean(input.planId) && input.planId === this.current?.planId;
     this.current = { ...input, planId: input.planId ?? randomUUID() };
     this.blocked = false;
+    this.stalled = false;
+    if (!samePlan) this.nudges = 0;
     return this.current;
+  }
+
+  /** Steps the plan still owes before complete_task may be called. */
+  unfinishedSteps(): ChatPlan["steps"] {
+    return this.current?.steps.filter((step) => step.status !== "completed" && step.status !== "skipped") ?? [];
+  }
+
+  /** The user spoke or async work started: the nudge budget is fresh again. */
+  resetNudges(): void {
+    this.nudges = 0;
+    this.stalled = false;
   }
 }

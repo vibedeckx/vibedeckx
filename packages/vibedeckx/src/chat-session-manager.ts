@@ -32,7 +32,7 @@ import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
 import type { RemoteExecutorStarts } from "./remote-executor-starts.js";
-import { AgentDispatchLedger, CommanderOperationLedger, type AgentDispatch, type CommanderExecutorOperation } from "./commander-operations.js";
+import { AgentDispatchLedger, CommanderOperationLedger, isOperationInFlight, type AgentDispatch, type CommanderExecutorOperation } from "./commander-operations.js";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import type { BrowserManager, BrowserError } from "./browser-manager.js";
 
@@ -166,6 +166,72 @@ function isSystemEventMessage(content: string): boolean {
  * track without spiraling into infinite reminders when the model is stuck.
  */
 const MAX_CHAT_CORRECTIONS = 2;
+
+/**
+ * Model steps per turn. A plan turn needs room for setPlan, a lookup and the
+ * action; the async-handoff stop condition keeps a started run from being
+ * polled with the remaining steps.
+ */
+const MAX_COMMANDER_STEPS = 6;
+
+/**
+ * Plan-continuation nudges per stretch of inactivity before the watchdog
+ * declares the plan stalled and hands it to the user. Reset whenever async
+ * work actually starts or the user speaks.
+ */
+const MAX_PLAN_NUDGES = 3;
+
+/** Backoff before re-driving a plan after the model stream itself failed. */
+const STALL_RETRY_DELAY_MS = 5_000;
+
+/** How often in-flight executor operations are checked against process liveness. */
+const IN_FLIGHT_RECONCILE_INTERVAL_MS = 30_000;
+
+/** An operation younger than this may still be between start and the started event. */
+const IN_FLIGHT_RECONCILE_MIN_AGE_MS = 20_000;
+
+/**
+ * A start whose outcome the worker never confirmed, or whose start request
+ * never answered, is reported to the model after this long. It is NOT given
+ * up: a lost response does not prove the command did not run, and the
+ * operation's identity is what lets a retry resume it exactly once.
+ */
+const UNCONFIRMED_START_AGE_MS = 10 * 60_000;
+
+/** Prefix of the synthetic user message that re-drives an unfinished plan. */
+const PLAN_CONTINUATION_PREFIX = "[Plan Continuation]";
+
+/** Prefix of the system entry that marks a plan the watchdog gave up on. */
+const PLAN_STALLED_PREFIX = "[Plan Stalled]";
+
+/**
+ * Tools whose success hands the turn over to an event: the result arrives as
+ * an [Executor|Agent|Terminal Event] message that wakes the model, so the turn
+ * should end right after one succeeds instead of spending steps polling.
+ */
+function startedAsyncWork(toolName: string, output: unknown): boolean {
+  const result = output && typeof output === "object" ? output as Record<string, unknown> : null;
+  if (!result) return false;
+  switch (toolName) {
+    case "runExecutor": return result.success === true || result.startUnknown === true;
+    case "spawnAgentSession":
+    case "sendToAgentSession": return result.success === true;
+    case "runInTerminal": return result.sent === true;
+    default: return false;
+  }
+}
+
+/** Output a tool returned in a step, shortened for a continuation message. */
+function summarizeToolOutput(output: unknown, max = 2000): string {
+  const text = typeof output === "string" ? output : JSON.stringify(output);
+  return text.length > max ? `${text.slice(0, max)}…(truncated)` : text;
+}
+
+/** A step observed on the stream: which tools it called and what they returned. */
+interface ObservedStep {
+  toolCalls: string[];
+  toolResults: Array<{ toolName: string; output: unknown }>;
+}
 
 /** Tool-call results kept for replaying a re-delivered call. */
 const MAX_REPLAYED_OPERATION_RESULTS = 500;
@@ -329,6 +395,18 @@ export class ChatSessionManager {
    */
   private correctionCounts = new Map<string, number>();
 
+  /** sessionId → delayed plan re-drive after a stream error (see enforcePlanContinuation). */
+  private stallRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  /** Periodic check that in-flight executor operations still have a live process. */
+  private inFlightReconciler: ReturnType<typeof setInterval> | null = null;
+
+  /** Backoff before re-driving a plan after a stream error; tests shorten it. */
+  stallRetryDelayMs = STALL_RETRY_DELAY_MS;
+
+  /** Nudged right after a stall milestone is written so the bell is fast. */
+  private onMilestoneCreated: (() => void) | null = null;
+
   private storage: Storage;
   private eventBus: EventBus | null = null;
   private processManager: ProcessManager;
@@ -372,6 +450,18 @@ export class ChatSessionManager {
   setEventBus(eventBus: EventBus): void {
     this.eventBus = eventBus;
     this.setupEventListeners();
+    this.startInFlightReconciler();
+  }
+
+  setMilestoneListener(listener: () => void): void {
+    this.onMilestoneCreated = listener;
+  }
+
+  shutdown(): void {
+    if (this.inFlightReconciler) clearInterval(this.inFlightReconciler);
+    this.inFlightReconciler = null;
+    for (const timer of this.stallRetryTimers.values()) clearTimeout(timer);
+    this.stallRetryTimers.clear();
   }
 
   setRemoteExecutorMonitor(monitor: RemoteExecutorMonitor): void {
@@ -656,7 +746,10 @@ export class ChatSessionManager {
    * when the user turned listening on, and is marked as unlinked so it cannot
    * advance the plan.
    */
-  private async handleExecutorFinished(event: Extract<GlobalEvent, { type: "executor:stopped" }>): Promise<void> {
+  private async handleExecutorFinished(
+    event: Extract<GlobalEvent, { type: "executor:stopped" }>,
+    reconciledNote?: string,
+  ): Promise<void> {
     try {
       // Before any await: a duplicate stop must see this one's settlement.
       const match = this.operations.finishExecutor(event.processId, event.exitCode);
@@ -700,6 +793,7 @@ export class ChatSessionManager {
         executor ? `Command: ${executor.command}` : null,
         `Exit Code: ${event.exitCode} (${exitStatus})`,
         ...(operation ? describeOperation(operation) : [UNLINKED_EVENT_NOTE]),
+        reconciledNote ?? null,
         ``,
         `Last output:`,
         `---`,
@@ -714,6 +808,246 @@ export class ChatSessionManager {
     } catch (error) {
       console.error(`[ChatSession] handleExecutorFinished error:`, error);
     }
+  }
+
+  // ---- Plan continuation: the plan drives the chat, not the other way round ----
+
+  /**
+   * Work this chat started whose result is still on its way as an event:
+   * executor runs, dispatched agent tasks, spawns being activated, terminal
+   * commands being watched. While any exists the chat is legitimately idle —
+   * the event will wake it — so the stall watchdog must stay quiet.
+   */
+  private hasInFlightWork(chatSessionId: string): boolean {
+    // A start already reported as unconfirmed is the model's to resolve (by
+    // resuming it); waiting on it would silence the watchdog forever.
+    if (this.operations.inFlight(chatSessionId).some((operation) => !operation.unconfirmedReportedAt)) return true;
+    if (this.agentDispatches.hasPending(chatSessionId)) return true;
+    if (this.spawnsInFlight.has(chatSessionId)) return true;
+    for (const watcher of this.terminalWatchers.values()) {
+      if (watcher.sessionId === chatSessionId) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Periodically confirm that every in-flight executor operation still has a
+   * live process. A finish whose event never reached the chat (worker outage
+   * at the wrong moment, hub-side listener gap) would otherwise keep the
+   * operation "running" forever — and the stall watchdog, seeing work in
+   * flight, would never re-drive the plan. The process record is the fallback
+   * source of the exit code; when it has none the run is reported as failed
+   * with an explicit note, never as success.
+   */
+  private startInFlightReconciler(): void {
+    if (this.inFlightReconciler) return;
+    this.inFlightReconciler = setInterval(() => {
+      this.reconcileInFlight().catch((err) => console.warn("[ChatSession] in-flight reconcile failed:", err));
+    }, IN_FLIGHT_RECONCILE_INTERVAL_MS);
+    this.inFlightReconciler.unref?.();
+  }
+
+  async reconcileInFlight(now = Date.now()): Promise<void> {
+    for (const operation of this.operations.allInFlight()) {
+      const session = this.sessions.get(operation.chatSessionId);
+      if (!session) continue;
+      const age = now - operation.registeredAt;
+
+      if (operation.status !== "started") {
+        // `accepted`: the start request has not answered (or its tool call died
+        // before settling). `start_unknown`: the worker never confirmed. A
+        // reconnect may still resolve it, and the lost response may hide a
+        // command that ran to completion — so the operation is never settled
+        // here. It keeps its identity (a runExecutor retry resumes it through
+        // the idempotent start path, exactly once) and the chat is told, once,
+        // that the outcome is unknown.
+        if (operation.unconfirmedReportedAt || age < UNCONFIRMED_START_AGE_MS) continue;
+        if (this.remoteExecutorMap.has(operation.processId) || (operation.target === "local" && this.processManager.isRunning(operation.processId))) continue;
+        operation.unconfirmedReportedAt = now;
+        console.warn(`[ChatSession] reconcile: start of ${operation.executorName} on ${operation.target} (operation ${operation.id}) is still unconfirmed after ${Math.round(age / 60_000)} min`);
+        this.enqueueOrSend(session.id, [
+          `[Executor Event: Start Unconfirmed]`,
+          `Executor: "${operation.executorName}"`,
+          `Operation: ${operation.id} (started by your runExecutor call)`,
+          operation.stepId ? `Plan step: ${operation.stepId} (plan ${operation.planId})` : null,
+          `The start has not been confirmed for ${Math.round(age / 60_000)} minutes and no finish has been observed. Its outcome is unknown: the command may never have started, or it may have run and already exited. Do not report it as started or as not started.`,
+          `To resolve it, call runExecutor for the same executor again: that resumes this start under its identity (the worker reports the existing process, or starts it once) and the Process Finished event will name this operation. Or record the step as failed with "outcome unknown" and let the user check.`,
+        ].filter((line): line is string => line !== null).join("\n"));
+        continue;
+      }
+      if (age < IN_FLIGHT_RECONCILE_MIN_AGE_MS) continue;
+
+      let exitCode: number | null | undefined;
+      if (operation.target === "local") {
+        if (this.processManager.isRunning(operation.processId)) continue;
+        const row = await this.storage.executorProcesses.getById(operation.processId).catch(() => undefined);
+        // No row at all means the start never materialized; a running row with
+        // a live process was handled above, so a running row here is a finish
+        // the process manager has not persisted yet — give it another tick.
+        if (row?.status === "running") continue;
+        exitCode = row?.exit_code;
+      } else {
+        // The hub still believes the remote process is running: its monitor
+        // will deliver the finish (or replay it once the worker reconnects).
+        if (this.remoteExecutorMap.has(operation.processId)) continue;
+        if (this.reverseConnectManager && !this.reverseConnectManager.isConnected(operation.target)) continue;
+        const row = await this.storage.remoteExecutorProcesses.getById(operation.processId).catch(() => undefined);
+        if (row?.status === "running") continue;
+        exitCode = row?.exit_code;
+      }
+
+      const known = typeof exitCode === "number";
+      const settledExitCode = typeof exitCode === "number" ? exitCode : 1;
+      console.warn(
+        `[ChatSession] reconcile: operation ${operation.id} (${operation.executorName} on ${operation.target}) ` +
+          `has no live process and no finish event; settling with exit code ${known ? exitCode : "unknown"}`,
+      );
+      await this.handleExecutorFinished({
+        type: "executor:stopped",
+        projectId: session.projectId,
+        executorId: operation.executorId,
+        processId: operation.processId,
+        exitCode: settledExitCode,
+        target: operation.target === "local" ? undefined : operation.target,
+        tailOutput: "(no output captured: the finish event was not observed)",
+      }, known
+        ? "Reconciled: the finish event was not observed; the exit code comes from the process record."
+        : "Reconciled: the finish event was not observed and the process record has no exit code, so this run counts as failed. Verify its effect before relying on it.");
+    }
+  }
+
+  /**
+   * Runs when a turn ends. The plan is the contract: while it still owes steps,
+   * either something must be in flight (an event will wake the model) or the
+   * model must be pushed to act again. The zero-tool watchdog above only sees
+   * turns with no tool at all; this one catches the turn that calls a tool or
+   * two and then just stops — the common way a plan died in place.
+   */
+  private enforcePlanContinuation(session: ChatSession, outcome: {
+    aborted: boolean;
+    error: string | null;
+    steps: ObservedStep[];
+    /** Set when re-entered from the error backoff timer: send now, re-checking every guard. */
+    deferred?: boolean;
+  }): void {
+    const sessionId = session.id;
+    const planState = session.planState;
+    const plan = planState.current;
+    // A turn that started meanwhile (or parked for approval) re-evaluates in its own finally.
+    if (outcome.deferred && (session.abortController || session.pendingApproval)) return;
+    if (!plan || outcome.aborted || session.taskCompleted || planState.blocked || planState.stalled) return;
+    const unfinished = planState.unfinishedSteps();
+    if (unfinished.length === 0) return;
+    // A queued message (an event, or the zero-tool correction) opens the next turn anyway.
+    if ((this.messageQueue.get(sessionId)?.length ?? 0) > 0) return;
+    if (plan.waitingOn) return; // legitimately waiting for the user; surfaced on the task card
+    if (this.hasInFlightWork(sessionId)) {
+      planState.nudges = 0;
+      return;
+    }
+
+    if (outcome.error && !outcome.deferred) {
+      // The stream itself failed (API error, rate limit): re-driving at once
+      // would hit the same wall. Back off, then come back through every guard
+      // above — the user may have spoken, work may have started, the plan may
+      // be waiting on a decision — before anything is sent.
+      this.cancelStallRetry(sessionId);
+      const timer = setTimeout(() => {
+        this.stallRetryTimers.delete(sessionId);
+        const live = this.sessions.get(sessionId);
+        if (live && live.planState.current?.planId === plan.planId) this.enforcePlanContinuation(live, { ...outcome, deferred: true });
+      }, this.stallRetryDelayMs);
+      timer.unref?.();
+      this.stallRetryTimers.set(sessionId, timer);
+      return;
+    }
+
+    if (planState.nudges >= MAX_PLAN_NUDGES) {
+      this.stallPlan(session, outcome.error ? `the model stream failed repeatedly (${outcome.error})` : "the model kept ending turns without starting the next step");
+      return;
+    }
+    planState.nudges++;
+    const attempt = `${planState.nudges}/${MAX_PLAN_NUDGES}`;
+    const owed = unfinished.map((step) => `- ${step.id}: ${step.title} (${step.status})`).join("\n");
+    const footer = [
+      "Nothing you started is running, so no event will wake you. Act now, in this turn:",
+      "- invoke the tool that performs the next unfinished step (pass its stepId to runExecutor), or",
+      "- call setPlan to record a step as failed/skipped with the reason, or set waitingOn if you truly need a user decision, or",
+      "- call complete_task if every step is actually done.",
+      "Do not reply with text only.",
+    ];
+
+    const lastStep = outcome.steps[outcome.steps.length - 1];
+    const truncated = outcome.steps.length >= MAX_COMMANDER_STEPS && Boolean(lastStep && lastStep.toolCalls.length > 0);
+    let lines: string[];
+    if (outcome.error) {
+      lines = [
+        PLAN_CONTINUATION_PREFIX,
+        `The previous turn ended with an error: ${outcome.error}`,
+        `Plan "${plan.goal}" still has unfinished steps:`,
+        owed,
+        ...footer,
+      ];
+    } else if (truncated && lastStep) {
+      lines = [
+        PLAN_CONTINUATION_PREFIX,
+        `The turn reached its ${MAX_COMMANDER_STEPS}-step limit before you saw the results of your last tool calls. They are:`,
+        ...lastStep.toolResults.map((result) => `${result.toolName}: ${summarizeToolOutput(result.output)}`),
+        `Plan "${plan.goal}" still has unfinished steps:`,
+        owed,
+        ...footer,
+      ];
+    } else {
+      lines = [
+        PLAN_CONTINUATION_PREFIX,
+        `You ended the turn while plan "${plan.goal}" still has unfinished steps:`,
+        owed,
+        ...footer,
+      ];
+    }
+    console.log(`[ChatSession] plan continuation nudge ${attempt} for ${sessionId} (${outcome.error ? "error" : truncated ? "step-limit" : "idle"})`);
+    this.enqueueOrSend(sessionId, lines.join("\n"));
+  }
+
+  /** Drop a pending error-backoff re-drive: the turn starting now re-evaluates the plan itself. */
+  private cancelStallRetry(sessionId: string): void {
+    const timer = this.stallRetryTimers.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.stallRetryTimers.delete(sessionId);
+  }
+
+  /**
+   * The watchdog gives up: mark the plan stalled, say so in the conversation,
+   * paint the dot amber and write a durable attention milestone so the bell
+   * rings even if nobody is looking at this workspace.
+   */
+  private stallPlan(session: ChatSession, reason: string): void {
+    const plan = session.planState.current;
+    if (!plan) return;
+    session.planState.stalled = true;
+    const owed = session.planState.unfinishedSteps().map((step) => step.title).join("; ");
+    this.pushEntry(session, {
+      type: "system",
+      content: `${PLAN_STALLED_PREFIX} The commander stopped before finishing "${plan.goal}": ${reason}. Unfinished: ${owed}. Send a message to continue, or start a new task.`,
+      timestamp: Date.now(),
+    });
+    this.emitChatActivity(session, "stopped");
+    console.warn(`[ChatSession] plan ${plan.planId} stalled for ${session.id}: ${reason}`);
+    const outbox = this.storage.notificationOutbox;
+    if (!outbox) return;
+    outbox.insert({
+      // One milestone per stall; a plan nudged back to life and stalling again is a new one.
+      id: `commander-stalled:${session.id}:${plan.planId}:${Date.now()}`,
+      kind: "commander_stalled",
+      project_id: session.projectId,
+      branch: session.branch,
+      session_id: session.id,
+      workflow_run_id: null,
+      created_at: Date.now(),
+    }).then(({ inserted }) => {
+      if (inserted) this.onMilestoneCreated?.();
+    }).catch((err) => console.warn(`[ChatSession] stall milestone for ${session.id} failed:`, err));
   }
 
   private trimBrowserEventField(value: string | undefined): string | null {
@@ -1562,11 +1896,13 @@ export class ChatSessionManager {
       "<critical-rules>",
       "Every action you take MUST be an actual tool invocation. Writing text like \"I'll run X\" or \"I've started X\" does NOT execute anything — only a tool_use block does. If you need to perform an action, invoke the tool. If you cannot invoke the tool right now, say so honestly instead of pretending you did. Never narrate a tool call without actually making it. Violating this rule means the action silently fails while you falsely report success.",
       "",
-      "PER-TURN TOOL INVARIANT: every assistant turn you produce MUST contain at least one tool_use block. There are exactly three ways for a turn to end legitimately:",
-      "  1. Invoke a tool to make progress (executor, terminal, browser, agent-query, etc.).",
+      "PER-TURN TOOL INVARIANT: every assistant turn you produce MUST contain at least one tool_use block, and the LAST step of the turn must be one of these — a lookup followed by narration does not count:",
+      "  1. Invoke a tool that performs the next action (runExecutor, runInTerminal, spawnAgentSession, sendToAgentSession, browser actions). After one of these succeeds the turn ends by itself and the result wakes you as an event.",
       "  2. Invoke `complete_task` to declare the user's overall goal achieved.",
-      "  3. The user explicitly aborts.",
+      "  3. Invoke `setPlan` to record a step as failed/skipped, or with `waitingOn` set because you genuinely need a user decision.",
+      "  4. The user explicitly aborts.",
       "Pure text turns are invalid — if you end a turn with text only, the system will detect the violation and inject a correction asking you to invoke a tool. Do not chat conversationally between turns; carry any explanation inside the same turn as a tool call.",
+      "\"Now I'll start X\" is not starting X. Checking status (getExecutorStatus, getAgentConversation, listTerminals) is preparation, never the last step: once you know what to do, do it in the same turn. While a plan has unfinished steps and nothing you started is running, the system re-drives you with a [Plan Continuation] message; after a few of those it declares the plan stalled and hands it to the user.",
       "WRAP-UP RULE: when the work is done and you want to summarize, the summary text and the `complete_task` call MUST go in the SAME turn — write your closing summary and invoke `complete_task` together. Never emit a standalone 'all done / 任务已完成' text turn and stop, expecting to call `complete_task` afterwards; that text-only turn is itself a violation and will trigger a correction. Deciding you are finished and calling `complete_task` are one action, not two.",
       "</critical-rules>",
     );
@@ -1579,6 +1915,7 @@ export class ChatSessionManager {
       "Broad goals or ambiguous scope requireConfirmation=true: the user reviews the task card before work starts. Explicit user-specified steps may use false. After a plan is rejected, ask what to change and wait for user feedback before resubmitting. This is an exception to the per-turn tool invariant: a text-only clarification is allowed while the plan is blocked. Never bypass rejection or execute it anyway.",
       "Use setPlan to update progress before actions and after actual completion events. Tool acceptance only means started, not completed. Include a short result explaining the evidence. Agent turn completion may still need tests. Skip unnecessary conditional steps with a reason. Never invent results.",
       "Keep the goal and steps stable during progress updates. Changes to scope require renewed confirmation. Do not call complete_task until required steps and completion criteria are satisfied.",
+      "A step whose executor run is still in flight cannot be marked completed; setPlan refuses it until the run's Process Finished event has arrived. If the next step needs a user decision, call setPlan with waitingOn describing what you need and stop; it clears when the user replies.",
       "When you run an executor for a plan step, pass that step's stepId. Its Process Finished event names the operationId and step it settles; use only such linked events as evidence for a step. An exit code is a fact, not acceptance — judge the step against its completion criteria. Events marked as not started by you never settle a step.",
       "</task-plans>",
     );
@@ -1700,6 +2037,22 @@ export class ChatSessionManager {
               message: "Unknown plan ID. Use the current plan ID to update it, or omit planId to start a new task.",
               currentPlan: planState.current,
             };
+          }
+          // A step with a run behind it is finished by that run's event, not by
+          // the model's say-so: refuse to close it while the run is in flight.
+          if (sessionId && input.planId) {
+            const before = new Map(planState.current?.steps.map((step) => [step.id, step.status]) ?? []);
+            for (const step of input.steps) {
+              if (step.status !== "completed" || before.get(step.id) === "completed") continue;
+              const operation = this.operations.latestForStep(sessionId, input.planId, step.id);
+              if (operation && isOperationInFlight(operation)) {
+                return {
+                  success: false,
+                  message: `Step "${step.id}" cannot be completed yet: operation ${operation.id} (${operation.executorName}) has not finished. Wait for its Process Finished event, which names this step.`,
+                  currentPlan: planState.current,
+                };
+              }
+            }
           }
           return { success: true, plan: planState.apply(input) };
         },
@@ -2885,6 +3238,10 @@ export class ChatSessionManager {
       return false;
     }
 
+    // A turn is starting: a pending error-backoff re-drive is superseded —
+    // this turn's own finally re-evaluates the plan with fresh state.
+    this.cancelStallRetry(sessionId);
+
     // 1. Push user message
     const userMsg: AgentMessage = { type: "user", content, timestamp: Date.now(), ...(eventMeta ? { event: eventMeta } : {}) };
     this.pushEntry(session, userMsg);
@@ -2903,6 +3260,12 @@ export class ChatSessionManager {
     // unlike eventDrivenTurn, NOT overridden by the eventDriven param, so
     // chat-initiated agent completions (eventDrivenTurn=false) are still gated.
     session.wokenByEvent = isSystemEventMessage(content);
+    // The user spoke: the plan gets a fresh nudge budget, and a plan waiting
+    // on them is no longer waiting.
+    if (!session.wokenByEvent && !content.startsWith(PLAN_CONTINUATION_PREFIX) && !content.startsWith("[System Invariant Violation]")) {
+      session.planState.resetNudges();
+      if (session.planState.current?.waitingOn) delete session.planState.current.waitingOn;
+    }
     // A new turn is starting — clear the prior turn's completion so the
     // dot returns to "main-running" (violet). `complete_task` means "this
     // response is finished, over to you" (cyan); the next turn is fresh
@@ -3003,6 +3366,10 @@ export class ChatSessionManager {
      * usually indicates a hallucinated tool call or a missing complete_task.
      */
     let toolCallCountInStream = 0;
+    /** Per-step tool calls and results, for the plan-continuation watchdog. */
+    const observedSteps: ObservedStep[] = [];
+    /** Message of a stream failure (not an abort), for the error re-drive. */
+    let streamError: string | null = null;
 
     try {
       // Browser events are untrusted page-controlled content. Never expose the
@@ -3032,7 +3399,16 @@ export class ChatSessionManager {
         system,
         messages,
         tools: isBrowserEvent ? {} : this.createTools(session.projectId, session.branch, session.id),
-        stopWhen: stepCountIs(3),
+        stopWhen: [
+          stepCountIs(MAX_COMMANDER_STEPS),
+          // Once a run/agent/terminal command is on its way, the turn is over:
+          // its result arrives as an event that wakes the model. Spending the
+          // remaining steps polling for it only burns tokens.
+          ({ steps }) => {
+            const last = steps[steps.length - 1];
+            return last?.toolResults.some((result) => startedAsyncWork(result.toolName, result.output)) ?? false;
+          },
+        ],
         abortSignal: abortController.signal,
         experimental_telemetry: {
           isEnabled: true,
@@ -3051,6 +3427,11 @@ export class ChatSessionManager {
         if (abortController.signal.aborted) break;
 
         switch (part.type) {
+          case "start-step": {
+            observedSteps.push({ toolCalls: [], toolResults: [] });
+            break;
+          }
+
           case "text-delta": {
             accumulatedText += part.text;
 
@@ -3105,6 +3486,7 @@ export class ChatSessionManager {
               timestamp: Date.now(),
             };
             this.pushEntry(session, toolUseMsg);
+            observedSteps[observedSteps.length - 1]?.toolCalls.push(part.toolName);
 
             // Watchdog accounting: model actually invoked a tool this turn.
             // Refresh the dot's `since` so a concurrent agent emit can't
@@ -3137,6 +3519,17 @@ export class ChatSessionManager {
               timestamp: Date.now(),
             };
             this.pushEntry(session, toolResultMsg);
+            observedSteps[observedSteps.length - 1]?.toolResults.push({ toolName: part.toolName, output });
+            break;
+          }
+
+          case "error": {
+            // The SDK reports a failed model call as a stream part, not a
+            // throw: without this the turn would end as if nothing happened.
+            const message = part.error instanceof Error ? part.error.message : String(part.error);
+            streamError = message;
+            console.error(`[ChatSession] Stream error part for ${sessionId}:`, message);
+            this.pushEntry(session, { type: "error", message, timestamp: Date.now() });
             break;
           }
         }
@@ -3203,12 +3596,17 @@ export class ChatSessionManager {
       // new stream so the model has a chance to invoke a tool this time.
       //
       // Skipped on abort (user clicked stop) and when complete_task was
-      // already called this stream (the model is legitimately done).
+      // already called this stream (the model is legitimately done). Also
+      // skipped while a plan still owes steps: the plan-continuation watchdog
+      // (enforcePlanContinuation) owns that case — it knows whether work is in
+      // flight, carries one budget, and ends in a visible stalled state —
+      // and two nudgers on the same turn would just double the noise.
       if (
         toolCallCountInStream === 0 &&
         !abortController.signal.aborted &&
         !session.taskCompleted &&
-        !session.planState.blocked
+        !session.planState.blocked &&
+        session.planState.unfinishedSteps().length === 0
       ) {
         const prev = this.correctionCounts.get(sessionId) ?? 0;
         if (prev < MAX_CHAT_CORRECTIONS) {
@@ -3258,6 +3656,7 @@ export class ChatSessionManager {
         }
       } else {
         const errorMessage = err instanceof Error ? err.message : "Unknown error";
+        streamError = errorMessage;
         console.error(`[ChatSession] Stream error for ${sessionId}:`, errorMessage);
         const errorMsg: AgentMessage = {
           type: "error",
@@ -3286,6 +3685,14 @@ export class ChatSessionManager {
         if (lastEntry && lastEntry.type !== "turn_end") {
           this.pushEntry(session, { type: "turn_end", timestamp: Date.now() });
         }
+
+        // An unfinished plan with nothing in flight gets re-driven here — on
+        // the error path too, which the in-stream watchdog never reaches.
+        this.enforcePlanContinuation(session, {
+          aborted: abortController.signal.aborted,
+          error: streamError,
+          steps: observedSteps,
+        });
 
         // Process any queued messages (e.g. [Terminal Event] that arrived during this stream)
         this.drainQueue(sessionId);
@@ -3337,6 +3744,7 @@ export class ChatSessionManager {
     }
     session.pendingApproval = null;
     session.planState = new ChatPlanState();
+    this.cancelStallRetry(sessionId);
     // Results of operations started by the cleared conversation have no owner left.
     this.operations.forgetSession(sessionId);
     this.agentDispatches.forgetChat(sessionId);
