@@ -32,10 +32,10 @@ export class ChatPlanState {
   current: ChatPlan | null = null;
   blocked = false;
   /**
-   * Continuation nudges sent since async work last started or the user last
-   * spoke. The stall watchdog gives up — and surfaces the plan as stalled —
-   * once this passes its budget, so a model that only talks cannot burn tokens
-   * forever.
+   * Turn-contract nudges (plan continuations and no-tool corrections) sent
+   * since the last compliant turn, async start, or user message. The watchdog
+   * gives up once this passes its budget — stalling an unfinished plan — so a
+   * model that only talks cannot burn tokens forever.
    */
   nudges = 0;
   /** Set when the watchdog gave up; cleared by the next user message or plan update. */

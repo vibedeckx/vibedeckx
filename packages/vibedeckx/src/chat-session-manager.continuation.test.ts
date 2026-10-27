@@ -321,6 +321,76 @@ describe("plan continuation watchdog", () => {
   });
 });
 
+describe("no-tool rule (no unfinished plan)", () => {
+  const corrections = (messages: string[]) => messages.filter((content) => content.startsWith("[System Invariant Violation]"));
+
+  it("corrects a tool-less turn up to the budget, then gives up quietly", async () => {
+    let phase = 0;
+    const { manager, id, idle, userMessages, continuations, outboxInsert } = setup(async () => {
+      if (phase++ < 4) return text("I ran the build.");
+      throw new Error(`Unexpected model call ${phase}`);
+    });
+    await manager.sendMessage(id, "Run the build");
+    await vi.waitFor(() => expect(phase).toBe(4));
+    await idle();
+    expect(corrections(userMessages())).toHaveLength(3);
+    expect(continuations()).toEqual([]);
+    // No plan to stall: nothing on screen, no bell.
+    expect(manager.getMessages(id).some((m) => m.type === "system")).toBe(false);
+    expect(outboxInsert).not.toHaveBeenCalled();
+    expect(manager.getSession(id)!.planState.nudges).toBe(0);
+  });
+
+  it("a turn that calls a tool resets the budget", async () => {
+    let phase = 0;
+    const { manager, id, idle, userMessages } = setup(async () => {
+      switch (phase++) {
+        case 0: case 1: return text("Done.");
+        case 2: return call("status", "getExecutorStatus", { tailLines: 5 });
+        case 3: return call("finish", "complete_task", { summary: "Checked" });
+        case 4: return text("Checked.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Check the build");
+    await vi.waitFor(() => expect(phase).toBe(5));
+    await idle();
+    expect(corrections(userMessages())).toHaveLength(2);
+    expect(manager.getSession(id)!.planState.nudges).toBe(0);
+  });
+
+  it("leaves a failed stream to the user", async () => {
+    let phase = 0;
+    const { manager, id, idle, userMessages } = setup(async () => {
+      phase++;
+      throw new Error("rate limited");
+    });
+    await manager.sendMessage(id, "Run the build");
+    await idle();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(phase).toBe(1);
+    expect(corrections(userMessages())).toEqual([]);
+    expect(manager.getMessages(id).filter((m) => m.type === "error")).toHaveLength(1);
+  });
+
+  it("defers to the plan rule while the plan owes steps", async () => {
+    let phase = 0;
+    const { manager, id, idle, userMessages, continuations } = setup(async () => {
+      switch (phase++) {
+        case 0: return call("plan", "setPlan", explicitPlan());
+        case 1: return text("Starting the build.");
+        case 2: return call("run", "runExecutor", { executorName: "build", stepId: "build" });
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Build it");
+    await vi.waitFor(() => expect(phase).toBe(3));
+    await idle();
+    expect(continuations()).toHaveLength(1);
+    expect(corrections(userMessages())).toEqual([]);
+  });
+});
+
 describe("in-flight reconciliation", () => {
   it("settles a run whose finish event never arrived from the process record", async () => {
     let phase = 0;

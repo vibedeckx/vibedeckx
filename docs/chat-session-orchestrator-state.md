@@ -134,49 +134,50 @@ A turn ends legitimately in exactly three ways:
 taught to the model in the system prompt's `<critical-rules>` section (see
 `getSystemPrompt`).
 
-### The watchdog
+### The turn-contract watchdog (implemented)
 
-Implemented inline at the end of the `sendMessage` stream loop:
+One check, `enforceTurnContract`, runs in `runStream`'s `finally` (so the error
+path is covered too), after the `turn_end` entry and before `drainQueue`. It
+used to be two watchdogs — a zero-tool check inside the `try` block with its own
+`correctionCounts`/`MAX_CHAT_CORRECTIONS = 2`, and the plan-continuation check —
+kept mutually exclusive by a condition; they are now one function with one
+budget.
 
-- `toolCallCountInStream` increments on every `tool-call` part.
-- After the stream completes, if `toolCallCountInStream === 0` **and** the turn
-  was not aborted **and** `taskCompleted` is false → the model just talked
-  without acting. Inject a correction message back through the queue;
-  `finally → drainQueue` picks it up and starts a fresh stream so the model can
-  invoke a tool this time.
-- `correctionCounts` (per session) caps consecutive corrections at
-  `MAX_CHAT_CORRECTIONS = 2` to prevent infinite nudge loops. A well-formed turn
-  (≥1 tool call) resets the counter.
+Common skips: the turn was aborted, `complete_task` ran, the plan is blocked on
+confirmation or already stalled, or a message is already queued (an event opens
+the next turn anyway).
 
-### The plan-continuation watchdog (implemented)
+**No unfinished plan → the no-tool rule.** A turn that invoked no tool at all
+(`toolCallCountInStream === 0`) usually narrated an action that never ran.
+Inject a `[System Invariant Violation]` correction. A turn with ≥1 tool call is
+compliant and resets the budget. A failed stream is left to the user (the error
+entry is on screen; nothing was promised). Out of budget → give up quietly and
+reset: a plan-less chat may just have been answering a question, so no
+notification.
 
-The zero-tool watchdog only sees a turn with **no** tool at all. The common way
-a plan died in place was subtler: `setPlan`, a `getExecutorStatus`, then "Now
-I'll start step 1" — two tool calls, so the turn counted as well-formed, nothing
-was started, so no event would ever wake the model, and the plan sat with every
-step pending. The plan itself is the contract that catches this.
+**Unfinished plan → the plan-idle rule.** Tools called this turn do not count:
+the common way a plan died in place was `setPlan`, a `getExecutorStatus`, then
+"Now I'll start step 1" — tool calls, nothing started, no event to wake the
+model.
 
-`enforcePlanContinuation` runs in `runStream`'s `finally` (so the error path is
-covered too), after the `turn_end` entry and before `drainQueue`:
-
-- Skip when there is no plan, the plan has no unfinished steps, it is blocked on
-  confirmation, `waitingOn` is set (the model legitimately needs a user
-  decision; the task card shows it), the turn was aborted, `complete_task` ran,
-  a message is already queued (an event or the zero-tool correction), or the
-  plan is already stalled.
-- Skip — and reset the nudge budget — when the chat has **work in flight**
-  (`hasInFlightWork`): an unsettled executor operation in
+- Compliant — and the budget resets — when `waitingOn` is set (the model
+  legitimately needs a user decision; the task card shows it) or the chat has
+  **work in flight** (`hasInFlightWork`): an unsettled executor operation in
   `CommanderOperationLedger`, a pending agent dispatch, a spawn being activated,
   or a terminal watcher. The event will wake the model.
 - Otherwise inject a `[Plan Continuation]` user message naming the unfinished
   steps. Three flavours: plain idle; the step limit cut off the model's last
   lookup (the results are quoted, since the rebuilt history is text-only); the
   stream itself failed (sent after `stallRetryDelayMs` backoff).
-- Budget: `ChatPlanState.nudges`, capped at `MAX_PLAN_NUDGES = 3`, reset when
-  async work starts or the user speaks. Past the cap the plan is **stalled**:
-  a `[Plan Stalled]` system entry, the dot goes amber (`stopped`), and a durable
-  `commander_stalled` outbox milestone rings the bell. The next user message
-  clears the stall and restores the budget.
+- Out of budget the plan is **stalled**: a `[Plan Stalled]` system entry, the
+  dot goes to `stopped`, and a durable `commander_stalled` outbox milestone
+  rings the bell. The next user message clears the stall and restores the
+  budget.
+
+Budget: `ChatPlanState.nudges`, shared by both rules, capped at
+`MAX_TURN_NUDGES = 3`; reset by a compliant turn, a new plan, async work
+starting, or the user speaking (`[System Invariant Violation]` and
+`[Plan Continuation]` messages are not user speech).
 
 Two guards make the plan's progress honest rather than narrated:
 
@@ -197,7 +198,7 @@ Two guards make the plan's progress honest rather than narrated:
   longer counts as in-flight work for the watchdog, so the plan is re-driven
   to resolve it.
 - The error-backoff re-drive is a timer that re-enters
-  `enforcePlanContinuation` with `deferred: true`: every guard is re-checked
+  `enforceTurnContract` with `deferred: true`: every guard is re-checked
   at fire time (turn in progress, in-flight work, `waitingOn`, stall), and any
   new turn starting (`sendMessage`) cancels the pending timer outright.
 
@@ -327,9 +328,9 @@ chat obligation, so they never arm a judge.
 |---------|----------|
 | Orchestrator state, watchdog, tools, gating | `packages/vibedeckx/src/chat-session-manager.ts` |
 | `complete_task` tool | `createTools()` in the above |
-| Watchdog | end of `sendMessage` stream loop (§3) |
+| Watchdog | `enforceTurnContract`, called from `runStream`'s `finally` (§3) |
 | `emitChatActivity`, `markCompleted` | `ChatSessionManager` methods |
-| `isSystemEventMessage`, `MAX_CHAT_CORRECTIONS` | module-level in the above |
+| `isSystemEventMessage`, `MAX_TURN_NUDGES` | module-level in the above |
 | `BranchActivity` type, `computeBranchActivity`, `BranchActivityDedupe`, `emitBranchActivityIfChanged` | `packages/vibedeckx/src/branch-activity.ts`, `agent-session-manager.ts` |
 | `branch:activity` event payload | `packages/vibedeckx/src/event-bus.ts` |
 | SSE fan-out | `packages/vibedeckx/src/routes/event-routes.ts` |

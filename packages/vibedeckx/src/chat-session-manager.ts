@@ -161,13 +161,6 @@ function isSystemEventMessage(content: string): boolean {
 }
 
 /**
- * Max consecutive "no tool_use" corrections per session before the watchdog
- * gives up and surfaces a warning. Two is enough to nudge the model back on
- * track without spiraling into infinite reminders when the model is stuck.
- */
-const MAX_CHAT_CORRECTIONS = 2;
-
-/**
  * Model steps per turn. A plan turn needs room for setPlan, a lookup and the
  * action; the async-handoff stop condition keeps a started run from being
  * polled with the remaining steps.
@@ -175,11 +168,15 @@ const MAX_CHAT_CORRECTIONS = 2;
 const MAX_COMMANDER_STEPS = 6;
 
 /**
- * Plan-continuation nudges per stretch of inactivity before the watchdog
- * declares the plan stalled and hands it to the user. Reset whenever async
- * work actually starts or the user speaks.
+ * Turn-contract nudges (plan continuations and no-tool corrections share one
+ * budget) before the watchdog gives up: an unfinished plan is declared stalled
+ * and handed to the user, a plan-less chat is left alone. Reset whenever a
+ * turn is compliant, async work starts, or the user speaks.
  */
-const MAX_PLAN_NUDGES = 3;
+const MAX_TURN_NUDGES = 3;
+
+/** Prefix of the synthetic user message that corrects a turn with no tool call. */
+const NO_TOOL_CORRECTION_PREFIX = "[System Invariant Violation]";
 
 /** Backoff before re-driving a plan after the model stream itself failed. */
 const STALL_RETRY_DELAY_MS = 5_000;
@@ -387,15 +384,7 @@ export class ChatSessionManager {
   /** Turn ends (`agentSessionId:turnEndEntryIndex`) a spawn claimed while completions were held. */
   private claimedTurnEnds = new Set<string>();
 
-  /**
-   * sessionId → consecutive "no tool_use" watchdog corrections injected since
-   * the last well-formed turn. Reset to 0 whenever a stream produces at least
-   * one tool_use. Capped at MAX_CHAT_CORRECTIONS to prevent infinite nudge
-   * loops when the model is genuinely stuck.
-   */
-  private correctionCounts = new Map<string, number>();
-
-  /** sessionId → delayed plan re-drive after a stream error (see enforcePlanContinuation). */
+  /** sessionId → delayed plan re-drive after a stream error (see enforceTurnContract). */
   private stallRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /** Periodic check that in-flight executor operations still have a live process. */
@@ -917,16 +906,23 @@ export class ChatSessionManager {
   }
 
   /**
-   * Runs when a turn ends. The plan is the contract: while it still owes steps,
-   * either something must be in flight (an event will wake the model) or the
-   * model must be pushed to act again. The zero-tool watchdog above only sees
-   * turns with no tool at all; this one catches the turn that calls a tool or
-   * two and then just stops — the common way a plan died in place.
+   * Runs when a turn ends (every path: normal, errored, truncated) and checks
+   * the commander's turn contract. One budget, two violations:
+   *
+   * - plan-idle: the plan still owes steps, nothing is in flight to wake the
+   *   model, and it is not waiting on the user. Tools called this turn do not
+   *   matter — "setPlan, a lookup, then narrate" is the common way a plan died
+   *   in place. Out of budget → the plan is stalled and the user notified.
+   * - no-tool: no unfinished plan and the turn invoked no tool at all, usually
+   *   a narrated action that never ran. Out of budget → give up quietly; a
+   *   plan-less chat may just have been answering a question.
    */
-  private enforcePlanContinuation(session: ChatSession, outcome: {
+  private enforceTurnContract(session: ChatSession, outcome: {
     aborted: boolean;
     error: string | null;
     steps: ObservedStep[];
+    /** Tool calls the model made this turn (for the no-tool rule). */
+    toolCalls: number;
     /** Set when re-entered from the error backoff timer: send now, re-checking every guard. */
     deferred?: boolean;
   }): void {
@@ -935,13 +931,32 @@ export class ChatSessionManager {
     const plan = planState.current;
     // A turn that started meanwhile (or parked for approval) re-evaluates in its own finally.
     if (outcome.deferred && (session.abortController || session.pendingApproval)) return;
-    if (!plan || outcome.aborted || session.taskCompleted || planState.blocked || planState.stalled) return;
-    const unfinished = planState.unfinishedSteps();
-    if (unfinished.length === 0) return;
-    // A queued message (an event, or the zero-tool correction) opens the next turn anyway.
+    if (outcome.aborted) return;
+    if (session.taskCompleted) {
+      // complete_task is the compliant way to end a turn.
+      planState.nudges = 0;
+      return;
+    }
+    if (planState.blocked || planState.stalled) return;
+    // A queued message (an event) opens the next turn anyway.
     if ((this.messageQueue.get(sessionId)?.length ?? 0) > 0) return;
-    if (plan.waitingOn) return; // legitimately waiting for the user; surfaced on the task card
-    if (this.hasInFlightWork(sessionId)) {
+    const unfinished = planState.unfinishedSteps();
+
+    if (!plan || unfinished.length === 0) {
+      // A failed stream with no plan behind it is the user's to retry: the
+      // error entry is on screen and nothing was promised.
+      if (outcome.error) return;
+      if (outcome.toolCalls > 0) {
+        planState.nudges = 0;
+        return;
+      }
+      this.nudgeNoTool(session);
+      return;
+    }
+
+    // Legitimately waiting for the user (surfaced on the task card), or for an
+    // event that will wake the model: a compliant end of turn.
+    if (plan.waitingOn || this.hasInFlightWork(sessionId)) {
       planState.nudges = 0;
       return;
     }
@@ -955,19 +970,19 @@ export class ChatSessionManager {
       const timer = setTimeout(() => {
         this.stallRetryTimers.delete(sessionId);
         const live = this.sessions.get(sessionId);
-        if (live && live.planState.current?.planId === plan.planId) this.enforcePlanContinuation(live, { ...outcome, deferred: true });
+        if (live && live.planState.current?.planId === plan.planId) this.enforceTurnContract(live, { ...outcome, deferred: true });
       }, this.stallRetryDelayMs);
       timer.unref?.();
       this.stallRetryTimers.set(sessionId, timer);
       return;
     }
 
-    if (planState.nudges >= MAX_PLAN_NUDGES) {
+    if (planState.nudges >= MAX_TURN_NUDGES) {
       this.stallPlan(session, outcome.error ? `the model stream failed repeatedly (${outcome.error})` : "the model kept ending turns without starting the next step");
       return;
     }
     planState.nudges++;
-    const attempt = `${planState.nudges}/${MAX_PLAN_NUDGES}`;
+    const attempt = `${planState.nudges}/${MAX_TURN_NUDGES}`;
     const owed = unfinished.map((step) => `- ${step.id}: ${step.title} (${step.status})`).join("\n");
     const footer = [
       "Nothing you started is running, so no event will wake you. Act now, in this turn:",
@@ -1007,6 +1022,26 @@ export class ChatSessionManager {
     }
     console.log(`[ChatSession] plan continuation nudge ${attempt} for ${sessionId} (${outcome.error ? "error" : truncated ? "step-limit" : "idle"})`);
     this.enqueueOrSend(sessionId, lines.join("\n"));
+  }
+
+  /** The no-plan half of the turn contract: a turn that invoked no tool at all. */
+  private nudgeNoTool(session: ChatSession): void {
+    const planState = session.planState;
+    if (planState.nudges >= MAX_TURN_NUDGES) {
+      console.warn(`[ChatSession] watchdog: no-tool correction limit (${MAX_TURN_NUDGES}) reached for ${session.id}, giving up`);
+      // Fresh budget for the next violation; giving up injects nothing, so this cannot loop.
+      planState.nudges = 0;
+      return;
+    }
+    planState.nudges++;
+    console.log(`[ChatSession] watchdog: no tool_use in stream for ${session.id}, injecting correction (attempt ${planState.nudges}/${MAX_TURN_NUDGES})`);
+    this.enqueueOrSend(session.id, [
+      NO_TOOL_CORRECTION_PREFIX,
+      "You ended a turn without invoking any tool.",
+      "Either call a tool to make progress, or call `complete_task` to mark the user's task finished.",
+      "Do not narrate actions you did not actually take — only a tool_use block executes anything.",
+      "If you claimed to have started or run something this turn, re-issue that action NOW by invoking the actual tool — do NOT just query status to 'confirm' a step you never executed. A status row may be left over from an earlier turn; check `startedThisTurn`/`finishedThisTurn` before assuming progress.",
+    ].join("\n"));
   }
 
   /** Drop a pending error-backoff re-drive: the turn starting now re-evaluates the plan itself. */
@@ -3262,7 +3297,7 @@ export class ChatSessionManager {
     session.wokenByEvent = isSystemEventMessage(content);
     // The user spoke: the plan gets a fresh nudge budget, and a plan waiting
     // on them is no longer waiting.
-    if (!session.wokenByEvent && !content.startsWith(PLAN_CONTINUATION_PREFIX) && !content.startsWith("[System Invariant Violation]")) {
+    if (!session.wokenByEvent && !content.startsWith(PLAN_CONTINUATION_PREFIX) && !content.startsWith(NO_TOOL_CORRECTION_PREFIX)) {
       session.planState.resetNudges();
       if (session.planState.current?.waitingOn) delete session.planState.current.waitingOn;
     }
@@ -3586,59 +3621,8 @@ export class ChatSessionManager {
         return;
       }
 
-      // 6b. Watchdog — structural invariant check.
-      //
-      // Every chat turn must invoke at least one tool (any real tool or
-      // `complete_task`). Zero tool-calls means the model violated the
-      // contract — usually a hallucinated tool call ("I ran X") or just
-      // chatting without making progress. Inject a correction back into
-      // the queue; drainQueue (in finally) will pick it up and start a
-      // new stream so the model has a chance to invoke a tool this time.
-      //
-      // Skipped on abort (user clicked stop) and when complete_task was
-      // already called this stream (the model is legitimately done). Also
-      // skipped while a plan still owes steps: the plan-continuation watchdog
-      // (enforcePlanContinuation) owns that case — it knows whether work is in
-      // flight, carries one budget, and ends in a visible stalled state —
-      // and two nudgers on the same turn would just double the noise.
-      if (
-        toolCallCountInStream === 0 &&
-        !abortController.signal.aborted &&
-        !session.taskCompleted &&
-        !session.planState.blocked &&
-        session.planState.unfinishedSteps().length === 0
-      ) {
-        const prev = this.correctionCounts.get(sessionId) ?? 0;
-        if (prev < MAX_CHAT_CORRECTIONS) {
-          this.correctionCounts.set(sessionId, prev + 1);
-          console.log(
-            `[ChatSession] watchdog: no tool_use in stream for ${sessionId}, ` +
-              `injecting correction (attempt ${prev + 1}/${MAX_CHAT_CORRECTIONS})`,
-          );
-          // Queue the correction. finally → drainQueue will pick it up
-          // immediately after the current stream cleans up.
-          this.enqueueOrSend(
-            sessionId,
-            [
-              "[System Invariant Violation]",
-              "You ended a turn without invoking any tool.",
-              "Either call a tool to make progress, or call `complete_task` to mark the user's task finished.",
-              "Do not narrate actions you did not actually take — only a tool_use block executes anything.",
-              "If you claimed to have started or run something this turn, re-issue that action NOW by invoking the actual tool — do NOT just query status to 'confirm' a step you never executed. A status row may be left over from an earlier turn; check `startedThisTurn`/`finishedThisTurn` before assuming progress.",
-            ].join("\n"),
-          );
-        } else {
-          console.warn(
-            `[ChatSession] watchdog: correction limit (${MAX_CHAT_CORRECTIONS}) ` +
-              `reached for ${sessionId}, giving up nudging`,
-          );
-          this.correctionCounts.delete(sessionId);
-        }
-      } else if (toolCallCountInStream > 0) {
-        // Well-formed turn — reset the counter so future violations
-        // get the full nudge budget.
-        this.correctionCounts.delete(sessionId);
-      }
+      // 6b. The turn contract (no-tool and plan-idle) is checked in
+      // `finally` by enforceTurnContract, so the error path is covered too.
     } catch (err: unknown) {
       // Don't push error for intentional abort
       if (abortController.signal.aborted) {
@@ -3656,14 +3640,19 @@ export class ChatSessionManager {
         }
       } else {
         const errorMessage = err instanceof Error ? err.message : "Unknown error";
+        // The stream's `error` part may already have reported this failure;
+        // the rejected result promise that lands here is the same error.
+        const alreadyReported = streamError !== null;
         streamError = errorMessage;
         console.error(`[ChatSession] Stream error for ${sessionId}:`, errorMessage);
-        const errorMsg: AgentMessage = {
-          type: "error",
-          message: errorMessage,
-          timestamp: Date.now(),
-        };
-        this.pushEntry(session, errorMsg);
+        if (!alreadyReported) {
+          const errorMsg: AgentMessage = {
+            type: "error",
+            message: errorMessage,
+            timestamp: Date.now(),
+          };
+          this.pushEntry(session, errorMsg);
+        }
       }
     } finally {
       if (session.pendingApproval) {
@@ -3686,12 +3675,13 @@ export class ChatSessionManager {
           this.pushEntry(session, { type: "turn_end", timestamp: Date.now() });
         }
 
-        // An unfinished plan with nothing in flight gets re-driven here — on
-        // the error path too, which the in-stream watchdog never reaches.
-        this.enforcePlanContinuation(session, {
+        // Turn contract: re-drive an idle plan or correct a tool-less turn —
+        // on the error path too.
+        this.enforceTurnContract(session, {
           aborted: abortController.signal.aborted,
           error: streamError,
           steps: observedSteps,
+          toolCalls: toolCallCountInStream,
         });
 
         // Process any queued messages (e.g. [Terminal Event] that arrived during this stream)
@@ -3762,8 +3752,7 @@ export class ChatSessionManager {
     this.broadcastPatch(session, statusPatch);
 
     // New Conversation semantics — the workspace dot returns to idle
-    // (gray). The watchdog counter is fresh for the new conversation.
-    this.correctionCounts.delete(sessionId);
+    // (gray). The watchdog budget is fresh with the new ChatPlanState above.
     this.emitChatActivity(session, "idle");
 
     console.log(`[ChatSession] Reset session ${sessionId}`);
