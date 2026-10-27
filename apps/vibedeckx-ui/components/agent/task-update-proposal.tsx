@@ -17,9 +17,15 @@ import { useAgentConversation } from "./agent-conversation";
  */
 export const PROPOSE_TASK_UPDATE_TOOL = "mcp__vibedeckx__propose_task_update";
 
-type Field = "title" | "status" | "priority" | "description";
-const FIELDS: Field[] = ["title", "status", "priority", "description"];
-const FIELD_LABEL: Record<Field, string> = { title: "Title", status: "Status", priority: "Priority", description: "Description" };
+type Field = "title" | "status" | "priority" | "parent" | "description";
+const FIELDS: Field[] = ["title", "status", "priority", "parent", "description"];
+const FIELD_LABEL: Record<Field, string> = {
+  title: "Title", status: "Status", priority: "Priority", parent: "Parent", description: "Description",
+};
+/** The tool's argument name for each field. */
+const ARG: Record<Field, string> = {
+  title: "title", status: "status", priority: "priority", parent: "parent_task_id", description: "description",
+};
 
 export interface ProposedUpdate {
   taskId: string;
@@ -27,6 +33,8 @@ export interface ProposedUpdate {
   description?: string;
   status?: TaskStatus;
   priority?: TaskPriority;
+  /** null = move to the top level. */
+  parent?: string | null;
 }
 
 /** Mirrors the limits parseProposeTaskUpdateArgs enforces in packages/vibedeckx/src/session-tools-mcp.ts. */
@@ -78,7 +86,11 @@ export function updateProposalRejection(input: unknown): string | null {
     if (o.priority !== undefined && !(priorityOptions as unknown[]).includes(o.priority)) {
       return `Update ${i + 1} had an unknown priority.`;
     }
-    if (FIELDS.every((f) => o[f] === undefined)) return `Update ${i + 1} changed nothing.`;
+    if (o.parent_task_id !== undefined && o.parent_task_id !== null
+      && (typeof o.parent_task_id !== "string" || !o.parent_task_id.trim() || o.parent_task_id.trim().length > TASK_ID_MAX)) {
+      return `Update ${i + 1} had an invalid parent task id.`;
+    }
+    if (FIELDS.every((f) => o[ARG[f]] === undefined)) return `Update ${i + 1} changed nothing.`;
   }
   return null;
 }
@@ -92,17 +104,51 @@ function readUpdates(input: unknown): ProposedUpdate[] {
       ...(typeof o.description === "string" ? { description: o.description } : {}),
       ...(typeof o.status === "string" ? { status: o.status as TaskStatus } : {}),
       ...(typeof o.priority === "string" ? { priority: o.priority as TaskPriority } : {}),
+      ...(o.parent_task_id === null || typeof o.parent_task_id === "string"
+        ? { parent: typeof o.parent_task_id === "string" ? o.parent_task_id.trim() : null }
+        : {}),
     };
   });
 }
 
 /**
+ * Why `parentId` can't parent `taskId`, or null. Mirrors reparentProblem in
+ * packages/vibedeckx/src/routes/session-mcp-routes.ts (and the update route's
+ * own check), so the card never offers a move the server would refuse.
+ */
+export function reparentProblem(tasks: readonly Task[], taskId: string, parentId: string | null): string | null {
+  if (parentId === null) return null;
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const seen = new Set<string>();
+  for (let current: string | null = parentId; current !== null; current = byId.get(current)?.parent_id ?? null) {
+    if (current === taskId) return "A task can't be nested under itself or its own sub-task.";
+    if (seen.has(current)) break;
+    seen.add(current);
+    if (!byId.has(current)) return "The proposed parent task doesn't exist.";
+  }
+  return null;
+}
+
+/**
  * The proposed fields that still differ from the task. Empty = nothing left
  * to apply: the card derives "applied" from the task itself rather than
- * storing it, so it survives a reload and reflects edits made elsewhere.
+ * storing it, so it survives a reload and reflects edits made elsewhere. A
+ * parent move the server would refuse is left out (see reparentProblem).
  */
-export function pendingFields(update: ProposedUpdate, task: Task): Field[] {
-  return FIELDS.filter((f) => update[f] !== undefined && update[f] !== (task[f] ?? ""));
+export function pendingFields(update: ProposedUpdate, task: Task, tasks: readonly Task[] = []): Field[] {
+  return FIELDS.filter((f) => {
+    if (f === "parent") {
+      return update.parent !== undefined && update.parent !== (task.parent_id ?? null)
+        && reparentProblem(tasks, task.id, update.parent) === null;
+    }
+    return update[f] !== undefined && update[f] !== (task[f] ?? "");
+  });
+}
+
+/** The parent move this row can't offer, or null. */
+function blockedParent(update: ProposedUpdate, task: Task, tasks: readonly Task[]): string | null {
+  if (update.parent === undefined || update.parent === (task.parent_id ?? null)) return null;
+  return reparentProblem(tasks, task.id, update.parent);
 }
 
 const ROW = "border-t border-border/60 px-3 py-2.5 first:border-t-0";
@@ -125,7 +171,12 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
 
   const rows = updates.map((update) => {
     const task = tasks?.find((t) => t.id === update.taskId) ?? null;
-    return { update, task, changes: task ? pendingFields(update, task) : [] };
+    return {
+      update,
+      task,
+      changes: task && tasks ? pendingFields(update, task, tasks) : [],
+      parentProblem: task && tasks ? blockedParent(update, task, tasks) : null,
+    };
   });
   const pendingIndices = rows.flatMap((row, i) => (row.changes.length > 0 ? [i] : []));
 
@@ -139,7 +190,7 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
       return next;
     });
     try {
-      const patch = Object.fromEntries(changes.map((f) => [f, update[f]]));
+      const patch = Object.fromEntries(changes.map((f) => (f === "parent" ? ["parent_id", update.parent] : [f, update[f]])));
       noteTaskChanged(projectId, await api.updateTask(task.id, patch));
     } catch (err) {
       setErrors((prev) => new Map(prev).set(index, err instanceof Error ? err.message : "Failed to update task"));
@@ -227,7 +278,7 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
         )}
       </div>
       <div className="flex flex-col">
-        {rows.map(({ update, task, changes }, index) => {
+        {rows.map(({ update, task, changes, parentProblem }, index) => {
           if (tasks === null) {
             return (
               <div key={index} className={cn(ROW, "text-[12px] text-muted-foreground")}>
@@ -284,9 +335,15 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
               {!applied && (
                 <dl className="mt-2 grid grid-cols-[72px_minmax(0,1fr)] items-start gap-x-2 gap-y-1.5 text-[12px]">
                   {changes.map((field) => (
-                    <FieldChange key={field} field={field} task={task} update={update} />
+                    <FieldChange key={field} field={field} task={task} update={update} tasks={tasks} />
                   ))}
                 </dl>
+              )}
+              {parentProblem && (
+                <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] break-words text-muted-foreground">
+                  <TriangleAlert className="h-3 w-3 shrink-0" />
+                  Parent not changed: {parentProblem}
+                </p>
               )}
               {error && (
                 <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] break-words text-red-500">
@@ -302,7 +359,7 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
   );
 }
 
-function FieldChange({ field, task, update }: { field: Field; task: Task; update: ProposedUpdate }) {
+function FieldChange({ field, task, update, tasks }: { field: Field; task: Task; update: ProposedUpdate; tasks: readonly Task[] }) {
   const label = <dt className="pt-px text-[11px] text-muted-foreground">{FIELD_LABEL[field]}</dt>;
   if (field === "description") {
     return (
@@ -329,13 +386,17 @@ function FieldChange({ field, task, update }: { field: Field; task: Task; update
     }
     return <span className="break-words">{value}</span>;
   };
+  const parentTitle = (id: string | null | undefined) =>
+    id ? (tasks.find((t) => t.id === id)?.title ?? id) : "None (top level)";
+  const before = field === "parent" ? parentTitle(task.parent_id) : String(task[field]);
+  const after = field === "parent" ? parentTitle(update.parent) : String(update[field]);
   return (
     <>
       {label}
       <dd className="flex min-w-0 flex-wrap items-center gap-1.5">
-        <span className="text-muted-foreground line-through decoration-muted-foreground/50">{render(String(task[field]))}</span>
+        <span className="text-muted-foreground line-through decoration-muted-foreground/50">{render(before)}</span>
         <ArrowRight className="h-3 w-3 shrink-0 text-muted-foreground" />
-        <span className="text-foreground">{render(String(update[field]))}</span>
+        <span className="text-foreground">{render(after)}</span>
       </dd>
     </>
   );

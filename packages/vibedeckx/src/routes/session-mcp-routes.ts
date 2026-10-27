@@ -98,6 +98,24 @@ const sameTitle = (a: string, b: string) => a.trim().toLowerCase() === b.trim().
  * and anything it renders on its own terms (a missing parent, a task already
  * up to date) is reported back to the agent as a note, never as an error.
  */
+/**
+ * Why `parentId` can't parent `taskId`, or null. Same rule as the task update
+ * route's parentError, judged over the project's task list; mirrored by the
+ * card's reparentProblem (task-update-proposal.tsx).
+ */
+export function reparentProblem(tasks: readonly Task[], taskId: string, parentId: string | null): string | null {
+  if (parentId === null) return null;
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const seen = new Set<string>();
+  for (let current: string | null = parentId; current !== null; current = byId.get(current)?.parent_id ?? null) {
+    if (current === taskId) return "a task can't be nested under itself or its own sub-task";
+    if (seen.has(current)) break;
+    seen.add(current);
+    if (!byId.has(current)) return "not a task of this project";
+  }
+  return null;
+}
+
 const routes: FastifyPluginAsync = async (fastify) => {
   // A reverse-connect worker serves only its own fallback (sessions it started
   // without a hub config — see AgentSessionManager.sessionToolsMcpFor): the two
@@ -228,24 +246,36 @@ const routes: FastifyPluginAsync = async (fastify) => {
     // Per entry, never the whole batch: the card shows a missing task as gone
     // and a no-op as up to date, and leaves the rest applicable. Only when no
     // entry proposes anything is it an error, and then the card offers nothing.
+    // A parent the card can't apply (outside the project, or a cycle) drops
+    // just that field, as the card does, so it's a note like the rest.
     const skipped: string[] = [];
+    const notes: string[] = [];
+    const all = parsed.value.some((u) => u.parent_task_id)
+      ? await fastify.storage.tasks.getByProjectId(payload.projectId, { includeArchived: true })
+      : [];
     for (const [i, update] of parsed.value.entries()) {
       const task = await taskInProject(payload, update.task_id);
       if (!task) {
         skipped.push(`updates[${i}]: task ${update.task_id} not found in this project`);
         continue;
       }
-      const changes = (["title", "description", "status", "priority"] as const)
+      const changes: string[] = (["title", "description", "status", "priority"] as const)
         .filter((field) => update[field] !== undefined && update[field] !== (task[field] ?? ""));
+      if (update.parent_task_id !== undefined && update.parent_task_id !== task.parent_id) {
+        const problem = reparentProblem(all, task.id, update.parent_task_id);
+        if (problem) notes.push(`updates[${i}].parent_task_id ${update.parent_task_id}: ${problem}, so the card won't offer it`);
+        else changes.push("parent_task_id");
+      }
       if (changes.length === 0) skipped.push(`updates[${i}]: task ${update.task_id} already has these values`);
     }
+    const note = notes.length ? `\nNote: ${notes.join("; ")}.` : "";
     if (skipped.length === parsed.value.length) {
-      return textResult(`Nothing to propose — ${skipped.join("; ")}. No card is actionable.`, true);
+      return textResult(`Nothing to propose — ${skipped.join("; ")}. No card is actionable.${note}`, true);
     }
-    if (skipped.length === 0) return textResult(PROPOSE_TASK_UPDATE_ACK);
+    if (skipped.length === 0) return textResult(`${PROPOSE_TASK_UPDATE_ACK}${note}`);
     return textResult(
       `${PROPOSE_TASK_UPDATE_ACK}\nNot on the card (nothing to apply): ${skipped.join("; ")}. `
-        + "If one of those ids was wrong, propose that task's update again with the right id.",
+        + `If one of those ids was wrong, propose that task's update again with the right id.${note}`,
     );
   };
 

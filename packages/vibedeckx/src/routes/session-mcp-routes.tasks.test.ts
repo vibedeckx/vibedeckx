@@ -223,6 +223,29 @@ describe("session MCP endpoint: project tasks", () => {
       expect(text).not.toContain("updates[0]");
     });
 
+    it("proposes a parent move and notes one the card can't offer", async () => {
+      const ok = await call(tokenFor(), PROPOSE_TASK_UPDATE_TOOL, {
+        updates: [{ task_id: "t-done", parent_task_id: "t-open" }, { task_id: "t-child", parent_task_id: null }],
+      });
+      expect(ok).toEqual({ isError: false, text: expect.stringContaining("PROPOSED") });
+      expect(ok.text).not.toContain("Note");
+      expect((await storage.tasks.getById("t-done"))!.parent_id).toBeNull();
+
+      // Under its own sub-task, or under another project's task: dropped with a note.
+      const cycle = await call(tokenFor(), PROPOSE_TASK_UPDATE_TOOL, {
+        updates: [{ task_id: "t-open", parent_task_id: "t-child" }, { task_id: "t-done", parent_task_id: "t-foreign", status: "todo" }],
+      });
+      expect(cycle.isError).toBe(false);
+      expect(cycle.text).toContain("updates[0]: task t-open already has these values");
+      expect(cycle.text).toContain("updates[0].parent_task_id t-child: a task can't be nested under itself");
+      expect(cycle.text).toContain("updates[1].parent_task_id t-foreign: not a task of this project");
+
+      // Already there is a no-op like any other field.
+      expect((await call(tokenFor(), PROPOSE_TASK_UPDATE_TOOL, {
+        updates: [{ task_id: "t-child", parent_task_id: "t-open" }],
+      })).isError).toBe(true);
+    });
+
     it("rejects a malformed proposal", async () => {
       expect((await call(tokenFor(), PROPOSE_TASK_UPDATE_TOOL, { updates: [{ task_id: "t-open" }] })).isError).toBe(true);
       expect((await call(tokenFor(), PROPOSE_TASK_UPDATE_TOOL, { updates: [{ task_id: "t-open", status: "closed" }] })).isError).toBe(true);

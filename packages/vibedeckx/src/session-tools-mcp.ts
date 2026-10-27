@@ -118,7 +118,7 @@ const TASK_ROUTING_HINT =
 const TASK_DATA_HINT =
   ` \`${CANONICAL_LIST_TASKS_TOOL}\` and \`${CANONICAL_GET_TASK_TOOL}\` read the project's existing tasks; use them`
   + " when the user refers to existing tasks, and before proposing new ones so you don't duplicate one."
-  + ` To change existing tasks (status, priority, title, description), call \`${CANONICAL_PROPOSE_TASK_UPDATE_TOOL}\``
+  + ` To change existing tasks (status, priority, title, description, parent), call \`${CANONICAL_PROPOSE_TASK_UPDATE_TOOL}\``
   + " when the user asks; the user confirms each change on a card. Never claim you created or updated a task."
   + " When you mention an existing task to the user, link it as [title](#ref:task:<id>) so they can open it.";
 
@@ -390,16 +390,19 @@ export const GET_TASK_INPUT_SCHEMA = {
 } as const;
 
 export const PROPOSE_TASK_UPDATE_DESCRIPTION = [
-  "Propose changes to existing tasks of this project: status, priority, title or description. Call",
-  "it when the user asks to update, close, reprioritize or rewrite tasks — \"mark the retention task",
-  "done\", \"fold what we learned into the task\". Never call it on your own initiative.",
+  "Propose changes to existing tasks of this project: status, priority, title, description or parent.",
+  "Call it when the user asks to update, close, reprioritize, rewrite or move tasks — \"mark the",
+  "retention task done\", \"fold what we learned into the task\", \"put these under the epic\". Never",
+  "call it on your own initiative.",
   "",
   "The proposal is shown to the user as a confirmation card listing each change against the task's",
   "current values; it does NOT change anything by itself and this call does not wait for the user.",
   "Say you have proposed the update (never that you made it) and continue.",
   "",
   "Give only the fields that should change. `description` replaces the whole description: read it",
-  "with get_task first and keep everything that should remain. Write files in this repository as",
+  "with get_task first and keep everything that should remain. `parent_task_id` moves the task under",
+  "another task of this project; null moves it back to the top level. A task can't go under itself or",
+  "one of its own sub-tasks. Write files in this repository as",
   "Markdown links with repo-relative paths, as for propose_task. Use ids from list_tasks / get_task;",
   "never a guessed id. At most 10 tasks per call, each at most once. An entry whose task doesn't",
   "exist or already has those values is left off the card and reported back to you.",
@@ -421,6 +424,10 @@ export const PROPOSE_TASK_UPDATE_INPUT_SCHEMA = {
           description: { type: "string", description: "New full Markdown description (replaces the current one)." },
           status: { type: "string", enum: ["todo", "in_progress", "done", "cancelled"], description: "New status." },
           priority: { type: "string", enum: ["low", "medium", "high", "urgent"], description: "New priority." },
+          parent_task_id: {
+            type: ["string", "null"],
+            description: "Id of the task to nest this one under, or null to make it a top-level task.",
+          },
         },
         required: ["task_id"],
       },
@@ -439,6 +446,8 @@ export interface ProposedTaskUpdate {
   description?: string;
   status?: TaskStatus;
   priority?: TaskPriority;
+  /** null = move to the top level. */
+  parent_task_id?: string | null;
 }
 
 export const PROPOSE_TASK_UPDATE_MAX_ITEMS = 10;
@@ -494,8 +503,18 @@ export function parseProposeTaskUpdateArgs(
       }
       update.priority = obj.priority as TaskPriority;
     }
+    if (obj.parent_task_id !== undefined) {
+      const parentId = typeof obj.parent_task_id === "string" ? obj.parent_task_id.trim() : null;
+      if (obj.parent_task_id !== null && (!parentId || parentId.length > TASK_ID_MAX)) {
+        return { ok: false, error: `updates[${i}].parent_task_id must be a task id string or null` };
+      }
+      update.parent_task_id = parentId;
+    }
     if (Object.keys(update).length === 1) {
-      return { ok: false, error: `updates[${i}] changes nothing; give at least one of title, description, status, priority` };
+      return {
+        ok: false,
+        error: `updates[${i}] changes nothing; give at least one of title, description, status, priority, parent_task_id`,
+      };
     }
     updates.push(update);
   }

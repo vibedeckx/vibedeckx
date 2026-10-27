@@ -207,6 +207,13 @@ describe("parseProposeTaskUpdateArgs", () => {
     });
   });
 
+  it("accepts a parent move, null meaning the top level", () => {
+    const parsed = parseProposeTaskUpdateArgs({
+      updates: [{ task_id: "t1", parent_task_id: " p1 " }, { task_id: "t2", parent_task_id: null }],
+    });
+    expect(parsed).toEqual({ ok: true, value: [{ task_id: "t1", parent_task_id: "p1" }, { task_id: "t2", parent_task_id: null }] });
+  });
+
   it.each([
     [{}, "non-empty"],
     [{ updates: [] }, "non-empty"],
@@ -217,6 +224,8 @@ describe("parseProposeTaskUpdateArgs", () => {
     [{ updates: [{ task_id: "t1", priority: "p0" }] }, "priority"],
     [{ updates: [{ task_id: "t1", title: "  " }] }, "title"],
     [{ updates: [{ task_id: "t1", description: "" }] }, "description"],
+    [{ updates: [{ task_id: "t1", parent_task_id: " " }] }, "parent_task_id"],
+    [{ updates: [{ task_id: "t1", parent_task_id: 7 }] }, "parent_task_id"],
     [{ updates: [{ task_id: "t1", status: "done" }, { task_id: "t1", title: "x" }] }, "more than once"],
   ])("rejects %j", (args, message) => {
     const parsed = parseProposeTaskUpdateArgs(args as Record<string, unknown>);

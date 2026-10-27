@@ -59,6 +59,7 @@ describe("updateProposalRejection", () => {
     [{ updates: [{ task_id: "a", status: "closed" }] }],
     [{ updates: [{ task_id: "a", priority: "p0" }] }],
     [{ updates: [{ task_id: "a", title: " " }] }],
+    [{ updates: [{ task_id: "a", parent_task_id: "" }] }],
     [{ updates: [{ task_id: "a", status: "done" }, { task_id: "a", title: "x" }] }],
     [{ updates: Array.from({ length: 11 }, (_, i) => ({ task_id: `t${i}`, status: "done" })) }],
   ])("rejects %j", (input) => {
@@ -71,6 +72,18 @@ describe("pendingFields", () => {
     const task = taskRow({ status: "done" });
     expect(pendingFields({ taskId: "task-1", status: "done", priority: "high" }, task)).toEqual(["priority"]);
     expect(pendingFields({ taskId: "task-1", status: "done" }, task)).toEqual([]);
+  });
+
+  it("offers a parent move only when the server would accept it", () => {
+    const parent = taskRow({ id: "p" });
+    const child = taskRow({ id: "c", parent_id: "task-1" });
+    const task = taskRow();
+    const all = [task, parent, child];
+    expect(pendingFields({ taskId: "task-1", parent: "p" }, task, all)).toEqual(["parent"]);
+    expect(pendingFields({ taskId: "task-1", parent: null }, task, all)).toEqual([]);
+    expect(pendingFields({ taskId: "task-1", parent: "c" }, task, all)).toEqual([]);
+    expect(pendingFields({ taskId: "task-1", parent: "gone" }, task, all)).toEqual([]);
+    expect(pendingFields({ taskId: "c", parent: null }, child, all)).toEqual(["parent"]);
   });
 });
 
@@ -154,6 +167,24 @@ describe("TaskUpdateProposalUI", () => {
     expect(rowStates()).toEqual(["pending", "missing", "applied"]);
     expect(buttons("Apply update")).toHaveLength(1);
     expect(buttons("Apply all")).toHaveLength(0);
+  });
+
+  it("moves a task under another, showing parent titles", async () => {
+    apiMock.updateTask.mockResolvedValue(taskRow({ parent_id: "task-2" }));
+    await render({ updates: [{ task_id: "task-1", parent_task_id: "task-2" }] });
+    expect(container.textContent).toContain("Parent");
+    expect(container.textContent).toContain("None (top level)");
+    expect(container.textContent).toContain("Second");
+    await act(async () => { buttons("Apply update")[0].click(); });
+    expect(apiMock.updateTask).toHaveBeenCalledWith("task-1", { parent_id: "task-2" });
+  });
+
+  it("explains a parent move it can't offer", async () => {
+    apiMock.getTasks.mockResolvedValue([taskRow(), taskRow({ id: "task-2", title: "Second", parent_id: "task-1" })]);
+    await render({ updates: [{ task_id: "task-1", parent_task_id: "task-2", status: "done" }] });
+    expect(container.textContent).toContain("Parent not changed");
+    await act(async () => { buttons("Apply update")[0].click(); });
+    expect(apiMock.updateTask).toHaveBeenCalledWith("task-1", { status: "done" });
   });
 
   it("keeps the row and shows the error when applying fails", async () => {
