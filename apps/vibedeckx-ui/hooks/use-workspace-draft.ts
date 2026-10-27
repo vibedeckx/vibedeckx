@@ -2,9 +2,11 @@ import { useCallback, useState } from "react";
 
 const KEY_PREFIX = "vibedeckx:agent-draft:";
 
+// The main workspace's branch is null; it shares the "" slot, like every
+// other per-workspace key in the app.
 function storageKey(projectId: string | null, branch: string | null): string | null {
-  if (!projectId || !branch) return null;
-  return `${KEY_PREFIX}${projectId}:${branch}`;
+  if (!projectId) return null;
+  return `${KEY_PREFIX}${projectId}:${branch ?? ""}`;
 }
 
 function readDraft(key: string | null): string {
