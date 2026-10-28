@@ -633,15 +633,18 @@ describe("waiting deadlines", () => {
     expect(delivered[1]).toMatch(/Operation: call-1/);
   });
 
-  it("gives up on a spawn that has not come up after five minutes", async () => {
-    const { manager, chatId, spawnAgent, delivered } = setup({ spawn: () => new Promise(() => {}) });
-    openUserTurn(manager, chatId);
-    void spawnAgent("call-1");
-    await vi.waitFor(() => expect(manager.getSession(chatId)!.pending.hasOpen()).toBe(true));
-    manager.expireOverdue(Date.now() + 5 * 60_000 + 1000);
+  it("a spawn call stops waiting at its deadline; a late activation still registers its task", async () => {
+    let activate!: (value: unknown) => void;
+    const { manager, chatId, spawnAgent, delivered } = setup({ spawn: () => new Promise((resolve) => { activate = resolve; }) });
+    manager.spawnDeadlineMs = 20;
+    const result = await spawnAgent("call-1");
+    expect(result).toMatchObject({ success: false, startUnconfirmed: true });
+    expect(result.message).toMatch(/outcome is unknown/);
     expect(manager.getSession(chatId)!.pending.hasOpen()).toBe(false);
-    expect(delivered).toHaveLength(1);
-    expect(delivered[0]).toMatch(/^\[Agent Event: Start Not Confirmed\]/);
+    expect(delivered).toEqual([]);
+
+    activate({ kind: "activated", view: { sessionId: "new-agent", userEntryIndex: 0 } });
+    await vi.waitFor(() => expect(manager.getSession(chatId)!.pending.open().map((item) => item.kind)).toEqual(["agent_dispatch"]));
   });
 
   it("with no open turn the wait just ends quietly", async () => {

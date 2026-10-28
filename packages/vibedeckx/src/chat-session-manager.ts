@@ -135,6 +135,9 @@ const UNLINKED_EVENT_NOTE = "Not started by you: this event is not linked to any
 
 type TaskCompletedEvent = Extract<GlobalEvent, { type: "session:taskCompleted" }>;
 
+/** What a spawn tool call answers when the agent has not come up by the deadline. */
+interface SpawnNotConfirmed { success: false; startUnconfirmed: true; message: string }
+
 /** An executor finish; `exitCode` is null when the process is gone with no exit code on record. */
 type ExecutorFinish = Omit<Extract<GlobalEvent, { type: "executor:stopped" }>, "exitCode"> & { exitCode: number | null };
 
@@ -174,10 +177,10 @@ const NO_TOOL_CORRECTION_PREFIX = "[System Invariant Violation]";
 const STALL_RETRY_DELAY_MS = 5_000;
 
 /**
- * How long a turn waits on a coding agent before giving its reply up as
- * unknown: the activation of a spawn, and the reply to a dispatched task.
- * Executor runs have no deadline (the reconciler checks their process), and a
- * terminal watch ends on its own idle timer.
+ * How long the commander waits on a coding agent before giving it up as
+ * unknown: a spawn tool call for the agent to come up, a turn for the reply
+ * to a dispatched task. Executor runs have no deadline (the reconciler checks
+ * their process), and a terminal watch ends on its own idle timer.
  */
 const SPAWN_DEADLINE_MS = 5 * 60_000;
 const AGENT_DISPATCH_DEADLINE_MS = 2 * 60 * 60_000;
@@ -418,6 +421,9 @@ export class ChatSessionManager {
   /** Periodic check that in-flight executor operations still have a live process. */
   private inFlightReconciler: ReturnType<typeof setInterval> | null = null;
 
+  /** How long a spawn tool call waits for the agent to come up; tests shorten it. */
+  spawnDeadlineMs = SPAWN_DEADLINE_MS;
+
   /** Backoff before re-driving a plan after a stream error; tests shorten it. */
   stallRetryDelayMs = STALL_RETRY_DELAY_MS;
 
@@ -557,13 +563,43 @@ export class ChatSessionManager {
     }
   }
 
-  private async duringSpawn<T>(chatSessionId: string, spawn: () => Promise<T>): Promise<T> {
-    this.spawnsInFlight.set(chatSessionId, (this.spawnsInFlight.get(chatSessionId) ?? 0) + 1);
+  /**
+   * Run a spawn tool call. The model waits for it inside its stream, so it is
+   * answered by the deadline at the latest: past it the call returns "start not
+   * confirmed" and the start carries on in the background — a late activation
+   * still registers its task, and completions held meanwhile are released only
+   * once the start really settles.
+   */
+  private async duringSpawn<T>(chatSessionId: string, spawn: () => Promise<T>): Promise<T | SpawnNotConfirmed> {
     // Per attempt, not per tool call: a re-delivered call overlapping the first must not share its item.
     const spawnId = randomUUID();
     const session = this.sessions.get(chatSessionId);
     const pending = session?.pending;
-    if (session) this.owe(session, { kind: "spawn", id: spawnId, label: "a coding agent being started", deadlineAt: Date.now() + SPAWN_DEADLINE_MS });
+    if (session) this.owe(session, { kind: "spawn", id: spawnId, label: "a coding agent being started" });
+    const start = this.runSpawn(chatSessionId, spawnId, spawn);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<"deadline">((resolve) => { timer = setTimeout(() => resolve("deadline"), this.spawnDeadlineMs); });
+    try {
+      const winner = await Promise.race([start, deadline]);
+      if (winner !== "deadline") return winner;
+    } finally {
+      clearTimeout(timer);
+    }
+    // A start that later fails must not surface as an unhandled rejection.
+    start.catch(() => {});
+    pending?.settle("spawn", spawnId, "interrupted");
+    const minutes = Math.round(this.spawnDeadlineMs / 60_000);
+    console.warn(`[ChatSession] spawn ${spawnId} of ${chatSessionId} not confirmed after ${minutes} min`);
+    return {
+      success: false,
+      startUnconfirmed: true,
+      message: `The coding agent has not come up after ${minutes} minutes, so this call stopped waiting. Its outcome is unknown: it may still start (its completion would then still reach you), or it may have failed without reporting. Do NOT spawn again blindly: check with getAgentConversation first.`,
+    };
+  }
+
+  private async runSpawn<T>(chatSessionId: string, spawnId: string, spawn: () => Promise<T>): Promise<T> {
+    this.spawnsInFlight.set(chatSessionId, (this.spawnsInFlight.get(chatSessionId) ?? 0) + 1);
+    const pending = this.sessions.get(chatSessionId)?.pending;
     let outcome: PendingOutcome = "failed";
     try {
       const result = await spawn();
@@ -957,17 +993,12 @@ export class ChatSessionManager {
         console.warn(`[ChatSession] ${item.kind} ${item.id} of ${session.id} passed its deadline after ${minutes} min`);
         // Nobody is waiting on it any more (the turn was stopped or reset).
         if (!session.turn) continue;
-        const content = item.kind === "spawn"
-          ? [
-            `[Agent Event: Start Not Confirmed]`,
-            `The coding agent you started has not come up after ${minutes} minutes, so you are no longer waiting on it. Its outcome is unknown: it may still start, or it may have failed without reporting. Check before relying on it.`,
-          ]
-          : [
-            `[Agent Event: No Reply]`,
-            `Waiting for: ${item.label}${item.stepId ? ` (plan step ${item.stepId})` : ""}`,
-            `No reply after ${minutes} minutes, so you are no longer waiting on it. Its outcome is unknown: the agent may still be working, or it may have stopped without reporting. Check it with getAgentConversation before relying on it; a late reply will still reach you.`,
-          ];
-        this.deliver(session.id, { source: "result", content: content.join("\n") });
+        // Only dispatched tasks carry a deadline here; a spawn call answers its own.
+        this.deliver(session.id, { source: "result", content: [
+          `[Agent Event: No Reply]`,
+          `Waiting for: ${item.label}${item.stepId ? ` (plan step ${item.stepId})` : ""}`,
+          `No reply after ${minutes} minutes, so you are no longer waiting on it. Its outcome is unknown: the agent may still be working, or it may have stopped without reporting. Check it with getAgentConversation before relying on it; a late reply will still reach you.`,
+        ].join("\n") });
       }
     }
   }

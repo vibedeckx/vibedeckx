@@ -8,6 +8,8 @@ import type { Storage } from "./storage/types.js";
 import type { ProcessManager } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
+import type { AgentSessionLifecycleService } from "./agent-session-lifecycle.js";
+import type { RemoteSessionLifecycleAdapter } from "./remote-session-lifecycle.js";
 
 vi.mock("./utils/chat-model.js", () => ({ resolveChatModel: vi.fn() }));
 
@@ -585,6 +587,31 @@ describe("complete_task and wait", () => {
     expect(woken).toContain("Exit Code: unknown (outcome unknown)");
     expect(woken).not.toContain("Exit Code: 1");
     expect(woken).toContain("whether this run succeeded is unknown");
+  });
+
+  it("a spawn that never comes up answers the model at its deadline, and the turn can end", async () => {
+    let phase = 0;
+    let spawnResult = "";
+    const { manager, id } = setup(async (options) => {
+      switch (phase++) {
+        case 0: return call("spawn", "spawnAgentSession", { prompt: "Refactor the login page" });
+        case 1:
+          spawnResult = JSON.stringify(options.prompt);
+          return call("done", "complete_task", { summary: "Could not confirm the agent" });
+        case 2: return text("The coding agent did not come up; check it before retrying.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    (manager as unknown as { agentSessionManager: Record<string, unknown> }).agentSessionManager.getSessionByBranch = vi.fn(() => null);
+    const never = { start: () => new Promise(() => {}) };
+    manager.setSessionLifecycle(never as unknown as AgentSessionLifecycleService, never as unknown as RemoteSessionLifecycleAdapter);
+    manager.spawnDeadlineMs = 30;
+
+    await manager.sendMessage(id, "Get an agent on the login page");
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(phase).toBe(3);
+    expect(spawnResult).toContain("startUnconfirmed");
+    expect(turnEnds(manager, id)).toBe(1);
   });
 });
 
