@@ -35,7 +35,7 @@ import type { RemoteExecutorStarts } from "./remote-executor-starts.js";
 import { AgentDispatchLedger, CommanderOperationLedger, isOperationInFlight, type AgentDispatch, type AgentDispatchChange, type CommanderExecutorOperation } from "./commander-operations.js";
 import {
   PendingRegistry, openTurn, turnAccepts, userPresentAfter,
-  type CommanderTurn, type PendingOutcome, type TurnArrival,
+  type CommanderTurn, type PendingItem, type PendingOutcome, type TurnArrival,
 } from "./commander-turn.js";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import type { BrowserManager, BrowserError } from "./browser-manager.js";
@@ -184,6 +184,13 @@ const IN_FLIGHT_RECONCILE_MIN_AGE_MS = 20_000;
  */
 const UNCONFIRMED_START_AGE_MS = 10 * 60_000;
 
+/** How long `wait` waits when the model gives no timeout, and the most it may ask for. */
+const WAIT_DEFAULT_SECONDS = 600;
+const WAIT_MAX_SECONDS = 3600;
+
+/** Prefix of the message that wakes a turn whose `wait` ran out. */
+const WAIT_TIMEOUT_PREFIX = "[Wait Timeout]";
+
 /** Prefix of the synthetic user message that re-drives an unfinished plan. */
 const PLAN_CONTINUATION_PREFIX = "[Plan Continuation]";
 
@@ -203,8 +210,20 @@ function startedAsyncWork(toolName: string, output: unknown): boolean {
     case "spawnAgentSession":
     case "sendToAgentSession": return result.success === true;
     case "runInTerminal": return result.sent === true;
+    // The model chose to wait: the turn waits with it.
+    case "wait": return result.success === true;
     default: return false;
   }
+}
+
+/** What a turn still waits for, as the model sees it. */
+function describePending(items: PendingItem[], now = Date.now()) {
+  return items.map((item) => ({
+    kind: item.kind,
+    waitingFor: item.label,
+    ...(item.stepId ? { stepId: item.stepId } : {}),
+    runningForSeconds: Math.round((now - item.registeredAt) / 1000),
+  }));
 }
 
 /** Output a tool returned in a step, shortened for a continuation message. */
@@ -378,6 +397,9 @@ export class ChatSessionManager {
   /** Turn ends (`agentSessionId:turnEndEntryIndex`) a spawn claimed while completions were held. */
   private claimedTurnEnds = new Set<string>();
 
+  /** sessionId → the timeout of the turn's `wait` call. */
+  private waitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   /** sessionId → delayed plan re-drive after a stream error (see enforceTurnContract). */
   private stallRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -445,6 +467,8 @@ export class ChatSessionManager {
     this.inFlightReconciler = null;
     for (const timer of this.stallRetryTimers.values()) clearTimeout(timer);
     this.stallRetryTimers.clear();
+    for (const timer of this.waitTimers.values()) clearTimeout(timer);
+    this.waitTimers.clear();
   }
 
   setRemoteExecutorMonitor(monitor: RemoteExecutorMonitor): void {
@@ -1078,6 +1102,35 @@ export class ChatSessionManager {
       "If you claimed to have started or run something this turn, re-issue that action NOW by invoking the actual tool — do NOT just query status to 'confirm' a step you never executed. A status row may be left over from an earlier turn; check `startedThisTurn`/`finishedThisTurn` before assuming progress.",
     ].join("\n") });
     return "nudged";
+  }
+
+  /**
+   * Wake a waiting turn when its `wait` runs out with work still running. The
+   * timer is dropped as soon as the turn wakes for any other reason.
+   */
+  private armWaitTimeout(session: ChatSession, turn: CommanderTurn, seconds: number): void {
+    this.cancelWaitTimeout(session.id);
+    const timer = setTimeout(() => {
+      this.waitTimers.delete(session.id);
+      if (session.turn !== turn) return;
+      const owed = session.pending.open();
+      if (owed.length === 0) return;
+      this.deliver(session.id, { source: "wait_timeout", content: [
+        WAIT_TIMEOUT_PREFIX,
+        `You waited ${seconds}s. Still running:`,
+        ...describePending(owed).map((item) => `- ${item.waitingFor}${item.stepId ? ` (step ${item.stepId})` : ""}, running for ${item.runningForSeconds}s`),
+        "Nothing has failed by timing out: decide whether to keep waiting (call wait again), tell the user how it is going, or act.",
+      ].join("\n") });
+    }, seconds * 1000);
+    timer.unref?.();
+    this.waitTimers.set(session.id, timer);
+  }
+
+  private cancelWaitTimeout(sessionId: string): void {
+    const timer = this.waitTimers.get(sessionId);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.waitTimers.delete(sessionId);
   }
 
   /** Drop a pending error-backoff re-drive: the turn starting now re-evaluates the plan itself. */
@@ -1982,6 +2035,7 @@ export class ChatSessionManager {
       "- runExecutor: returns when the process is *started*, NOT when it has finished. The executor is only finished when you receive an `[Executor Event: Process Finished]` message — that message (and only that message) carries the exit code and final output. For one-shot executors (build, test, script), wait for the Process Finished event before reporting outcome. For long-running executors (dev servers), it is fine to report that it was started.",
       "- runInTerminal: returns when the command is *sent* to the terminal. The output arrives as a `[Terminal Event]` message once the command finishes — wait for it before commenting on results.",
       "- Browser commands: may produce `[Browser Event]` messages on errors or page lifecycle changes — handle them when they arrive.",
+      "Work you start belongs to the task you are on: its result arrives as an event message that continues this same task, and the task is not over until everything you started has reported back. While any of it is still running, either reply to the user (when you have something worth telling them) or call `wait` (when you do not). Do not call complete_task until it has all reported back — it is refused before then.",
       "</async-execution-model>",
       "",
       "<critical-rules>",
@@ -1989,10 +2043,11 @@ export class ChatSessionManager {
       "",
       "PER-TURN TOOL INVARIANT: every assistant turn you produce MUST contain at least one tool_use block, and the LAST step of the turn must be one of these — a lookup followed by narration does not count:",
       "  1. Invoke a tool that performs the next action (runExecutor, runInTerminal, spawnAgentSession, sendToAgentSession, browser actions). After one of these succeeds the turn ends by itself and the result wakes you as an event.",
-      "  2. Invoke `complete_task` to declare the user's overall goal achieved.",
-      "  3. Invoke `setPlan` to record a step as failed/skipped, or with `waitingOn` set because you genuinely need a user decision.",
-      "  4. The user explicitly aborts.",
-      "Pure text turns are invalid — if you end a turn with text only, the system will detect the violation and inject a correction asking you to invoke a tool. Do not chat conversationally between turns; carry any explanation inside the same turn as a tool call.",
+      "  2. Invoke `wait` when work you started is still running and you have nothing to tell the user.",
+      "  3. Invoke `complete_task` to declare the user's overall goal achieved (only once nothing you started is still running).",
+      "  4. Invoke `setPlan` to record a step as failed/skipped, or with `waitingOn` set because you genuinely need a user decision.",
+      "  5. The user explicitly aborts.",
+      "Pure text turns are invalid when nothing you started is still running — the system will detect the violation and inject a correction asking you to invoke a tool. Do not chat conversationally between turns; carry any explanation inside the same turn as a tool call. While work you started is still running, a text reply to the user is fine: its result will wake you.",
       "\"Now I'll start X\" is not starting X. Checking status (getExecutorStatus, getAgentConversation, listTerminals) is preparation, never the last step: once you know what to do, do it in the same turn. While a plan has unfinished steps and nothing you started is running, the system re-drives you with a [Plan Continuation] message; after a few of those it declares the plan stalled and hands it to the user.",
       "WRAP-UP RULE: when the work is done and you want to summarize, the summary text and the `complete_task` call MUST go in the SAME turn — write your closing summary and invoke `complete_task` together. Never emit a standalone 'all done / 任务已完成' text turn and stop, expecting to call `complete_task` afterwards; that text-only turn is itself a violation and will trigger a correction. Deciding you are finished and calling `complete_task` are one action, not two.",
       "</critical-rules>",
@@ -2015,7 +2070,8 @@ export class ChatSessionManager {
 
     sections.push(
       "  <lifecycle-tools>",
-      "  - complete_task: call this when the user's overall task in this workspace is fully accomplished and no further work is needed. Marks the workspace dot 'main-completed' (cyan). Does NOT terminate the chat — the user can still send follow-up messages. Use this instead of ending a turn with bare text when you believe the task is done. Your completion summary and this call belong in the same turn — invoke complete_task in the very turn where you conclude the work is finished, not in a follow-up turn.",
+      "  - complete_task: call this when the user's overall task in this workspace is fully accomplished and no further work is needed. Marks the workspace dot 'main-completed' (cyan). Does NOT terminate the chat — the user can still send follow-up messages. Use this instead of ending a turn with bare text when you believe the task is done. Your completion summary and this call belong in the same turn — invoke complete_task in the very turn where you conclude the work is finished, not in a follow-up turn. Refused while work you started is still running.",
+      "  - wait: when work you started is still running and you have nothing to tell the user, call wait instead of replying. You are woken when any of it reports back, the user speaks, or the timeout passes. It does not stop anything.",
       "  </lifecycle-tools>",
     );
 
@@ -2149,10 +2205,36 @@ export class ChatSessionManager {
           return { success: true, plan: planState.apply(input) };
         },
       }),
+      wait: tool({
+        description:
+          "Wait for work you started (runs, coding agents, terminal commands) when you have nothing to tell the user yet. " +
+          "Ends this response. You are woken as soon as any of that work reports back, the user speaks, or timeoutSeconds pass — whichever comes first. " +
+          "It does not stop or change any work. Refused when nothing you started is still running.",
+        inputSchema: z.object({
+          timeoutSeconds: z.number().int().min(10).max(WAIT_MAX_SECONDS).optional()
+            .describe(`Wake up after this long even if nothing has reported back. Default ${WAIT_DEFAULT_SECONDS}.`),
+        }),
+        execute: async ({ timeoutSeconds }) => {
+          const session = sessionId ? this.sessions.get(sessionId) : undefined;
+          const owed = session?.pending.open() ?? [];
+          if (!session?.turn || owed.length === 0) {
+            return { success: false, message: "Nothing you started is still running, so there is nothing to wait for. Reply to the user, continue the plan, or call complete_task." };
+          }
+          const seconds = timeoutSeconds ?? WAIT_DEFAULT_SECONDS;
+          this.armWaitTimeout(session, session.turn, seconds);
+          return {
+            success: true,
+            timeoutSeconds: seconds,
+            waitingFor: describePending(owed),
+            message: "Waiting. You will be woken when one of these reports back, the user speaks, or the timeout passes.",
+          };
+        },
+      }),
       complete_task: tool({
         description:
           "Signal that the user's overall task in this workspace is fully accomplished. " +
           "Call this when no further work is needed — every required action has been taken, verified, and any external events have arrived. " +
+          "Refused while work you started (a run, a coding agent, a terminal command) is still running: wait for its result first, and never call it in the response that starts such work. " +
           "This marks the workspace dot 'main-completed' (cyan). It does NOT terminate the chat — the user can still send follow-up messages, which will move the workspace back to 'main-running'.",
         inputSchema: z.object({
           summary: z
@@ -2164,6 +2246,17 @@ export class ChatSessionManager {
           if (!sessionId) {
             return { completed: false, message: "No session context available." };
           }
+          const session = this.sessions.get(sessionId);
+          const owed = session?.pending.open() ?? [];
+          if (owed.length > 0) {
+            return {
+              completed: false,
+              message: "Work you started is still running, so the task is not finished. Wait for its results (call wait if you have nothing to tell the user), then complete.",
+              stillRunning: describePending(owed),
+            };
+          }
+          // Once per turn: the turn is already declared finished.
+          if (session?.taskCompleted) return { completed: true, message: "Task already marked complete." };
           if (planState?.current?.steps.some((step) => step.status !== "completed" && step.status !== "skipped")) {
             return { completed: false, message: "The plan still has unfinished steps. Update their results before completing the task." };
           }
@@ -3230,7 +3323,7 @@ export class ChatSessionManager {
         this.duringSpawn(sessionId, async () => spawnExecute(input, options));
     }
     // Confirmation is enforced at the execution boundary, not only in the prompt.
-    const readOnlyTools = new Set(["setPlan", "getAgentConversation", "getExecutorStatus", "listTerminals", "screenshot", "getPageContent", "waitForElement"]);
+    const readOnlyTools = new Set(["setPlan", "getAgentConversation", "getExecutorStatus", "listTerminals", "screenshot", "getPageContent", "waitForElement", "wait"]);
     for (const [name, definition] of Object.entries(tools)) {
       const execute = definition.execute;
       if (!execute || readOnlyTools.has(name)) continue;
@@ -3316,8 +3409,9 @@ export class ChatSessionManager {
     const turn = session.turn;
     if (!turn) return;
     // A stream is starting: a pending error-backoff re-drive is superseded —
-    // this stream's end decides again with fresh state.
+    // this stream's end decides again with fresh state — and so is a wait.
     this.cancelStallRetry(session.id);
+    this.cancelWaitTimeout(session.id);
 
     const arrivals = turn.inbox.splice(0);
     for (const arrival of arrivals) {
@@ -3338,10 +3432,10 @@ export class ChatSessionManager {
 
     session.status = "running";
     this.broadcastPatch(session, ConversationPatch.updateStatus("running"));
-    // `complete_task` speaks for the stream it is called in; the next stream
-    // is fresh work again (violet).
-    session.taskCompleted = false;
-    if (this.drivesDot(session)) this.emitChatActivity(session, "main-running");
+    // `complete_task` declares the turn finished, once. A new turn — or the
+    // user asking for more — is fresh work again (violet).
+    if (turn.streams === 1 || arrivals.some((arrival) => arrival.source === "user")) session.taskCompleted = false;
+    if (this.drivesDot(session)) this.emitChatActivity(session, session.taskCompleted ? "main-completed" : "main-running");
 
     const messages = session.store.entries
       .filter((e): e is Extract<AgentMessage, { type: "user" | "assistant" }> =>
@@ -3382,8 +3476,10 @@ export class ChatSessionManager {
     if (session.pending.hasOpen() || waitingOnUser) {
       // Work it started is on its way back, or the user owes a decision: a
       // compliant end of a stream. The result (or the reply) wakes the turn.
+      // Whatever complete_task said, a turn that still owes results is not done.
       turn.status = "waiting";
       session.planState.nudges = 0;
+      session.taskCompleted = false;
       return;
     }
     switch (this.enforceTurnContract(session, outcome)) {
@@ -3407,6 +3503,7 @@ export class ChatSessionManager {
     if (!turn) return;
     session.turn = null;
     this.cancelStallRetry(session.id);
+    this.cancelWaitTimeout(session.id);
     // One divider per turn, however many streams it took. Skip a double
     // divider (an empty stream).
     const lastEntry = session.store.entries[session.store.nextIndex - 1];
@@ -3823,6 +3920,7 @@ export class ChatSessionManager {
     session.turn = null;
     session.outside = [];
     this.cancelStallRetry(sessionId);
+    this.cancelWaitTimeout(sessionId);
     // Results of operations started by the cleared conversation have no owner left.
     this.operations.forgetSession(sessionId);
     this.agentDispatches.forgetChat(sessionId);

@@ -115,10 +115,11 @@ export type TurnOpenedBy = "user" | "listened_event";
  * Something entering the conversation. `result`: the outcome of work this chat
  * started. `notice`: an event the user chose to listen to. `browser`: a
  * page-controlled event, summarized in a turn of its own without tools.
- * `nudge`: the turn contract re-driving the model.
+ * `nudge`: the turn contract re-driving the model. `wait_timeout`: a `wait`
+ * call ran out with work still running.
  */
 export interface TurnArrival {
-  source: "user" | "result" | "notice" | "browser" | "nudge";
+  source: "user" | "result" | "notice" | "browser" | "nudge" | "wait_timeout";
   content: string;
   /** Provenance of an agent-task completion, carried onto the user entry. */
   eventMeta?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number };

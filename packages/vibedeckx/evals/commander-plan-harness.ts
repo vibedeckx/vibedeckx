@@ -9,7 +9,7 @@ import type { ProcessManager } from "../src/process-manager.js";
 import type { AgentSessionManager } from "../src/agent-session-manager.js";
 import type { RemotePatchCache } from "../src/remote-patch-cache.js";
 
-const readOnly = new Set(["getAgentConversation", "getExecutorStatus", "listTerminals", "screenshot", "getPageContent", "waitForElement"]);
+const readOnly = new Set(["getAgentConversation", "getExecutorStatus", "listTerminals", "screenshot", "getPageContent", "waitForElement", "wait"]);
 export const isAction = (message: AgentMessage) => message.type === "tool_use" &&
   !readOnly.has(message.tool) && message.tool !== "setPlan" && message.tool !== "complete_task";
 export function plans(messages: AgentMessage[]): ChatPlanInput[] {
@@ -53,7 +53,7 @@ export function createHarness(config: ChatProviderConfig) {
   internal.createTools = (...args) => {
     const tools = original(...args);
     for (const [name, definition] of Object.entries(tools)) {
-      if (name === "setPlan" || name === "complete_task") continue;
+      if (name === "setPlan" || name === "complete_task" || name === "wait") continue;
       // No shell, filesystem, browser, remote server or agent action can run.
       definition.execute = async (input: unknown, options?: { toolCallId?: string }) => {
         if (!readOnly.has(name) && manager.getSession(id)!.planState.blocked) {

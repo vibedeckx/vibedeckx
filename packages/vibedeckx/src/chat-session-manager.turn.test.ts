@@ -361,3 +361,126 @@ describe("terminal watch that goes quiet", () => {
     expect(delivered[0]).toMatch(/^\[Terminal Event: No New Output\]\nTerminal: remote-t1/);
   });
 });
+
+describe("complete_task and wait", () => {
+  const toolResults = (manager: ChatSessionManager, id: string, tool: string) => manager.getMessages(id)
+    .filter((m): m is Extract<typeof m, { type: "tool_result" }> => m.type === "tool_result" && m.tool === tool)
+    .map((m) => JSON.parse(m.output) as Record<string, unknown>);
+
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("complete_task is refused while a run is in flight, and accepted once it reported back", async () => {
+    let phase = 0;
+    const { manager, id, idle, stop, start } = setup(async () => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        case 1: return call("early", "complete_task", { summary: "Done" });
+        case 2: return text("The build is still running.");
+        case 3: return call("finish", "complete_task", { summary: "Built" });
+        case 4: return text("Built.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Build it");
+    await idle();
+    await manager.sendMessage(id, "Done yet?");
+    await idle();
+    const [refused] = toolResults(manager, id, "complete_task");
+    expect(refused).toMatchObject({ completed: false, stillRunning: [expect.objectContaining({ kind: "executor" })] });
+    expect(manager.getSession(id)!.taskCompleted).toBe(false);
+    expect(manager.getSession(id)!.turn?.status).toBe("waiting");
+
+    stop(start.mock.calls[0][3]);
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(toolResults(manager, id, "complete_task")[1]).toMatchObject({ completed: true });
+    expect(turnEnds(manager, id)).toBe(1);
+  });
+
+  it("a second complete_task in the same turn changes nothing", async () => {
+    let phase = 0;
+    const { manager, id, idle } = setup(async () => {
+      switch (phase++) {
+        case 0: return call("one", "complete_task", { summary: "Done" });
+        case 1: return call("two", "complete_task", { summary: "Done again" });
+        case 2: return text("Done.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Wrap up");
+    await idle();
+    expect(toolResults(manager, id, "complete_task")).toEqual([
+      expect.objectContaining({ completed: true, message: "Task marked complete: Done" }),
+      expect.objectContaining({ completed: true, message: "Task already marked complete." }),
+    ]);
+  });
+
+  it("wait ends the response and its timeout wakes the turn, unattended", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let phase = 0;
+    let woken = "";
+    const { manager, id, idle } = setup(async (options) => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        case 1: return call("wait", "wait", { timeoutSeconds: 30 });
+        case 2:
+          woken = JSON.stringify(options.prompt);
+          return text("Still building.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Build it");
+    await idle();
+    await manager.sendMessage(id, "Let me know");
+    await idle();
+    expect(phase).toBe(2);
+    expect(toolResults(manager, id, "wait")[0]).toMatchObject({ success: true, timeoutSeconds: 30 });
+    expect(manager.getSession(id)!.turn?.status).toBe("waiting");
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.waitFor(() => expect(phase).toBe(3));
+    await idle();
+    expect(woken).toContain("[Wait Timeout]");
+    expect(woken).toContain('executor \\"build\\" on local');
+    expect(manager.getSession(id)!.turn).toMatchObject({ status: "waiting", userPresent: false });
+  });
+
+  it("a result wakes a waiting turn before its wait runs out, and the timeout is dropped", async () => {
+    let phase = 0;
+    const { manager, id, idle, stop, start } = setup(async () => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        case 1: return call("wait", "wait", {});
+        case 2: return call("finish", "complete_task", { summary: "Built" });
+        case 3: return text("Built.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Build it");
+    await idle();
+    await manager.sendMessage(id, "Tell me when it is done");
+    await idle();
+    const timers = (manager as unknown as { waitTimers: Map<string, unknown> }).waitTimers;
+    expect(timers.has(id)).toBe(true);
+
+    stop(start.mock.calls[0][3]);
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(timers.has(id)).toBe(false);
+    expect(phase).toBe(4);
+  });
+
+  it("wait is refused when nothing is running", async () => {
+    let phase = 0;
+    const { manager, id, idle } = setup(async () => {
+      switch (phase++) {
+        case 0: return call("wait", "wait", {});
+        case 1: return text("Nothing to wait for; here is the answer.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Anything running?");
+    await idle();
+    expect(toolResults(manager, id, "wait")[0]).toMatchObject({ success: false });
+    expect(manager.getSession(id)!.turn).toBeNull();
+  });
+});
+
