@@ -735,5 +735,33 @@ describe("stopping a turn", () => {
     expect(delivered).toEqual([]);
     expect(session.turn).toBeNull();
   });
+
+  it("a terminal command whose send answers after Stop is not watched, and a newer turn's watch on that terminal stays", () => {
+    const { manager, id } = setup(async () => text("unused"));
+    const internal = manager as unknown as Internal & { terminalWatchers: Map<string, { sessionId: string }> };
+    const setChannelAdapter = vi.fn();
+    internal.reverseConnectManager = {
+      isConnected: () => true, setChannelAdapter, openVirtualChannel: vi.fn(), closeChannel: vi.fn(), sendChannelData: vi.fn(),
+    };
+    const delivered: string[] = [];
+    vi.spyOn(internal, "deliver").mockImplementation((_id, arrival) => { delivered.push(arrival.content); });
+    const session = manager.getSession(id)!;
+    // turn-1 sent a command; its send is still in flight when the user stops it.
+    session.turn = openTurn({ source: "user", content: "run it" }, "turn-1");
+    session.turn.status = "waiting";
+    manager.stopGeneration(id);
+    // The user's next turn watches the same terminal.
+    session.turn = openTurn({ source: "user", content: "run it again" }, "turn-2");
+    internal.startRemoteTerminalWatcher(id, "remote-t1", { remoteServerId: "srv", remoteProcessId: "rp1" }, "turn-2");
+    const watcher = internal.terminalWatchers.get("remote-t1");
+
+    // turn-1's send finally answers.
+    internal.startRemoteTerminalWatcher(id, "remote-t1", { remoteServerId: "srv", remoteProcessId: "rp1" }, "turn-1");
+    internal.startTerminalWatcher(id, "remote-t1", "turn-1");
+    expect(internal.terminalWatchers.get("remote-t1")).toBe(watcher);
+    expect(setChannelAdapter).toHaveBeenCalledTimes(1);
+    expect(session.pending.open().map((item) => item.id)).toEqual(["remote-t1"]);
+    expect(delivered).toEqual([]);
+  });
 });
 

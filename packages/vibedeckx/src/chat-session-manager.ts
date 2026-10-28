@@ -1686,6 +1686,7 @@ export class ChatSessionManager {
   // ---- Terminal watcher ----
 
   private startTerminalWatcher(sessionId: string, terminalId: string, turnId: string | null): void {
+    if (!this.turnStillOpen(sessionId, turnId)) return;
     // Clean up any existing watcher for this terminal
     this.stopTerminalWatcher(terminalId);
 
@@ -1797,6 +1798,18 @@ export class ChatSessionManager {
     ].join("\n") });
   }
 
+  /**
+   * Whether the turn that sent a terminal command is still the open one. A
+   * command whose send only answered after Stop is not watched: nobody waits
+   * for its output, and a watch on the same terminal by a newer turn stays.
+   */
+  private turnStillOpen(sessionId: string, turnId: string | null): boolean {
+    const open = this.sessions.get(sessionId)?.turn;
+    if (open && turnId !== null && open.id === turnId) return true;
+    console.debug(`[ChatSession] not watching a terminal for turn ${turnId ?? "(none)"} of ${sessionId}: it is no longer open`);
+    return false;
+  }
+
   private stopTerminalWatcher(terminalId: string): void {
     const watcher = this.terminalWatchers.get(terminalId);
     if (!watcher) return;
@@ -1824,6 +1837,7 @@ export class ChatSessionManager {
     remoteInfo: RemoteExecutorInfo,
     turnId: string | null,
   ): void {
+    if (!this.turnStillOpen(sessionId, turnId)) return;
     // Clean up any existing watcher for this terminal
     this.stopTerminalWatcher(terminalId);
 
