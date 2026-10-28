@@ -534,3 +534,68 @@ describe("spawn completion that outruns registration", () => {
     expect(delivered[0]).toMatch(/Not started by you/);
   });
 });
+
+/** The pending registry mirrors what the chat still owes itself, whoever drives the sources. */
+describe("pending registry", () => {
+  const owed = (manager: ChatSessionManager, chatId: string) =>
+    manager.getSession(chatId)!.pending.open().map((item) => `${item.kind}:${item.id}`);
+
+  it("owes a run until its finish", async () => {
+    const { manager, chatId, run, stop, settle } = setup();
+    const result = await run("call-1");
+    expect(owed(manager, chatId)).toEqual(["executor:call-1"]);
+    stop(result.processId as string, 1);
+    await settle();
+    expect(owed(manager, chatId)).toEqual([]);
+  });
+
+  it("stops owing an unconfirmed start once reported, and owes it again when it is confirmed", async () => {
+    const { manager, chatId, bus, run, remoteStart } = setup({
+      remote: true,
+      remoteStart: async () => ({ kind: "unknown", error: "Remote server unreachable" }),
+    });
+    await run("call-1");
+    expect(owed(manager, chatId)).toEqual(["executor:call-1"]);
+    await manager.reconcileInFlight(Date.now() + 11 * 60_000);
+    expect(owed(manager, chatId)).toEqual([]);
+    const processId = `remote-e1-${remoteStart.mock.calls[0][0].processId}`;
+    bus.emit({ type: "executor:started", projectId: "p1", executorId: "e1", processId, target: "srv" });
+    expect(owed(manager, chatId)).toEqual(["executor:call-1"]);
+  });
+
+  it("owes a dispatched task's reply until its turn end; a failed delivery owes nothing", async () => {
+    const completed = (turnEndEntryIndex: number) => ({
+      type: "session:taskCompleted" as const, projectId: "p1", branch: "dev", sessionId: "agent-1", summaryText: "done", turnEndEntryIndex,
+    });
+    const ok = setup({ agent: { id: "agent-1", status: "stopped", entries: 2 } });
+    await ok.send("call-1");
+    expect(owed(ok.manager, ok.chatId)).toEqual(["agent_dispatch:call-1"]);
+    ok.bus.emit(completed(5));
+    expect(owed(ok.manager, ok.chatId)).toEqual([]);
+
+    const failed = setup({ agent: { id: "agent-1", status: "stopped", entries: 2, send: async () => false } });
+    await failed.send("call-1");
+    expect(owed(failed.manager, failed.chatId)).toEqual([]);
+  });
+
+  it("owes a spawn while it activates, then the spawned task's reply", async () => {
+    let during: string[] = [];
+    const ctx = setup({
+      spawn: async () => {
+        during = owed(ctx.manager, ctx.chatId).map((entry) => entry.split(":")[0]);
+        return { kind: "activated", view: { sessionId: "new-agent", userEntryIndex: 0 } };
+      },
+    });
+    expect(await ctx.spawnAgent("call-1")).toMatchObject({ success: true });
+    expect(during).toEqual(["spawn"]);
+    expect(owed(ctx.manager, ctx.chatId)).toEqual(["agent_dispatch:call-1"]);
+  });
+
+  it("a conversation reset forgets owed runs and replies", async () => {
+    const { manager, chatId, run } = setup();
+    await run("call-1");
+    manager.resetSession(chatId);
+    expect(owed(manager, chatId)).toEqual([]);
+  });
+});
+

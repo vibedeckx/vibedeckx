@@ -69,6 +69,9 @@ export class CommanderOperationLedger {
   private byId = new Map<string, CommanderExecutorOperation>();
   private byProcessId = new Map<string, string>();
 
+  /** `onChange` hears every status change, so a mirror stays exact whoever drives the ledger. */
+  constructor(private readonly onChange: (operation: CommanderExecutorOperation) => void = () => {}) {}
+
   get(operationId: string): CommanderExecutorOperation | undefined {
     return this.byId.get(operationId);
   }
@@ -81,6 +84,7 @@ export class CommanderOperationLedger {
     this.byId.set(created.id, created);
     this.byProcessId.set(created.processId, created.id);
     this.prune();
+    this.onChange(created);
     return { operation: created, created: true };
   }
 
@@ -129,6 +133,7 @@ export class CommanderOperationLedger {
     if (!operation || operation.status !== "start_unknown") return;
     operation.status = "superseded";
     if (this.byProcessId.get(operation.processId) === operationId) this.byProcessId.delete(operation.processId);
+    this.onChange(operation);
   }
 
   /** Record the start outcome. A finish that already arrived is never overwritten. */
@@ -139,6 +144,7 @@ export class CommanderOperationLedger {
     operation.status = status;
     if (status === "started") delete operation.unconfirmedReportedAt;
     if (status === "rejected") this.byProcessId.delete(operation.processId);
+    this.onChange(operation);
   }
 
   /** Follow the identity a start actually used when it differs from the requested one. */
@@ -156,7 +162,20 @@ export class CommanderOperationLedger {
     if (operation && (operation.status === "accepted" || operation.status === "start_unknown")) {
       operation.status = "started";
       delete operation.unconfirmedReportedAt;
+      this.onChange(operation);
     }
+  }
+
+  /**
+   * The chat has been told this start is still unconfirmed. The operation
+   * keeps its identity for a resuming retry, but stops counting as work to
+   * wait for.
+   */
+  markUnconfirmedReported(operationId: string, now = Date.now()): void {
+    const operation = this.byId.get(operationId);
+    if (!operation || operation.unconfirmedReportedAt) return;
+    operation.unconfirmedReportedAt = now;
+    this.onChange(operation);
   }
 
   finishExecutor(processId: string, exitCode: number): ExecutorFinishMatch {
@@ -166,6 +185,7 @@ export class CommanderOperationLedger {
     operation.status = "finished";
     operation.exitCode = exitCode;
     this.prune();
+    this.onChange(operation);
     return { kind: "matched", operation };
   }
 
@@ -231,7 +251,17 @@ const MAX_SETTLED_TURNS = 500;
  * A previous turn's completion still in flight at that moment (remote stream
  * lag) would land above a stale floor. In-memory like the executor ledger.
  */
+/**
+ * How a dispatch left the pending list: its turn end arrived (`answered`), its
+ * delivery failed (`cancelled`), or a later turn end showed it will never be
+ * attributed (`released`).
+ */
+export type AgentDispatchChange = "pending" | "answered" | "cancelled" | "released";
+
 export class AgentDispatchLedger<Completion> {
+  /** `onChange` hears a dispatch join and leave the pending list. */
+  constructor(private readonly onChange: (dispatch: AgentDispatch, change: AgentDispatchChange) => void = () => {}) {}
+
   private pending = new Map<string, AgentDispatch[]>();
   private settled = new Map<string, AgentDispatch>();
   private lastTurnEnd = new Map<string, number>();
@@ -259,14 +289,17 @@ export class AgentDispatchLedger<Completion> {
     }
     list.push(dispatch);
     this.pending.set(dispatch.agentSessionId, list);
+    this.onChange(dispatch, "pending");
     return null;
   }
 
   /** Withdraw a dispatch whose delivery failed. */
   cancel(agentSessionId: string, dispatchId: string): void {
-    const list = this.pending.get(agentSessionId)?.filter((entry) => entry.id !== dispatchId) ?? [];
+    const all = this.pending.get(agentSessionId) ?? [];
+    const list = all.filter((entry) => entry.id !== dispatchId);
     if (list.length > 0) this.pending.set(agentSessionId, list);
     else this.pending.delete(agentSessionId);
+    for (const entry of all) if (entry.id === dispatchId) this.onChange(entry, "cancelled");
   }
 
   finishTurn(agentSessionId: string, turnEndEntryIndex: number | undefined, completion: Completion): AgentTurnMatch {
@@ -294,6 +327,8 @@ export class AgentDispatchLedger<Completion> {
     if (rest.length > 0) this.pending.set(agentSessionId, rest);
     else this.pending.delete(agentSessionId);
     this.settle(agentSessionId, turnEndEntryIndex, owner);
+    this.onChange(owner, "answered");
+    for (const entry of list) if (entry !== owner && entry.afterEntryIndex < turnEndEntryIndex) this.onChange(entry, "released");
     return { kind: "matched", dispatch: owner };
   }
 

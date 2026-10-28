@@ -32,7 +32,8 @@ import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
 import type { RemoteExecutorStarts } from "./remote-executor-starts.js";
-import { AgentDispatchLedger, CommanderOperationLedger, isOperationInFlight, type AgentDispatch, type CommanderExecutorOperation } from "./commander-operations.js";
+import { AgentDispatchLedger, CommanderOperationLedger, isOperationInFlight, type AgentDispatch, type AgentDispatchChange, type CommanderExecutorOperation } from "./commander-operations.js";
+import { PendingRegistry, type PendingOutcome } from "./commander-turn.js";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import type { BrowserManager, BrowserError } from "./browser-manager.js";
 
@@ -124,6 +125,8 @@ interface ChatSession {
    */
   pendingApproval: PendingApproval | null;
   planState: ChatPlanState;
+  /** Results this chat still owes itself — see commander-turn.ts. */
+  pending: PendingRegistry;
 }
 
 /**
@@ -348,7 +351,7 @@ export class ChatSessionManager {
   private remoteExecutorStarts: RemoteExecutorStarts | null = null;
 
   /** Processes the commander started, keyed by exact identity — see commander-operations.ts. */
-  private operations = new CommanderOperationLedger();
+  private operations = new CommanderOperationLedger((operation) => this.syncExecutorPending(operation));
 
   /** operationId → in-flight tool execution, so a re-delivered call joins it. */
   private operationCalls = new Map<string, Promise<Record<string, unknown>>>();
@@ -371,7 +374,7 @@ export class ChatSessionManager {
    * completion is a continuation of the chat's workflow — it drives the
    * orchestrator dot (violet/cyan); an unmatched one stays gated.
    */
-  private agentDispatches = new AgentDispatchLedger<TaskCompletedEvent>();
+  private agentDispatches = new AgentDispatchLedger<TaskCompletedEvent>((dispatch, change) => this.syncAgentDispatchPending(dispatch, change));
 
   /**
    * chatSessionId → spawns in flight. A spawn's session id is unknown until it
@@ -529,9 +532,17 @@ export class ChatSessionManager {
 
   private async duringSpawn<T>(chatSessionId: string, spawn: () => Promise<T>): Promise<T> {
     this.spawnsInFlight.set(chatSessionId, (this.spawnsInFlight.get(chatSessionId) ?? 0) + 1);
+    // Per attempt, not per tool call: a re-delivered call overlapping the first must not share its item.
+    const spawnId = randomUUID();
+    const pending = this.sessions.get(chatSessionId)?.pending;
+    pending?.register({ kind: "spawn", id: spawnId, label: "a coding agent being started" });
+    let outcome: PendingOutcome = "failed";
     try {
-      return await spawn();
+      const result = await spawn();
+      if ((result as { success?: unknown } | null)?.success === true) outcome = "completed";
+      return result;
     } finally {
+      pending?.settle("spawn", spawnId, outcome);
       const left = (this.spawnsInFlight.get(chatSessionId) ?? 1) - 1;
       if (left > 0) {
         this.spawnsInFlight.set(chatSessionId, left);
@@ -804,19 +815,48 @@ export class ChatSessionManager {
   /**
    * Work this chat started whose result is still on its way as an event:
    * executor runs, dispatched agent tasks, spawns being activated, terminal
-   * commands being watched. While any exists the chat is legitimately idle —
-   * the event will wake it — so the stall watchdog must stay quiet.
+   * commands being watched — the open items of its pending registry. While
+   * any exists the chat is legitimately idle — the event will wake it — so
+   * the stall watchdog must stay quiet.
    */
   private hasInFlightWork(chatSessionId: string): boolean {
-    // A start already reported as unconfirmed is the model's to resolve (by
-    // resuming it); waiting on it would silence the watchdog forever.
-    if (this.operations.inFlight(chatSessionId).some((operation) => !operation.unconfirmedReportedAt)) return true;
-    if (this.agentDispatches.hasPending(chatSessionId)) return true;
-    if (this.spawnsInFlight.has(chatSessionId)) return true;
-    for (const watcher of this.terminalWatchers.values()) {
-      if (watcher.sessionId === chatSessionId) return true;
+    return this.sessions.get(chatSessionId)?.pending.hasOpen() ?? false;
+  }
+
+  /**
+   * Mirror an executor operation into its chat's pending registry. Owed while
+   * a result may still arrive — except a start already reported as
+   * unconfirmed, which is the model's to resolve (by resuming it); waiting on
+   * it would silence the watchdog forever. A late confirmation owes again.
+   */
+  private syncExecutorPending(operation: CommanderExecutorOperation): void {
+    const pending = this.sessions.get(operation.chatSessionId)?.pending;
+    if (!pending) return;
+    if (isOperationInFlight(operation) && !operation.unconfirmedReportedAt) {
+      pending.register({
+        kind: "executor", id: operation.id, label: `executor "${operation.executorName}" on ${operation.target}`,
+        planId: operation.planId, stepId: operation.stepId,
+      });
+      return;
     }
-    return false;
+    const outcome: PendingOutcome = operation.status === "finished"
+      ? (operation.exitCode === 0 ? "completed" : "failed")
+      : operation.status === "rejected" ? "failed"
+      : operation.status === "superseded" ? "cancelled"
+      : "interrupted";
+    pending.settle("executor", operation.id, outcome);
+  }
+
+  /** Mirror a dispatch joining or leaving the agent dispatch ledger's pending list. */
+  private syncAgentDispatchPending(dispatch: AgentDispatch, change: AgentDispatchChange): void {
+    const pending = this.sessions.get(dispatch.chatSessionId)?.pending;
+    if (!pending) return;
+    if (change === "pending") {
+      pending.register({ kind: "agent_dispatch", id: dispatch.id, label: "a coding agent's reply" });
+      return;
+    }
+    // A released dispatch's agent moved past it: its own reply will never be attributed.
+    pending.settle("agent_dispatch", dispatch.id, change === "answered" ? "completed" : change === "cancelled" ? "cancelled" : "interrupted");
   }
 
   /**
@@ -852,7 +892,7 @@ export class ChatSessionManager {
         // that the outcome is unknown.
         if (operation.unconfirmedReportedAt || age < UNCONFIRMED_START_AGE_MS) continue;
         if (this.remoteExecutorMap.has(operation.processId) || (operation.target === "local" && this.processManager.isRunning(operation.processId))) continue;
-        operation.unconfirmedReportedAt = now;
+        this.operations.markUnconfirmedReported(operation.id, now);
         console.warn(`[ChatSession] reconcile: start of ${operation.executorName} on ${operation.target} (operation ${operation.id}) is still unconfirmed after ${Math.round(age / 60_000)} min`);
         this.enqueueOrSend(session.id, [
           `[Executor Event: Start Unconfirmed]`,
@@ -1552,6 +1592,7 @@ export class ChatSessionManager {
       return;
     }
 
+    this.sessions.get(sessionId)?.pending.register({ kind: "terminal_watch", id: terminalId, label: `output of terminal ${terminalId}` });
     this.terminalWatchers.set(terminalId, {
       unsubscribe,
       state, // live reference — timer IDs stay current
@@ -1569,6 +1610,7 @@ export class ChatSessionManager {
     if (watcher.state.debounceTimer) clearTimeout(watcher.state.debounceTimer);
     clearTimeout(watcher.state.idleTimer);
     this.terminalWatchers.delete(terminalId);
+    this.sessions.get(watcher.sessionId)?.pending.settle("terminal_watch", terminalId, "completed");
     console.debug(`[ChatSession] Stopped terminal watcher for terminal=${terminalId}`);
   }
 
@@ -1719,6 +1761,7 @@ export class ChatSessionManager {
       closeWs();
     };
 
+    this.sessions.get(sessionId)?.pending.register({ kind: "terminal_watch", id: terminalId, label: `output of terminal ${terminalId}` });
     this.terminalWatchers.set(terminalId, {
       unsubscribe,
       state,
@@ -1755,6 +1798,7 @@ export class ChatSessionManager {
       wokenByEvent: false,
       pendingApproval: null,
       planState: new ChatPlanState(),
+      pending: new PendingRegistry(),
     };
 
     this.sessions.set(id, session);
@@ -3738,6 +3782,8 @@ export class ChatSessionManager {
     // Results of operations started by the cleared conversation have no owner left.
     this.operations.forgetSession(sessionId);
     this.agentDispatches.forgetChat(sessionId);
+    session.pending.forget("executor");
+    session.pending.forget("agent_dispatch");
 
     // Clear the message store
     session.store.entries = [];

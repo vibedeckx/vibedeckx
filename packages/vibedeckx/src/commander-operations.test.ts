@@ -181,3 +181,42 @@ describe("AgentDispatchLedger", () => {
     expect(ledger.finishTurn("agent-1", 9, "c").kind).toBe("unmatched");
   });
 });
+
+describe("ledger change notifications", () => {
+  it("the executor ledger reports every status change, including a late confirmation", () => {
+    const seen: string[] = [];
+    const ledger = new CommanderOperationLedger((operation) => seen.push(`${operation.id}:${operation.status}${operation.unconfirmedReportedAt ? ":reported" : ""}`));
+    ledger.register(op("call-1", "p1"));
+    ledger.register(op("call-1", "p1"));
+    ledger.settleStart("call-1", "start_unknown");
+    ledger.markUnconfirmedReported("call-1", 5);
+    ledger.markUnconfirmedReported("call-1", 6);
+    ledger.markStarted("p1");
+    ledger.finishExecutor("p1", 0);
+    ledger.finishExecutor("p1", 0);
+    ledger.register(op("call-2", "p2"));
+    ledger.settleStart("call-2", "start_unknown");
+    ledger.supersede("call-2");
+    expect(seen).toEqual([
+      "call-1:accepted", "call-1:start_unknown", "call-1:start_unknown:reported", "call-1:started", "call-1:finished",
+      "call-2:accepted", "call-2:start_unknown", "call-2:superseded",
+    ]);
+  });
+
+  it("the dispatch ledger reports a dispatch joining and leaving the pending list", () => {
+    const seen: string[] = [];
+    const ledger = new AgentDispatchLedger<string>((dispatch, change) => seen.push(`${dispatch.id}:${change}`));
+    const dispatch = (id: string, afterEntryIndex: number) => ({ id, chatSessionId: "chat-1", agentSessionId: "agent-1", afterEntryIndex });
+    ledger.register(dispatch("d1", -1));
+    ledger.register(dispatch("d2", 0));
+    // One turn end owned by the newest dispatch releases the older one.
+    ledger.finishTurn("agent-1", 5, "c");
+    ledger.register(dispatch("d3", 5));
+    ledger.cancel("agent-1", "d3");
+    ledger.cancel("agent-1", "d3");
+    // A completion that outran registration never puts the dispatch on the list.
+    ledger.finishTurn("agent-1", 9, "early");
+    ledger.register(dispatch("d4", 6));
+    expect(seen).toEqual(["d1:pending", "d2:pending", "d2:answered", "d1:released", "d3:pending", "d3:cancelled"]);
+  });
+});
