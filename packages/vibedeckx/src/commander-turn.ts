@@ -107,3 +107,72 @@ export class PendingRegistry {
 }
 
 const keyOf = (kind: PendingKind, id: string) => `${kind}:${id}`;
+
+/** Who opened a turn. `parent_dispatch` and `schedule` arrive with the multi-level commander and scheduled chats. */
+export type TurnOpenedBy = "user" | "listened_event";
+
+/**
+ * Something entering the conversation. `result`: the outcome of work this chat
+ * started. `notice`: an event the user chose to listen to. `browser`: a
+ * page-controlled event, summarized in a turn of its own without tools.
+ * `nudge`: the turn contract re-driving the model.
+ */
+export interface TurnArrival {
+  source: "user" | "result" | "notice" | "browser" | "nudge";
+  content: string;
+  /** Provenance of an agent-task completion, carried onto the user entry. */
+  eventMeta?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number };
+}
+
+/**
+ * One piece of work the commander is doing for whoever opened it: one or more
+ * model streams, until it owes nothing. Results of the work it started never
+ * open a turn of their own; they join this one (waking it when it waits).
+ * Design: docs/commander-turn-model-design.md §3–§5.
+ */
+export interface CommanderTurn {
+  id: string;
+  openedBy: TurnOpenedBy;
+  startedAt: number;
+  /** `running`: a stream is live or parked on an approval. `waiting`: no stream, results or the user still owed. */
+  status: "running" | "waiting";
+  /**
+   * Whether the user was there when the current stream started: they opened
+   * the turn or spoke into it. A stream woken by a result or an event is not
+   * watched, so outbound agent actions in it need approval.
+   */
+  userPresent: boolean;
+  /** A turn summarizing untrusted browser events: no tools, and nothing else joins it. */
+  toolless: boolean;
+  /** Arrivals not yet shown to the model; the next stream starts with them. */
+  inbox: TurnArrival[];
+  streams: number;
+}
+
+export function openTurn(first: TurnArrival, id: string, now = Date.now()): CommanderTurn {
+  return {
+    id,
+    openedBy: first.source === "user" ? "user" : "listened_event",
+    startedAt: now,
+    status: "running",
+    userPresent: false,
+    toolless: first.source === "browser",
+    inbox: [first],
+    streams: 0,
+  };
+}
+
+/** Whether an arrival may join the turn, or has to wait for the next one. */
+export function turnAccepts(turn: CommanderTurn, arrival: TurnArrival): boolean {
+  return !turn.toolless && arrival.source !== "browser";
+}
+
+/**
+ * Who is watching the stream about to start with these arrivals: the user if
+ * they spoke, nobody if a result or event woke it; a nudge alone changes nothing.
+ */
+export function userPresentAfter(current: boolean, arrivals: TurnArrival[]): boolean {
+  if (arrivals.some((arrival) => arrival.source === "user")) return true;
+  if (arrivals.some((arrival) => arrival.source !== "nudge")) return false;
+  return current;
+}

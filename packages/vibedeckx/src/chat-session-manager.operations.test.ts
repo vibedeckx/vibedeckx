@@ -96,8 +96,8 @@ function setup(opts: {
 
   const chatId = manager.getOrCreateSession("p1", "dev", "u1");
   const delivered: string[] = [];
-  vi.spyOn(manager as unknown as { enqueueOrSend: (id: string, content: string) => void }, "enqueueOrSend")
-    .mockImplementation((id, content) => { if (id === chatId) delivered.push(content); });
+  vi.spyOn(manager as unknown as { deliver: (id: string, arrival: { content: string }) => void }, "deliver")
+    .mockImplementation((id, arrival) => { if (id === chatId) delivered.push(arrival.content); });
 
   const tools = (manager as unknown as {
     createTools: (projectId: string, branch: string | null, sessionId?: string) => Record<string, {

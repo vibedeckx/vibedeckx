@@ -33,7 +33,10 @@ import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
 import type { RemoteExecutorStarts } from "./remote-executor-starts.js";
 import { AgentDispatchLedger, CommanderOperationLedger, isOperationInFlight, type AgentDispatch, type AgentDispatchChange, type CommanderExecutorOperation } from "./commander-operations.js";
-import { PendingRegistry, type PendingOutcome } from "./commander-turn.js";
+import {
+  PendingRegistry, openTurn, turnAccepts, userPresentAfter,
+  type CommanderTurn, type PendingOutcome, type TurnArrival,
+} from "./commander-turn.js";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import type { BrowserManager, BrowserError } from "./browser-manager.js";
 
@@ -75,25 +78,26 @@ interface ChatSession {
   eventListeningEnabled: boolean;
   /**
    * Sticky flag set when the model calls the `complete_task` tool. Used by
-   * the workspace dot (emits "main-completed") and by the post-stream
-   * watchdog (skips correction injection when set). Does NOT terminate the
-   * stream — user can still send more messages, and a new user message
-   * transitions back to "main-running".
+   * the workspace dot (emits "main-completed") and by the turn contract
+   * (a stream that called it may end the turn). Reset when the next stream
+   * starts. Does NOT terminate the stream.
    */
   taskCompleted: boolean;
   /**
-   * True while the current turn was triggered by a reactive system event
-   * (executor/agent/terminal/browser) rather than direct user input. Such
-   * turns must NOT drive the orchestrator workspace dot (violet/cyan) —
-   * the dot should keep reflecting the real subsystem state (e.g. the
-   * coding agent's own "completed"/emerald). Set per-turn at sendMessage
-   * start; read by emitChatActivity gating.
+   * The open turn, or null when the commander owes nothing to anyone. See
+   * commander-turn.ts and docs/commander-turn-model-design.md.
    */
-  eventDrivenTurn: boolean;
+  turn: CommanderTurn | null;
   /**
-   * Epoch ms when the current turn's stream started (set at runStream start).
-   * Read by getExecutorStatus to compute `startedThisTurn`/`finishedThisTurn`,
-   * so the model can tell a process that ran THIS turn from one whose status
+   * Arrivals that could not join the open turn (browser events, anything
+   * arriving during a browser turn, a stopped turn's unread inbox). Each
+   * waits for the next turn.
+   */
+  outside: TurnArrival[];
+  /**
+   * Epoch ms when the current turn opened. Read by getExecutorStatus to
+   * compute `startedThisTurn`/`finishedThisTurn`, so the model can tell a
+   * process that ran in THIS turn (any of its streams) from one whose status
    * row is left over from an earlier turn (the row is per-executor, not
    * per-turn). Null before the first turn.
    */
@@ -112,13 +116,6 @@ interface ChatSession {
    */
   lastAgentSessionId: string | null;
   /**
-   * True while the current turn was woken by a system/agent event (content
-   * sniffed via isSystemEventMessage), independent of eventDrivenTurn's
-   * dot-painting override. Gates needsApproval on the agent-delegation tools
-   * so event-driven outbound sends require user confirmation.
-   */
-  wokenByEvent: boolean;
-  /**
    * Set when the current turn paused on one or more tool-approval-requests.
    * Holds everything needed to resume the stream once the user decides.
    * Null whenever no approval is pending.
@@ -129,13 +126,6 @@ interface ChatSession {
   pending: PendingRegistry;
 }
 
-/**
- * Detect the synthetic "[X Event: ...]" messages the manager injects into
- * the chat when a subsystem fires (executor finished, coding agent task
- * completed, terminal output, browser error). These are reactive turns —
- * the user did not type them — so they must not repaint the orchestrator
- * workspace dot.
- */
 /**
  * Marks an event the user opted to listen to but the commander did not start:
  * it may trigger Workspace Rules, but it must not be read as the result of a
@@ -157,10 +147,6 @@ function describeOperation(operation: CommanderExecutorOperation): string[] {
     operation.stepId ? `Plan step: ${operation.stepId} (plan ${operation.planId})` : null,
     "The exit code is an execution fact, not acceptance: decide the step's status yourself against its completion criteria.",
   ].filter((line): line is string => line !== null);
-}
-
-function isSystemEventMessage(content: string): boolean {
-  return /^\[(Executor|Agent|Terminal|Browser) Event/.test(content);
 }
 
 /**
@@ -226,6 +212,20 @@ function summarizeToolOutput(output: unknown, max = 2000): string {
   const text = typeof output === "string" ? output : JSON.stringify(output);
   return text.length > max ? `${text.slice(0, max)}…(truncated)` : text;
 }
+
+/** How a stream ended, for deciding where its turn goes next. */
+interface StreamOutcome {
+  aborted: boolean;
+  error: string | null;
+  steps: ObservedStep[];
+  /** Tool calls the model made in the stream (for the no-tool rule). */
+  toolCalls: number;
+  /** Set when re-entered from the error backoff timer: decide now, re-checking everything. */
+  deferred?: boolean;
+}
+
+/** What the turn contract decided for a turn that may end. */
+type ContractVerdict = "pass" | "nudged" | "retry" | "stalled";
 
 /** A step observed on the stream: which tools it called and what they returned. */
 interface ObservedStep {
@@ -358,15 +358,6 @@ export class ChatSessionManager {
 
   /** operationId → the call's result, refusals included, replayed when the same call runs again. */
   private operationResults = new Map<string, Record<string, unknown>>();
-
-  /**
-   * sessionId → queued messages waiting to be sent after the current stream
-   * finishes. Each entry carries an optional `eventDriven` override so the
-   * turn classification (orchestrator dot gating) survives queuing — see
-   * `sendMessage`. When omitted, classification falls back to content
-   * sniffing via `isSystemEventMessage`.
-   */
-  private messageQueue = new Map<string, Array<{ content: string; eventDriven?: boolean; eventMeta?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number } }>>();
 
   /**
    * Tasks this chat orchestrator dispatched to coding agents (vs. ones started
@@ -728,14 +719,13 @@ export class ChatSessionManager {
         : `Summarize in 1-2 sentences what the coding agent accomplished.`,
     ].filter((line) => line !== null && line !== undefined).join("\n");
 
-    // A dispatched task's completion is a workflow continuation that
-    // legitimately drives the dot (eventDriven=false). One started in the
-    // agent window is a reactive summary that must not repaint it.
-    // Send as a user message into the main chat — triggers AI response
+    // A dispatched task's completion is the result of this chat's own work:
+    // it wakes the turn that dispatched it. One started in the agent window
+    // is an event the user chose to listen to.
     const eventMeta = event.turnEndEntryIndex !== undefined
       ? { kind: "agent_task_completed" as const, sessionId: event.sessionId, turnEndEntryIndex: event.turnEndEntryIndex }
       : undefined;
-    this.enqueueOrSend(chatSessionId, message, !dispatch, eventMeta);
+    this.deliver(chatSessionId, { source: dispatch ? "result" : "notice", content: message, eventMeta });
   }
 
   /**
@@ -803,8 +793,7 @@ export class ChatSessionManager {
         `Check your Workspace Rules for any rules that apply to this event, then respond.`,
       ].filter((line) => line !== null).join("\n");
 
-      // Send as a user message into the main chat — triggers DeepSeek AI response
-      this.enqueueOrSend(sessionId, message);
+      this.deliver(sessionId, { source: operation ? "result" : "notice", content: message });
     } catch (error) {
       console.error(`[ChatSession] handleExecutorFinished error:`, error);
     }
@@ -894,14 +883,14 @@ export class ChatSessionManager {
         if (this.remoteExecutorMap.has(operation.processId) || (operation.target === "local" && this.processManager.isRunning(operation.processId))) continue;
         this.operations.markUnconfirmedReported(operation.id, now);
         console.warn(`[ChatSession] reconcile: start of ${operation.executorName} on ${operation.target} (operation ${operation.id}) is still unconfirmed after ${Math.round(age / 60_000)} min`);
-        this.enqueueOrSend(session.id, [
+        this.deliver(session.id, { source: "result", content: [
           `[Executor Event: Start Unconfirmed]`,
           `Executor: "${operation.executorName}"`,
           `Operation: ${operation.id} (started by your runExecutor call)`,
           operation.stepId ? `Plan step: ${operation.stepId} (plan ${operation.planId})` : null,
           `The start has not been confirmed for ${Math.round(age / 60_000)} minutes and no finish has been observed. Its outcome is unknown: the command may never have started, or it may have run and already exited. Do not report it as started or as not started.`,
           `To resolve it, call runExecutor for the same executor again: that resumes this start under its identity (the worker reports the existing process, or starts it once) and the Process Finished event will name this operation. Or record the step as failed with "outcome unknown" and let the user check.`,
-        ].filter((line): line is string => line !== null).join("\n"));
+        ].filter((line): line is string => line !== null).join("\n") });
         continue;
       }
       if (age < IN_FLIGHT_RECONCILE_MIN_AGE_MS) continue;
@@ -946,80 +935,67 @@ export class ChatSessionManager {
   }
 
   /**
-   * Runs when a turn ends (every path: normal, errored, truncated) and checks
-   * the commander's turn contract. One budget, two violations:
+   * Runs when a stream ends with nothing owed and nobody to wait for — the
+   * point where the turn may end — and checks the commander's turn contract.
+   * One budget, two violations:
    *
-   * - plan-idle: the plan still owes steps, nothing is in flight to wake the
-   *   model, and it is not waiting on the user. Tools called this turn do not
-   *   matter — "setPlan, a lookup, then narrate" is the common way a plan died
-   *   in place. Out of budget → the plan is stalled and the user notified.
-   * - no-tool: no unfinished plan and the turn invoked no tool at all, usually
-   *   a narrated action that never ran. Out of budget → give up quietly; a
-   *   plan-less chat may just have been answering a question.
+   * - plan-idle: the plan still owes steps. Tools called in the stream do not
+   *   matter — "setPlan, a lookup, then narrate" is the common way a plan
+   *   died in place. Out of budget → the plan is stalled and the user notified.
+   * - no-tool: no unfinished plan and the stream invoked no tool at all,
+   *   usually a narrated action that never ran. Out of budget → give up
+   *   quietly; a plan-less chat may just have been answering a question.
+   *
+   * A nudge goes into the turn's inbox and the turn goes on; a failed stream
+   * waits out a backoff first.
    */
-  private enforceTurnContract(session: ChatSession, outcome: {
-    aborted: boolean;
-    error: string | null;
-    steps: ObservedStep[];
-    /** Tool calls the model made this turn (for the no-tool rule). */
-    toolCalls: number;
-    /** Set when re-entered from the error backoff timer: send now, re-checking every guard. */
-    deferred?: boolean;
-  }): void {
+  private enforceTurnContract(session: ChatSession, outcome: StreamOutcome): ContractVerdict {
     const sessionId = session.id;
     const planState = session.planState;
     const plan = planState.current;
-    // A turn that started meanwhile (or parked for approval) re-evaluates in its own finally.
-    if (outcome.deferred && (session.abortController || session.pendingApproval)) return;
-    if (outcome.aborted) return;
+    // A browser turn has no tools to call: summarizing is all it may do.
+    if (session.turn?.toolless) return "pass";
     if (session.taskCompleted) {
       // complete_task is the compliant way to end a turn.
       planState.nudges = 0;
-      return;
+      return "pass";
     }
-    if (planState.blocked || planState.stalled) return;
-    // A queued message (an event) opens the next turn anyway.
-    if ((this.messageQueue.get(sessionId)?.length ?? 0) > 0) return;
+    if (planState.blocked || planState.stalled) return "pass";
     const unfinished = planState.unfinishedSteps();
 
     if (!plan || unfinished.length === 0) {
       // A failed stream with no plan behind it is the user's to retry: the
       // error entry is on screen and nothing was promised.
-      if (outcome.error) return;
+      if (outcome.error) return "pass";
       if (outcome.toolCalls > 0) {
         planState.nudges = 0;
-        return;
+        return "pass";
       }
-      this.nudgeNoTool(session);
-      return;
-    }
-
-    // Legitimately waiting for the user (surfaced on the task card), or for an
-    // event that will wake the model: a compliant end of turn.
-    if (plan.waitingOn || this.hasInFlightWork(sessionId)) {
-      planState.nudges = 0;
-      return;
+      return this.nudgeNoTool(session);
     }
 
     if (outcome.error && !outcome.deferred) {
       // The stream itself failed (API error, rate limit): re-driving at once
-      // would hit the same wall. Back off, then come back through every guard
-      // above — the user may have spoken, work may have started, the plan may
-      // be waiting on a decision — before anything is sent.
+      // would hit the same wall. The turn waits out a backoff, then decides
+      // again with fresh state — the user may have spoken, work may have
+      // started, the plan may be waiting on a decision.
       this.cancelStallRetry(sessionId);
+      const turn = session.turn;
       const timer = setTimeout(() => {
         this.stallRetryTimers.delete(sessionId);
         const live = this.sessions.get(sessionId);
-        if (live && live.planState.current?.planId === plan.planId) this.enforceTurnContract(live, { ...outcome, deferred: true });
+        if (!live || !turn || live.turn !== turn || turn.status !== "waiting") return;
+        if (live.planState.current?.planId !== plan.planId) return;
+        this.afterStream(live, turn, { ...outcome, deferred: true });
       }, this.stallRetryDelayMs);
       timer.unref?.();
       this.stallRetryTimers.set(sessionId, timer);
-      return;
+      return "retry";
     }
 
     if (planState.nudges >= MAX_TURN_NUDGES) {
       this.stallPlan(session, outcome.error ? `the model stream failed repeatedly (${outcome.error})` : "the model kept ending turns without starting the next step");
-      return;
+      return "stalled";
     }
     planState.nudges++;
     const attempt = `${planState.nudges}/${MAX_TURN_NUDGES}`;
@@ -1061,27 +1037,29 @@ export class ChatSessionManager {
       ];
     }
     console.log(`[ChatSession] plan continuation nudge ${attempt} for ${sessionId} (${outcome.error ? "error" : truncated ? "step-limit" : "idle"})`);
-    this.enqueueOrSend(sessionId, lines.join("\n"));
+    session.turn?.inbox.push({ source: "nudge", content: lines.join("\n") });
+    return "nudged";
   }
 
-  /** The no-plan half of the turn contract: a turn that invoked no tool at all. */
-  private nudgeNoTool(session: ChatSession): void {
+  /** The no-plan half of the turn contract: a stream that invoked no tool at all. */
+  private nudgeNoTool(session: ChatSession): ContractVerdict {
     const planState = session.planState;
     if (planState.nudges >= MAX_TURN_NUDGES) {
       console.warn(`[ChatSession] watchdog: no-tool correction limit (${MAX_TURN_NUDGES}) reached for ${session.id}, giving up`);
       // Fresh budget for the next violation; giving up injects nothing, so this cannot loop.
       planState.nudges = 0;
-      return;
+      return "pass";
     }
     planState.nudges++;
     console.log(`[ChatSession] watchdog: no tool_use in stream for ${session.id}, injecting correction (attempt ${planState.nudges}/${MAX_TURN_NUDGES})`);
-    this.enqueueOrSend(session.id, [
+    session.turn?.inbox.push({ source: "nudge", content: [
       NO_TOOL_CORRECTION_PREFIX,
       "You ended a turn without invoking any tool.",
       "Either call a tool to make progress, or call `complete_task` to mark the user's task finished.",
       "Do not narrate actions you did not actually take — only a tool_use block executes anything.",
       "If you claimed to have started or run something this turn, re-issue that action NOW by invoking the actual tool — do NOT just query status to 'confirm' a step you never executed. A status row may be left over from an earlier turn; check `startedThisTurn`/`finishedThisTurn` before assuming progress.",
-    ].join("\n"));
+    ].join("\n") });
+    return "nudged";
   }
 
   /** Drop a pending error-backoff re-drive: the turn starting now re-evaluates the plan itself. */
@@ -1157,9 +1135,8 @@ export class ChatSessionManager {
       ? `${content.slice(0, MAX_BROWSER_EVENT_MESSAGE_LENGTH)}\n...(truncated)`
       : content;
 
-    // eventDriven=true: classifies the turn as reactive (no orchestrator-dot
-    // repaint) AND, in sendMessage, strips the tool set for this turn.
-    this.enqueueOrSend(sessionId, capped, true);
+    // Summarized in a turn of its own, without tools and without repainting the dot.
+    this.deliver(sessionId, { source: "browser", content: capped });
   }
 
   private async spawnRemoteAgentSession(params: {
@@ -1560,8 +1537,8 @@ export class ChatSessionManager {
       // Clean up watcher before sending (prevents duplicate flushes)
       this.stopTerminalWatcher(terminalId);
 
-      // Inject into chat session (queued if a stream is already active)
-      this.enqueueOrSend(sessionId, message);
+      // The watched command's output is the result of this chat's own work.
+      this.deliver(sessionId, { source: "result", content: message });
     };
 
     const unsubscribe = this.processManager.subscribe(terminalId, (msg) => {
@@ -1619,7 +1596,7 @@ export class ChatSessionManager {
    * the existing reverse-connect WebSocket.
    * Mirrors the local startTerminalWatcher() — accumulates output with
    * debounce, flushes on "finished" or idle timeout, and feeds the result
-   * into enqueueOrSend().
+   * into deliver().
    */
   private startRemoteTerminalWatcher(
     sessionId: string,
@@ -1677,8 +1654,7 @@ export class ChatSessionManager {
       // Clean up watcher before sending (prevents duplicate flushes)
       this.stopTerminalWatcher(terminalId);
 
-      // Inject into chat session
-      this.enqueueOrSend(sessionId, message);
+      this.deliver(sessionId, { source: "result", content: message });
     };
 
     // Open a virtual channel over the existing reverse-connect WebSocket.
@@ -1792,10 +1768,10 @@ export class ChatSessionManager {
       abortController: null,
       eventListeningEnabled: false,
       taskCompleted: false,
-      eventDrivenTurn: false,
+      turn: null,
+      outside: [],
       turnStartedAt: null,
       lastAgentSessionId: null,
-      wokenByEvent: false,
       pendingApproval: null,
       planState: new ChatPlanState(),
       pending: new PendingRegistry(),
@@ -1841,7 +1817,7 @@ export class ChatSessionManager {
    * The flag is sticky for the REST OF THE CURRENT TURN — any further emits
    * within this stream (a post-complete tool-call, or the execute/tool-call
    * ordering race) keep cyan rather than reverting to violet. It is cleared
-   * at the start of the next sendMessage (a new turn = fresh work = violet)
+   * when the next stream starts (fresh work = violet)
    * and by resetSession.
    */
   markCompleted(sessionId: string): boolean {
@@ -1851,7 +1827,7 @@ export class ChatSessionManager {
       return false;
     }
     session.taskCompleted = true;
-    // On reactive event-driven turns the orchestrator dot normally belongs to
+    // In a turn the user did not open the orchestrator dot normally belongs to
     // the subsystem (agent/executor) — don't repaint it just because the chat
     // finished auto-summarizing. The exception: when the dot still shows the
     // orchestrator's own `main-running` (a prior user turn kicked off async
@@ -1863,9 +1839,10 @@ export class ChatSessionManager {
       session.projectId,
       session.branch,
     );
-    if (shouldEmitMainCompleted(session.eventDrivenTurn, currentDot)) {
+    const eventDriven = !this.drivesDot(session);
+    if (shouldEmitMainCompleted(eventDriven, currentDot)) {
       this.emitChatActivity(session, "main-completed");
-      console.debug(`[ChatSession] markCompleted: emitted main-completed for session=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"} (eventDriven=${session.eventDrivenTurn}, dotWas=${currentDot ?? "none"})`);
+      console.debug(`[ChatSession] markCompleted: emitted main-completed for session=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"} (eventDriven=${eventDriven}, dotWas=${currentDot ?? "none"})`);
     }
     return true;
   }
@@ -2086,10 +2063,11 @@ export class ChatSessionManager {
     const storage = this.storage;
     const processManager = this.processManager;
     // Captured for turn-attribution in getExecutorStatus. createTools runs once
-    // per turn, after session.turnStartedAt is set, so this is stable and
-    // correct for the current turn.
+    // per stream, after the turn opened, so this is stable for the turn.
     const turnStartedAt = (sessionId ? this.sessions.get(sessionId)?.turnStartedAt : null) ?? null;
-    const wokenByEvent = (sessionId ? this.sessions.get(sessionId)?.wokenByEvent : false) ?? false;
+    // Outbound agent actions need the user's approval in a stream nobody is
+    // watching: one a result or event woke (design §9).
+    const unattended = sessionId ? this.sessions.get(sessionId)?.turn?.userPresent === false : false;
     const agentSessionManager = this.agentSessionManager;
     const remoteExecutorMap = this.remoteExecutorMap;
     const reverseConnectManager = this.reverseConnectManager;
@@ -2325,7 +2303,7 @@ export class ChatSessionManager {
             .optional()
             .describe("Which agent to spawn. Defaults to claude-code."),
         }),
-        needsApproval: wokenByEvent,
+        needsApproval: unattended,
         execute: async ({ prompt, agentType }, toolOptions?: { toolCallId?: string }) => {
           if (!sessionId) {
             return { success: false, message: "No session context available." };
@@ -2434,7 +2412,7 @@ export class ChatSessionManager {
               "The message to send to the coding agent. Write it in the user's original language, and describe what you want clearly without over-prescribing the steps — let the agent work out the how.",
             ),
         }),
-        needsApproval: wokenByEvent,
+        needsApproval: unattended,
         execute: async ({ message }, toolOptions?: { toolCallId?: string }) => {
           if (!sessionId) {
             return { success: false, message: "No session context available." };
@@ -3231,132 +3209,105 @@ export class ChatSessionManager {
     return tools;
   }
 
-  // ---- Message queue (prevents concurrent streams on the same session) ----
+  // ---- Turns: everything entering the conversation goes through deliver() ----
 
-  private enqueueOrSend(
-    sessionId: string,
-    content: string,
-    eventDriven?: boolean,
-    eventMeta?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number },
-  ): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) {
-      console.warn(`[ChatSession] enqueueOrSend: session ${sessionId} not found, dropping message`);
-      return;
-    }
-
-    if (session.abortController) {
-      // A stream is already active — queue the message
-      let queue = this.messageQueue.get(sessionId);
-      if (!queue) {
-        queue = [];
-        this.messageQueue.set(sessionId, queue);
-      }
-
-      // Rate-limit attacker-controlled browser events: a malicious previewed
-      // page can fire console errors / failed requests in a tight loop. Cap
-      // how many can pile up behind an active stream so it can't grow an
-      // unbounded LLM queue (cost/storage DoS).
-      if (content.startsWith(BROWSER_EVENT_PREFIX)) {
-        const queuedBrowserEvents = queue.filter((item) => item.content.startsWith(BROWSER_EVENT_PREFIX)).length;
-        if (queuedBrowserEvents >= MAX_QUEUED_BROWSER_EVENTS) {
-          console.warn(`[ChatSession] Dropping browser event for session ${sessionId} (queued browser-event limit ${MAX_QUEUED_BROWSER_EVENTS} reached)`);
-          return;
-        }
-      }
-
-      queue.push({ content, eventDriven, eventMeta });
-      console.debug(`[ChatSession] Queued message for session ${sessionId} (queue length: ${queue.length})`);
-      return;
-    }
-
-    // No active stream — send immediately
-    this.sendMessage(sessionId, content, eventDriven, eventMeta).catch((err) => {
-      console.error(`[ChatSession] enqueueOrSend sendMessage error:`, err);
+  /** Route an arrival into the conversation; see `route`. */
+  private deliver(sessionId: string, arrival: TurnArrival): void {
+    this.route(sessionId, arrival).catch((err) => {
+      console.error(`[ChatSession] deliver error for ${sessionId}:`, err);
     });
   }
-
-  private drainQueue(sessionId: string): void {
-    const queue = this.messageQueue.get(sessionId);
-    if (!queue || queue.length === 0) {
-      this.messageQueue.delete(sessionId);
-      return;
-    }
-
-    const next = queue.shift()!;
-    if (queue.length === 0) this.messageQueue.delete(sessionId);
-
-    console.debug(`[ChatSession] Draining queued message for session ${sessionId}`);
-    this.sendMessage(sessionId, next.content, next.eventDriven, next.eventMeta).catch((err) => {
-      console.error(`[ChatSession] drainQueue sendMessage error:`, err);
-    });
-  }
-
-  // ---- Send message & stream AI response ----
 
   /**
-   * @param eventDriven Explicit turn classification override. When omitted,
-   *   the turn is classified by sniffing the content for a `[X Event]`
-   *   prefix. Callers that know the provenance (e.g. a chat-initiated agent
-   *   completion, which is a workflow continuation despite being an
-   *   `[Agent Event]`) pass it explicitly. Drives orchestrator dot gating.
-   * @param eventMeta When this message originates from an `session:taskCompleted`
-   *   event with a known turn-end boundary, carries that provenance onto the
-   *   pushed user entry (`event` field) so downstream consumers (e.g. the
-   *   workflow UI) can correlate the chat turn with the agent turn it reacts to.
+   * With no open turn the arrival opens one, resolving when that turn's first
+   * stream ends. An open turn takes it into its inbox: a waiting turn wakes on
+   * it, a running one shows it to the model when the current stream ends. A
+   * browser event never joins an open turn and nothing joins a browser turn —
+   * those wait for the next turn.
    */
-  async sendMessage(
-    sessionId: string,
-    content: string,
-    eventDriven?: boolean,
-    eventMeta?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number },
-  ): Promise<boolean> {
+  private async route(sessionId: string, arrival: TurnArrival): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
-      console.warn(`[ChatSession] sendMessage: session ${sessionId} not found, dropping message`);
-      return false;
+      console.warn(`[ChatSession] deliver: session ${sessionId} not found, dropping ${arrival.source} message`);
+      return;
     }
+    const turn = session.turn;
+    if (!turn) {
+      session.turn = openTurn(arrival, randomUUID());
+      session.turnStartedAt = session.turn.startedAt;
+      await this.startStream(session);
+      return;
+    }
+    if (!turnAccepts(turn, arrival)) {
+      this.queueForNextTurn(session, arrival);
+      return;
+    }
+    turn.inbox.push(arrival);
+    if (turn.status === "waiting") await this.startStream(session);
+  }
 
-    // A turn is starting: a pending error-backoff re-drive is superseded —
-    // this turn's own finally re-evaluates the plan with fresh state.
-    this.cancelStallRetry(sessionId);
+  private queueForNextTurn(session: ChatSession, arrival: TurnArrival): void {
+    // Rate-limit attacker-controlled browser events: a malicious previewed
+    // page can fire console errors / failed requests in a tight loop. Cap how
+    // many can pile up so it can't grow an unbounded LLM queue (cost/storage DoS).
+    if (arrival.source === "browser") {
+      const queuedBrowserEvents = session.outside.filter((item) => item.source === "browser").length;
+      if (queuedBrowserEvents >= MAX_QUEUED_BROWSER_EVENTS) {
+        console.warn(`[ChatSession] Dropping browser event for session ${session.id} (queued browser-event limit ${MAX_QUEUED_BROWSER_EVENTS} reached)`);
+        return;
+      }
+    }
+    session.outside.push(arrival);
+    console.debug(`[ChatSession] Queued ${arrival.source} message for the next turn of ${session.id} (queue length: ${session.outside.length})`);
+  }
 
-    // 1. Push user message
-    const userMsg: AgentMessage = { type: "user", content, timestamp: Date.now(), ...(eventMeta ? { event: eventMeta } : {}) };
-    this.pushEntry(session, userMsg);
+  /** Hand waiting arrivals to the next turn, for as long as it takes them. */
+  private drainOutside(session: ChatSession): void {
+    while (session.outside.length > 0) {
+      const next = session.outside[0];
+      if (session.turn && !turnAccepts(session.turn, next)) return;
+      session.outside.shift();
+      this.deliver(session.id, next);
+    }
+  }
 
-    // 2. Update status to running
+  /** Whether the orchestrator dot follows this turn: only one the user opened. */
+  private drivesDot(session: ChatSession): boolean {
+    return session.turn?.openedBy === "user";
+  }
+
+  /** Start the turn's next stream with everything that arrived since the last one. */
+  private async startStream(session: ChatSession): Promise<void> {
+    const turn = session.turn;
+    if (!turn) return;
+    // A stream is starting: a pending error-backoff re-drive is superseded —
+    // this stream's end decides again with fresh state.
+    this.cancelStallRetry(session.id);
+
+    const arrivals = turn.inbox.splice(0);
+    for (const arrival of arrivals) {
+      this.pushEntry(session, {
+        type: "user", content: arrival.content, timestamp: Date.now(),
+        ...(arrival.eventMeta ? { event: arrival.eventMeta } : {}),
+      });
+      if (arrival.source === "user") {
+        // The user spoke: the plan gets a fresh nudge budget, and a plan
+        // waiting on them is no longer waiting.
+        session.planState.resetNudges();
+        if (session.planState.current?.waitingOn) delete session.planState.current.waitingOn;
+      }
+    }
+    turn.userPresent = userPresentAfter(turn.userPresent, arrivals);
+    turn.status = "running";
+    turn.streams++;
+
     session.status = "running";
     this.broadcastPatch(session, ConversationPatch.updateStatus("running"));
-    // Classify the turn. Reactive system-event turns (executor/agent/
-    // terminal/browser) must NOT repaint the orchestrator dot — leave it
-    // showing the real subsystem state (e.g. the coding agent's emerald
-    // "completed"). Only user-initiated turns (and chat-initiated agent
-    // continuations) drive violet/cyan. An explicit `eventDriven` from the
-    // caller wins over content sniffing.
-    session.eventDrivenTurn = eventDriven ?? isSystemEventMessage(content);
-    // Gate signal for outbound agent-delegation tools. Pure content sniff —
-    // unlike eventDrivenTurn, NOT overridden by the eventDriven param, so
-    // chat-initiated agent completions (eventDrivenTurn=false) are still gated.
-    session.wokenByEvent = isSystemEventMessage(content);
-    // The user spoke: the plan gets a fresh nudge budget, and a plan waiting
-    // on them is no longer waiting.
-    if (!session.wokenByEvent && !content.startsWith(PLAN_CONTINUATION_PREFIX) && !content.startsWith(NO_TOOL_CORRECTION_PREFIX)) {
-      session.planState.resetNudges();
-      if (session.planState.current?.waitingOn) delete session.planState.current.waitingOn;
-    }
-    // A new turn is starting — clear the prior turn's completion so the
-    // dot returns to "main-running" (violet). `complete_task` means "this
-    // response is finished, over to you" (cyan); the next turn is fresh
-    // work again. The flag is reset here rather than in markCompleted so
-    // it stays sticky for the rest of the turn it was set in (see the
-    // tool-call handler + the trailing-text case).
+    // `complete_task` speaks for the stream it is called in; the next stream
+    // is fresh work again (violet).
     session.taskCompleted = false;
-    if (!session.eventDrivenTurn) {
-      this.emitChatActivity(session, "main-running");
-    }
+    if (this.drivesDot(session)) this.emitChatActivity(session, "main-running");
 
-    // 3. Build messages array for AI SDK
     const messages = session.store.entries
       .filter((e): e is Extract<AgentMessage, { type: "user" | "assistant" }> =>
         e.type === "user" || e.type === "assistant"
@@ -3366,9 +3317,86 @@ export class ChatSessionManager {
         content: typeof e.content === "string" ? e.content : e.content.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n"),
       }));
 
-    // 4. Stream response
     await this.runStream(session, messages);
+  }
 
+  private continueTurn(session: ChatSession): void {
+    this.startStream(session).catch((err) => {
+      console.error(`[ChatSession] continueTurn error for ${session.id}:`, err);
+    });
+  }
+
+  /**
+   * Where the turn goes when a stream ends (design §5.2): show the model what
+   * arrived meanwhile, wait for owed results or for the user, or let the turn
+   * contract decide whether the turn may end.
+   */
+  private afterStream(session: ChatSession, turn: CommanderTurn, outcome: StreamOutcome): void {
+    // A reset (or a newer turn) took over while this stream was ending.
+    if (session.turn !== turn) return;
+    if (outcome.aborted) {
+      this.endTurn(session, "cancelled");
+      return;
+    }
+    if (turn.inbox.length > 0) {
+      this.continueTurn(session);
+      return;
+    }
+    const plan = session.planState.current;
+    const waitingOnUser = Boolean(plan?.waitingOn) && session.planState.unfinishedSteps().length > 0;
+    if (session.pending.hasOpen() || waitingOnUser) {
+      // Work it started is on its way back, or the user owes a decision: a
+      // compliant end of a stream. The result (or the reply) wakes the turn.
+      turn.status = "waiting";
+      session.planState.nudges = 0;
+      return;
+    }
+    switch (this.enforceTurnContract(session, outcome)) {
+      case "nudged":
+        this.continueTurn(session);
+        return;
+      case "retry":
+        turn.status = "waiting";
+        return;
+      case "stalled":
+        this.endTurn(session, "stalled");
+        return;
+      case "pass":
+        this.endTurn(session, "completed");
+        return;
+    }
+  }
+
+  private endTurn(session: ChatSession, endedWith: "completed" | "cancelled" | "stalled"): void {
+    const turn = session.turn;
+    if (!turn) return;
+    session.turn = null;
+    this.cancelStallRetry(session.id);
+    // One divider per turn, however many streams it took. Skip a double
+    // divider (an empty stream).
+    const lastEntry = session.store.entries[session.store.nextIndex - 1];
+    if (lastEntry && lastEntry.type !== "turn_end") {
+      this.pushEntry(session, { type: "turn_end", timestamp: Date.now() });
+    }
+    // What the turn never showed the model goes to the next turn, first.
+    if (turn.inbox.length > 0) session.outside.unshift(...turn.inbox.splice(0));
+    console.debug(`[ChatSession] turn ${turn.id} of ${session.id} ended ${endedWith} after ${turn.streams} stream(s)`);
+    this.drainOutside(session);
+  }
+
+  // ---- Send message & stream AI response ----
+
+  /**
+   * A message from the user. With no open turn it opens one and resolves when
+   * that turn's first stream ends; otherwise it speaks into the open turn —
+   * waking a waiting turn, or reaching the model when the current stream ends.
+   */
+  async sendMessage(sessionId: string, content: string): Promise<boolean> {
+    if (!this.sessions.has(sessionId)) {
+      console.warn(`[ChatSession] sendMessage: session ${sessionId} not found, dropping message`);
+      return false;
+    }
+    await this.route(sessionId, { source: "user", content });
     return true;
   }
 
@@ -3420,20 +3448,18 @@ export class ChatSessionManager {
   }
 
   /**
-   * Run one `streamText` pass against a caller-supplied messages array.
-   * Sets `session.abortController` and `session.turnStartedAt`, drives the
-   * full stream loop (text-delta / tool-call / tool-result), finalizes the
-   * partial assistant message, runs the no-tool-call watchdog, and drains
-   * the queue in `finally`. Extracted from `sendMessage` so it can also be
-   * called by the approval-resume path (Task 4/5).
+   * Run one `streamText` pass of the open turn against a caller-supplied
+   * messages array. Sets `session.abortController`, drives the full stream
+   * loop (text-delta / tool-call / tool-result), finalizes the partial
+   * assistant message, and in `finally` hands the turn to `afterStream`
+   * unless it parked on an approval. Called by `startStream` and by the
+   * approval-resume path.
    */
   private async runStream(session: ChatSession, messages: ModelMessage[]): Promise<void> {
     const sessionId = session.id;
+    const turn = session.turn;
     const abortController = new AbortController();
     session.abortController = abortController;
-    // Anchor for turn-attribution in getExecutorStatus. Set here, after the
-    // messages array is built, so it marks when THIS stream began.
-    session.turnStartedAt = Date.now();
 
     let assistantIndex: number | null = null;
     let accumulatedText = "";
@@ -3453,17 +3479,10 @@ export class ChatSessionManager {
     try {
       // Browser events are untrusted page-controlled content. Never expose the
       // privileged tool set (runInTerminal, openPreview, getPageContent, …) to
-      // these turns — they exist only to be summarized, so a prompt injection
-      // in a previewed page cannot drive tool execution.
-      // Derive isBrowserEvent from the last user message in the messages array
-      // (the same message that sendMessage used content.startsWith() on).
-      const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
-      const lastUserText = typeof lastUserMsg?.content === "string"
-        ? lastUserMsg.content
-        : Array.isArray(lastUserMsg?.content)
-          ? lastUserMsg.content.filter((p): p is { type: "text"; text: string } => p.type === "text").map((p) => p.text).join("")
-          : "";
-      const isBrowserEvent = lastUserText.startsWith(BROWSER_EVENT_PREFIX);
+      // their turns — they exist only to be summarized, so a prompt injection
+      // in a previewed page cannot drive tool execution. Nothing else joins
+      // such a turn (turnAccepts).
+      const isBrowserEvent = turn?.toolless ?? false;
       const baseSystemPrompt = await this.getSystemPrompt(session.projectId, session.branch);
       // New turns intentionally rebuild text-only history. Carry the active
       // plan separately so async completions retain IDs, criteria and progress.
@@ -3572,10 +3591,10 @@ export class ChatSessionManager {
             // override it. Sticky-completed: if complete_task was called
             // earlier (even in this same stream, e.g. the model called
             // complete_task then another tool), keep cyan instead of
-            // reverting to violet. Suppressed entirely on event-driven
-            // turns (the dot belongs to the subsystem there).
+            // reverting to violet. Suppressed entirely in turns the user did
+            // not open (the dot belongs to the subsystem there).
             toolCallCountInStream++;
-            if (!session.eventDrivenTurn) {
+            if (this.drivesDot(session)) {
               this.emitChatActivity(
                 session,
                 session.taskCompleted ? "main-completed" : "main-running",
@@ -3701,35 +3720,24 @@ export class ChatSessionManager {
     } finally {
       if (session.pendingApproval) {
         // Turn suspended awaiting user approval — keep abortController set so
-        // concurrent events queue (drained on resume); skip status/turn_end/drain.
+        // arrivals wait in the inbox (shown on resume); decide nothing yet.
         console.debug(`[ChatSession] runStream parked for approval ${sessionId}`);
       } else {
-        session.abortController = null;
-        session.status = "stopped";
-        this.broadcastPatch(session, ConversationPatch.updateStatus("stopped"));
-
-        // Mark the end of this turn so the UI can render a divider. Every
-        // stream (normal, aborted, or errored) reaches this point, so a
-        // turn_end entry here separates each turn from the next — including
-        // the most recent one at the bottom. Skip if the last entry is
-        // already a turn_end (defends against an empty stream producing a
-        // bare double divider).
-        const lastEntry = session.store.entries[session.store.nextIndex - 1];
-        if (lastEntry && lastEntry.type !== "turn_end") {
-          this.pushEntry(session, { type: "turn_end", timestamp: Date.now() });
-        }
-
-        // Turn contract: re-drive an idle plan or correct a tool-less turn —
-        // on the error path too.
-        this.enforceTurnContract(session, {
+        // A reset may have started a newer stream already; never clear its controller.
+        if (session.abortController === abortController) session.abortController = null;
+        const outcome: StreamOutcome = {
           aborted: abortController.signal.aborted,
           error: streamError,
           steps: observedSteps,
           toolCalls: toolCallCountInStream,
-        });
-
-        // Process any queued messages (e.g. [Terminal Event] that arrived during this stream)
-        this.drainQueue(sessionId);
+        };
+        if (turn) this.afterStream(session, turn, outcome);
+        else this.drainOutside(session);
+        // Unless the turn went straight on into its next stream, nothing is streaming now.
+        if (!session.abortController) {
+          session.status = "stopped";
+          this.broadcastPatch(session, ConversationPatch.updateStatus("stopped"));
+        }
       }
     }
   }
@@ -3741,15 +3749,14 @@ export class ChatSessionManager {
     if (!session) return false;
 
     // Parked-for-approval turn: no live stream to abort. Tear down
-    // explicitly (the runStream finally won't run again) and process any
-    // events that queued during the wait.
+    // explicitly (the runStream finally won't run again) and end the turn.
     if (session.pendingApproval) {
       session.pendingApproval = null;
       session.abortController = null;
       session.status = "stopped";
       this.broadcastPatch(session, ConversationPatch.updateStatus("stopped"));
       this.emitChatActivity(session, "stopped");
-      this.drainQueue(sessionId);
+      this.endTurn(session, "cancelled");
       return true;
     }
 
@@ -3778,6 +3785,8 @@ export class ChatSessionManager {
     }
     session.pendingApproval = null;
     session.planState = new ChatPlanState();
+    session.turn = null;
+    session.outside = [];
     this.cancelStallRetry(sessionId);
     // Results of operations started by the cleared conversation have no owner left.
     this.operations.forgetSession(sessionId);
