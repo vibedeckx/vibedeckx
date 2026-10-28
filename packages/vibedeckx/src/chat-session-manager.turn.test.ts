@@ -83,6 +83,7 @@ function setup(doStream: MockLanguageModelV3["doStream"], opts: { running?: bool
     start,
     getProcessesByExecutorId: vi.fn(() => []),
     isRunning: vi.fn(() => opts.running ?? true),
+    subscribe: vi.fn(() => () => {}),
   } as unknown as ProcessManager;
   const emitBranchActivityIfChanged = vi.fn();
   const manager = new ChatSessionManager(
@@ -103,7 +104,7 @@ function setup(doStream: MockLanguageModelV3["doStream"], opts: { running?: bool
   const stop = (processId: string, exitCode = 0) => bus.emit({
     type: "executor:stopped", projectId: "p1", executorId: "e1", processId, exitCode, tailOutput: "done",
   });
-  return { manager, id, bus, idle, userMessages, continuations, stop, start, outboxInsert, milestones, emitBranchActivityIfChanged };
+  return { manager, id, bus, idle, userMessages, continuations, stop, start, outboxInsert, milestones, emitBranchActivityIfChanged, storage };
 }
 
 const managers: ChatSessionManager[] = [];
@@ -115,6 +116,9 @@ afterEach(() => {
 
 type Internal = {
   deliver: (id: string, arrival: { source: "user" | "result" | "notice" | "browser" | "nudge"; content: string }) => void;
+  startTerminalWatcher: (sessionId: string, terminalId: string) => void;
+  startRemoteTerminalWatcher: (sessionId: string, terminalId: string, info: { remoteServerId: string; remoteProcessId: string }) => void;
+  reverseConnectManager: unknown;
   createTools: (projectId: string, branch: string | null, sessionId?: string) => Record<string, { needsApproval?: unknown }>;
 };
 
@@ -281,5 +285,79 @@ describe("commander turns", () => {
     await idle();
     expect(manager.getSession(id)!.turn).toBeNull();
     expect(turnEnds(manager, id)).toBe(1);
+  });
+
+  it("a finish whose lookups outlast the stream it arrived in still joins that turn", async () => {
+    let phase = 0;
+    let releaseLookup!: () => void;
+    const lookup = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const ctx = setup(async () => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        case 1:
+          // The finish lands mid-stream; its executor lookup is still pending when the stream ends.
+          ctx.stop(ctx.start.mock.calls[0][3]);
+          return text("Checking.");
+        case 2: return call("finish", "complete_task", { summary: "Built" });
+        case 3: return text("Built.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    const { manager, id, idle, storage, userMessages } = ctx;
+    await manager.sendMessage(id, "Build it");
+    await idle();
+    const getById = vi.mocked(storage.executors.getById);
+    const original = getById.getMockImplementation()!;
+    getById.mockImplementation(async (executorId: string) => { await lookup; return original(executorId); });
+
+    await manager.sendMessage(id, "How is it going?");
+    await idle();
+    expect(phase).toBe(2);
+    const turn = manager.getSession(id)!.turn;
+    expect(turn?.status).toBe("waiting");
+
+    releaseLookup();
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(phase).toBe(4);
+    expect(turnEnds(manager, id)).toBe(1);
+    expect(userMessages().filter((content) => content.startsWith("[System Invariant Violation]"))).toEqual([]);
+    expect(userMessages().at(-1)).toMatch(/^\[Executor Event: Process Finished\]/);
+  });
+});
+
+describe("terminal watch that goes quiet", () => {
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("a local watch with no output reports that instead of stopping silently", () => {
+    vi.useFakeTimers();
+    const { manager, id } = setup(async () => text("unused"));
+    const internal = manager as unknown as Internal;
+    const delivered: string[] = [];
+    vi.spyOn(internal, "deliver").mockImplementation((_id, arrival) => { delivered.push(arrival.content); });
+    internal.startTerminalWatcher(id, "t1");
+    expect(manager.getSession(id)!.pending.isOpen("terminal_watch", "t1")).toBe(true);
+
+    vi.advanceTimersByTime(60_000);
+    expect(manager.getSession(id)!.pending.hasOpen()).toBe(false);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatch(/^\[Terminal Event: No New Output\]\nTerminal: t1/);
+  });
+
+  it("a remote watch with no output reports that too", () => {
+    vi.useFakeTimers();
+    const { manager, id } = setup(async () => text("unused"));
+    const internal = manager as unknown as Internal;
+    internal.reverseConnectManager = {
+      isConnected: () => true, setChannelAdapter: vi.fn(), openVirtualChannel: vi.fn(), closeChannel: vi.fn(), sendChannelData: vi.fn(),
+    };
+    const delivered: string[] = [];
+    vi.spyOn(internal, "deliver").mockImplementation((_id, arrival) => { delivered.push(arrival.content); });
+    internal.startRemoteTerminalWatcher(id, "remote-t1", { remoteServerId: "srv", remoteProcessId: "rp1" });
+    expect(manager.getSession(id)!.pending.isOpen("terminal_watch", "remote-t1")).toBe(true);
+
+    vi.advanceTimersByTime(60_000);
+    expect(manager.getSession(id)!.pending.hasOpen()).toBe(false);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatch(/^\[Terminal Event: No New Output\]\nTerminal: remote-t1/);
   });
 });

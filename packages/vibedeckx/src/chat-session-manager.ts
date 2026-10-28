@@ -748,55 +748,71 @@ export class ChatSessionManager {
         return;
       }
 
-      const executor = await this.storage.executors.getById(event.executorId);
       const operation = match.kind === "matched" ? match.operation : null;
-
-      let sessionId: string | undefined;
-      if (operation) {
-        sessionId = operation.chatSessionId;
-      } else {
-        if (!executor) { console.debug(`[ChatSession] handleExecutorFinished: executor ${event.executorId} not found`); return; }
-        const workspace = await this.storage.workspaceRegistry.getWorkspaceById(executor.workspace_id);
-        if (!workspace) { console.debug(`[ChatSession] handleExecutorFinished: workspace not found for executor.workspace_id=${executor.workspace_id}`); return; }
-        const key = `${event.projectId}:${workspace.branch || ""}`;
-        sessionId = this.sessionIndex.get(key);
-        if (!sessionId) {
-          console.debug(`[ChatSession] handleExecutorFinished: no chat session for key="${key}", indexed=[${[...this.sessionIndex.keys()].join(", ")}]`);
-          return;
+      try {
+        await this.reportExecutorFinished(event, operation, reconciledNote);
+      } finally {
+        // Delivered (or dropped) by now: the run is no longer owed.
+        if (operation) {
+          this.sessions.get(operation.chatSessionId)?.pending
+            .settle("executor", operation.id, event.exitCode === 0 ? "completed" : "failed");
         }
       }
-
-      const session = this.sessions.get(sessionId);
-      if (!session) { console.debug(`[ChatSession] handleExecutorFinished: session object not found for id=${sessionId}`); return; }
-      if (!operation && !session.eventListeningEnabled) {
-        console.debug(`[ChatSession] handleExecutorFinished: process ${event.processId} not started by the commander and eventListening disabled for session ${sessionId}`);
-        return;
-      }
-
-      // Use tail output included in the event (snapshotted by process-manager at emit time)
-      const tailOutput = event.tailOutput ?? "";
-
-      const exitStatus = event.exitCode === 0 ? "success" : "failed";
-      const message = [
-        `[Executor Event: Process Finished]`,
-        `Executor: "${executor?.name ?? operation?.executorName ?? event.executorId}"`,
-        executor ? `Command: ${executor.command}` : null,
-        `Exit Code: ${event.exitCode} (${exitStatus})`,
-        ...(operation ? describeOperation(operation) : [UNLINKED_EVENT_NOTE]),
-        reconciledNote ?? null,
-        ``,
-        `Last output:`,
-        `---`,
-        tailOutput || "(no output captured)",
-        `---`,
-        ``,
-        `Check your Workspace Rules for any rules that apply to this event, then respond.`,
-      ].filter((line) => line !== null).join("\n");
-
-      this.deliver(sessionId, { source: operation ? "result" : "notice", content: message });
     } catch (error) {
       console.error(`[ChatSession] handleExecutorFinished error:`, error);
     }
+  }
+
+  private async reportExecutorFinished(
+    event: Extract<GlobalEvent, { type: "executor:stopped" }>,
+    operation: CommanderExecutorOperation | null,
+    reconciledNote: string | undefined,
+  ): Promise<void> {
+    const executor = await this.storage.executors.getById(event.executorId);
+
+    let sessionId: string | undefined;
+    if (operation) {
+      sessionId = operation.chatSessionId;
+    } else {
+      if (!executor) { console.debug(`[ChatSession] handleExecutorFinished: executor ${event.executorId} not found`); return; }
+      const workspace = await this.storage.workspaceRegistry.getWorkspaceById(executor.workspace_id);
+      if (!workspace) { console.debug(`[ChatSession] handleExecutorFinished: workspace not found for executor.workspace_id=${executor.workspace_id}`); return; }
+      const key = `${event.projectId}:${workspace.branch || ""}`;
+      sessionId = this.sessionIndex.get(key);
+      if (!sessionId) {
+        console.debug(`[ChatSession] handleExecutorFinished: no chat session for key="${key}", indexed=[${[...this.sessionIndex.keys()].join(", ")}]`);
+        return;
+      }
+    }
+
+    const session = this.sessions.get(sessionId);
+    if (!session) { console.debug(`[ChatSession] handleExecutorFinished: session object not found for id=${sessionId}`); return; }
+    if (!operation && !session.eventListeningEnabled) {
+      console.debug(`[ChatSession] handleExecutorFinished: process ${event.processId} not started by the commander and eventListening disabled for session ${sessionId}`);
+      return;
+    }
+
+    // Use tail output included in the event (snapshotted by process-manager at emit time)
+    const tailOutput = event.tailOutput ?? "";
+
+    const exitStatus = event.exitCode === 0 ? "success" : "failed";
+    const message = [
+      `[Executor Event: Process Finished]`,
+      `Executor: "${executor?.name ?? operation?.executorName ?? event.executorId}"`,
+      executor ? `Command: ${executor.command}` : null,
+      `Exit Code: ${event.exitCode} (${exitStatus})`,
+      ...(operation ? describeOperation(operation) : [UNLINKED_EVENT_NOTE]),
+      reconciledNote ?? null,
+      ``,
+      `Last output:`,
+      `---`,
+      tailOutput || "(no output captured)",
+      `---`,
+      ``,
+      `Check your Workspace Rules for any rules that apply to this event, then respond.`,
+    ].filter((line) => line !== null).join("\n");
+
+    this.deliver(sessionId, { source: operation ? "result" : "notice", content: message });
   }
 
   // ---- Plan continuation: the plan drives the chat, not the other way round ----
@@ -828,9 +844,11 @@ export class ChatSessionManager {
       });
       return;
     }
-    const outcome: PendingOutcome = operation.status === "finished"
-      ? (operation.exitCode === 0 ? "completed" : "failed")
-      : operation.status === "rejected" ? "failed"
+    // A finish stays owed until handleExecutorFinished has put its result in
+    // front of the model: settling earlier would let a stream ending during
+    // its lookups end the turn, and the result would then open a turn of its own.
+    if (operation.status === "finished") return;
+    const outcome: PendingOutcome = operation.status === "rejected" ? "failed"
       : operation.status === "superseded" ? "cancelled"
       : "interrupted";
     pending.settle("executor", operation.id, outcome);
@@ -1498,7 +1516,7 @@ export class ChatSessionManager {
     // object so the terminalWatchers map always has a live reference to current timers.
     const state = {
       debounceTimer: null as ReturnType<typeof setTimeout> | null,
-      idleTimer: setTimeout(() => this.stopTerminalWatcher(terminalId), IDLE_TIMEOUT_MS),
+      idleTimer: setTimeout(() => this.terminalWatchIdle(terminalId, IDLE_TIMEOUT_MS), IDLE_TIMEOUT_MS),
       outputBuffer: "",
     };
 
@@ -1559,7 +1577,7 @@ export class ChatSessionManager {
 
         // Reset idle timer
         clearTimeout(state.idleTimer);
-        state.idleTimer = setTimeout(() => this.stopTerminalWatcher(terminalId), IDLE_TIMEOUT_MS);
+        state.idleTimer = setTimeout(() => this.terminalWatchIdle(terminalId, IDLE_TIMEOUT_MS), IDLE_TIMEOUT_MS);
       }
     });
 
@@ -1577,6 +1595,23 @@ export class ChatSessionManager {
     });
 
     console.debug(`[ChatSession] Started terminal watcher for terminal=${terminalId} session=${sessionId}`);
+  }
+
+  /**
+   * The watched terminal went quiet without anything to report (no output, or
+   * it ended with none). The watch is the turn's to resolve, so say so instead
+   * of stopping silently — a turn waiting on it would otherwise never wake.
+   */
+  private terminalWatchIdle(terminalId: string, idleMs: number): void {
+    const watcher = this.terminalWatchers.get(terminalId);
+    if (!watcher) return;
+    this.stopTerminalWatcher(terminalId);
+    this.deliver(watcher.sessionId, { source: "result", content: [
+      `[Terminal Event: No New Output]`,
+      `Terminal: ${terminalId}`,
+      ``,
+      `No new output for ${Math.round(idleMs / 1000)}s, so the watch on this terminal stopped. The command may still be running: check the terminal before assuming it finished or failed.`,
+    ].join("\n") });
   }
 
   private stopTerminalWatcher(terminalId: string): void {
@@ -1613,7 +1648,7 @@ export class ChatSessionManager {
 
     const state = {
       debounceTimer: null as ReturnType<typeof setTimeout> | null,
-      idleTimer: setTimeout(() => this.stopTerminalWatcher(terminalId), IDLE_TIMEOUT_MS),
+      idleTimer: setTimeout(() => this.terminalWatchIdle(terminalId, IDLE_TIMEOUT_MS), IDLE_TIMEOUT_MS),
       outputBuffer: "",
     };
 
@@ -1715,7 +1750,7 @@ export class ChatSessionManager {
 
         // Reset idle timer
         clearTimeout(state.idleTimer);
-        state.idleTimer = setTimeout(() => this.stopTerminalWatcher(terminalId), IDLE_TIMEOUT_MS);
+        state.idleTimer = setTimeout(() => this.terminalWatchIdle(terminalId, IDLE_TIMEOUT_MS), IDLE_TIMEOUT_MS);
       }
     });
 
