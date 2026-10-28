@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
 import { ChatSessionManager } from "./chat-session-manager.js";
+import { openTurn } from "./commander-turn.js";
 import { chatPlanSchema, type ChatPlan } from "./chat-plan.js";
 import { EventBus } from "./event-bus.js";
 import { resolveChatModel } from "./utils/chat-model.js";
@@ -336,6 +337,7 @@ describe("terminal watch that goes quiet", () => {
     const internal = manager as unknown as Internal;
     const delivered: string[] = [];
     vi.spyOn(internal, "deliver").mockImplementation((_id, arrival) => { delivered.push(arrival.content); });
+    manager.getSession(id)!.turn = openTurn({ source: "user", content: "watch it" }, "turn-1");
     internal.startTerminalWatcher(id, "t1");
     expect(manager.getSession(id)!.pending.isOpen("terminal_watch", "t1")).toBe(true);
 
@@ -354,6 +356,7 @@ describe("terminal watch that goes quiet", () => {
     };
     const delivered: string[] = [];
     vi.spyOn(internal, "deliver").mockImplementation((_id, arrival) => { delivered.push(arrival.content); });
+    manager.getSession(id)!.turn = openTurn({ source: "user", content: "watch it" }, "turn-1");
     internal.startRemoteTerminalWatcher(id, "remote-t1", { remoteServerId: "srv", remoteProcessId: "rp1" });
     expect(manager.getSession(id)!.pending.isOpen("terminal_watch", "remote-t1")).toBe(true);
 
@@ -612,6 +615,101 @@ describe("complete_task and wait", () => {
     expect(phase).toBe(3);
     expect(spawnResult).toContain("startUnconfirmed");
     expect(turnEnds(manager, id)).toBe(1);
+  });
+});
+
+describe("stopping a turn", () => {
+  it("Stop ends a waiting turn as cancelled without touching the run; its later finish is dropped while not listening", async () => {
+    let phase = 0;
+    const { manager, id, idle, stop, start, emitBranchActivityIfChanged } = setup(async () => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Build it");
+    await idle();
+    expect(manager.getSession(id)!.turn?.status).toBe("waiting");
+
+    expect(manager.stopGeneration(id)).toBe(true);
+    expect(manager.getSession(id)!.turn).toBeNull();
+    expect(manager.getSession(id)!.pending.outcomeOf("executor", "run")).toBe("cancelled");
+    expect(turnEnds(manager, id)).toBe(1);
+    expect(emitBranchActivityIfChanged).toHaveBeenLastCalledWith("p1", "dev", expect.objectContaining({ activity: "stopped" }));
+
+    stop(start.mock.calls[0][3]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(manager.getSession(id)!.turn).toBeNull();
+    expect(phase).toBe(1);
+  });
+
+  it("with listening on, a stopped run's later finish arrives as an event in a turn of its own", async () => {
+    let phase = 0;
+    let woken = "";
+    const { manager, id, idle, stop, start } = setup(async (options) => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        case 1:
+          woken = JSON.stringify(options.prompt);
+          return call("noted", "complete_task", { summary: "Noted" });
+        case 2: return text("The stopped build finished.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    manager.setEventListening(id, true);
+    await manager.sendMessage(id, "Build it");
+    await idle();
+    manager.stopGeneration(id);
+
+    stop(start.mock.calls[0][3]);
+    await vi.waitFor(() => expect(phase).toBe(3));
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(woken).toContain("[Executor Event: Process Finished]");
+    expect(turnEnds(manager, id)).toBe(2);
+  });
+
+  it("Stop mid-stream keeps the user's queued words for the next turn and drops unread results", async () => {
+    let phase = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let next = "";
+    const { manager, id, idle, userMessages } = setup(async (options) => {
+      switch (phase++) {
+        case 0: await gate; return text("late");
+        case 1:
+          next = JSON.stringify(options.prompt);
+          return call("done", "complete_task", { summary: "Answered" });
+        case 2: return text("Done.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    const first = manager.sendMessage(id, "do something long");
+    await vi.waitFor(() => expect(phase).toBe(1));
+    void manager.sendMessage(id, "actually, do this instead");
+    (manager as unknown as Internal).deliver(id, { source: "result", content: "[Terminal Event: Output]\nstale" });
+    manager.stopGeneration(id);
+    release();
+    await first;
+    await vi.waitFor(() => expect(phase).toBe(3));
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    await idle();
+    expect(next).toContain("actually, do this instead");
+    expect(userMessages().some((content) => content.includes("stale"))).toBe(false);
+    expect(turnEnds(manager, id)).toBe(2);
+  });
+
+  it("Stop stops watching the turn's terminals", async () => {
+    const { manager, id } = setup(async () => text("unused"));
+    const internal = manager as unknown as Internal & { terminalWatchers: Map<string, unknown> };
+    const session = manager.getSession(id)!;
+    session.turn = openTurn({ source: "user", content: "watch it" }, "turn-1");
+    session.turn.status = "waiting";
+    internal.startTerminalWatcher(id, "t1");
+    expect(internal.terminalWatchers.has("t1")).toBe(true);
+
+    manager.stopGeneration(id);
+    expect(internal.terminalWatchers.has("t1")).toBe(false);
+    expect(session.pending.hasOpen()).toBe(false);
   });
 });
 

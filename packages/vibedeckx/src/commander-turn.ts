@@ -74,6 +74,11 @@ export class PendingRegistry {
     return item;
   }
 
+  /** The item's outcome: null while open, undefined when the registry never saw it (or forgot it). */
+  outcomeOf(kind: PendingKind, id: string): PendingOutcome | null | undefined {
+    return this.items.get(keyOf(kind, id))?.outcome;
+  }
+
   isOpen(kind: PendingKind, id: string): boolean {
     return this.items.get(keyOf(kind, id))?.outcome === null;
   }

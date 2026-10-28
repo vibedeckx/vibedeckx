@@ -35,7 +35,7 @@ import type { RemoteExecutorStarts } from "./remote-executor-starts.js";
 import { AgentDispatchLedger, CommanderOperationLedger, isOperationInFlight, type AgentDispatch, type AgentDispatchChange, type CommanderExecutorOperation } from "./commander-operations.js";
 import {
   PendingRegistry, openTurn, turnAccepts, userPresentAfter,
-  type CommanderTurn, type PendingItem, type PendingOutcome, type TurnArrival,
+  type CommanderTurn, type PendingItem, type PendingKind, type PendingOutcome, type TurnArrival,
 } from "./commander-turn.js";
 import { VirtualWsAdapter } from "./virtual-ws-adapter.js";
 import type { BrowserManager, BrowserError } from "./browser-manager.js";
@@ -798,7 +798,8 @@ export class ChatSessionManager {
     const eventMeta = event.turnEndEntryIndex !== undefined
       ? { kind: "agent_task_completed" as const, sessionId: event.sessionId, turnEndEntryIndex: event.turnEndEntryIndex }
       : undefined;
-    this.deliver(chatSessionId, { source: dispatch ? "result" : "notice", content: message, eventMeta });
+    if (dispatch) this.deliverOwn(session, "agent_dispatch", dispatch.id, { source: "result", content: message, eventMeta });
+    else this.deliver(chatSessionId, { source: "notice", content: message, eventMeta });
   }
 
   /**
@@ -886,7 +887,8 @@ export class ChatSessionManager {
       `Check your Workspace Rules for any rules that apply to this event, then respond.`,
     ].filter((line) => line !== null).join("\n");
 
-    this.deliver(sessionId, { source: operation ? "result" : "notice", content: message });
+    if (operation) this.deliverOwn(session, "executor", operation.id, { source: "result", content: message });
+    else this.deliver(sessionId, { source: "notice", content: message });
   }
 
   // ---- Plan continuation: the plan drives the chat, not the other way round ----
@@ -909,9 +911,33 @@ export class ChatSessionManager {
   private owe(session: ChatSession, item: Parameters<PendingRegistry["register"]>[0]): void {
     const fresh = !session.pending.isOpen(item.kind, item.id);
     session.pending.register(item);
+    if (!session.turn) {
+      // Started after its turn was stopped (a tool call still finishing):
+      // nobody waits for it, and its result comes back like any event.
+      session.pending.settle(item.kind, item.id, "cancelled");
+      return;
+    }
     if (!fresh || !session.taskCompleted) return;
     session.taskCompleted = false;
     if (this.drivesDot(session)) this.emitChatActivity(session, "main-running");
+  }
+
+  /**
+   * Deliver the result of work this chat started. If the turn that waited for
+   * it was stopped, nobody waits for it any more (design §10): it reaches the
+   * chat only as an event the user listens to.
+   */
+  private deliverOwn(session: ChatSession, kind: PendingKind, id: string, arrival: TurnArrival): void {
+    const outcome = session.pending.outcomeOf(kind, id);
+    if (outcome === undefined || outcome === "cancelled") {
+      if (!session.eventListeningEnabled) {
+        console.debug(`[ChatSession] dropping the result of abandoned ${kind} ${id} for ${session.id} (listening off)`);
+        return;
+      }
+      this.deliver(session.id, { ...arrival, source: "notice" });
+      return;
+    }
+    this.deliver(session.id, arrival);
   }
 
   /** Arrivals the model has not been shown yet, e.g. a result that landed mid-stream. */
@@ -1021,7 +1047,7 @@ export class ChatSessionManager {
         if (this.remoteExecutorMap.has(operation.processId) || (operation.target === "local" && this.processManager.isRunning(operation.processId))) continue;
         this.operations.markUnconfirmedReported(operation.id, now);
         console.warn(`[ChatSession] reconcile: start of ${operation.executorName} on ${operation.target} (operation ${operation.id}) is still unconfirmed after ${Math.round(age / 60_000)} min`);
-        this.deliver(session.id, { source: "result", content: [
+        this.deliverOwn(session, "executor", operation.id, { source: "result", content: [
           `[Executor Event: Start Unconfirmed]`,
           `Executor: "${operation.executorName}"`,
           `Operation: ${operation.id} (started by your runExecutor call)`,
@@ -3614,8 +3640,28 @@ export class ChatSessionManager {
     if (lastEntry && lastEntry.type !== "turn_end") {
       this.pushEntry(session, { type: "turn_end", timestamp: Date.now() });
     }
+    let unread = turn.inbox.splice(0);
+    if (endedWith === "cancelled") {
+      // Stopped (design §10): nothing it started is waited for any more. The
+      // processes and agents keep running — they are the user's — but the
+      // chat stops watching terminals for it, and their later results come
+      // back only as events the user listens to.
+      for (const item of session.pending.open()) session.pending.settle(item.kind, item.id, "cancelled");
+      for (const [terminalId, watcher] of this.terminalWatchers) {
+        if (watcher.sessionId === session.id) this.stopTerminalWatcher(terminalId);
+      }
+      // The user's own words still open the next turn; results already in are
+      // events now, and the turn's own nudges and timeouts are moot.
+      unread = unread.flatMap((arrival): TurnArrival[] => {
+        if (arrival.source === "user") return [arrival];
+        if ((arrival.source === "result" || arrival.source === "notice") && session.eventListeningEnabled) {
+          return [{ ...arrival, source: "notice" }];
+        }
+        return [];
+      });
+    }
     // What the turn never showed the model goes to the next turn, first.
-    if (turn.inbox.length > 0) session.outside.unshift(...turn.inbox.splice(0));
+    if (unread.length > 0) session.outside.unshift(...unread);
     console.debug(`[ChatSession] turn ${turn.id} of ${session.id} ended ${endedWith} after ${turn.streams} stream(s)`);
     this.drainOutside(session);
   }
@@ -3991,6 +4037,13 @@ export class ChatSessionManager {
       session.abortController = null;
       session.status = "stopped";
       this.broadcastPatch(session, ConversationPatch.updateStatus("stopped"));
+      this.emitChatActivity(session, "stopped");
+      this.endTurn(session, "cancelled");
+      return true;
+    }
+
+    // A waiting turn has no stream to abort: end it here.
+    if (!session.abortController && session.turn?.status === "waiting") {
       this.emitChatActivity(session, "stopped");
       this.endTurn(session, "cancelled");
       return true;
