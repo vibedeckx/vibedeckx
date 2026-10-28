@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { ChatSessionManager } from "./chat-session-manager.js";
+import { openTurn } from "./commander-turn.js";
 import { EventBus } from "./event-bus.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import type { ProcessManager } from "./process-manager.js";
@@ -596,6 +597,59 @@ describe("pending registry", () => {
     await run("call-1");
     manager.resetSession(chatId);
     expect(owed(manager, chatId)).toEqual([]);
+  });
+});
+
+/** A turn waits on a coding agent only so long; past the deadline its outcome is reported as unknown. */
+describe("waiting deadlines", () => {
+  const hours = (n: number) => n * 60 * 60_000;
+  const openUserTurn = (manager: ChatSessionManager, chatId: string) => {
+    manager.getSession(chatId)!.turn = openTurn({ source: "user", content: "go" }, "turn-1");
+  };
+
+  it("gives up on a dispatched task's reply after two hours and tells the open turn", async () => {
+    const { manager, chatId, send, delivered } = setup({ agent: { id: "agent-1", status: "stopped", entries: 2 } });
+    openUserTurn(manager, chatId);
+    await send("call-1");
+    manager.expireOverdue(Date.now() + hours(1));
+    expect(delivered).toEqual([]);
+
+    manager.expireOverdue(Date.now() + hours(2) + 1000);
+    expect(manager.getSession(chatId)!.pending.hasOpen()).toBe(false);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatch(/^\[Agent Event: No Reply\]/);
+    expect(delivered[0]).toMatch(/coding agent agent-1/);
+    expect(delivered[0]).toMatch(/outcome is unknown/);
+  });
+
+  it("a late reply after the deadline still reaches the chat, linked to its dispatch", async () => {
+    const { manager, chatId, bus, send, settle, delivered } = setup({ agent: { id: "agent-1", status: "stopped", entries: 2 } });
+    openUserTurn(manager, chatId);
+    await send("call-1");
+    manager.expireOverdue(Date.now() + hours(3));
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "agent-1", summaryText: "done", turnEndEntryIndex: 5 });
+    await settle();
+    expect(delivered).toHaveLength(2);
+    expect(delivered[1]).toMatch(/Operation: call-1/);
+  });
+
+  it("gives up on a spawn that has not come up after five minutes", async () => {
+    const { manager, chatId, spawnAgent, delivered } = setup({ spawn: () => new Promise(() => {}) });
+    openUserTurn(manager, chatId);
+    void spawnAgent("call-1");
+    await vi.waitFor(() => expect(manager.getSession(chatId)!.pending.hasOpen()).toBe(true));
+    manager.expireOverdue(Date.now() + 5 * 60_000 + 1000);
+    expect(manager.getSession(chatId)!.pending.hasOpen()).toBe(false);
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatch(/^\[Agent Event: Start Not Confirmed\]/);
+  });
+
+  it("with no open turn the wait just ends quietly", async () => {
+    const { manager, chatId, send, delivered } = setup({ agent: { id: "agent-1", status: "stopped", entries: 2 } });
+    await send("call-1");
+    manager.expireOverdue(Date.now() + hours(3));
+    expect(manager.getSession(chatId)!.pending.hasOpen()).toBe(false);
+    expect(delivered).toEqual([]);
   });
 });
 

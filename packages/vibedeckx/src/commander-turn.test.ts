@@ -60,4 +60,16 @@ describe("PendingRegistry", () => {
     expect(registry.settle("executor", "op-0", "failed")).toBeNull();
     expect(registry.settle("executor", "op-249", "failed")).toBeNull();
   });
+
+  it("lists open items past their deadline, never settled or deadline-free ones", () => {
+    const registry = new PendingRegistry();
+    registry.register({ kind: "agent_dispatch", id: "late", label: "reply", deadlineAt: 100 });
+    registry.register({ kind: "agent_dispatch", id: "answered", label: "reply", deadlineAt: 100 });
+    registry.register({ kind: "spawn", id: "early", label: "spawn", deadlineAt: 500 });
+    registry.register({ kind: "executor", id: "run", label: "run" });
+    registry.settle("agent_dispatch", "answered", "completed");
+    expect(registry.overdue(200).map((item) => item.id)).toEqual(["late"]);
+    expect(registry.overdue(500).map((item) => item.id)).toEqual(["late", "early"]);
+  });
 });
+

@@ -27,6 +27,8 @@ export interface PendingItem {
   planId: string | null;
   stepId: string | null;
   registeredAt: number;
+  /** When an unanswered wait is given up as `interrupted`; null = no deadline. */
+  deadlineAt: number | null;
   outcome: PendingOutcome | null;
   settledAt: number | null;
 }
@@ -39,7 +41,7 @@ export class PendingRegistry {
 
   /** Start owing a result. Returns the open item when one is already registered under the id. */
   register(
-    item: { kind: PendingKind; id: string; label: string; planId?: string | null; stepId?: string | null },
+    item: { kind: PendingKind; id: string; label: string; planId?: string | null; stepId?: string | null; deadlineAt?: number | null },
     now = Date.now(),
   ): PendingItem {
     const key = keyOf(item.kind, item.id);
@@ -54,6 +56,7 @@ export class PendingRegistry {
       planId: item.planId ?? null,
       stepId: item.stepId ?? null,
       registeredAt: now,
+      deadlineAt: item.deadlineAt ?? null,
       outcome: null,
       settledAt: null,
     };
@@ -78,6 +81,11 @@ export class PendingRegistry {
   /** Items whose result has not come back, oldest first. */
   open(): PendingItem[] {
     return [...this.items.values()].filter((item) => item.outcome === null);
+  }
+
+  /** Open items whose deadline has passed. */
+  overdue(now = Date.now()): PendingItem[] {
+    return this.open().filter((item) => item.deadlineAt !== null && item.deadlineAt <= now);
   }
 
   hasOpen(): boolean {

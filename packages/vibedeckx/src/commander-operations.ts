@@ -38,7 +38,8 @@ export interface CommanderExecutorOperation {
   /** The identity the process runs under (`remote-…` for remote targets). */
   processId: string;
   status: CommanderOperationStatus;
-  exitCode?: number;
+  /** Null when the process is gone but no exit code was ever observed. */
+  exitCode?: number | null;
   /** Epoch ms of registration, for the in-flight reconciler's minimum age. */
   registeredAt: number;
   /**
@@ -178,7 +179,7 @@ export class CommanderOperationLedger {
     this.onChange(operation);
   }
 
-  finishExecutor(processId: string, exitCode: number): ExecutorFinishMatch {
+  finishExecutor(processId: string, exitCode: number | null): ExecutorFinishMatch {
     const operation = this.byProcess(processId);
     if (!operation) return { kind: "unmatched" };
     if (operation.status === "finished") return { kind: "duplicate", operation };

@@ -135,6 +135,9 @@ const UNLINKED_EVENT_NOTE = "Not started by you: this event is not linked to any
 
 type TaskCompletedEvent = Extract<GlobalEvent, { type: "session:taskCompleted" }>;
 
+/** An executor finish; `exitCode` is null when the process is gone with no exit code on record. */
+type ExecutorFinish = Omit<Extract<GlobalEvent, { type: "executor:stopped" }>, "exitCode"> & { exitCode: number | null };
+
 /** A completion's identity across repeats, or null when it has no turn-end index. */
 function completionKey(event: TaskCompletedEvent): string | null {
   return event.turnEndEntryIndex === undefined ? null : `${event.sessionId}:${event.turnEndEntryIndex}`;
@@ -169,6 +172,15 @@ const NO_TOOL_CORRECTION_PREFIX = "[System Invariant Violation]";
 
 /** Backoff before re-driving a plan after the model stream itself failed. */
 const STALL_RETRY_DELAY_MS = 5_000;
+
+/**
+ * How long a turn waits on a coding agent before giving its reply up as
+ * unknown: the activation of a spawn, and the reply to a dispatched task.
+ * Executor runs have no deadline (the reconciler checks their process), and a
+ * terminal watch ends on its own idle timer.
+ */
+const SPAWN_DEADLINE_MS = 5 * 60_000;
+const AGENT_DISPATCH_DEADLINE_MS = 2 * 60 * 60_000;
 
 /** How often in-flight executor operations are checked against process liveness. */
 const IN_FLIGHT_RECONCILE_INTERVAL_MS = 30_000;
@@ -551,7 +563,7 @@ export class ChatSessionManager {
     const spawnId = randomUUID();
     const session = this.sessions.get(chatSessionId);
     const pending = session?.pending;
-    if (session) this.owe(session, { kind: "spawn", id: spawnId, label: "a coding agent being started" });
+    if (session) this.owe(session, { kind: "spawn", id: spawnId, label: "a coding agent being started", deadlineAt: Date.now() + SPAWN_DEADLINE_MS });
     let outcome: PendingOutcome = "failed";
     try {
       const result = await spawn();
@@ -762,7 +774,7 @@ export class ChatSessionManager {
    * advance the plan.
    */
   private async handleExecutorFinished(
-    event: Extract<GlobalEvent, { type: "executor:stopped" }>,
+    event: ExecutorFinish,
     reconciledNote?: string,
   ): Promise<void> {
     try {
@@ -780,7 +792,7 @@ export class ChatSessionManager {
         // Delivered (or dropped) by now: the run is no longer owed.
         if (operation) {
           this.sessions.get(operation.chatSessionId)?.pending
-            .settle("executor", operation.id, event.exitCode === 0 ? "completed" : "failed");
+            .settle("executor", operation.id, event.exitCode === null ? "interrupted" : event.exitCode === 0 ? "completed" : "failed");
         }
       }
     } catch (error) {
@@ -789,7 +801,7 @@ export class ChatSessionManager {
   }
 
   private async reportExecutorFinished(
-    event: Extract<GlobalEvent, { type: "executor:stopped" }>,
+    event: ExecutorFinish,
     operation: CommanderExecutorOperation | null,
     reconciledNote: string | undefined,
   ): Promise<void> {
@@ -820,12 +832,13 @@ export class ChatSessionManager {
     // Use tail output included in the event (snapshotted by process-manager at emit time)
     const tailOutput = event.tailOutput ?? "";
 
-    const exitStatus = event.exitCode === 0 ? "success" : "failed";
+    // An exit code is a fact: one that was never observed is reported as unknown, not invented.
+    const exitStatus = event.exitCode === null ? "outcome unknown" : event.exitCode === 0 ? "success" : "failed";
     const message = [
       `[Executor Event: Process Finished]`,
       `Executor: "${executor?.name ?? operation?.executorName ?? event.executorId}"`,
       executor ? `Command: ${executor.command}` : null,
-      `Exit Code: ${event.exitCode} (${exitStatus})`,
+      `Exit Code: ${event.exitCode ?? "unknown"} (${exitStatus})`,
       ...(operation ? describeOperation(operation) : [UNLINKED_EVENT_NOTE]),
       reconciledNote ?? null,
       ``,
@@ -903,7 +916,10 @@ export class ChatSessionManager {
     if (!session) return;
     const pending = session.pending;
     if (change === "pending") {
-      this.owe(session, { kind: "agent_dispatch", id: dispatch.id, label: "a coding agent's reply" });
+      this.owe(session, {
+        kind: "agent_dispatch", id: dispatch.id, label: `the reply of coding agent ${dispatch.agentSessionId}`,
+        deadlineAt: Date.now() + AGENT_DISPATCH_DEADLINE_MS,
+      });
       return;
     }
     // A released dispatch's agent moved past it: its own reply will never be attributed.
@@ -916,15 +932,44 @@ export class ChatSessionManager {
    * at the wrong moment, hub-side listener gap) would otherwise keep the
    * operation "running" forever — and the stall watchdog, seeing work in
    * flight, would never re-drive the plan. The process record is the fallback
-   * source of the exit code; when it has none the run is reported as failed
-   * with an explicit note, never as success.
+   * source of the exit code; when it has none the run is reported with an
+   * unknown outcome — never as success, and never with an invented exit code.
    */
   private startInFlightReconciler(): void {
     if (this.inFlightReconciler) return;
     this.inFlightReconciler = setInterval(() => {
+      this.expireOverdue();
       this.reconcileInFlight().catch((err) => console.warn("[ChatSession] in-flight reconcile failed:", err));
     }, IN_FLIGHT_RECONCILE_INTERVAL_MS);
     this.inFlightReconciler.unref?.();
+  }
+
+  /**
+   * Give up waiting on what is past its deadline: the item settles as
+   * `interrupted` and the open turn is told its outcome is unknown, so it can
+   * decide what to do and end. A late result still arrives, as an event.
+   */
+  expireOverdue(now = Date.now()): void {
+    for (const session of this.sessions.values()) {
+      for (const item of session.pending.overdue(now)) {
+        session.pending.settle(item.kind, item.id, "interrupted", now);
+        const minutes = Math.round((now - item.registeredAt) / 60_000);
+        console.warn(`[ChatSession] ${item.kind} ${item.id} of ${session.id} passed its deadline after ${minutes} min`);
+        // Nobody is waiting on it any more (the turn was stopped or reset).
+        if (!session.turn) continue;
+        const content = item.kind === "spawn"
+          ? [
+            `[Agent Event: Start Not Confirmed]`,
+            `The coding agent you started has not come up after ${minutes} minutes, so you are no longer waiting on it. Its outcome is unknown: it may still start, or it may have failed without reporting. Check before relying on it.`,
+          ]
+          : [
+            `[Agent Event: No Reply]`,
+            `Waiting for: ${item.label}${item.stepId ? ` (plan step ${item.stepId})` : ""}`,
+            `No reply after ${minutes} minutes, so you are no longer waiting on it. Its outcome is unknown: the agent may still be working, or it may have stopped without reporting. Check it with getAgentConversation before relying on it; a late reply will still reach you.`,
+          ];
+        this.deliver(session.id, { source: "result", content: content.join("\n") });
+      }
+    }
   }
 
   async reconcileInFlight(now = Date.now()): Promise<void> {
@@ -977,7 +1022,6 @@ export class ChatSessionManager {
       }
 
       const known = typeof exitCode === "number";
-      const settledExitCode = typeof exitCode === "number" ? exitCode : 1;
       console.warn(
         `[ChatSession] reconcile: operation ${operation.id} (${operation.executorName} on ${operation.target}) ` +
           `has no live process and no finish event; settling with exit code ${known ? exitCode : "unknown"}`,
@@ -987,12 +1031,12 @@ export class ChatSessionManager {
         projectId: session.projectId,
         executorId: operation.executorId,
         processId: operation.processId,
-        exitCode: settledExitCode,
+        exitCode: known ? exitCode as number : null,
         target: operation.target === "local" ? undefined : operation.target,
         tailOutput: "(no output captured: the finish event was not observed)",
       }, known
         ? "Reconciled: the finish event was not observed; the exit code comes from the process record."
-        : "Reconciled: the finish event was not observed and the process record has no exit code, so this run counts as failed. Verify its effect before relying on it.");
+        : "Reconciled: the finish event was not observed and the process record has no exit code, so whether this run succeeded is unknown. Verify its effect before relying on it, or run it again.");
     }
   }
 

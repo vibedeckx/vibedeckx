@@ -562,5 +562,29 @@ describe("complete_task and wait", () => {
     expect(phase).toBe(tool === "wait" ? 4 : 5);
     expect(turnEnds(manager, id)).toBe(1);
   });
+
+  it("a run whose finish was never observed and has no exit code on record is reported as unknown, not failed", async () => {
+    let phase = 0;
+    let woken = "";
+    const { manager, id, idle } = setup(async (options) => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        case 1:
+          woken = JSON.stringify(options.prompt);
+          return call("done", "complete_task", { summary: "Reported" });
+        case 2: return text("I could not tell whether the build succeeded.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    }, { running: false, lastRow: { status: "failed", exit_code: null, started_at: "2026-01-01 00:00:00", finished_at: "2026-01-01 00:00:05" } });
+    await manager.sendMessage(id, "Build it");
+    await idle();
+    const turn = manager.getSession(id)!.turn!;
+    await manager.reconcileInFlight(Date.now() + 60_000);
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(turn.streams).toBe(2);
+    expect(woken).toContain("Exit Code: unknown (outcome unknown)");
+    expect(woken).not.toContain("Exit Code: 1");
+    expect(woken).toContain("whether this run succeeded is unknown");
+  });
 });
 
