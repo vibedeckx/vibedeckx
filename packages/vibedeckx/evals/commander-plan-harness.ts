@@ -77,7 +77,7 @@ export function createHarness(config: ChatProviderConfig) {
         const operationId = options?.toolCallId ?? `sim-call-${++simulated}`;
         const processId = `sim-process-${++simulated}`;
         internal.operations.register({
-          id: operationId, kind: "executor", chatSessionId: id,
+          id: operationId, kind: "executor", chatSessionId: id, turnId: manager.getSession(id)!.turn?.id ?? null,
           planId: stepId ? plan?.planId ?? null : null, stepId: stepId ?? null,
           executorId: `sim-${name}`, executorName: String((input as { executorName?: string } | null)?.executorName ?? name),
           target: "local", processId,

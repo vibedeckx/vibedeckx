@@ -570,12 +570,12 @@ export class ChatSessionManager {
    * still registers its task, and completions held meanwhile are released only
    * once the start really settles.
    */
-  private async duringSpawn<T>(chatSessionId: string, spawn: () => Promise<T>): Promise<T | SpawnNotConfirmed> {
+  private async duringSpawn<T>(chatSessionId: string, turnId: string | null, spawn: () => Promise<T>): Promise<T | SpawnNotConfirmed> {
     // Per attempt, not per tool call: a re-delivered call overlapping the first must not share its item.
     const spawnId = randomUUID();
     const session = this.sessions.get(chatSessionId);
     const pending = session?.pending;
-    if (session) this.owe(session, { kind: "spawn", id: spawnId, label: "a coding agent being started" });
+    if (session) this.owe(session, { kind: "spawn", id: spawnId, label: "a coding agent being started" }, turnId);
     const start = this.runSpawn(chatSessionId, spawnId, spawn);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const deadline = new Promise<"deadline">((resolve) => { timer = setTimeout(() => resolve("deadline"), this.spawnDeadlineMs); });
@@ -905,18 +905,24 @@ export class ChatSessionManager {
   }
 
   /**
-   * Start owing a result. New work after a complete_task means the turn is
-   * not finished after all: the completion is withdrawn, dot included.
+   * Start owing a result to the turn whose tool call started the work. Work
+   * whose turn is no longer the open one — stopped, ended, or replaced by a
+   * newer turn — is owed to nobody: a late confirmation or a tool call still
+   * finishing after Stop must not make another turn wait for it, and its
+   * result comes back like any event. New work after a complete_task means
+   * the turn is not finished after all: the completion is withdrawn, dot
+   * included.
    */
-  private owe(session: ChatSession, item: Parameters<PendingRegistry["register"]>[0]): void {
-    const fresh = !session.pending.isOpen(item.kind, item.id);
-    session.pending.register(item);
-    if (!session.turn) {
-      // Started after its turn was stopped (a tool call still finishing):
-      // nobody waits for it, and its result comes back like any event.
-      session.pending.settle(item.kind, item.id, "cancelled");
+  private owe(session: ChatSession, item: Parameters<PendingRegistry["register"]>[0], turnId: string | null): void {
+    if (!session.turn || session.turn.id !== turnId) {
+      if (session.pending.outcomeOf(item.kind, item.id) !== "cancelled") {
+        session.pending.register(item);
+        session.pending.settle(item.kind, item.id, "cancelled");
+      }
       return;
     }
+    const fresh = !session.pending.isOpen(item.kind, item.id);
+    session.pending.register(item);
     if (!fresh || !session.taskCompleted) return;
     session.taskCompleted = false;
     if (this.drivesDot(session)) this.emitChatActivity(session, "main-running");
@@ -959,7 +965,7 @@ export class ChatSessionManager {
       this.owe(session, {
         kind: "executor", id: operation.id, label: `executor "${operation.executorName}" on ${operation.target}`,
         planId: operation.planId, stepId: operation.stepId,
-      });
+      }, operation.turnId);
       return;
     }
     // A finish stays owed until handleExecutorFinished has put its result in
@@ -981,7 +987,7 @@ export class ChatSessionManager {
       this.owe(session, {
         kind: "agent_dispatch", id: dispatch.id, label: `the reply of coding agent ${dispatch.agentSessionId}`,
         deadlineAt: Date.now() + AGENT_DISPATCH_DEADLINE_MS,
-      });
+      }, dispatch.turnId);
       return;
     }
     // A released dispatch's agent moved past it: its own reply will never be attributed.
@@ -1338,9 +1344,10 @@ export class ChatSessionManager {
     prompt: string;
     agentType?: string;
     chatSessionId: string;
+    turnId: string | null;
     operationId: string;
   }): Promise<{ success: boolean; agentSessionId?: string; message: string }> {
-    const { projectId, branch, agentMode, prompt, agentType, chatSessionId, operationId } = params;
+    const { projectId, branch, agentMode, prompt, agentType, chatSessionId, turnId, operationId } = params;
     const lifecycle = this.remoteSessionLifecycle;
     if (!lifecycle) return { success: false, message: "Remote session lifecycle is not available." };
 
@@ -1410,7 +1417,7 @@ export class ChatSessionManager {
     // start, its finish is the commander's only evidence. Success itself is
     // reported only for a confirmed activation.
     this.registerAgentDispatch({
-      id: operationId, chatSessionId, agentSessionId: localSessionId,
+      id: operationId, chatSessionId, turnId, agentSessionId: localSessionId,
       // The session was created for this operation: its first turn is this task.
       afterEntryIndex: started.view.userEntryIndex ?? -1,
     });
@@ -1445,9 +1452,10 @@ export class ChatSessionManager {
     branch: string | null;
     message: string;
     chatSessionId: string;
+    turnId: string | null;
     operationId: string;
   }): Promise<{ success: boolean; message: string }> {
-    const { projectId, branch, message, chatSessionId, operationId } = params;
+    const { projectId, branch, message, chatSessionId, turnId, operationId } = params;
 
     const target = this.findRemoteSessionForProject(projectId, branch);
     if (!target) {
@@ -1470,7 +1478,7 @@ export class ChatSessionManager {
     const activityAt = Date.now();
     // Registered before delivery so the turn's completion cannot outrun it.
     this.registerAgentDispatch({
-      id: operationId, chatSessionId, agentSessionId: target.localSessionId,
+      id: operationId, chatSessionId, turnId, agentSessionId: target.localSessionId,
       afterEntryIndex: head.latestEntryIndex,
     });
     try {
@@ -1677,7 +1685,7 @@ export class ChatSessionManager {
 
   // ---- Terminal watcher ----
 
-  private startTerminalWatcher(sessionId: string, terminalId: string): void {
+  private startTerminalWatcher(sessionId: string, terminalId: string, turnId: string | null): void {
     // Clean up any existing watcher for this terminal
     this.stopTerminalWatcher(terminalId);
 
@@ -1762,7 +1770,7 @@ export class ChatSessionManager {
     }
 
     const watchingSession = this.sessions.get(sessionId);
-    if (watchingSession) this.owe(watchingSession, { kind: "terminal_watch", id: terminalId, label: `output of terminal ${terminalId}` });
+    if (watchingSession) this.owe(watchingSession, { kind: "terminal_watch", id: terminalId, label: `output of terminal ${terminalId}` }, turnId);
     this.terminalWatchers.set(terminalId, {
       unsubscribe,
       state, // live reference — timer IDs stay current
@@ -1793,10 +1801,12 @@ export class ChatSessionManager {
     const watcher = this.terminalWatchers.get(terminalId);
     if (!watcher) return;
 
+    // Out of the map first: closing a remote channel fires its close callback
+    // synchronously, which flushes buffered output only for a live watcher.
+    this.terminalWatchers.delete(terminalId);
     watcher.unsubscribe();
     if (watcher.state.debounceTimer) clearTimeout(watcher.state.debounceTimer);
     clearTimeout(watcher.state.idleTimer);
-    this.terminalWatchers.delete(terminalId);
     this.sessions.get(watcher.sessionId)?.pending.settle("terminal_watch", terminalId, "completed");
     console.debug(`[ChatSession] Stopped terminal watcher for terminal=${terminalId}`);
   }
@@ -1812,6 +1822,7 @@ export class ChatSessionManager {
     sessionId: string,
     terminalId: string,
     remoteInfo: RemoteExecutorInfo,
+    turnId: string | null,
   ): void {
     // Clean up any existing watcher for this terminal
     this.stopTerminalWatcher(terminalId);
@@ -1948,7 +1959,7 @@ export class ChatSessionManager {
     };
 
     const watchingSession = this.sessions.get(sessionId);
-    if (watchingSession) this.owe(watchingSession, { kind: "terminal_watch", id: terminalId, label: `output of terminal ${terminalId}` });
+    if (watchingSession) this.owe(watchingSession, { kind: "terminal_watch", id: terminalId, label: `output of terminal ${terminalId}` }, turnId);
     this.terminalWatchers.set(terminalId, {
       unsubscribe,
       state,
@@ -2282,6 +2293,9 @@ export class ChatSessionManager {
     // Outbound agent actions need the user's approval in a stream nobody is
     // watching: one a result or event woke (design §9).
     const unattended = sessionId ? this.sessions.get(sessionId)?.turn?.userPresent === false : false;
+    // Work these tools start belongs to the turn this stream runs in, even if
+    // the call only finishes after that turn was stopped.
+    const owningTurnId = (sessionId ? this.sessions.get(sessionId)?.turn?.id : null) ?? null;
     const agentSessionManager = this.agentSessionManager;
     const remoteExecutorMap = this.remoteExecutorMap;
     const reverseConnectManager = this.reverseConnectManager;
@@ -2575,7 +2589,7 @@ export class ChatSessionManager {
           // starting a second one.
           const operationId = toolOptions?.toolCallId ?? randomUUID();
           if (project && agentMode && agentMode !== "local") {
-            return await this.spawnRemoteAgentSession({ projectId, branch, agentMode, prompt, agentType, chatSessionId: sessionId, operationId });
+            return await this.spawnRemoteAgentSession({ projectId, branch, agentMode, prompt, agentType, chatSessionId: sessionId, turnId: owningTurnId, operationId });
           }
           if (!project?.path) {
             return { success: false, message: "No project path configured for this workspace." };
@@ -2641,7 +2655,7 @@ export class ChatSessionManager {
           // did start, its finish is the commander's only evidence. Success
           // itself is reported only for a confirmed activation.
           this.registerAgentDispatch({
-            id: operationId, chatSessionId: sessionId, agentSessionId: newSessionId,
+            id: operationId, chatSessionId: sessionId, turnId: owningTurnId, agentSessionId: newSessionId,
             // The session was created for this operation: its first turn is this task.
             afterEntryIndex: started.view.userEntryIndex ?? -1,
           });
@@ -2681,7 +2695,7 @@ export class ChatSessionManager {
           const sendProject = await storage.projects.getById(projectId);
           const sendAgentMode = sendProject?.agent_mode;
           if (sendProject && sendAgentMode && sendAgentMode !== "local") {
-            return await this.sendToRemoteAgentSession({ projectId, branch, message, chatSessionId: sessionId, operationId });
+            return await this.sendToRemoteAgentSession({ projectId, branch, message, chatSessionId: sessionId, turnId: owningTurnId, operationId });
           }
           const project = await storage.projects.getById(projectId);
           const target = agentSessionManager.getSessionByBranch(projectId, branch);
@@ -2702,7 +2716,7 @@ export class ChatSessionManager {
           // Registered before delivery so the turn's completion cannot outrun
           // it; everything already in the transcript predates this task.
           this.registerAgentDispatch({
-            id: operationId, chatSessionId: sessionId, agentSessionId: target.id,
+            id: operationId, chatSessionId: sessionId, turnId: owningTurnId, agentSessionId: target.id,
             afterEntryIndex: this.agentDispatchFloor(target.id, (target.store?.entries.length ?? 0) - 1),
           });
           let sent = false;
@@ -2834,7 +2848,7 @@ export class ChatSessionManager {
             const registerOperation = (target: string, processId: string, executor: { id: string; name: string }) => {
               if (!sessionId) return;
               this.operations.register({
-                id: operationId, kind: "executor", chatSessionId: sessionId,
+                id: operationId, kind: "executor", chatSessionId: sessionId, turnId: owningTurnId,
                 planId: stepId ? planState?.current?.planId ?? null : null, stepId: stepId ?? null,
                 executorId: executor.id, executorName: executor.name, target, processId,
               });
@@ -3210,7 +3224,7 @@ export class ChatSessionManager {
               // Start a remote terminal watcher so output flows back as a [Terminal Event]
               console.log(`[runInTerminal] remote: sessionId=${sessionId ?? "NOT FOUND"}`);
               if (sessionId) {
-                this.startRemoteTerminalWatcher(sessionId, terminalId, remoteInfo);
+                this.startRemoteTerminalWatcher(sessionId, terminalId, remoteInfo, owningTurnId);
               } else {
                 console.log(`[runInTerminal] WARNING: No chat session found — remote terminal watcher NOT started`);
               }
@@ -3225,7 +3239,7 @@ export class ChatSessionManager {
             // Find the chat session that called this tool so we can inject the [Terminal Event] later
             console.log(`[runInTerminal] sessionId=${sessionId ?? "NOT FOUND"}`);
             if (sessionId) {
-              this.startTerminalWatcher(sessionId, terminalId);
+              this.startTerminalWatcher(sessionId, terminalId, owningTurnId);
             } else {
               console.log(`[runInTerminal] WARNING: No chat session found — terminal watcher NOT started`);
             }
@@ -3452,7 +3466,7 @@ export class ChatSessionManager {
     const spawnExecute = tools.spawnAgentSession?.execute;
     if (spawnExecute && sessionId) {
       tools.spawnAgentSession.execute = (input, options) =>
-        this.duringSpawn(sessionId, async () => spawnExecute(input, options));
+        this.duringSpawn(sessionId, owningTurnId, async () => spawnExecute(input, options));
     }
     // Confirmation is enforced at the execution boundary, not only in the prompt.
     const readOnlyTools = new Set(["setPlan", "getAgentConversation", "getExecutorStatus", "listTerminals", "screenshot", "getPageContent", "waitForElement", "wait"]);

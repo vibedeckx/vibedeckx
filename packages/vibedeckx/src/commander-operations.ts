@@ -29,6 +29,8 @@ export interface CommanderExecutorOperation {
   id: string;
   kind: "executor";
   chatSessionId: string;
+  /** The turn whose tool call started it; null when no turn was open. */
+  turnId: string | null;
   planId: string | null;
   stepId: string | null;
   executorId: string;
@@ -225,6 +227,8 @@ export interface AgentDispatch {
   /** Tool call id of the spawn / send that dispatched the task. */
   id: string;
   chatSessionId: string;
+  /** The commander turn whose tool call dispatched it; null when no turn was open. */
+  turnId: string | null;
   agentSessionId: string;
   /** Turn ends at or before this entry index predate the dispatch. */
   afterEntryIndex: number;

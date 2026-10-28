@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { ChatSessionManager } from "./chat-session-manager.js";
-import { openTurn } from "./commander-turn.js";
+import { openTurn as newTurn } from "./commander-turn.js";
+
+/** A turn whose first stream already took its opening message. */
+const openTurn = (...args: Parameters<typeof newTurn>) => ({ ...newTurn(...args), inbox: [] });
 import { EventBus } from "./event-bus.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import type { ProcessManager } from "./process-manager.js";
@@ -649,6 +652,46 @@ describe("waiting deadlines", () => {
     manager.getSession(chatId)!.turn = null;
     manager.expireOverdue(Date.now() + hours(3));
     expect(manager.getSession(chatId)!.pending.hasOpen()).toBe(false);
+    expect(delivered).toEqual([]);
+  });
+});
+
+/** Work belongs to the turn whose tool call started it; a newer turn never waits for it. */
+describe("work of a stopped turn", () => {
+  const stopTurn = (manager: ChatSessionManager, chatId: string) => {
+    manager.getSession(chatId)!.turn!.status = "waiting";
+    expect(manager.stopGeneration(chatId)).toBe(true);
+    manager.getSession(chatId)!.turn = openTurn({ source: "user", content: "something else" }, "turn-2");
+  };
+
+  it("a start confirmed after Stop is not owed to the next turn, and its finish stays an unheard event", async () => {
+    const { manager, chatId, bus, run, remoteStart, stop, settle, delivered } = setup({
+      remote: true,
+      remoteStart: async () => ({ kind: "unknown", error: "Remote server unreachable" }),
+    });
+    await run("call-1");
+    stopTurn(manager, chatId);
+
+    const processId = `remote-e1-${remoteStart.mock.calls[0][0].processId}`;
+    bus.emit({ type: "executor:started", projectId: "p1", executorId: "e1", processId, target: "srv" });
+    expect(manager.getSession(chatId)!.pending.hasOpen()).toBe(false);
+    stop(processId);
+    await settle();
+    expect(delivered).toEqual([]);
+  });
+
+  it("a spawn that comes up after Stop is not owed to the next turn", async () => {
+    let activate!: (value: unknown) => void;
+    const { manager, chatId, bus, spawnAgent, settle, delivered } = setup({ spawn: () => new Promise((resolve) => { activate = resolve; }) });
+    const call = spawnAgent("call-1");
+    await vi.waitFor(() => expect(manager.getSession(chatId)!.pending.hasOpen()).toBe(true));
+    stopTurn(manager, chatId);
+
+    activate({ kind: "activated", view: { sessionId: "new-agent", userEntryIndex: 0 } });
+    await call;
+    expect(manager.getSession(chatId)!.pending.hasOpen()).toBe(false);
+    bus.emit({ type: "session:taskCompleted", projectId: "p1", branch: "dev", sessionId: "new-agent", summaryText: "done", turnEndEntryIndex: 3 });
+    await settle();
     expect(delivered).toEqual([]);
   });
 });

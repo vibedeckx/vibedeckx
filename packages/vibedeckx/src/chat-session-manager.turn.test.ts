@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
 import { ChatSessionManager } from "./chat-session-manager.js";
-import { openTurn } from "./commander-turn.js";
+import { openTurn as newTurn } from "./commander-turn.js";
+
+/** A turn whose first stream already took its opening message. */
+const openTurn = (...args: Parameters<typeof newTurn>) => ({ ...newTurn(...args), inbox: [] });
 import { chatPlanSchema, type ChatPlan } from "./chat-plan.js";
 import { EventBus } from "./event-bus.js";
 import { resolveChatModel } from "./utils/chat-model.js";
@@ -119,8 +122,8 @@ afterEach(() => {
 
 type Internal = {
   deliver: (id: string, arrival: { source: "user" | "result" | "notice" | "browser" | "nudge"; content: string }) => void;
-  startTerminalWatcher: (sessionId: string, terminalId: string) => void;
-  startRemoteTerminalWatcher: (sessionId: string, terminalId: string, info: { remoteServerId: string; remoteProcessId: string }) => void;
+  startTerminalWatcher: (sessionId: string, terminalId: string, turnId: string | null) => void;
+  startRemoteTerminalWatcher: (sessionId: string, terminalId: string, info: { remoteServerId: string; remoteProcessId: string }, turnId: string | null) => void;
   reverseConnectManager: unknown;
   createTools: (projectId: string, branch: string | null, sessionId?: string) => Record<string, { needsApproval?: unknown }>;
 };
@@ -338,7 +341,7 @@ describe("terminal watch that goes quiet", () => {
     const delivered: string[] = [];
     vi.spyOn(internal, "deliver").mockImplementation((_id, arrival) => { delivered.push(arrival.content); });
     manager.getSession(id)!.turn = openTurn({ source: "user", content: "watch it" }, "turn-1");
-    internal.startTerminalWatcher(id, "t1");
+    internal.startTerminalWatcher(id, "t1", "turn-1");
     expect(manager.getSession(id)!.pending.isOpen("terminal_watch", "t1")).toBe(true);
 
     vi.advanceTimersByTime(60_000);
@@ -357,7 +360,7 @@ describe("terminal watch that goes quiet", () => {
     const delivered: string[] = [];
     vi.spyOn(internal, "deliver").mockImplementation((_id, arrival) => { delivered.push(arrival.content); });
     manager.getSession(id)!.turn = openTurn({ source: "user", content: "watch it" }, "turn-1");
-    internal.startRemoteTerminalWatcher(id, "remote-t1", { remoteServerId: "srv", remoteProcessId: "rp1" });
+    internal.startRemoteTerminalWatcher(id, "remote-t1", { remoteServerId: "srv", remoteProcessId: "rp1" }, "turn-1");
     expect(manager.getSession(id)!.pending.isOpen("terminal_watch", "remote-t1")).toBe(true);
 
     vi.advanceTimersByTime(60_000);
@@ -704,12 +707,33 @@ describe("stopping a turn", () => {
     const session = manager.getSession(id)!;
     session.turn = openTurn({ source: "user", content: "watch it" }, "turn-1");
     session.turn.status = "waiting";
-    internal.startTerminalWatcher(id, "t1");
+    internal.startTerminalWatcher(id, "t1", "turn-1");
     expect(internal.terminalWatchers.has("t1")).toBe(true);
 
     manager.stopGeneration(id);
     expect(internal.terminalWatchers.has("t1")).toBe(false);
     expect(session.pending.hasOpen()).toBe(false);
+  });
+
+  it("Stop drops a remote terminal's buffered output instead of delivering it", () => {
+    const { manager, id } = setup(async () => text("unused"));
+    const internal = manager as unknown as Internal;
+    const setChannelAdapter = vi.fn();
+    internal.reverseConnectManager = {
+      isConnected: () => true, setChannelAdapter, openVirtualChannel: vi.fn(), closeChannel: vi.fn(), sendChannelData: vi.fn(),
+    };
+    const delivered: string[] = [];
+    vi.spyOn(internal, "deliver").mockImplementation((_id, arrival) => { delivered.push(arrival.content); });
+    const session = manager.getSession(id)!;
+    session.turn = openTurn({ source: "user", content: "watch it" }, "turn-1");
+    session.turn.status = "waiting";
+    internal.startRemoteTerminalWatcher(id, "remote-t1", { remoteServerId: "srv", remoteProcessId: "rp1" }, "turn-1");
+    const adapter = setChannelAdapter.mock.calls[0][2] as { emit: (event: string, data: string) => void };
+    adapter.emit("message", JSON.stringify({ type: "stdout", data: "half a line" }));
+
+    manager.stopGeneration(id);
+    expect(delivered).toEqual([]);
+    expect(session.turn).toBeNull();
   });
 });
 
