@@ -549,8 +549,9 @@ export class ChatSessionManager {
     this.spawnsInFlight.set(chatSessionId, (this.spawnsInFlight.get(chatSessionId) ?? 0) + 1);
     // Per attempt, not per tool call: a re-delivered call overlapping the first must not share its item.
     const spawnId = randomUUID();
-    const pending = this.sessions.get(chatSessionId)?.pending;
-    pending?.register({ kind: "spawn", id: spawnId, label: "a coding agent being started" });
+    const session = this.sessions.get(chatSessionId);
+    const pending = session?.pending;
+    if (session) this.owe(session, { kind: "spawn", id: spawnId, label: "a coding agent being started" });
     let outcome: PendingOutcome = "failed";
     try {
       const result = await spawn();
@@ -853,16 +854,34 @@ export class ChatSessionManager {
   }
 
   /**
+   * Start owing a result. New work after a complete_task means the turn is
+   * not finished after all: the completion is withdrawn, dot included.
+   */
+  private owe(session: ChatSession, item: Parameters<PendingRegistry["register"]>[0]): void {
+    const fresh = !session.pending.isOpen(item.kind, item.id);
+    session.pending.register(item);
+    if (!fresh || !session.taskCompleted) return;
+    session.taskCompleted = false;
+    if (this.drivesDot(session)) this.emitChatActivity(session, "main-running");
+  }
+
+  /** Arrivals the model has not been shown yet, e.g. a result that landed mid-stream. */
+  private unseenArrivals(session: ChatSession): number {
+    return session.turn?.inbox.length ?? 0;
+  }
+
+  /**
    * Mirror an executor operation into its chat's pending registry. Owed while
    * a result may still arrive — except a start already reported as
    * unconfirmed, which is the model's to resolve (by resuming it); waiting on
    * it would silence the watchdog forever. A late confirmation owes again.
    */
   private syncExecutorPending(operation: CommanderExecutorOperation): void {
-    const pending = this.sessions.get(operation.chatSessionId)?.pending;
-    if (!pending) return;
+    const session = this.sessions.get(operation.chatSessionId);
+    if (!session) return;
+    const pending = session.pending;
     if (isOperationInFlight(operation) && !operation.unconfirmedReportedAt) {
-      pending.register({
+      this.owe(session, {
         kind: "executor", id: operation.id, label: `executor "${operation.executorName}" on ${operation.target}`,
         planId: operation.planId, stepId: operation.stepId,
       });
@@ -880,10 +899,11 @@ export class ChatSessionManager {
 
   /** Mirror a dispatch joining or leaving the agent dispatch ledger's pending list. */
   private syncAgentDispatchPending(dispatch: AgentDispatch, change: AgentDispatchChange): void {
-    const pending = this.sessions.get(dispatch.chatSessionId)?.pending;
-    if (!pending) return;
+    const session = this.sessions.get(dispatch.chatSessionId);
+    if (!session) return;
+    const pending = session.pending;
     if (change === "pending") {
-      pending.register({ kind: "agent_dispatch", id: dispatch.id, label: "a coding agent's reply" });
+      this.owe(session, { kind: "agent_dispatch", id: dispatch.id, label: "a coding agent's reply" });
       return;
     }
     // A released dispatch's agent moved past it: its own reply will never be attributed.
@@ -1640,7 +1660,8 @@ export class ChatSessionManager {
       return;
     }
 
-    this.sessions.get(sessionId)?.pending.register({ kind: "terminal_watch", id: terminalId, label: `output of terminal ${terminalId}` });
+    const watchingSession = this.sessions.get(sessionId);
+    if (watchingSession) this.owe(watchingSession, { kind: "terminal_watch", id: terminalId, label: `output of terminal ${terminalId}` });
     this.terminalWatchers.set(terminalId, {
       unsubscribe,
       state, // live reference — timer IDs stay current
@@ -1825,7 +1846,8 @@ export class ChatSessionManager {
       closeWs();
     };
 
-    this.sessions.get(sessionId)?.pending.register({ kind: "terminal_watch", id: terminalId, label: `output of terminal ${terminalId}` });
+    const watchingSession = this.sessions.get(sessionId);
+    if (watchingSession) this.owe(watchingSession, { kind: "terminal_watch", id: terminalId, label: `output of terminal ${terminalId}` });
     this.terminalWatchers.set(terminalId, {
       unsubscribe,
       state,
@@ -2042,7 +2064,7 @@ export class ChatSessionManager {
       "Every action you take MUST be an actual tool invocation. Writing text like \"I'll run X\" or \"I've started X\" does NOT execute anything — only a tool_use block does. If you need to perform an action, invoke the tool. If you cannot invoke the tool right now, say so honestly instead of pretending you did. Never narrate a tool call without actually making it. Violating this rule means the action silently fails while you falsely report success.",
       "",
       "PER-TURN TOOL INVARIANT: every assistant turn you produce MUST contain at least one tool_use block, and the LAST step of the turn must be one of these — a lookup followed by narration does not count:",
-      "  1. Invoke a tool that performs the next action (runExecutor, runInTerminal, spawnAgentSession, sendToAgentSession, browser actions). After one of these succeeds the turn ends by itself and the result wakes you as an event.",
+      "  1. Invoke a tool that performs the next action (runExecutor, runInTerminal, spawnAgentSession, sendToAgentSession, browser actions). After one of these succeeds your response ends by itself and the result wakes you as an event.",
       "  2. Invoke `wait` when work you started is still running and you have nothing to tell the user.",
       "  3. Invoke `complete_task` to declare the user's overall goal achieved (only once nothing you started is still running).",
       "  4. Invoke `setPlan` to record a step as failed/skipped, or with `waitingOn` set because you genuinely need a user decision.",
@@ -2216,6 +2238,12 @@ export class ChatSessionManager {
         }),
         execute: async ({ timeoutSeconds }) => {
           const session = sessionId ? this.sessions.get(sessionId) : undefined;
+          // Something already reported back that you have not seen: no waiting
+          // needed — this response ends and it follows at once.
+          const unseen = session ? this.unseenArrivals(session) : 0;
+          if (unseen > 0) {
+            return { success: true, arrived: unseen, message: "New messages arrived while you were working. They follow immediately; read them before deciding anything." };
+          }
           const owed = session?.pending.open() ?? [];
           if (!session?.turn || owed.length === 0) {
             return { success: false, message: "Nothing you started is still running, so there is nothing to wait for. Reply to the user, continue the plan, or call complete_task." };
@@ -2254,6 +2282,9 @@ export class ChatSessionManager {
               message: "Work you started is still running, so the task is not finished. Wait for its results (call wait if you have nothing to tell the user), then complete.",
               stillRunning: describePending(owed),
             };
+          }
+          if (session && this.unseenArrivals(session) > 0) {
+            return { completed: false, message: "New messages arrived that you have not read yet (results of your work, or the user). They follow this response; read them before completing." };
           }
           // Once per turn: the turn is already declared finished.
           if (session?.taskCompleted) return { completed: true, message: "Task already marked complete." };
@@ -3476,10 +3507,8 @@ export class ChatSessionManager {
     if (session.pending.hasOpen() || waitingOnUser) {
       // Work it started is on its way back, or the user owes a decision: a
       // compliant end of a stream. The result (or the reply) wakes the turn.
-      // Whatever complete_task said, a turn that still owes results is not done.
       turn.status = "waiting";
       session.planState.nudges = 0;
-      session.taskCompleted = false;
       return;
     }
     switch (this.enforceTurnContract(session, outcome)) {

@@ -482,5 +482,85 @@ describe("complete_task and wait", () => {
     expect(toolResults(manager, id, "wait")[0]).toMatchObject({ success: false });
     expect(manager.getSession(id)!.turn).toBeNull();
   });
+
+  it("new work after complete_task withdraws the completion, even when its result returns mid-stream", async () => {
+    let phase = 0;
+    const ctx = setup(async () => {
+      switch (phase++) {
+        case 0: return call("done", "complete_task", { summary: "Done" });
+        case 1: return call("run", "runExecutor", { executorName: "build" });
+        case 2: return call("again", "complete_task", { summary: "Built after all" });
+        case 3: return text("Built.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    const { manager, id, start, stop, emitBranchActivityIfChanged } = ctx;
+    // The run finishes before runExecutor even returns: its result lands in the inbox mid-stream.
+    start.mockImplementationOnce(async (_executor: unknown, _base: string, _skipDb: boolean, processId: string) => {
+      stop(processId);
+      return processId;
+    });
+    await manager.sendMessage(id, "Wrap up, then build");
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(phase).toBe(4);
+    expect(toolResults(manager, id, "complete_task")[1]).toMatchObject({ completed: true, message: "Task marked complete: Built after all" });
+    const dots = emitBranchActivityIfChanged.mock.calls.map((args) => (args[2] as { activity: string }).activity);
+    expect(dots.slice(dots.indexOf("main-completed"))).toContain("main-running");
+  });
+
+  it("new work after complete_task that keeps running leaves the turn waiting, not complete", async () => {
+    let phase = 0;
+    const { manager, id, idle, emitBranchActivityIfChanged } = setup(async () => {
+      switch (phase++) {
+        case 0: return call("done", "complete_task", { summary: "Done" });
+        case 1: return call("run", "runExecutor", { executorName: "build" });
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Wrap up, then build");
+    await idle();
+    expect(manager.getSession(id)!.taskCompleted).toBe(false);
+    expect(manager.getSession(id)!.turn?.status).toBe("waiting");
+    expect(emitBranchActivityIfChanged).toHaveBeenLastCalledWith("p1", "dev", expect.objectContaining({ activity: "main-running" }));
+  });
+
+  it.each(["wait", "complete_task"] as const)("%s sees a result that arrived mid-stream before the model did", async (tool) => {
+    let phase = 0;
+    let after = "";
+    const ctx = setup(async (options) => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        case 1:
+          ctx.stop(ctx.start.mock.calls[0][3]);
+          await vi.waitFor(() => expect(ctx.manager.getSession(ctx.id)!.turn!.inbox).toHaveLength(1));
+          return call("t", tool, tool === "wait" ? {} : { summary: "Done" });
+        // A refused complete_task leaves the rest of that stream to the model.
+        case 2:
+          if (tool === "complete_task") return text("Let me read that first.");
+          after = JSON.stringify(options.prompt);
+          return call("done", "complete_task", { summary: "Built" });
+        case 3:
+          if (tool === "wait") return text("Built.");
+          after = JSON.stringify(options.prompt);
+          return call("done", "complete_task", { summary: "Built" });
+        case 4:
+          if (tool === "complete_task") return text("Built.");
+          throw new Error(`Unexpected model call ${phase}`);
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    const { manager, id, idle } = ctx;
+    await manager.sendMessage(id, "Build it");
+    await idle();
+    await manager.sendMessage(id, "Status?");
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    await idle();
+    const [result] = toolResults(manager, id, tool);
+    if (tool === "wait") expect(result).toMatchObject({ success: true, arrived: 1 });
+    else expect(result).toMatchObject({ completed: false });
+    expect(after).toContain("[Executor Event: Process Finished]");
+    expect(phase).toBe(tool === "wait" ? 4 : 5);
+    expect(turnEnds(manager, id)).toBe(1);
+  });
 });
 
