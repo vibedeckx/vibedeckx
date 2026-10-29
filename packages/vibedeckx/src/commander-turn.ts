@@ -1,3 +1,5 @@
+import type { ModelMessage } from "ai";
+
 /**
  * What a Main Chat commander still owes: the results of work it started that
  * have not come back yet. One registry per chat session, fed by the four
@@ -161,6 +163,13 @@ export interface CommanderTurn {
   /** Arrivals not yet shown to the model; the next stream starts with them. */
   inbox: TurnArrival[];
   streams: number;
+  /** Index of the turn's first conversation entry: the turn is entries [firstEntryIndex, …). */
+  firstEntryIndex: number;
+  /**
+   * The turn as the model sees it, in full: its user messages and every
+   * stream's assistant messages, tool calls and results (chat-history.ts).
+   */
+  messages: ModelMessage[];
 }
 
 export function openTurn(first: TurnArrival, id: string, now = Date.now()): CommanderTurn {
@@ -173,6 +182,8 @@ export function openTurn(first: TurnArrival, id: string, now = Date.now()): Comm
     toolless: first.source === "browser",
     inbox: [first],
     streams: 0,
+    firstEntryIndex: 0,
+    messages: [],
   };
 }
 

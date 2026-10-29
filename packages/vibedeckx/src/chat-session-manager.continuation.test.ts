@@ -254,7 +254,7 @@ describe("plan continuation watchdog", () => {
     expect(phase).toBe(7);
   });
 
-  it("continues after the step limit cut off a lookup result, carrying that result along", async () => {
+  it("continues after the step limit cut off a lookup result, and the model still sees that result", async () => {
     let phase = 0;
     let continuation: string | undefined;
     const { manager, id, idle, continuations } = setup(async (options) => {
@@ -275,9 +275,10 @@ describe("plan continuation watchdog", () => {
     await idle();
     expect(continuations()).toHaveLength(1);
     expect(continuations()[0]).toContain("6-step limit");
-    expect(continuations()[0]).toContain("getExecutorStatus:");
-    expect(continuations()[0]).toContain("observedAt");
     expect(continuation).toContain("[Plan Continuation]");
+    // The open turn is sent in full: the cut-off lookup's result is right there as a tool result.
+    expect(continuation).toContain('"type":"tool-result"');
+    expect(continuation).toContain("observedAt");
   });
 
   it("re-drives the plan after the model stream itself fails", async () => {

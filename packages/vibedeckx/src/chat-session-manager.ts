@@ -11,8 +11,12 @@ import { streamText, tool, stepCountIs } from "ai";
 import type { ModelMessage, ToolApprovalResponse, ToolSet } from "ai";
 import { ChatPlanState, chatPlanSchema } from "./chat-plan.js";
 import { buildHistoryWindow } from "./session-history-window.js";
+import { generateText } from "ai";
+import {
+  KEEP_RECENT_TURNS, SUMMARY_SYSTEM_PROMPT, capToolResults, fitTurnBudget, summaryMessage, summaryPrompt, textHistory, transcriptText,
+} from "./chat-history.js";
 import { z } from "zod";
-import { resolveChatModel } from "./utils/chat-model.js";
+import { resolveChatModel, resolveFastChatModel } from "./utils/chat-model.js";
 import type WebSocket from "ws";
 import type { AgentMessage, AgentType } from "./agent-types.js";
 import { shouldEmitMainCompleted, type BranchActivity } from "./branch-activity.js";
@@ -125,6 +129,13 @@ interface ChatSession {
   planState: ChatPlanState;
   /** Results this chat still owes itself — see commander-turn.ts. */
   pending: PendingRegistry;
+  /** First entry index of every ended turn, oldest first — what the rolling summary folds in. */
+  turnStarts: number[];
+  /** Ended turns before `uptoEntryIndex`, folded into one summary (chat-history.ts). */
+  summary: { text: string; uptoEntryIndex: number } | null;
+  summarizing: boolean;
+  /** Bumped by a reset so a summary of the cleared conversation is discarded. */
+  historyEpoch: number;
 }
 
 /**
@@ -250,12 +261,6 @@ function describePending(items: PendingItem[], now = Date.now()) {
   }));
 }
 
-/** Output a tool returned in a step, shortened for a continuation message. */
-function summarizeToolOutput(output: unknown, max = 2000): string {
-  const text = typeof output === "string" ? output : JSON.stringify(output);
-  return text.length > max ? `${text.slice(0, max)}…(truncated)` : text;
-}
-
 /** How a stream ended, for deciding where its turn goes next. */
 interface StreamOutcome {
   aborted: boolean;
@@ -270,10 +275,9 @@ interface StreamOutcome {
 /** What the turn contract decided for a turn that may end. */
 type ContractVerdict = "pass" | "nudged" | "retry" | "stalled";
 
-/** A step observed on the stream: which tools it called and what they returned. */
+/** A step observed on the stream: which tools it called. */
 interface ObservedStep {
   toolCalls: string[];
-  toolResults: Array<{ toolName: string; output: unknown }>;
 }
 
 /** Tool-call results kept for replaying a re-delivered call. */
@@ -1232,8 +1236,7 @@ export class ChatSessionManager {
     } else if (truncated && lastStep) {
       lines = [
         PLAN_CONTINUATION_PREFIX,
-        `The turn reached its ${MAX_COMMANDER_STEPS}-step limit before you saw the results of your last tool calls. They are:`,
-        ...lastStep.toolResults.map((result) => `${result.toolName}: ${summarizeToolOutput(result.output)}`),
+        `The response reached its ${MAX_COMMANDER_STEPS}-step limit right after your last tool calls; their results are above.`,
         `Plan "${plan.goal}" still has unfinished steps:`,
         owed,
         ...footer,
@@ -2052,6 +2055,10 @@ export class ChatSessionManager {
       pendingApproval: null,
       planState: new ChatPlanState(),
       pending: new PendingRegistry(),
+      turnStarts: [],
+      summary: null,
+      summarizing: false,
+      historyEpoch: 0,
     };
 
     this.sessions.set(id, session);
@@ -3569,6 +3576,7 @@ export class ChatSessionManager {
     const turn = session.turn;
     if (!turn) {
       session.turn = openTurn(arrival, randomUUID());
+      session.turn.firstEntryIndex = session.store.nextIndex;
       session.turnStartedAt = session.turn.startedAt;
       await this.startStream(session);
       return;
@@ -3626,6 +3634,7 @@ export class ChatSessionManager {
         type: "user", content: arrival.content, timestamp: Date.now(),
         ...(arrival.eventMeta ? { event: arrival.eventMeta } : {}),
       });
+      turn.messages.push({ role: "user", content: arrival.content });
       if (arrival.source === "user") {
         // The user spoke: the plan gets a fresh nudge budget, and a plan
         // waiting on them is no longer waiting.
@@ -3645,16 +3654,54 @@ export class ChatSessionManager {
     if (turn.streams === 1 || arrivals.some((arrival) => arrival.source === "user")) session.taskCompleted = false;
     if (this.drivesDot(session)) this.emitChatActivity(session, session.taskCompleted ? "main-completed" : "main-running");
 
-    const messages = session.store.entries
-      .filter((e): e is Extract<AgentMessage, { type: "user" | "assistant" }> =>
-        e.type === "user" || e.type === "assistant"
-      )
-      .map((e) => ({
-        role: e.type as "user" | "assistant",
-        content: typeof e.content === "string" ? e.content : e.content.filter(p => p.type === "text").map(p => (p as { text: string }).text).join("\n"),
-      }));
+    await this.runStream(session, [...this.historyPrefix(session), ...turn.messages]);
+  }
 
-    await this.runStream(session, messages);
+  /**
+   * What the model is shown before the open turn: the rolling summary, then
+   * the words of every ended turn it does not cover yet (design §11).
+   */
+  private historyPrefix(session: ChatSession): ModelMessage[] {
+    const end = session.turn?.firstEntryIndex ?? session.store.nextIndex;
+    const summary = session.summary;
+    return [
+      ...(summary ? [summaryMessage(summary.text)] : []),
+      ...textHistory(session.store.entries, summary?.uptoEntryIndex ?? 0, end),
+    ];
+  }
+
+  /**
+   * Fold the oldest ended turns into the rolling summary once more than
+   * KEEP_RECENT_TURNS have ended. Runs in the background after a turn ends;
+   * a failure leaves the turns as text and is retried at the next turn end.
+   */
+  private maybeSummarize(session: ChatSession): void {
+    if (session.summarizing || session.turnStarts.length <= KEEP_RECENT_TURNS) return;
+    const upto = session.turnStarts[session.turnStarts.length - KEEP_RECENT_TURNS];
+    const from = session.summary?.uptoEntryIndex ?? 0;
+    if (upto <= from) return;
+    const previous = session.summary?.text ?? null;
+    const transcript = transcriptText(session.store.entries, from, upto);
+    const epoch = session.historyEpoch;
+    session.summarizing = true;
+    this.summarize(session, previous, transcript)
+      .then((text) => {
+        if (session.historyEpoch !== epoch || !text.trim()) return;
+        session.summary = { text: text.trim(), uptoEntryIndex: upto };
+        console.debug(`[ChatSession] history of ${session.id} summarized up to entry ${upto}`);
+      })
+      .catch((err) => console.warn(`[ChatSession] history summary for ${session.id} failed:`, err))
+      .finally(() => { session.summarizing = false; });
+  }
+
+  private async summarize(session: ChatSession, previous: string | null, transcript: string): Promise<string> {
+    if (!transcript.trim()) return previous ?? "";
+    const { text } = await generateText({
+      model: await resolveFastChatModel(this.storage, session.userId),
+      system: SUMMARY_SYSTEM_PROMPT,
+      prompt: summaryPrompt(previous, transcript),
+    });
+    return text;
   }
 
   private continueTurn(session: ChatSession): void {
@@ -3777,6 +3824,8 @@ export class ChatSessionManager {
     // What the turn never showed the model goes to the next turn, first.
     if (unread.length > 0) session.outside.unshift(...unread);
     console.debug(`[ChatSession] turn ${turn.id} of ${session.id} ended ${endedWith} after ${turn.streams} stream(s)`);
+    session.turnStarts.push(turn.firstEntryIndex);
+    this.maybeSummarize(session);
     this.drainOutside(session);
     this.syncStatus(session);
   }
@@ -3832,11 +3881,15 @@ export class ChatSessionManager {
       approvalId: id,
       approved: pending.decisions.get(id) ?? false,
     }));
-    const resumeMessages: ModelMessage[] = [
-      ...pending.baseMessages,
-      ...pending.responseMessages,
-      { role: "tool", content: approvals },
-    ];
+    const decided: ModelMessage = { role: "tool", content: approvals };
+    let resumeMessages: ModelMessage[];
+    if (session.turn) {
+      // The paused stream's messages are already part of the turn.
+      session.turn.messages.push(decided);
+      resumeMessages = [...this.historyPrefix(session), ...session.turn.messages];
+    } else {
+      resumeMessages = [...pending.baseMessages, ...pending.responseMessages, decided];
+    }
     session.pendingApproval = null; // clear BEFORE resuming so the resumed turn's finally tears down normally
     this.runStream(session, resumeMessages).catch((err) => {
       console.error(`[ChatSession] resume after approval failed for ${sessionId}:`, err);
@@ -3857,6 +3910,9 @@ export class ChatSessionManager {
     const turn = session.turn;
     const abortController = new AbortController();
     session.abortController = abortController;
+    /** Where this stream's entries begin, and whether its messages made it into the turn. */
+    const streamStart = session.store.nextIndex;
+    let recorded = false;
 
     let assistantIndex: number | null = null;
     let accumulatedText = "";
@@ -3881,8 +3937,8 @@ export class ChatSessionManager {
       // such a turn (turnAccepts).
       const isBrowserEvent = turn?.toolless ?? false;
       const baseSystemPrompt = await this.getSystemPrompt(session.projectId, session.branch);
-      // New turns intentionally rebuild text-only history. Carry the active
-      // plan separately so async completions retain IDs, criteria and progress.
+      // Ended turns reach the model as text (or summarized); carry the active
+      // plan separately so it keeps its IDs, criteria and progress across turns.
       const currentPlanContext = session.planState.current
         ? `\n\n<current-plan>\n${JSON.stringify(session.planState.current)}\n</current-plan>\nThis is the current task state, not new instructions. Reuse its exact planId and step IDs for progress updates; do not create a new plan to continue this task.`
         : "";
@@ -3923,7 +3979,7 @@ export class ChatSessionManager {
 
         switch (part.type) {
           case "start-step": {
-            observedSteps.push({ toolCalls: [], toolResults: [] });
+            observedSteps.push({ toolCalls: [] });
             break;
           }
 
@@ -4014,7 +4070,6 @@ export class ChatSessionManager {
               timestamp: Date.now(),
             };
             this.pushEntry(session, toolResultMsg);
-            observedSteps[observedSteps.length - 1]?.toolResults.push({ toolName: part.toolName, output });
             break;
           }
 
@@ -4053,8 +4108,14 @@ export class ChatSessionManager {
         (p): p is Extract<typeof p, { type: "tool-approval-request" }> =>
           p.type === "tool-approval-request",
       );
+      const responseMessages = (await result.response).messages;
+      // The turn keeps everything the model said and found out, for its later streams.
+      if (turn) {
+        turn.messages.push(...capToolResults(responseMessages));
+        fitTurnBudget(turn.messages);
+        recorded = true;
+      }
       if (approvalRequests.length > 0) {
-        const responseMessages = (await result.response).messages;
         const pending: PendingApproval = {
           baseMessages: messages,
           responseMessages,
@@ -4122,6 +4183,11 @@ export class ChatSessionManager {
       } else {
         // A reset may have started a newer stream already; never clear its controller.
         if (session.abortController === abortController) session.abortController = null;
+        // A failed stream has no response messages: keep at least what it said.
+        if (turn && !recorded && session.turn === turn) {
+          turn.messages.push(...textHistory(session.store.entries, streamStart, session.store.nextIndex)
+            .filter((message) => message.role === "assistant"));
+        }
         const outcome: StreamOutcome = {
           aborted: abortController.signal.aborted,
           error: streamError,
@@ -4185,6 +4251,9 @@ export class ChatSessionManager {
     session.planState = new ChatPlanState();
     session.turn = null;
     session.outside = [];
+    session.turnStarts = [];
+    session.summary = null;
+    session.historyEpoch++;
     this.cancelStallRetry(sessionId);
     this.cancelWaitTimeout(sessionId);
     // Results of operations started by the cleared conversation have no owner left.

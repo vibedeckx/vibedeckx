@@ -954,3 +954,78 @@ describe("what the UI sees of a turn", () => {
   });
 });
 
+describe("what the model is shown (design §11)", () => {
+  type Summarizer = { summarize: (session: unknown, previous: string | null, transcript: string) => Promise<string> };
+
+  it("a later stream of the same turn sees the earlier stream's tool results; an ended turn is only its words", async () => {
+    let phase = 0;
+    const prompts: string[] = [];
+    const { manager, id, idle, stop, start } = setup(async (options) => {
+      prompts.push(JSON.stringify(options.prompt));
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        case 1: return call("finish", "complete_task", { summary: "Built" });
+        case 2: return text("Built.");
+        case 3: return call("status", "getExecutorStatus", { tailLines: 5 });
+        case 4: return text("All quiet.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Build it");
+    await idle();
+    stop(start.mock.calls[0][3]);
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    // Woken by the finish, the model still has its own runExecutor call and result.
+    expect(prompts[1]).toContain('"toolName":"runExecutor"');
+    expect(prompts[1]).toContain("Started \\\"build\\\"");
+
+    await manager.sendMessage(id, "Anything running?");
+    await idle();
+    // The previous turn is its words only: no tool calls or results from it.
+    expect(prompts[3]).toContain("Build it");
+    expect(prompts[3]).toContain("Built.");
+    expect(prompts[3]).not.toContain('"toolName":"runExecutor"');
+  });
+
+  it("past three ended turns the oldest are folded into a rolling summary", async () => {
+    const prompts: string[] = [];
+    const { manager, id, idle } = setup(async (options) => {
+      prompts.push(JSON.stringify(options.prompt));
+      return call(`done-${prompts.length}`, "complete_task", { summary: "ok" });
+    });
+    const summarize = vi.spyOn(manager as unknown as Summarizer, "summarize")
+      .mockImplementation(async (_session, previous, transcript) => `${previous ? `${previous} + ` : ""}summary of [${transcript.match(/question \d/g)?.join(", ")}]`);
+    for (const n of [1, 2, 3, 4, 5]) {
+      await manager.sendMessage(id, `question ${n}`);
+      await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+      await idle();
+    }
+    // Ended turns 1-4: turn 1 folded; after turn 5, turn 2 as well.
+    expect(summarize).toHaveBeenCalledTimes(2);
+    expect(manager.getSession(id)!.summary?.text).toBe("summary of [question 1] + summary of [question 2]");
+
+    await manager.sendMessage(id, "question 6");
+    await idle();
+    const last = prompts.at(-1)!;
+    expect(last).toContain("[Earlier conversation, summarized]");
+    expect(last).not.toContain('"text":"question 1"');
+    expect(last).not.toContain('"text":"question 2"');
+    for (const kept of ["question 3", "question 4", "question 5", "question 6"]) expect(last).toContain(kept);
+  });
+
+  it("a reset drops the summary, even one still being written", async () => {
+    const { manager, id, idle } = setup(async () => call("done", "complete_task", { summary: "ok" }));
+    let finish!: (text: string) => void;
+    vi.spyOn(manager as unknown as Summarizer, "summarize").mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    for (const n of [1, 2, 3, 4]) {
+      await manager.sendMessage(id, `question ${n}`);
+      await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+      await idle();
+    }
+    manager.resetSession(id);
+    finish("stale summary");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(manager.getSession(id)!.summary).toBeNull();
+  });
+});
+
