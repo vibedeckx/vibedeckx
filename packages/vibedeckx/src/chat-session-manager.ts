@@ -655,7 +655,8 @@ export class ChatSessionManager {
     if (!this.eventBus) return;
     this.eventBus.subscribe((event: GlobalEvent) => {
       if (event.type === "executor:started") {
-        this.operations.markStarted(event.processId);
+        const confirmed = this.operations.markStarted(event.processId);
+        if (confirmed?.from === "start_unknown" && confirmed.operation.service) this.reportServiceUp(confirmed.operation);
       } else if (event.type === "executor:stopped") {
         this.handleExecutorFinished(event).catch((err) => {
           console.error(`[ChatSession] handleExecutorFinished unhandled error:`, err);
@@ -906,6 +907,23 @@ export class ChatSessionManager {
     } else {
       this.deliver(sessionId, { source: "notice", content: message });
     }
+  }
+
+  /**
+   * A service whose start the model was told is unknown turned out to be up.
+   * That is the result its turn waits for: nothing else would wake it — a
+   * running service has no exit to report.
+   */
+  private reportServiceUp(operation: CommanderExecutorOperation): void {
+    const session = this.sessions.get(operation.chatSessionId);
+    if (!session) return;
+    this.deliverOwn(session, "executor", operation.id, { source: "result", content: [
+      `[Executor Event: Service Started]`,
+      `Executor: "${operation.executorName}"`,
+      `Operation: ${operation.id} (started by your runExecutor call)`,
+      ...(operation.stepId ? [`Plan step: ${operation.stepId} (plan ${operation.planId})`] : []),
+      `The start you were told was unknown has been confirmed: the service is running. You are not waiting for it to exit; if it ever stops, that arrives as an event.`,
+    ].join("\n") });
   }
 
   // ---- Plan continuation: the plan drives the chat, not the other way round ----

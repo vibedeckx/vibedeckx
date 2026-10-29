@@ -161,14 +161,20 @@ export class CommanderOperationLedger {
     this.byProcessId.set(processId, operationId);
   }
 
-  /** A start confirmed out of band (e.g. after a remote reconnects). */
-  markStarted(processId: string): void {
+  /**
+   * A start confirmed out of band (e.g. after a remote reconnects). Returns the
+   * operation and the status it was confirmed from, when it was unconfirmed.
+   */
+  markStarted(processId: string): { operation: CommanderExecutorOperation; from: "accepted" | "start_unknown" } | undefined {
     const operation = this.byProcess(processId);
     if (operation && (operation.status === "accepted" || operation.status === "start_unknown")) {
+      const from = operation.status;
       operation.status = "started";
       delete operation.unconfirmedReportedAt;
       this.onChange(operation);
+      return { operation, from };
     }
+    return undefined;
   }
 
   /**

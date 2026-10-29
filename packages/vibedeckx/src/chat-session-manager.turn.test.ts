@@ -13,6 +13,7 @@ import type { ProcessManager } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { AgentSessionLifecycleService } from "./agent-session-lifecycle.js";
+import type { RemoteExecutorStarts, RemoteStartOutcome } from "./remote-executor-starts.js";
 import type { RemoteSessionLifecycleAdapter } from "./remote-session-lifecycle.js";
 
 vi.mock("./utils/chat-model.js", () => ({ resolveChatModel: vi.fn() }));
@@ -801,7 +802,7 @@ describe("long-running services", () => {
     expect(turnEnds(manager, id)).toBe(1);
   });
 
-  it("a service's later exit is reported even while not listening, and after Stop (D3)", async () => {
+  it("a service's later exit is reported even while not listening (D3)", async () => {
     let phase = 0;
     let news = "";
     const ctx = withService(setup(async (options) => {
@@ -852,6 +853,71 @@ describe("long-running services", () => {
     await manager.sendMessage(id, "Start the dev server");
     await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
     expect(woken).toContain("Exit Code: 1 (failed)");
+    expect(turnEnds(manager, id)).toBe(1);
+  });
+
+  it("a service's exit is still reported after the turn that started it was stopped (D3)", async () => {
+    let phase = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let news = "";
+    const ctx = withService(setup(async (options) => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "dev" });
+        // Still working after starting it when the user stops the turn.
+        case 1: await gate; return text("late");
+        case 2:
+          news = JSON.stringify(options.prompt);
+          return call("noted", "complete_task", { summary: "Noted" });
+        case 3: return text("The dev server stopped.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    }));
+    const { manager, id, idle, stop, start } = ctx;
+    const sent = manager.sendMessage(id, "Start the dev server, then look around");
+    await vi.waitFor(() => expect(phase).toBe(2));
+    manager.stopGeneration(id);
+    release();
+    await sent;
+    await idle();
+    expect(manager.getSession(id)!.turn).toBeNull();
+
+    stop(start.mock.calls[0][3], 1);
+    await vi.waitFor(() => expect(phase).toBe(4));
+    expect(news).toContain("long-running service you started");
+  });
+
+  it("a remote service whose start was unknown wakes its waiting turn once it is confirmed up", async () => {
+    let phase = 0;
+    let woken = "";
+    const ctx = withService(setup(async (options) => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "dev" });
+        case 1:
+          woken = JSON.stringify(options.prompt);
+          return call("finish", "complete_task", { summary: "Dev server up" });
+        case 2: return text("The dev server is up.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    }));
+    const { manager, id, idle, bus, storage } = ctx;
+    vi.mocked(storage.projects.getById).mockResolvedValue({ id: "p1", path: "/repo", executor_mode: "srv" } as never);
+    vi.mocked(storage.remoteServers.getById).mockResolvedValue({ id: "srv" } as never);
+    (storage.projectRemotes as unknown as Record<string, unknown>).getByProjectAndServer = vi.fn(async () => ({ remote_path: "/remote/repo" }));
+    const remoteStart = vi.fn(async () => ({ kind: "unknown", error: "Remote server unreachable" }) as RemoteStartOutcome);
+    manager.setRemoteExecutorStarts({ start: remoteStart, reconcile: vi.fn() } as unknown as RemoteExecutorStarts);
+
+    await manager.sendMessage(id, "Start the dev server");
+    await idle();
+    expect(phase).toBe(1);
+    expect(manager.getSession(id)!.turn?.status).toBe("waiting");
+
+    // The worker reconnects and confirms the process: no user message, no exit.
+    const processId = `remote-e1-${(remoteStart.mock.calls[0] as unknown as [{ processId: string }])[0].processId}`;
+    bus.emit({ type: "executor:started", projectId: "p1", executorId: "e1", processId, target: "srv" });
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(phase).toBe(3);
+    expect(woken).toContain("[Executor Event: Service Started]");
     expect(turnEnds(manager, id)).toBe(1);
   });
 });
