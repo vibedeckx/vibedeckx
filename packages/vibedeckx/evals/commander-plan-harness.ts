@@ -61,14 +61,19 @@ export function createHarness(config: ChatProviderConfig) {
         }
         if (name === "getExecutorStatus") return {
           observedAt: new Date().toISOString(),
-          executors: ["test", "dev-server"].map((name) => ({ name, status: "never_started", command: name === "test" ? "npm test" : "npm run dev" })),
+          executors: ["test", "dev-server"].map((name) => ({
+            name, status: "never_started", command: name === "test" ? "npm test" : "npm run dev",
+            lifecycle: name === "dev-server" ? "service" : "oneshot",
+          })),
         };
         if (name === "getAgentConversation") return { success: true, messages: [], message: "No coding agent has started. The project uses GitHub OAuth; no email/password login is implemented." };
         if (name === "listTerminals") return { success: true, terminals: [{ id: "eval-terminal", name: "Terminal" }] };
         if (readOnly.has(name)) return { success: true, content: "Development workspace ready." };
         // A started action is work in flight, exactly as production records
-        // it: the turn ends on it, the stall watchdog stays quiet, and a step
-        // linked to it cannot be completed until `finishOperations` settles it.
+        // it: the response ends on it, the turn waits for its result, and a
+        // step linked to it cannot be completed until `finishOperations`
+        // settles it. The dev server is a service, as configured in
+        // production: once started it is done and the response goes on.
         const stepId = (input as { stepId?: string } | null)?.stepId;
         const plan = manager.getSession(id)!.planState.current;
         if (stepId && !plan?.steps.some((step) => step.id === stepId)) {
@@ -76,13 +81,19 @@ export function createHarness(config: ChatProviderConfig) {
         }
         const operationId = options?.toolCallId ?? `sim-call-${++simulated}`;
         const processId = `sim-process-${++simulated}`;
+        const executorName = String((input as { executorName?: string } | null)?.executorName ?? name);
+        const service = name === "runExecutor" && executorName === "dev-server";
         internal.operations.register({
           id: operationId, kind: "executor", chatSessionId: id, turnId: manager.getSession(id)!.turn?.id ?? null,
           planId: stepId ? plan?.planId ?? null : null, stepId: stepId ?? null,
-          executorId: `sim-${name}`, service: false, executorName: String((input as { executorName?: string } | null)?.executorName ?? name),
+          executorId: `sim-${name}`, service, executorName,
           target: "local", processId,
         });
         internal.operations.settleStart(operationId, "started");
+        if (service) return {
+          success: true, service: true, operationId, ...(stepId ? { stepId } : {}), processId,
+          message: `Started "${executorName}". It is a long-running service: you are not waiting for it to exit — report that it started and move on.`,
+        };
         return {
           success: true, sent: true, operationId, ...(stepId ? { stepId } : {}), processId,
           message: "Operation started. Wait for its separate completion event; no completion has arrived yet.",

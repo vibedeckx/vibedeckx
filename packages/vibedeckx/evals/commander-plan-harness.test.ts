@@ -23,7 +23,7 @@ describe("Commander plan eval harness", () => {
         input: JSON.stringify({ goal: "Start preview", completionCriteria: ["Preview accessible"], requireConfirmation: true, steps: [{ id: "preview", title: "Start preview", status: "pending" }] }),
       }] : index === 1 ? [{
         type: "tool-call", toolCallId: "execute", toolName: "runExecutor",
-        input: JSON.stringify({ executorName: "dev-server" }),
+        input: JSON.stringify({ executorName: "test" }),
       }] : [
         { type: "text-start", id: "text" },
         { type: "text-delta", id: "text", delta: "Waiting for completion." },
@@ -61,12 +61,13 @@ describe("Commander plan eval harness", () => {
         if (result?.type === "tool_result") expect(JSON.parse(result.output)).toMatchObject({ success: true, message: expect.stringContaining("Operation started") });
         expect(h.manager.getSession(h.id)!.planState.current?.goal).toBe("Start preview");
         expect(h.messages().some((message) => message.type === "error")).toBe(false);
-        // The started run is work in flight: the turn ended on it and the
-        // watchdog did not re-drive the plan.
+        // The started run is work in flight: the response ended on it, the
+        // turn waits for its result, and the watchdog did not re-drive the plan.
+        expect(h.manager.getSession(h.id)!.turn?.status).toBe("waiting");
         expect(h.messages().some((message) => message.type === "user" && message.content.startsWith("[Plan Continuation]"))).toBe(false);
         expect(h.finishOperations()).toEqual(["execute"]);
       });
-      // setPlan, then runExecutor — the turn ends once the run is on its way.
+      // setPlan, then runExecutor — the response ends once the run is on its way.
       expect(traces).toHaveLength(2);
       expect(JSON.stringify(traces.map((trace) => trace.input))).toContain("reasoning");
       expect(traces.every((trace) => trace.usage?.totalTokens === 2)).toBe(true);

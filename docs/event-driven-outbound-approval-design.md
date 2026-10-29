@@ -1,5 +1,9 @@
 # 事件驱动出站确认闸（Event-driven Outbound Approval Gate）
 
+> **状态（2026-10-29）：机制已被取代，目标不变。** 下文的 `wokenByEvent` / `eventDrivenTurn` 内容嗅探已随 Main Chat 的 turn 层删除。
+> 现在 spawn/send 的审批看 `turn.userPresent`：这一段流由用户消息开启则不审批，由结果、事件或超时叫醒则审批——
+> 拦住的仍是本文描述的自激链。见 [`chat-session-orchestrator-state.md`](./chat-session-orchestrator-state.md) §8。
+
 ## 1. 背景与问题
 
 Main Chat 的 commander 通过两个工具向 coding agent 发起动作：

@@ -1,11 +1,12 @@
-# Chat Session Orchestrator: State, Watchdog & Workspace Dot
+# Chat Session Orchestrator: Turns, Pending Work, Watchdog & Workspace Dot
 
-How the main chat session (the "orchestrator") tracks its run state, enforces a
-per-turn tool invariant, and drives the workspace dot color — and how that
-coexists with the coding agent's own state.
+How the Main Chat orchestrator (the "commander") organizes its work into turns,
+keeps track of what it still owes, enforces its turn contract, and drives the
+workspace dot — and how that coexists with the coding agent's own state.
 
-All code referenced here lives in `packages/vibedeckx/src/chat-session-manager.ts`
-unless otherwise noted.
+Code: `packages/vibedeckx/src/chat-session-manager.ts` unless noted, plus
+`commander-turn.ts` (turn object, pending registry), `commander-operations.ts`
+(identity ledgers) and `chat-history.ts` (what the model is shown).
 
 ---
 
@@ -16,324 +17,268 @@ A workspace branch has **two** independent AI actors:
 | Actor | Where | Manager | What it does |
 |-------|-------|---------|--------------|
 | **Coding agent** | the lower "agent window" | `AgentSessionManager` | spawns Claude Code as a child process, does the heavy code edits |
-| **Chat orchestrator** | the main chat panel | `ChatSessionManager` | answers questions, runs executors/terminal/browser tools, summarizes events |
+| **Chat orchestrator** | the Main Chat panel | `ChatSessionManager` | answers questions, runs executors/terminal/browser tools, dispatches coding agents, summarizes events |
 
 Both report activity for the **same** sidebar dot (`StatusDot` in
-`apps/vibedeckx-ui/components/layout/app-sidebar.tsx`). The dot shows one color
-at a time; the most recent emit (by `since` timestamp) wins.
-
-### Color reference
-
-`BranchActivity` / `WorkspaceStatus` values and their dot colors:
+`apps/vibedeckx-ui/components/layout/app-sidebar.tsx`). The most recent emit
+(by `since`) wins.
 
 | State | Color | Meaning | Emitted by |
 |-------|-------|---------|------------|
 | `idle` | gray | no activity yet / fresh conversation | both |
-| `working` | blue pulse | **coding agent** actively running | `AgentSessionManager` |
-| `completed` | emerald | **coding agent** finished its task | `AgentSessionManager` |
-| `stopped` | amber | stopped / abandoned mid-turn | both |
-| `main-running` | **violet pulse** | **chat orchestrator** actively processing | `ChatSessionManager` |
-| `main-completed` | **cyan** | **chat orchestrator** finished its response ("over to you") | `ChatSessionManager` |
+| `working` | blue pulse | coding agent running | `AgentSessionManager` |
+| `completed` | lime | coding agent finished its task | `AgentSessionManager` |
+| `stopped` | amber | stopped / abandoned / stalled | both |
+| `main-running` | violet pulse | orchestrator streaming a reply | `ChatSessionManager` |
+| `main-waiting` | hollow violet ring, slow pulse | orchestrator still on the task between replies, waiting for results or for the user | `ChatSessionManager` |
+| `main-completed` | emerald | orchestrator declared the task done (`complete_task`) | `ChatSessionManager` |
 
-The `main-*` variants exist specifically so the user can visually tell
-"orchestrator is working" (violet) apart from "coding agent is working" (blue),
-and "orchestrator done responding" (cyan) apart from "coding agent task done"
-(emerald).
-
-Type definitions (kept in sync manually across the process boundary):
-- Backend: `BranchActivity` in `branch-activity.ts`; event payload in `event-bus.ts`.
-- Frontend: `BranchActivity` in `hooks/use-branch-activity.ts`; `WorkspaceStatus`
-  in `lib/workspace-status.ts`.
-
-### Emit plumbing
-
-`computeBranchActivity` (in `branch-activity.ts`) **only** derives the four
-agent states from the `agent_sessions` DB table. It never returns `main-*`.
-
-The chat orchestrator emits its states directly via
-`ChatSessionManager.emitChatActivity(session, activity)`, which forwards to
-`AgentSessionManager.emitBranchActivityIfChanged(...)`. Both actors share the
-same `BranchActivityDedupe` gate (a redundant emit of the same value is
-dropped) and the same SSE channel (`branch:activity` events → `/api/events`).
-The frontend `useBranchActivity` hook applies the most-recent-by-`since` event.
+`computeBranchActivity` (`branch-activity.ts`) only derives the agent states
+from `agent_sessions`. The orchestrator emits `main-*` itself via
+`emitChatActivity`, through the same `BranchActivityDedupe` gate and
+`branch:activity` SSE channel; `overlayOrchestratorActivity` replays live
+`main-*` states into the REST snapshot. `main-running` and `main-waiting` are
+live work: they win over a New Conversation placeholder
+(`lib/workspace-status.ts`).
 
 ---
 
-## 2. Chat orchestrator turn lifecycle
+## 2. Three layers: session, turn, step
 
-A "turn" is one `sendMessage(sessionId, content, eventDriven?)` invocation:
-push a user/event message, stream the model response (with up to
-`MAX_COMMANDER_STEPS = 6` tool-use rounds, or fewer: the turn stops as soon as
-a step hands work off to an event — a successful `runExecutor`,
-`spawnAgentSession`, `sendToAgentSession` or `runInTerminal` — because the
-result arrives as an `[… Event]` message that wakes the model), finalize.
+- **Step** — one model call plus the tool calls it makes inline
+  (`ObservedStep`; at most `MAX_COMMANDER_STEPS = 6` per stream).
+- **Stream** — one `streamText` run (`runStream`).
+- **Turn** — one user message (or a listened event) and *all* the work it
+  leads to, across as many streams as it takes, until the commander owes
+  nothing. A hub-side bookkeeping object (`CommanderTurn`, on
+  `ChatSession.turn`); the model API is unchanged.
 
-### Dot transitions on a user-initiated turn
+A session has at most one open turn, so a turn is a contiguous range of
+conversation entries starting at `turn.firstEntryIndex`. One `turn_end` divider
+is written when a turn ends, however many streams it took.
+
+The rule borrowed from eve: **a result of work the commander started never
+opens a turn of its own — it joins the turn that started the work, waking it
+if it waits; and that turn does not end while it still owes results.**
+
+### `CommanderTurn` fields
+
+| Field | Meaning |
+|-------|---------|
+| `openedBy` | `user`, or `listened_event` (an event the user opted to listen to, a browser event, a late result of abandoned work) |
+| `status` | `running` (a stream is live or parked on an approval) / `waiting` (no stream; results or the user owed) |
+| `userPresent` | whether the user was there when the current stream started — gates outbound agent actions (§8) |
+| `toolless` | a browser-event turn: no tools, and nothing else joins it |
+| `inbox` | arrivals not yet shown to the model; the next stream starts with them |
+| `messages` | the turn as the model sees it, in full (§9) |
+| `firstEntryIndex`, `streams`, `startedAt` | bookkeeping; `startedAt` anchors `getExecutorStatus`'s `startedThisTurn` |
+
+---
+
+## 3. Turn lifecycle
+
+Everything entering the conversation goes through `deliver(sessionId, arrival)`.
+An arrival is `user`, `result` (of the chat's own work), `notice` (a listened
+event), `browser`, `nudge` (the turn contract) or `wait_timeout`.
+
+- **No open turn** → the arrival opens one (`route` → `startStream`).
+- **Open turn** → the arrival joins its inbox. A `waiting` turn wakes at once
+  (next stream, same turn id); a `running` one shows it to the model when the
+  current stream ends.
+- **Browser events** never join an open turn, and nothing joins a browser
+  turn: such arrivals wait in `ChatSession.outside` for the next turn.
+
+A user message during a stream therefore no longer starts a second, concurrent
+stream; it joins the turn.
+
+### When a stream ends (`afterStream`)
+
+Checked in order, first match wins:
+
+| # | Condition | Result |
+|---|-----------|--------|
+| 1 | parked on a tool approval | nothing (the turn stays `running`) |
+| 2 | aborted (Stop) | turn ends `cancelled` (§6) |
+| 3 | inbox non-empty | next stream at once, same turn |
+| 4 | pending work, or the plan's `waitingOn` is set | turn `waiting`; no `turn_end`, no watchdog; dot `main-waiting` |
+| 5–6 | otherwise | the turn may end: `enforceTurnContract` decides (§5) |
 
 ```
-user sends message
-   │
-   ▼
-sendMessage start ──────────────► emit main-running  (violet)
-   │  taskCompleted = false
-   │
-   ▼
-stream loop
-   ├─ tool-call ────────────────► emit (taskCompleted ? main-completed : main-running)
-   │                                (refreshes `since`; sticky-cyan within the turn)
-   ├─ complete_task tool ───────► markCompleted: taskCompleted = true, emit main-completed (cyan)
-   └─ trailing text ────────────► (no emit)
-   │
-   ▼
-stream ends
-   ├─ watchdog check (§3)
-   └─ finally: status=stopped (internal WS patch, NOT a dot emit), drainQueue
+            openTurn ──► running ◄──┐ inbox non-empty / nudge: next stream
+                          │  ▲  ────┘
+   owed / wait / waitingOn │  │ result, user message, wait timeout, deadline
+                          ▼  │
+                        waiting ──Stop──► ended
+                          running ──(stream end, nothing owed)──► ended
+                          running ──Stop──► ended
 ```
 
-The next user turn resets `taskCompleted` and emits `main-running` again — so
-the dot goes **violet → cyan → (next message) violet → cyan → …**.
-
-`complete_task` means **"this response is finished, over to you"** — cyan. It is
-NOT a permanent "task closed" state; every new turn is fresh work (violet).
-
-### Per-session state flags (`ChatSession`)
-
-| Field | Lifetime | Purpose |
-|-------|----------|---------|
-| `status` | per-stream | internal `running`/`stopped` — drives the WS `/status` patch for the chat UI, **not** the dot |
-| `taskCompleted` | sticky within a turn, reset at next `sendMessage` start | set by `complete_task`; keeps cyan for the rest of the turn (handles the tool-call/execute emit-ordering race and post-complete tool calls) and tells the watchdog the turn is well-formed |
-| `eventDrivenTurn` | per turn | true if the turn is a reactive system event; gates all orchestrator dot emits off (see §5) |
-
-### Lifecycle emits
-
-- `stopGeneration` (user clicks Stop) → emit `stopped` (amber).
-- `resetSession` (New Conversation) → clears `taskCompleted`, clears the
-  watchdog counter, emit `idle` (gray).
+`ended` is `completed`, `cancelled` or `stalled`.
 
 ---
 
-## 3. The per-turn tool invariant & watchdog (implemented)
+## 4. Pending work
 
-### Problem
+`PendingRegistry` (`commander-turn.ts`, on `ChatSession.pending`) answers one
+question: *what does the chat still owe itself?* Every item reaches exactly one
+outcome — `completed`, `failed`, `cancelled` or `interrupted` (unknown).
 
-The model sometimes **claims** it called a tool ("I ran the build", "已修改…")
-without actually emitting a `tool_use` block. The action silently never
-happens, no completion event fires, and the workflow stalls.
+| Kind | Owed from | Settled when | Deadline |
+|------|-----------|--------------|----------|
+| `executor` | `runExecutor` registers the operation | its finish has been **delivered** to the turn; a reconcile with no exit code → `interrupted` | none (the reconciler checks the process) |
+| executor, service | same | its start is confirmed (`completed`): a service is done once up | — |
+| `agent_dispatch` | spawn activation / `sendToAgentSession` | its turn end is matched; a later dispatch's turn end → `interrupted` | 2 h → `[Agent Event: No Reply]`, `interrupted` |
+| `spawn` | `spawnAgentSession` call | the call returns | 5 min: the call itself answers "start not confirmed" |
+| `terminal_watch` | `runInTerminal` | output flushed, or 60 s idle → `[Terminal Event: No New Output]` | idle timer |
 
-### The invariant
+Rules that keep it honest:
 
-> **Every assistant turn must contain at least one `tool_use` block.**
+- **Identity stays with the ledgers.** `CommanderOperationLedger` and
+  `AgentDispatchLedger` still match events to work by exact identity, and
+  notify the registry on every change (constructor listener), so the mirror is
+  exact whoever drives them.
+- **An item settles in the same tick its result enters the turn.** Settling
+  earlier (e.g. while a finish's lookups are still awaited) lets a stream end
+  the turn in between, and the result then opens a turn of its own.
+- **Work belongs to the turn whose tool call started it.** `createTools`
+  captures that turn's id; `owe()` registers an item only while that turn is
+  still open. A tool call still finishing after Stop, or a late confirmation
+  arriving in a newer turn, is owed to nobody.
+- **In-stream waits answer the tool call.** A deadline for something the
+  model is blocked on inside a tool call (the spawn) must make that call
+  return; posting to the inbox is useless until the stream ends.
+- **Exit codes are facts.** A run whose finish was never observed and whose
+  process record has no exit code is reported as `Exit Code: unknown`, never
+  as a made-up `1`.
 
-A turn ends legitimately in exactly three ways:
-1. invoke a real tool (make progress),
-2. invoke `complete_task` (done responding),
-3. the user aborts.
-
-`complete_task` is itself a tool, so the invariant collapses to a single
-**structural** check — no LLM judge needed for hallucination detection. It is
-taught to the model in the system prompt's `<critical-rules>` section (see
-`getSystemPrompt`).
-
-### The turn-contract watchdog (implemented)
-
-One check, `enforceTurnContract`, runs in `runStream`'s `finally` (so the error
-path is covered too), after the `turn_end` entry and before `drainQueue`. It
-used to be two watchdogs — a zero-tool check inside the `try` block with its own
-`correctionCounts`/`MAX_CHAT_CORRECTIONS = 2`, and the plan-continuation check —
-kept mutually exclusive by a condition; they are now one function with one
-budget.
-
-Common skips: the turn was aborted, `complete_task` ran, the plan is blocked on
-confirmation or already stalled, or a message is already queued (an event opens
-the next turn anyway).
-
-**No unfinished plan → the no-tool rule.** A turn that invoked no tool at all
-(`toolCallCountInStream === 0`) usually narrated an action that never ran.
-Inject a `[System Invariant Violation]` correction. A turn with ≥1 tool call is
-compliant and resets the budget. A failed stream is left to the user (the error
-entry is on screen; nothing was promised). Out of budget → give up quietly and
-reset: a plan-less chat may just have been answering a question, so no
-notification.
-
-**Unfinished plan → the plan-idle rule.** Tools called this turn do not count:
-the common way a plan died in place was `setPlan`, a `getExecutorStatus`, then
-"Now I'll start step 1" — tool calls, nothing started, no event to wake the
-model.
-
-- Compliant — and the budget resets — when `waitingOn` is set (the model
-  legitimately needs a user decision; the task card shows it) or the chat has
-  **work in flight** (`hasInFlightWork`): an unsettled executor operation in
-  `CommanderOperationLedger`, a pending agent dispatch, a spawn being activated,
-  or a terminal watcher. The event will wake the model.
-- Otherwise inject a `[Plan Continuation]` user message naming the unfinished
-  steps. Three flavours: plain idle; the step limit cut off the model's last
-  lookup (the results are quoted, since the rebuilt history is text-only); the
-  stream itself failed (sent after `stallRetryDelayMs` backoff).
-- Out of budget the plan is **stalled**: a `[Plan Stalled]` system entry, the
-  dot goes to `stopped`, and a durable `commander_stalled` outbox milestone
-  rings the bell. The next user message clears the stall and restores the
-  budget.
-
-Budget: `ChatPlanState.nudges`, shared by both rules, capped at
-`MAX_TURN_NUDGES = 3`; reset by a compliant turn, a new plan, async work
-starting, or the user speaking (`[System Invariant Violation]` and
-`[Plan Continuation]` messages are not user speech).
-
-Two guards make the plan's progress honest rather than narrated:
-
-- `setPlan` refuses to mark a step `completed` while the latest executor
-  operation registered for that step is still in flight.
-- `reconcileInFlight` (every `IN_FLIGHT_RECONCILE_INTERVAL_MS`) settles a
-  started operation whose process is gone but whose finish event never reached
-  the chat, taking the exit code from the process record (local
-  `executor_processes`, remote `remote_executor_processes`) and reporting the
-  run as failed with an explicit note when the record has none. Without it the
-  watchdog would see "work in flight" forever and never re-drive the plan. A
-  start that never settled (`accepted`) or was never confirmed by the worker
-  (`start_unknown`) is **not** settled by the reconciler — a lost response
-  does not prove the command did not run, and the identity is what lets a
-  runExecutor retry resume it exactly once through the idempotent start path.
-  After `UNCONFIRMED_START_AGE_MS` the chat is told once
-  (`[Executor Event: Start Unconfirmed]`), and from then on the operation no
-  longer counts as in-flight work for the watchdog, so the plan is re-driven
-  to resolve it.
-- The error-backoff re-drive is a timer that re-enters
-  `enforceTurnContract` with `deferred: true`: every guard is re-checked
-  at fire time (turn in progress, in-flight work, `waitingOn`, stall), and any
-  new turn starting (`sendMessage`) cancels the pending timer outright.
-
-### Why no `since`-debounce / LLM judge here
-
-`stop_reason === end_turn` (a stream that ends with no tool call) is a
-deterministic signal — there is nothing in flight to wait for, so the check is
-synchronous. The structural invariant replaces the probabilistic
-"LLM-as-judge" approach we considered for hallucination detection.
+The sweep for deadlines (`expireOverdue`) rides the 30 s reconcile timer.
 
 ---
 
-## 4. `complete_task` tool (implemented)
+## 5. The turn contract (watchdog)
 
-```
-complete_task({ summary?: string })
-```
+`enforceTurnContract` runs only at §3 row 5–6: the stream ended, nothing is
+owed, nobody is waited for. It returns a verdict instead of injecting messages
+itself:
 
-- Calls `markCompleted(sessionId)`: sets `taskCompleted = true` and (on
-  non-event turns) emits `main-completed` (cyan).
-- Does **NOT** abort the stream — the tool-result and any trailing assistant
-  text still render, and the user can keep chatting.
-- On the next turn, `taskCompleted` resets and the dot returns to violet.
+| Verdict | Meaning |
+|---------|---------|
+| `pass` | the turn ends `completed` (`complete_task` was called, the plan is done or blocked/stalled, a plan-less stream called a tool, or the budget gave up quietly) |
+| `nudged` | a `[Plan Continuation]` or `[System Invariant Violation]` message went into the inbox; the turn goes on |
+| `retry` | the stream failed with a plan owing steps; the turn waits out `stallRetryDelayMs`, then decides again |
+| `stalled` | the plan budget ran out: `[Plan Stalled]` entry, dot `stopped`, durable `commander_stalled` milestone |
 
-Documented to the model under `<lifecycle-tools>` in the system prompt.
+- **Unfinished plan → plan-idle rule.** Tools called do not count; re-drive
+  with `[Plan Continuation]` up to `MAX_TURN_NUDGES = 3`, then stall.
+- **No unfinished plan → no-tool rule.** A stream that called no tool gets a
+  correction, up to the same budget, then is left alone. Because rule 4 runs
+  first, a text-only reply while work is in flight is compliant.
+- Browser turns always pass (they have no tools to call).
+- Budget (`ChatPlanState.nudges`) resets on a compliant stream, async work
+  starting, or the user speaking.
 
----
-
-## 5. Event-driven turn gating (implemented)
-
-### Problem
-
-When a subsystem fires (coding agent finishes, executor exits, terminal output,
-browser error), `ChatSessionManager` injects a synthetic `[X Event: …]` message
-into the chat to summarize it. Without gating, this reactive turn emits
-`main-running` and **repaints the dot violet** — even though the user never
-engaged the orchestrator and the real subsystem (e.g. the agent) just reported
-`completed` (emerald).
-
-### The rule
-
-> Reactive system-event turns must **not** drive the orchestrator dot. The dot
-> keeps showing the real subsystem state.
-
-### Mechanism
-
-- `isSystemEventMessage(content)` matches `^\[(Executor|Agent|Terminal|Browser) Event`.
-- `sendMessage` sets `session.eventDrivenTurn = eventDriven ?? isSystemEventMessage(content)`.
-  An explicit `eventDriven` override from the caller wins over content sniffing.
-- All three orchestrator emit sites — `sendMessage` start, the `tool-call`
-  handler, and `markCompleted` — are gated behind `!session.eventDrivenTurn`.
-  (`markCompleted` still **sets** `taskCompleted` so the watchdog treats the
-  turn as well-formed; it just skips the cyan emit.)
-
-So an agent-window task completing → agent emits emerald → chat summarizes
-silently → dot stays emerald.
+`setPlan` refuses to mark a step `completed` while its latest executor run is
+still in flight — except a service that is up.
 
 ---
 
-## 6. `chatInitiatedAgentTasks` discriminator (scaffolded)
+## 6. `complete_task`, `wait`, Stop
 
-### The distinction
+**`complete_task`** declares the turn finished, once. It is refused while work
+the turn started is still owed or a result has arrived the model has not read
+yet; a second call in the same turn changes nothing. New work registered after
+it withdraws the completion (dot back to violet).
 
-| Scenario | Dot behavior | Why |
-|----------|--------------|-----|
-| User starts a task **in the chat**, chat delegates to the agent, agent finishes, **chat continues** the workflow | agent emerald, then **violet** when chat continues | the continuation is genuine orchestrator work the user initiated |
-| User starts a task **in the agent window**, agent finishes, chat just auto-summarizes | stays agent emerald (**no violet**) | incidental reactive summary; the user never engaged the orchestrator |
+**`wait({ timeoutSeconds? })`** is the model's "nothing to tell the user,
+waiting on results". It ends the response; any result, the user speaking, or
+the timeout (default 600 s, max 3600 s, `[Wait Timeout]`) wakes the turn. It
+returns at once if an unread result is already in the inbox, and is refused
+when nothing is owed. It stops nothing.
 
-The single discriminator is: **did the chat orchestrator start this agent task?**
-
-### Implementation
-
-- `chatInitiatedAgentTasks: Set<string>` — coding-agent sessionIds delegated by
-  the chat.
-- `registerChatInitiatedAgentTask(agentSessionId)` — public hook for a future
-  chat tool that delegates to the agent to call on delegation.
-- The `eventDriven` flag is threaded through `enqueueOrSend` → `messageQueue`
-  (now `{ content, eventDriven? }`) → `drainQueue` → `sendMessage`, so the
-  classification survives queuing.
-- `handleSessionTaskCompleted` computes
-  `isChatInitiated = chatInitiatedAgentTasks.delete(event.sessionId)` and passes
-  `eventDriven: !isChatInitiated`. Chat-initiated completions therefore drive
-  the dot (violet on the chat's response); agent-window ones stay gated.
-
-### Current behavior
-
-No chat tool delegates to the agent yet, so the set is **always empty**:
-`isChatInitiated` is always false, every agent event takes the gated path, and
-behavior is identical to §5. The discriminator is wired ahead of the feature so
-it only needs to call `registerChatInitiatedAgentTask` once it exists.
+**Stop** ends the turn `cancelled` — a running stream, one parked on an
+approval, or a waiting turn. Everything still owed settles `cancelled`; the
+processes and agents keep running (they are the user's); the chat stops
+watching terminals. Of the unread inbox, the user's own words open the next
+turn and results are kept only as events when the user listens. A later
+result of abandoned work reaches the chat only as a listened event
+(`deliverOwn`) — except a service's exit (§7).
 
 ---
 
-## 7. Designed but NOT implemented (future work)
+## 7. Services
 
-These were designed in discussion but deliberately left unbuilt — they depend on
-the not-yet-existing "chat delegates to agent" feature and would be dead code
-without it.
-
-### 7a. Stuck-tool watchdog (timer-based, "Case 2")
-
-Distinct from the §3 structural watchdog. Catches the *opposite* failure: a
-`tool_use` **was** emitted but `tool-result` never returns (executor hung,
-remote died, etc.).
-
-Design: arm a per-tool timer on `tool-call`; cancel it on the matching
-`tool-result`; on timeout do a cheap liveness check (child process alive?
-recent stdout? WS connected?) and only escalate to an LLM judge if the signals
-are ambiguous. Timeout length should vary by tool (`Bash` build vs `Read`).
-
-### 7b. Response watchdog for chat-initiated agent tasks (Q2)
-
-For tasks in `chatInitiatedAgentTasks`, the chat has an outstanding obligation:
-when the agent completes, the chat *should* continue. If it doesn't (event
-dropped, listening disabled, chat errored) the workflow stalls.
-
-Design: arm a long watchdog at delegation (agent never reports back) and a short
-watchdog after the `[Agent Event]` arrives (chat doesn't start responding).
-**Gated on the same `chatInitiatedAgentTasks` bit** — agent-window tasks carry no
-chat obligation, so they never arm a judge.
+An executor with `lifecycle: "service"` (`executors.lifecycle`; the "Long-running
+service" switch in the executor form, on for the Dev Server preset) is done
+once its start is confirmed: it is not owed, the response goes on instead of
+handing off, its plan step can be completed, and `getExecutorStatus` shows the
+lifecycle. Its later exit is news, not a result: delivered as an event even
+with listening off and after Stop. A service that dies before its start is
+confirmed is still the result its turn waits for; one whose start was unknown
+and is confirmed later delivers `[Executor Event: Service Started]`.
 
 ---
 
-## 8. File / symbol index
+## 8. Approval and untrusted events
+
+`spawnAgentSession` / `sendToAgentSession` need the user's approval in a
+stream nobody is watching: `needsApproval = turn.userPresent === false`.
+`userPresent` follows the arrivals that start a stream (`userPresentAfter`): a
+user message → present; a result, event or timeout → not; a nudge alone →
+unchanged. This replaces the old `wokenByEvent` content sniffing with the same
+effect: "agent finishes → commander wakes → dispatches again" still asks first
+(see [`event-driven-outbound-approval-design.md`](./event-driven-outbound-approval-design.md)).
+
+Browser events are page-controlled: their turns get no tools, and they never
+join a turn that has them.
+
+The orchestrator dot follows only turns the user opened (`drivesDot`);
+listened-event turns leave the dot to the subsystem that fired.
+
+---
+
+## 9. What the model is shown
+
+Built per stream by `historyPrefix` + `turn.messages` (`chat-history.ts`):
+
+1. the rolling summary, if any;
+2. the words (user/assistant text) of every ended turn the summary does not
+   cover;
+3. the open turn in full — its user messages and every stream's assistant
+   messages, tool calls and tool results (`result.response.messages`), each
+   tool result cut to 8 KB, the turn kept under ~120 KB by dropping its oldest
+   tool outputs first.
+
+Once more than `KEEP_RECENT_TURNS = 3` turns have ended, the oldest are folded
+into the summary by the user's fast model, in the background at a turn end,
+batch by batch (`summaryBatch`; the summary only advances over what was
+actually handed over). The active plan travels in the system prompt as
+`<current-plan>`.
+
+---
+
+## 10. UI
+
+- Chat status (`STATUS` patch) is `running`, `waiting` or `stopped`
+  (`ChatSessionStatus`; agent sessions never send `waiting`), kept in line by
+  `syncStatus`.
+- A `TurnState` frame `{ status, waitingFor }` is pushed on every turn change
+  and on (re)connect; Main Chat shows "Waiting for …" above the composer.
+- While waiting the composer stays open (a message joins the same task) and
+  Stop is offered; while a reply streams the composer is locked.
+
+---
+
+## 11. File / symbol index
 
 | Concern | Location |
 |---------|----------|
-| Orchestrator state, watchdog, tools, gating | `packages/vibedeckx/src/chat-session-manager.ts` |
-| `complete_task` tool | `createTools()` in the above |
-| Watchdog | `enforceTurnContract`, called from `runStream`'s `finally` (§3) |
-| `emitChatActivity`, `markCompleted` | `ChatSessionManager` methods |
-| `isSystemEventMessage`, `MAX_TURN_NUDGES` | module-level in the above |
-| `BranchActivity` type, `computeBranchActivity`, `BranchActivityDedupe`, `emitBranchActivityIfChanged` | `packages/vibedeckx/src/branch-activity.ts`, `agent-session-manager.ts` |
-| `branch:activity` event payload | `packages/vibedeckx/src/event-bus.ts` |
-| SSE fan-out | `packages/vibedeckx/src/routes/event-routes.ts` |
-| Dot rendering (`StatusDot`) | `apps/vibedeckx-ui/components/layout/app-sidebar.tsx` |
-| Frontend activity hook | `apps/vibedeckx-ui/hooks/use-branch-activity.ts` |
-| `WorkspaceStatus` + projection | `apps/vibedeckx-ui/lib/workspace-status.ts` |
+| Turn object, pending registry, arrival rules | `commander-turn.ts` |
+| Identity ledgers (executor operations, agent dispatches) | `commander-operations.ts` |
+| `deliver` / `route` / `startStream` / `afterStream` / `endTurn` | `chat-session-manager.ts` |
+| `enforceTurnContract`, `stallPlan`, `expireOverdue`, `reconcileInFlight` | `chat-session-manager.ts` |
+| `complete_task`, `wait`, `setPlan` tools | `createTools()` in `chat-session-manager.ts` |
+| History and summary | `chat-history.ts`, `historyPrefix` / `maybeSummarize` |
+| `BranchActivity`, overlay, `shouldEmitMainCompleted` | `branch-activity.ts` |
+| Chat status / `TurnState` on the frontend | `apps/vibedeckx-ui/hooks/chat-stream.ts`, `components/conversation/main-conversation.tsx` |
+| Dot rendering | `apps/vibedeckx-ui/components/layout/app-sidebar.tsx`, `lib/workspace-status.ts` |
+| Tests | `chat-session-manager.turn.test.ts`, `.continuation.test.ts`, `.operations.test.ts`, `commander-turn.test.ts`, `chat-history.test.ts` |
