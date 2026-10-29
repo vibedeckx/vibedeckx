@@ -85,6 +85,7 @@ export interface ExecutorsTable {
   pty: GeneratedDbBool;
   position: Generated<number>;
   disabled_targets: Generated<string>; // JSON: string[]
+  lifecycle: Generated<string>; // 'oneshot' | 'service'
   created_at: Generated<string>;
 }
 

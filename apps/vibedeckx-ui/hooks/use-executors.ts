@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { toast } from "sonner";
-import { api, ExecutorProcessRequestError, getAuthToken, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess } from "@/lib/api";
+import { api, ExecutorProcessRequestError, getAuthToken, type Executor, type ExecutorType, type PromptProvider, type ExecutorProcess, type ExecutorLifecycle } from "@/lib/api";
 import { useGlobalEventStream } from "@/hooks/global-event-stream";
 
 function getApiBase(): string {
@@ -305,7 +305,7 @@ export function useExecutors(
 
   // Create executor in the active workspace
   const createExecutor = useCallback(
-    async (opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => {
+    async (opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; lifecycle?: ExecutorLifecycle }) => {
       if (!projectId || workspaceKey === null) return null;
 
       try {
@@ -326,7 +326,7 @@ export function useExecutors(
   const updateExecutor = useCallback(
     async (
       id: string,
-      opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; target?: string; disabled?: boolean }
+      opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; lifecycle?: ExecutorLifecycle; target?: string; disabled?: boolean }
     ) => {
       try {
         const executor = await api.updateExecutor(id, opts);

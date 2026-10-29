@@ -17,7 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { Executor, ExecutorType, PromptProvider } from "@/lib/api";
+import type { Executor, ExecutorLifecycle, ExecutorType, PromptProvider } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Terminal, MessageSquare, ChevronDown, ChevronRight } from "lucide-react";
 
@@ -26,11 +26,12 @@ interface ExecutorPreset {
   command: string;
   executor_type: "command" | "prompt";
   pty: boolean;
+  lifecycle?: ExecutorLifecycle;
   description?: string;
 }
 
 const EXECUTOR_PRESETS: ExecutorPreset[] = [
-  { name: "Dev Server", command: "pnpm dev", executor_type: "command", pty: true, description: "Start the development server with hot reload" },
+  { name: "Dev Server", command: "pnpm dev", executor_type: "command", pty: true, lifecycle: "service", description: "Start the development server with hot reload" },
   { name: "Build", command: "pnpm build", executor_type: "command", pty: true, description: "Build the project for production" },
   { name: "Lint", command: "pnpm lint", executor_type: "command", pty: true, description: "Run the linter to check code quality" },
   { name: "Type Check", command: "npx tsc --noEmit", executor_type: "command", pty: true, description: "Run TypeScript type checking without emitting files" },
@@ -46,7 +47,7 @@ interface ExecutorFormProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   executor?: Executor;
-  onSubmit: (data: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => Promise<void>;
+  onSubmit: (data: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; lifecycle?: ExecutorLifecycle }) => Promise<void>;
 }
 
 export function ExecutorForm({
@@ -61,6 +62,7 @@ export function ExecutorForm({
   const [command, setCommand] = useState(executor?.command ?? "");
   const [cwd, setCwd] = useState(executor?.cwd ?? "");
   const [pty, setPty] = useState(executor?.pty ?? true);
+  const [service, setService] = useState(executor?.lifecycle === "service");
   const [loading, setLoading] = useState(false);
   const [showPresets, setShowPresets] = useState(false);
   const [selectedPreset, setSelectedPreset] = useState<ExecutorPreset | null>(null);
@@ -83,6 +85,7 @@ export function ExecutorForm({
         setCommand(executor.command);
         setCwd(executor.cwd ?? "");
         setPty(executor.pty);
+        setService(executor.lifecycle === "service");
       }
     }
   }, [open]);
@@ -100,6 +103,7 @@ export function ExecutorForm({
         prompt_provider: executorType === "prompt" ? promptProvider : null,
         cwd: cwd.trim() || undefined,
         pty: executorType === "prompt" ? true : pty,
+        lifecycle: executorType === "command" && service ? "service" : "oneshot",
       });
       onOpenChange(false);
       if (!isEdit) {
@@ -109,6 +113,7 @@ export function ExecutorForm({
         setCommand("");
         setCwd("");
         setPty(true);
+        setService(false);
       }
     } finally {
       setLoading(false);
@@ -262,6 +267,35 @@ export function ExecutorForm({
               </button>
             </div>
           )}
+          {executorType === "command" && (
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <label className="text-sm font-medium">Long-running service</label>
+                <p className="text-xs text-muted-foreground">
+                  For dev servers and watchers: Main Chat treats it as done once it starts, instead of waiting for it to exit
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={service}
+                aria-label="Long-running service"
+                onClick={() => setService(!service)}
+                className={cn(
+                  "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors",
+                  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                  service ? "bg-primary" : "bg-input"
+                )}
+              >
+                <span
+                  className={cn(
+                    "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow-lg ring-0 transition-transform",
+                    service ? "translate-x-5" : "translate-x-0"
+                  )}
+                />
+              </button>
+            </div>
+          )}
           <div className="flex-1" />
           <DialogFooter>
             <Button
@@ -368,6 +402,7 @@ export function ExecutorForm({
                     setCommand(selectedPreset.command);
                     setExecutorType(selectedPreset.executor_type);
                     setPty(selectedPreset.pty);
+                    setService(selectedPreset.lifecycle === "service");
                     setShowPresets(false);
                     setSelectedPreset(null);
                     setExpandedPreset(null);

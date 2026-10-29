@@ -246,6 +246,7 @@ export class SchedulerService {
       pty: true,
       position: 0,
       disabled_targets: [],
+      lifecycle: "oneshot",
       created_at: new Date().toISOString(),
     };
 

@@ -4,6 +4,7 @@ import { fromDbBool, type DialectHelpers } from "../dialect.js";
 import type {
   Storage,
   Executor,
+  ExecutorLifecycle,
   ExecutorType,
   PromptProvider,
   ExecutorProcess,
@@ -16,6 +17,7 @@ const mapExecutor = (row: Selectable<ExecutorsTable>): Executor => ({
   executor_type: (row.executor_type || "command") as ExecutorType,
   prompt_provider: (row.prompt_provider as PromptProvider) ?? null,
   pty: fromDbBool(row.pty),
+  lifecycle: (row.lifecycle === "service" ? "service" : "oneshot") as ExecutorLifecycle,
   disabled_targets: row.disabled_targets ? (JSON.parse(row.disabled_targets) as string[]) : [],
 });
 
@@ -48,7 +50,7 @@ export const createExecutorRepos = (
   h: DialectHelpers,
 ): Pick<Storage, "executors" | "executorProcesses" | "remoteExecutorProcesses"> => ({
   executors: {
-    create: async ({ id, project_id, workspace_id, name, command, executor_type, prompt_provider, cwd, pty }) => {
+    create: async ({ id, project_id, workspace_id, name, command, executor_type, prompt_provider, cwd, pty, lifecycle }) => {
       // Position assignment pushed into the INSERT itself (a
       // `coalesce(max(position), -1) + 1` subquery scoped to the workspace)
       // instead of a JS-side "read max, then write" — that keeps the whole
@@ -61,6 +63,7 @@ export const createExecutorRepos = (
         prompt_provider: prompt_provider ?? null,
         cwd: cwd ?? null,
         pty: h.toDbBool(pty !== false),
+        lifecycle: lifecycle ?? "oneshot",
         position: eb.selectFrom("executors")
           .select(sql<number>`coalesce(max(position), -1) + 1`.as("next_position"))
           .where("workspace_id", "=", workspace_id),
@@ -99,6 +102,7 @@ export const createExecutorRepos = (
       if (opts.prompt_provider !== undefined) sets.prompt_provider = opts.prompt_provider;
       if (opts.cwd !== undefined) sets.cwd = opts.cwd;
       if (opts.pty !== undefined) sets.pty = h.toDbBool(opts.pty);
+      if (opts.lifecycle !== undefined) sets.lifecycle = opts.lifecycle;
       if (opts.disabled_targets !== undefined) sets.disabled_targets = JSON.stringify(opts.disabled_targets);
 
       if (Object.keys(sets).length > 0) {

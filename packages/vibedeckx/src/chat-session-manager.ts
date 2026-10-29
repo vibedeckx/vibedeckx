@@ -18,7 +18,7 @@ import type { AgentMessage, AgentSessionStatus, AgentType } from "./agent-types.
 import { shouldEmitMainCompleted, type BranchActivity } from "./branch-activity.js";
 import { ConversationPatch } from "./conversation-patch.js";
 import type { Patch, AgentWsMessage, BrowserCommand, BrowserCommandResult } from "./conversation-patch.js";
-import type { Storage } from "./storage/types.js";
+import type { Executor, Storage } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { ProcessManager, LogMessage } from "./process-manager.js";
 import type { AgentSessionManager } from "./agent-session-manager.js";
@@ -221,7 +221,8 @@ function startedAsyncWork(toolName: string, output: unknown): boolean {
   const result = output && typeof output === "object" ? output as Record<string, unknown> : null;
   if (!result) return false;
   switch (toolName) {
-    case "runExecutor": return result.success === true || result.startUnknown === true;
+    // A service that started is done, not handed off: the response goes on.
+    case "runExecutor": return (result.success === true && result.service !== true) || result.startUnknown === true;
     case "spawnAgentSession":
     case "sendToAgentSession": return result.success === true;
     case "runInTerminal": return result.sent === true;
@@ -229,6 +230,13 @@ function startedAsyncWork(toolName: string, output: unknown): boolean {
     case "wait": return result.success === true;
     default: return false;
   }
+}
+
+/** Added to a service's start result: the model is not to wait for it. */
+function serviceNote(executor: Pick<Executor, "lifecycle">): string {
+  return executor.lifecycle === "service"
+    ? " It is a long-running service: you are not waiting for it to exit — report that it started and move on. If it ever stops, that arrives as an event."
+    : "";
 }
 
 /** What a turn still waits for, as the model sees it. */
@@ -877,6 +885,7 @@ export class ChatSessionManager {
       executor ? `Command: ${executor.command}` : null,
       `Exit Code: ${event.exitCode ?? "unknown"} (${exitStatus})`,
       ...(operation ? describeOperation(operation) : [UNLINKED_EVENT_NOTE]),
+      operation?.service ? "This is a long-running service you started, and it has stopped running. Decide whether that matters (e.g. it crashed) or was expected." : null,
       reconciledNote ?? null,
       ``,
       `Last output:`,
@@ -887,8 +896,16 @@ export class ChatSessionManager {
       `Check your Workspace Rules for any rules that apply to this event, then respond.`,
     ].filter((line) => line !== null).join("\n");
 
-    if (operation) this.deliverOwn(session, "executor", operation.id, { source: "result", content: message });
-    else this.deliver(sessionId, { source: "notice", content: message });
+    if (operation?.service && session.pending.outcomeOf("executor", operation.id) !== null) {
+      // A service that was already up (D3): its exit always reaches the chat —
+      // listening or not, stopped or not — as news about the commander's own
+      // process, never as the result a turn waits for.
+      this.deliver(sessionId, { source: "notice", content: message });
+    } else if (operation) {
+      this.deliverOwn(session, "executor", operation.id, { source: "result", content: message });
+    } else {
+      this.deliver(sessionId, { source: "notice", content: message });
+    }
   }
 
   // ---- Plan continuation: the plan drives the chat, not the other way round ----
@@ -961,6 +978,11 @@ export class ChatSessionManager {
     const session = this.sessions.get(operation.chatSessionId);
     if (!session) return;
     const pending = session.pending;
+    // A service is done once it is up: its exit is news, not an owed result.
+    if (operation.service && operation.status === "started") {
+      pending.settle("executor", operation.id, "completed");
+      return;
+    }
     if (isOperationInFlight(operation) && !operation.unconfirmedReportedAt) {
       this.owe(session, {
         kind: "executor", id: operation.id, label: `executor "${operation.executorName}" on ${operation.target}`,
@@ -2180,7 +2202,7 @@ export class ChatSessionManager {
       "",
       "<async-execution-model>",
       "Many operations in this workspace are asynchronous and event-driven: a tool call kicks off the action and returns immediately, then the *actual completion* arrives later as a separate event message. Do NOT report success or failure based on a kick-off tool's return value — wait for the corresponding event before stating outcome.",
-      "- runExecutor: returns when the process is *started*, NOT when it has finished. The executor is only finished when you receive an `[Executor Event: Process Finished]` message — that message (and only that message) carries the exit code and final output. For one-shot executors (build, test, script), wait for the Process Finished event before reporting outcome. For long-running executors (dev servers), it is fine to report that it was started.",
+      "- runExecutor: returns when the process is *started*, NOT when it has finished. The executor is only finished when you receive an `[Executor Event: Process Finished]` message — that message (and only that message) carries the exit code and final output. For one-shot executors (build, test, script), wait for the Process Finished event before reporting outcome. Executors marked `lifecycle: service` (dev servers; see getExecutorStatus) are done once started: report that they started and move on — you are not waiting for them, and their exit, if it comes, arrives as an event.",
       "- runInTerminal: returns when the command is *sent* to the terminal. The output arrives as a `[Terminal Event]` message once the command finishes — wait for it before commenting on results.",
       "- Browser commands: may produce `[Browser Event]` messages on errors or page lifecycle changes — handle them when they arrive.",
       "Work you start belongs to the task you are on: its result arrives as an event message that continues this same task, and the task is not over until everything you started has reported back. While any of it is still running, either reply to the user (when you have something worth telling them) or call `wait` (when you do not). Do not call complete_task until it has all reported back — it is refused before then.",
@@ -2344,7 +2366,8 @@ export class ChatSessionManager {
             for (const step of input.steps) {
               if (step.status !== "completed" || before.get(step.id) === "completed") continue;
               const operation = this.operations.latestForStep(sessionId, input.planId, step.id);
-              if (operation && isOperationInFlight(operation)) {
+              // A service that is up has done what its step asked for.
+              if (operation && isOperationInFlight(operation) && !(operation.service && operation.status === "started")) {
                 return {
                   success: false,
                   message: `Step "${step.id}" cannot be completed yet: operation ${operation.id} (${operation.executorName}) has not finished. Wait for its Process Finished event, which names this step.`,
@@ -2792,6 +2815,7 @@ export class ChatSessionManager {
               return {
                 name: executor.name,
                 command: executor.command,
+                lifecycle: executor.lifecycle,
                 status: "never_started" as const,
                 note: "This executor has NEVER been started — its command has not run. Do not assume it completed.",
               };
@@ -2812,6 +2836,7 @@ export class ChatSessionManager {
             return {
               name: executor.name,
               command: executor.command,
+              lifecycle: executor.lifecycle,
               status: lastRow.status, // 'running' | 'completed' | 'failed' | 'killed'
               exitCode: lastRow.exit_code,
               startedAt: lastRow.started_at,
@@ -2859,12 +2884,12 @@ export class ChatSessionManager {
             if (stepId && !planState?.current?.steps.some((step) => step.id === stepId)) {
               return { success: false, message: `Unknown plan step "${stepId}". Use a step ID from the current plan, or omit stepId.` };
             }
-            const registerOperation = (target: string, processId: string, executor: { id: string; name: string }) => {
+            const registerOperation = (target: string, processId: string, executor: Pick<Executor, "id" | "name" | "lifecycle">) => {
               if (!sessionId) return;
               this.operations.register({
                 id: operationId, kind: "executor", chatSessionId: sessionId, turnId: owningTurnId,
                 planId: stepId ? planState?.current?.planId ?? null : null, stepId: stepId ?? null,
-                executorId: executor.id, executorName: executor.name, target, processId,
+                executorId: executor.id, executorName: executor.name, service: executor.lifecycle === "service", target, processId,
               });
             };
             const settle = (status: "started" | "start_unknown" | "rejected", result: Record<string, unknown>) => {
@@ -2965,7 +2990,8 @@ export class ChatSessionManager {
                   return settle("started", {
                     success: true, ...linked, processId: outcome.processId, executorName: executor.name,
                     command: executor.command, target: resolvedRemote,
-                    message: `Started "${executor.name}" on remote server "${resolvedRemote}".`,
+                    ...(executor.lifecycle === "service" ? { service: true } : {}),
+                    message: `Started "${executor.name}" on remote server "${resolvedRemote}".${serviceNote(executor)}`,
                   });
                 case "already_running":
                   return settle("rejected", {
@@ -3014,7 +3040,8 @@ export class ChatSessionManager {
               await processManager.start(executor, basePath, false, processId);
               return settle("started", {
                 success: true, ...linked, processId, executorName: executor.name, command: executor.command,
-                message: `Started "${executor.name}".`,
+                ...(executor.lifecycle === "service" ? { service: true } : {}),
+                message: `Started "${executor.name}".${serviceNote(executor)}`,
               });
             } catch (err) {
               const msg = err instanceof Error ? err.message : "Unknown error";

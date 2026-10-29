@@ -391,6 +391,7 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       pty INTEGER DEFAULT 1,
       position INTEGER DEFAULT 0,
       disabled_targets TEXT DEFAULT '[]',
+      lifecycle TEXT NOT NULL DEFAULT 'oneshot',
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
       FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
@@ -1378,6 +1379,14 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     }
   })();
 
+  // Migration: executor.lifecycle — 'oneshot' (a run the commander waits to
+  // finish) or 'service' (a dev server: started is all the commander waits for).
+  // Must precede the executor_groups → workspaces rebuild below, which copies it.
+  const execColsForLifecycle = db.prepare("PRAGMA table_info(executors)").all() as { name: string }[];
+  if (!execColsForLifecycle.some((c) => c.name === "lifecycle")) {
+    db.exec("ALTER TABLE executors ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'oneshot'");
+  }
+
   // Migration: executor.disabled (global bool) → executor.disabled_targets
   // (JSON array of target ids: "local" or a remote_server_id). A disabled
   // executor becomes disabled on every current target of its project, then the
@@ -2250,7 +2259,8 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
   //
   // Deliberately last in the migration chain: it copies every executor column,
   // so each earlier ALTER that adds one (pty/position/executor_type/
-  // prompt_provider above, disabled_targets further up) must already have run.
+  // prompt_provider above, disabled_targets and lifecycle further up) must
+  // already have run.
   const executorColsForWorkspace = db.prepare("PRAGMA table_info(executors)").all() as { name: string }[];
   if (executorColsForWorkspace.some((col) => col.name === "group_id")) {
     db.transaction(() => {
@@ -2302,6 +2312,7 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
           pty INTEGER DEFAULT 1,
           position INTEGER DEFAULT 0,
           disabled_targets TEXT DEFAULT '[]',
+          lifecycle TEXT NOT NULL DEFAULT 'oneshot',
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
           FOREIGN KEY (workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
@@ -2309,13 +2320,13 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
 
         INSERT INTO executors_workspace_new
           (id, project_id, workspace_id, name, command, executor_type,
-           prompt_provider, cwd, pty, position, disabled_targets, created_at)
+           prompt_provider, cwd, pty, position, disabled_targets, lifecycle, created_at)
         SELECT e.id, e.project_id, w.id, e.name, e.command, e.executor_type,
                e.prompt_provider, e.cwd, e.pty,
                ROW_NUMBER() OVER (
                  PARTITION BY w.id ORDER BY e.position, e.created_at, e.id
                ) - 1,
-               e.disabled_targets, e.created_at
+               e.disabled_targets, e.lifecycle, e.created_at
           FROM executors e
           LEFT JOIN executor_groups g ON g.id = e.group_id
           JOIN workspaces w

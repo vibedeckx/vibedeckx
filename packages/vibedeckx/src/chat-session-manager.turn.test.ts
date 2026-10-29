@@ -765,3 +765,94 @@ describe("stopping a turn", () => {
   });
 });
 
+describe("long-running services", () => {
+  const service = { ...executor, name: "dev", command: "npm run dev", lifecycle: "service" as const };
+  const withService = (ctx: ReturnType<typeof setup>) => {
+    vi.mocked(ctx.storage.executors.getByWorkspaceId).mockResolvedValue([service] as never);
+    vi.mocked(ctx.storage.executors.getById).mockResolvedValue(service as never);
+    return ctx;
+  };
+
+  it("a started service does not keep the turn waiting, and its step can be completed", async () => {
+    let phase = 0;
+    let started = "";
+    const ctx = withService(setup(async (options) => {
+      switch (phase++) {
+        case 0: return call("plan", "setPlan", { ...explicitPlan(), steps: [{ id: "dev", title: "Start the dev server" }] });
+        case 1: return call("run", "runExecutor", { executorName: "dev", stepId: "dev" });
+        case 2: {
+          started = JSON.stringify(options.prompt);
+          const plan = manager.getSession(id)!.planState.current!;
+          return call("done", "setPlan", { ...plan, steps: [{ ...plan.steps[0], status: "completed", result: "Dev server up" }] });
+        }
+        case 3: return call("finish", "complete_task", { summary: "Dev server running" });
+        case 4: return text("The dev server is running.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    }));
+    const { manager, id } = ctx;
+    await manager.sendMessage(id, "Start the dev server");
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(phase).toBe(5);
+    // The start result is read in the same response: a service start is not a handoff.
+    expect(started).toContain("long-running service");
+    expect(manager.getMessages(id).filter((m) => m.type === "turn_end")).toHaveLength(1);
+    expect(manager.getSession(id)!.planState.current).toBeNull();
+    expect(turnEnds(manager, id)).toBe(1);
+  });
+
+  it("a service's later exit is reported even while not listening, and after Stop (D3)", async () => {
+    let phase = 0;
+    let news = "";
+    const ctx = withService(setup(async (options) => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "dev" });
+        case 1: return call("finish", "complete_task", { summary: "Started" });
+        case 2: return text("Started.");
+        case 3:
+          news = JSON.stringify(options.prompt);
+          return call("noted", "complete_task", { summary: "Noted" });
+        case 4: return text("The dev server stopped.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    }));
+    const { manager, id, stop, start } = ctx;
+    await manager.sendMessage(id, "Start the dev server");
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(manager.getEventListening(id)).toBe(false);
+
+    stop(start.mock.calls[0][3], 1);
+    await vi.waitFor(() => expect(phase).toBe(5));
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(news).toContain("[Executor Event: Process Finished]");
+    expect(news).toContain("long-running service you started");
+    expect(turnEnds(manager, id)).toBe(2);
+  });
+
+  it("a service that dies before it is confirmed up is the result the turn waits for", async () => {
+    let phase = 0;
+    let woken = "";
+    const ctx = withService(setup(async (options) => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "dev" });
+        case 1: return text("The dev server is starting.");
+        case 2:
+          woken = JSON.stringify(options.prompt);
+          return call("finish", "complete_task", { summary: "It crashed" });
+        case 3: return text("The dev server crashed on start.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    }));
+    const { manager, id, start, stop } = ctx;
+    // Exits before start() even returns: the start is never confirmed.
+    start.mockImplementationOnce(async (_executor: unknown, _base: string, _skipDb: boolean, processId: string) => {
+      stop(processId, 1);
+      return processId;
+    });
+    await manager.sendMessage(id, "Start the dev server");
+    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+    expect(woken).toContain("Exit Code: 1 (failed)");
+    expect(turnEnds(manager, id)).toBe(1);
+  });
+});
+

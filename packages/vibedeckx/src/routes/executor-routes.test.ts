@@ -178,4 +178,32 @@ describe("executor routes (workspace scoping)", () => {
       expect(response.statusCode).toBe(400);
     });
   });
+
+  describe("lifecycle", () => {
+    const create = (payload: Record<string, unknown>) => app.inject({
+      method: "POST", url: "/api/projects/project-1/executors",
+      payload: { name: "x", command: "npm run dev", branch: "", ...payload },
+    });
+    const update = (payload: Record<string, unknown>) => app.inject({ method: "PUT", url: "/api/executors/e-main", payload });
+
+    it("creates a service, and ignores an unknown value", async () => {
+      expect((await create({ lifecycle: "service" })).json().executor.lifecycle).toBe("service");
+      expect((await create({ lifecycle: "forever" })).json().executor.lifecycle).toBe("oneshot");
+      expect((await create({})).json().executor.lifecycle).toBe("oneshot");
+    });
+
+    it("never makes a prompt executor a service", async () => {
+      expect((await create({ executor_type: "prompt", lifecycle: "service" })).json().executor.lifecycle).toBe("oneshot");
+      await update({ lifecycle: "service" });
+      expect((await update({ executor_type: "prompt" })).json().executor.lifecycle).toBe("oneshot");
+      expect((await update({ lifecycle: "service" })).json().executor.lifecycle).toBe("oneshot");
+    });
+
+    it("switches an existing command executor", async () => {
+      expect((await update({ lifecycle: "service" })).json().executor.lifecycle).toBe("service");
+      expect((await update({ name: "renamed" })).json().executor.lifecycle).toBe("service");
+      expect((await update({ lifecycle: "oneshot" })).json().executor.lifecycle).toBe("oneshot");
+    });
+  });
 });
+

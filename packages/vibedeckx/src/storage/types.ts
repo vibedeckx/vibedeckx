@@ -95,6 +95,12 @@ export interface Project {
 }
 
 export type ExecutorType = 'command' | 'prompt';
+/**
+ * How the Main Chat commander treats a run: `oneshot` (build, test, script) is
+ * waited for until it exits; `service` (a dev server) is done once started —
+ * its later exit is reported as an event.
+ */
+export type ExecutorLifecycle = 'oneshot' | 'service';
 export type PromptProvider = 'claude' | 'codex';
 
 export interface Executor {
@@ -112,6 +118,7 @@ export interface Executor {
   // Target ids ("local" or a remote_server_id) on which this executor is
   // disabled. Empty = runnable everywhere. Absence of a target = enabled there.
   disabled_targets: string[];
+  lifecycle: ExecutorLifecycle;
   created_at: string;
 }
 
@@ -1159,11 +1166,11 @@ export interface Storage {
     markWorktreesSynced(projectId: string, remoteServerId: string): Promise<void>;
   };
   executors: {
-    create: (opts: { id: string; project_id: string; workspace_id: string; name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean }) => Promise<Executor>;
+    create: (opts: { id: string; project_id: string; workspace_id: string; name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; lifecycle?: ExecutorLifecycle }) => Promise<Executor>;
     getByProjectId: (projectId: string) => Promise<Executor[]>;
     getByWorkspaceId: (workspaceId: string) => Promise<Executor[]>;
     getById: (id: string) => Promise<Executor | undefined>;
-    update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; disabled_targets?: string[] }) => Promise<Executor | undefined>;
+    update: (id: string, opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; lifecycle?: ExecutorLifecycle; disabled_targets?: string[] }) => Promise<Executor | undefined>;
     /**
      * Atomically add/remove a single target from `disabled_targets` — the
      * read-modify-write of the JSON array happens inside one storage call, so

@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
-import type { Executor, ExecutorType, PromptProvider } from "../storage/types.js";
+import type { Executor, ExecutorLifecycle, ExecutorType, PromptProvider } from "../storage/types.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 
@@ -16,6 +16,11 @@ function normalizeSqlTimestamp(value: string | null | undefined): string | null 
   if (value.includes('T') && /(Z|[+-]\d{2}:?\d{2})$/.test(value)) return value;
   // SQLite "YYYY-MM-DD HH:MM:SS[.SSS]" → ISO with explicit UTC marker.
   return value.replace(' ', 'T') + 'Z';
+}
+
+/** A valid lifecycle from a request body, or undefined (absent or unknown: leave it be). */
+function parseLifecycle(value: unknown): ExecutorLifecycle | undefined {
+  return value === "service" || value === "oneshot" ? value : undefined;
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
@@ -98,7 +103,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // Create Executor
   fastify.post<{
     Params: { projectId: string };
-    Body: { name: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; pty?: boolean; branch?: string };
+    Body: { name: string; command: string; executor_type?: string; prompt_provider?: string; cwd?: string; pty?: boolean; lifecycle?: string; branch?: string };
   }>("/api/projects/:projectId/executors", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -108,7 +113,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { name, command, executor_type, prompt_provider, cwd, pty, branch } = req.body;
+    const { name, command, executor_type, prompt_provider, cwd, pty, lifecycle, branch } = req.body;
     if (branch === undefined) {
       return reply.code(400).send({ error: "branch is required" });
     }
@@ -128,6 +133,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const parsedProvider = (prompt_provider === 'codex' ? 'codex' : 'claude') as PromptProvider;
 
     const id = randomUUID();
+    // Only a command can be a long-running service; a prompt run always ends.
     const executor = await fastify.storage.executors.create({
       id,
       project_id: req.params.projectId,
@@ -138,6 +144,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       prompt_provider: parsedType === 'prompt' ? parsedProvider : null,
       cwd,
       pty,
+      lifecycle: parsedType === 'command' ? parseLifecycle(lifecycle) ?? 'oneshot' : 'oneshot',
     });
 
     return reply.code(201).send({ executor });
@@ -146,7 +153,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
   // 更新 Executor
   fastify.put<{
     Params: { id: string };
-    Body: { name?: string; command?: string; executor_type?: string; prompt_provider?: string; cwd?: string | null; pty?: boolean; target?: string; disabled?: boolean };
+    Body: { name?: string; command?: string; executor_type?: string; prompt_provider?: string; cwd?: string | null; pty?: boolean; lifecycle?: string; target?: string; disabled?: boolean };
   }>("/api/executors/:id", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
@@ -162,7 +169,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { executor_type, prompt_provider, target, disabled, ...rest } = req.body;
+    const { executor_type, prompt_provider, lifecycle, target, disabled, ...rest } = req.body;
     const parsedType = executor_type !== undefined
       ? (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType
       : undefined;
@@ -182,10 +189,15 @@ const routes: FastifyPluginAsync = async (fastify) => {
       executor = await fastify.storage.executors.setTargetDisabled(req.params.id, target, disabled) ?? executor;
     }
 
+    // A prompt run always ends, so it is never a service.
+    const parsedLifecycle: ExecutorLifecycle | undefined = (parsedType ?? existing.executor_type) === 'prompt'
+      ? (existing.lifecycle === 'service' ? 'oneshot' : undefined)
+      : parseLifecycle(lifecycle);
     const updateOpts = {
       ...rest,
       ...(parsedType !== undefined ? { executor_type: parsedType } : {}),
       ...(parsedProvider !== undefined ? { prompt_provider: parsedProvider } : {}),
+      ...(parsedLifecycle !== undefined ? { lifecycle: parsedLifecycle } : {}),
     };
     if (Object.keys(updateOpts).length > 0) {
       executor = await fastify.storage.executors.update(req.params.id, updateOpts) ?? executor;

@@ -166,6 +166,8 @@ describe("executor group → workspace migration", () => {
       name: "dev", command: "npm run dev", executor_type: "command",
       prompt_provider: null, cwd: "/tmp/p", pty: true, position: 0,
       disabled_targets: ["srv-1"],
+      // Added before the rebuild and carried through it.
+      lifecycle: "oneshot",
     });
     expect(build).toMatchObject({
       id: "e-main-1", name: "build", pty: false, position: 1, cwd: null,

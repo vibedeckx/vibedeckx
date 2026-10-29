@@ -31,7 +31,7 @@ import { ExecutorOutput } from "./executor-output";
 import { ExecutorForm } from "./executor-form";
 import { useExecutorProcessLogs } from "@/hooks/executor-logs-context";
 import type { ExecutorWithProcess } from "@/hooks/use-executors";
-import type { ExecutorType, PromptProvider } from "@/lib/api";
+import type { ExecutorLifecycle, ExecutorType, PromptProvider } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { LocateMatchText } from "@/components/locate/locate-highlight";
 import { useSortable } from "@dnd-kit/sortable";
@@ -51,7 +51,7 @@ interface ExecutorItemProps {
   onOpenChange: (open: boolean) => void;
   onStart: () => Promise<string | null>;
   onStop: (processId?: string) => Promise<void>;
-  onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; target?: string; disabled?: boolean }) => Promise<unknown>;
+  onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; lifecycle?: ExecutorLifecycle; target?: string; disabled?: boolean }) => Promise<unknown>;
   onDelete: () => Promise<void>;
   onProcessFinished: (processId: string | null) => void;
 }

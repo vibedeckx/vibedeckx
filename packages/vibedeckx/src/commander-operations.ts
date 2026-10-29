@@ -35,6 +35,8 @@ export interface CommanderExecutorOperation {
   stepId: string | null;
   executorId: string;
   executorName: string;
+  /** A long-running service: once started it is no longer waited for, and its exit is news. */
+  service: boolean;
   /** "local" or the remote server id. */
   target: string;
   /** The identity the process runs under (`remote-…` for remote targets). */

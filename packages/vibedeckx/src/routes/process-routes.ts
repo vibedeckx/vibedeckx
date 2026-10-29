@@ -57,6 +57,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       pty: pty !== false,
       position: 0,
       disabled_targets: [],
+      lifecycle: "oneshot" as const,
       created_at: new Date().toISOString(),
     };
 

@@ -589,6 +589,8 @@ export interface WorktreeDeleteResult {
 
 export type ExecutorType = 'command' | 'prompt';
 export type PromptProvider = 'claude' | 'codex';
+/** `service`: a dev server — the Main Chat treats it as done once started instead of waiting for it to exit. */
+export type ExecutorLifecycle = 'oneshot' | 'service';
 
 export interface Executor {
   id: string;
@@ -600,6 +602,7 @@ export interface Executor {
   prompt_provider: PromptProvider | null;
   cwd: string | null;
   pty: boolean;
+  lifecycle: ExecutorLifecycle;
   position: number;
   // Target ids ("local" or a remote_server_id) on which this executor is
   // disabled. The UI checks membership for the currently-selected target.
@@ -2364,7 +2367,7 @@ export const api = {
 
   async createExecutor(
     projectId: string,
-    opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; branch: string }
+    opts: { name: string; command: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string; pty?: boolean; lifecycle?: ExecutorLifecycle; branch: string }
   ): Promise<Executor> {
     const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/executors`, {
       method: "POST",
@@ -2381,7 +2384,7 @@ export const api = {
 
   async updateExecutor(
     id: string,
-    opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; target?: string; disabled?: boolean }
+    opts: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; pty?: boolean; lifecycle?: ExecutorLifecycle; target?: string; disabled?: boolean }
   ): Promise<Executor> {
     const res = await authFetch(`${getApiBase()}/api/executors/${id}`, {
       method: "PUT",

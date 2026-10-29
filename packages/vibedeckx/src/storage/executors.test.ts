@@ -46,6 +46,15 @@ describe("executors/executorProcesses/remoteExecutorProcesses storage", () => {
       expect(u?.disabled_targets).toEqual(["local", "srv-1"]);
     });
 
+    it("lifecycle defaults to oneshot and round-trips service", async () => {
+      const plain = await storage.executors.create({ id: "e1", project_id: "p1", workspace_id: w1, name: "build", command: "make" });
+      expect(plain.lifecycle).toBe("oneshot");
+      const dev = await storage.executors.create({ id: "e2", project_id: "p1", workspace_id: w1, name: "dev", command: "npm run dev", lifecycle: "service" });
+      expect(dev.lifecycle).toBe("service");
+      expect((await storage.executors.update("e2", { lifecycle: "oneshot" }))?.lifecycle).toBe("oneshot");
+      expect((await storage.executors.getById("e1"))?.lifecycle).toBe("oneshot");
+    });
+
     it("create accepts explicit executor_type/prompt_provider/cwd/pty overrides", async () => {
       const e = await storage.executors.create({
         id: "e1", project_id: "p1", workspace_id: w1, name: "prompt-run", command: "n/a",

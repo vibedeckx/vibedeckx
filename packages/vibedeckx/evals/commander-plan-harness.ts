@@ -79,7 +79,7 @@ export function createHarness(config: ChatProviderConfig) {
         internal.operations.register({
           id: operationId, kind: "executor", chatSessionId: id, turnId: manager.getSession(id)!.turn?.id ?? null,
           planId: stepId ? plan?.planId ?? null : null, stepId: stepId ?? null,
-          executorId: `sim-${name}`, executorName: String((input as { executorName?: string } | null)?.executorName ?? name),
+          executorId: `sim-${name}`, service: false, executorName: String((input as { executorName?: string } | null)?.executorName ?? name),
           target: "local", processId,
         });
         internal.operations.settleStart(operationId, "started");
