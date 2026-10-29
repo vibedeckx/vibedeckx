@@ -219,3 +219,11 @@ describe("computeWorkspaceStatuses", () => {
     expect(result.get("feat")).toBe("completed");
   });
 });
+
+describe("computeWorkspaceStatuses — main-waiting", () => {
+  it("a waiting orchestrator is live work: it wins over a New Conversation placeholder", () => {
+    const backend = new Map<string, WorkspaceStatus>([["dev", "main-waiting"]]);
+    const result = computeWorkspaceStatuses([makeWorktree("dev")], backend, () => true);
+    expect(result.get("dev")).toBe("main-waiting");
+  });
+});

@@ -25,11 +25,16 @@ export type Patch = PatchEntry[];
  */
 export type PatchValue =
   | { type: "ENTRY"; content: AgentMessage }
-  | { type: "STATUS"; content: AgentSessionStatus }
+  | { type: "STATUS"; content: ChatSessionStatus }
   | { type: "READY"; content: true }
   | { type: "FINISHED"; content: true };
 
 export type AgentSessionStatus = "running" | "stopped" | "error";
+/**
+ * The Main Chat adds `waiting`: no stream is running, but its turn still owes
+ * results (or the user's reply). Agent sessions never send it.
+ */
+export type ChatSessionStatus = AgentSessionStatus | "waiting";
 
 // ============ WebSocket Message Format ============
 
@@ -143,7 +148,7 @@ export const ConversationPatch = {
   /**
    * Create a status update patch
    */
-  updateStatus(status: AgentSessionStatus): Patch {
+  updateStatus(status: ChatSessionStatus): Patch {
     return [
       {
         op: "replace",

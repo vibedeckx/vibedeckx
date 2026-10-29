@@ -10,6 +10,7 @@ export type BranchActivity =
   | "completed"
   | "stopped"
   | "main-running"
+  | "main-waiting"
   | "main-completed";
 
 interface BranchActivityEntry {

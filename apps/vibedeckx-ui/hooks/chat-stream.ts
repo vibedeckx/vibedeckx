@@ -34,7 +34,14 @@ export type AgentMessage =
   | { type: "turn_end"; timestamp: number }
   | { type: "tool_approval_request"; tool: string; input: unknown; approvalId: string; resolved?: "approved" | "denied"; timestamp: number };
 
-export type AgentSessionStatus = "running" | "stopped" | "error";
+/** `waiting`: no reply is streaming, but Main Chat is still on the task, waiting for results or for you. */
+export type AgentSessionStatus = "running" | "waiting" | "stopped" | "error";
+
+/** What Main Chat's open turn is doing; while it waits, what for. Pushed by the server, not replayed. */
+export interface ChatTurnState {
+  status: "running" | "waiting" | "idle";
+  waitingFor: string[];
+}
 
 export interface ChatSession {
   id: string;
@@ -60,6 +67,7 @@ export interface ChatStreamState {
   isLoading: boolean;
   error: string | null;
   workflowRunUpdate: WorkflowRun | null;
+  turnState: ChatTurnState;
   /** Bumped on every `Ready` — the reconciliation point for non-replayed pushes. */
   streamEpoch: number;
   /** Unsent composer text. Per workspace; survives switching away and back. */
@@ -75,6 +83,7 @@ export const EMPTY_CHAT_STREAM_STATE: ChatStreamState = Object.freeze({
   isLoading: false,
   error: null,
   workflowRunUpdate: null,
+  turnState: { status: "idle", waitingFor: [] },
   streamEpoch: 0,
   draft: "",
 }) as ChatStreamState;
@@ -113,6 +122,7 @@ type AgentWsMessage =
   | { browserCommand: BrowserCommand }
   | { openPreviewFrame: { projectId: string; url: string } }
   | { WorkflowRunUpdated: WorkflowRun }
+  | { TurnState: ChatTurnState }
   // Liveness-only frame from the server heartbeat — carries no state, exists to
   // give the silence watchdog something to observe on an idle session.
   | { keepalive: number };
@@ -638,6 +648,11 @@ export class ChatStream {
 
     if ("WorkflowRunUpdated" in msg) {
       this.set({ workflowRunUpdate: msg.WorkflowRunUpdated });
+      return;
+    }
+
+    if ("TurnState" in msg) {
+      this.set({ turnState: msg.TurnState });
       return;
     }
 

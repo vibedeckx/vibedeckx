@@ -101,6 +101,18 @@ function StatusDot({ status }: { status?: WorkspaceStatus }) {
       </span>
     );
   }
+  if (status === "main-waiting") {
+    // Still on the task between replies, waiting for results or for you: the
+    // orchestrator's violet as a hollow ring, with a slower pulse than running.
+    return (
+      <span className={cn(base, "border-[1.5px] border-violet-500 bg-transparent")}>
+        <span
+          className="absolute inset-[-2px] rounded-full border border-violet-500"
+          style={{ animation: "status-dot-pulse 2.4s ease-out infinite", opacity: 0.4 }}
+        />
+      </span>
+    );
+  }
   if (status === "main-completed") {
     // Cool green for workspace completion; agent-completed uses a warm
     // yellow-green (lime) so the two completion states stay clearly distinct.
@@ -142,7 +154,7 @@ function ResidentSessionDot({ status }: { status: string }) {
 
 function workspaceDotStatus(status: WorkspaceStatus | undefined, hasResidentSessions: boolean): WorkspaceStatus | undefined {
   if (!hasResidentSessions) return status;
-  if (status === "main-running" || status === "main-completed") return status;
+  if (status === "main-running" || status === "main-waiting" || status === "main-completed") return status;
   return "idle";
 }
 

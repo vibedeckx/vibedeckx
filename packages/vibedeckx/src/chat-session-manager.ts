@@ -14,10 +14,10 @@ import { buildHistoryWindow } from "./session-history-window.js";
 import { z } from "zod";
 import { resolveChatModel } from "./utils/chat-model.js";
 import type WebSocket from "ws";
-import type { AgentMessage, AgentSessionStatus, AgentType } from "./agent-types.js";
+import type { AgentMessage, AgentType } from "./agent-types.js";
 import { shouldEmitMainCompleted, type BranchActivity } from "./branch-activity.js";
 import { ConversationPatch } from "./conversation-patch.js";
-import type { Patch, AgentWsMessage, BrowserCommand, BrowserCommandResult } from "./conversation-patch.js";
+import type { Patch, AgentWsMessage, BrowserCommand, BrowserCommandResult, ChatSessionStatus } from "./conversation-patch.js";
 import type { Executor, Storage } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { ProcessManager, LogMessage } from "./process-manager.js";
@@ -73,7 +73,8 @@ interface ChatSession {
   userId: string;
   store: ChatStore;
   subscribers: Set<WebSocket>;
-  status: AgentSessionStatus;
+  /** `running` while a stream is live, `waiting` while its turn waits, else `stopped`. */
+  status: ChatSessionStatus;
   abortController: AbortController | null;
   eventListeningEnabled: boolean;
   /**
@@ -2151,10 +2152,11 @@ export class ChatSessionManager {
       }
     }
 
-    // Send current status
+    // Send current status, and what a waiting turn waits for
     const statusPatch = ConversationPatch.updateStatus(session.status);
     try {
       ws.send(JSON.stringify({ JsonPatch: statusPatch }));
+      ws.send(JSON.stringify({ TurnState: this.turnState(session) }));
     } catch {
       // Client gone
     }
@@ -3637,6 +3639,7 @@ export class ChatSessionManager {
 
     session.status = "running";
     this.broadcastPatch(session, ConversationPatch.updateStatus("running"));
+    this.broadcastTurnState(session);
     // `complete_task` declares the turn finished, once. A new turn — or the
     // user asking for more — is fresh work again (violet).
     if (turn.streams === 1 || arrivals.some((arrival) => arrival.source === "user")) session.taskCompleted = false;
@@ -3681,7 +3684,7 @@ export class ChatSessionManager {
     if (session.pending.hasOpen() || waitingOnUser) {
       // Work it started is on its way back, or the user owes a decision: a
       // compliant end of a stream. The result (or the reply) wakes the turn.
-      turn.status = "waiting";
+      this.enterWaiting(session, turn);
       session.planState.nudges = 0;
       return;
     }
@@ -3690,7 +3693,7 @@ export class ChatSessionManager {
         this.continueTurn(session);
         return;
       case "retry":
-        turn.status = "waiting";
+        this.enterWaiting(session, turn);
         return;
       case "stalled":
         this.endTurn(session, "stalled");
@@ -3698,6 +3701,44 @@ export class ChatSessionManager {
       case "pass":
         this.endTurn(session, "completed");
         return;
+    }
+  }
+
+  private enterWaiting(session: ChatSession, turn: CommanderTurn): void {
+    turn.status = "waiting";
+    // Still on the user's task, between streams (design §13).
+    if (this.drivesDot(session) && !session.taskCompleted) this.emitChatActivity(session, "main-waiting");
+  }
+
+  /**
+   * Bring the chat's status in line with its turn once no stream is starting:
+   * `waiting` while the turn waits, `stopped` when there is none. A live
+   * stream set `running` itself.
+   */
+  private syncStatus(session: ChatSession): void {
+    if (session.abortController) return;
+    const status: ChatSessionStatus = session.turn?.status === "waiting" ? "waiting" : "stopped";
+    if (session.status !== status) {
+      session.status = status;
+      this.broadcastPatch(session, ConversationPatch.updateStatus(status));
+    }
+    this.broadcastTurnState(session);
+  }
+
+  /** What the open turn is doing and, while it waits, what for — shown above the composer. */
+  private turnState(session: ChatSession): { status: "running" | "waiting" | "idle"; waitingFor: string[] } {
+    const turn = session.turn;
+    if (!turn) return { status: "idle", waitingFor: [] };
+    const waitingFor = session.pending.open().map((item) => item.label);
+    const waitingOn = session.planState.current?.waitingOn;
+    if (waitingOn) waitingFor.push(`your reply: ${waitingOn}`);
+    return { status: turn.status, waitingFor };
+  }
+
+  private broadcastTurnState(session: ChatSession): void {
+    const frame = JSON.stringify({ TurnState: this.turnState(session) });
+    for (const ws of session.subscribers) {
+      if (ws.readyState === 1) ws.send(frame);
     }
   }
 
@@ -3737,6 +3778,7 @@ export class ChatSessionManager {
     if (unread.length > 0) session.outside.unshift(...unread);
     console.debug(`[ChatSession] turn ${turn.id} of ${session.id} ended ${endedWith} after ${turn.streams} stream(s)`);
     this.drainOutside(session);
+    this.syncStatus(session);
   }
 
   // ---- Send message & stream AI response ----
@@ -4088,11 +4130,7 @@ export class ChatSessionManager {
         };
         if (turn) this.afterStream(session, turn, outcome);
         else this.drainOutside(session);
-        // Unless the turn went straight on into its next stream, nothing is streaming now.
-        if (!session.abortController) {
-          session.status = "stopped";
-          this.broadcastPatch(session, ConversationPatch.updateStatus("stopped"));
-        }
+        this.syncStatus(session);
       }
     }
   }
@@ -4108,8 +4146,6 @@ export class ChatSessionManager {
     if (session.pendingApproval) {
       session.pendingApproval = null;
       session.abortController = null;
-      session.status = "stopped";
-      this.broadcastPatch(session, ConversationPatch.updateStatus("stopped"));
       this.emitChatActivity(session, "stopped");
       this.endTurn(session, "cancelled");
       return true;
@@ -4168,6 +4204,7 @@ export class ChatSessionManager {
     this.broadcastPatch(session, clearPatch);
     const statusPatch = ConversationPatch.updateStatus("stopped");
     this.broadcastPatch(session, statusPatch);
+    this.broadcastTurnState(session);
 
     // New Conversation semantics — the workspace dot returns to idle
     // (gray). The watchdog budget is fresh with the new ChatPlanState above.

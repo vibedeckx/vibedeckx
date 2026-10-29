@@ -272,7 +272,7 @@ export function useMergeStatus(projectId: string | null, worktrees: Worktree[]) 
 }
 
 /** Workspace statuses that mean an agent is actively working on the branch. */
-const ACTIVE_WORKSPACE_STATUSES = new Set(["working", "main-running"]);
+const ACTIVE_WORKSPACE_STATUSES = new Set(["working", "main-running", "main-waiting"]);
 
 /** Branch keys currently in an active status. Pure — exported for tests. */
 export function activeBranchSet(

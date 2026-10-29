@@ -24,7 +24,7 @@ import { ToolApprovalCard } from "./tool-approval-card";
 import { ReviewRunPanel } from "./review-run-panel";
 import { NewLoopDialog } from "./new-loop-dialog";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
-import { MessageSquare, Loader2, Square, Search, Radio, SquarePen, TriangleAlert } from "lucide-react";
+import { MessageSquare, Loader2, Square, Search, Radio, SquarePen, TriangleAlert, Hourglass } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, type WorkflowRun } from "@/lib/api";
 import { toast } from "sonner";
@@ -99,6 +99,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
     stopGeneration,
     restartSession,
     workflowRunUpdate,
+    turnState,
     streamEpoch,
     draft,
     setDraft,
@@ -123,6 +124,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
   const eventListeningEnabled = session?.eventListeningEnabled ?? false;
 
   const isGenerating = status === "running";
+  // Between replies, still on the task: results (or your answer) are owed. You
+  // can speak into it — your message joins the same task — or stop it.
+  const isWaiting = status === "waiting";
 
   const handleSubmit = useCallback(
     async (message: { text: string }) => {
@@ -159,6 +163,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
           <span className="text-xs font-medium text-foreground">Main Chat</span>
           {isGenerating && (
             <Loader2 className="h-3 w-3 animate-spin text-primary/60" />
+          )}
+          {isWaiting && (
+            <Hourglass className="h-3 w-3 text-primary/60" aria-label="Waiting for results" />
           )}
         </div>
         {session && (
@@ -425,7 +432,13 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
         {taskPlans.current && session && (
           <TaskPlanPanel key={taskPlans.current.key} task={taskPlans.current} sessionId={session.id} />
         )}
-        {isGenerating && (
+        {isWaiting && turnState.waitingFor.length > 0 && (
+          <div className="mb-2 flex items-start gap-1.5 text-xs text-muted-foreground" data-testid="turn-waiting-for">
+            <Hourglass className="mt-0.5 h-3 w-3 shrink-0" />
+            <span>Waiting for {turnState.waitingFor.join(", ")}</span>
+          </div>
+        )}
+        {(isGenerating || isWaiting) && (
           <div className="flex justify-center mb-2">
             <Button
               variant="outline"
@@ -434,7 +447,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
               className="gap-1.5"
             >
               <Square className="h-3 w-3" />
-              Stop generating
+              {isGenerating ? "Stop generating" : "Stop"}
             </Button>
           </div>
         )}
@@ -449,7 +462,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
                 ? "Connecting..."
                 : isGenerating
                   ? "Waiting for response..."
-                  : "Type a message..."
+                  : isWaiting
+                    ? "Still on it — add to the task..."
+                    : "Type a message..."
             }
             className="pr-12"
             style={{ fontSize: "var(--conv-font-size, 14px)" }}

@@ -17,6 +17,7 @@ export type BranchActivity =
   | "completed"
   | "stopped"
   | "main-running"
+  | "main-waiting"
   | "main-completed";
 
 export interface BranchActivityState {
@@ -204,7 +205,7 @@ export function overlayOrchestratorActivity(
 ): Map<string, BranchActivityState> {
   const result = new Map(computed);
   for (const [branch, state] of orchestratorStates) {
-    if (state.activity === "main-running" || state.activity === "main-completed") {
+    if (state.activity === "main-running" || state.activity === "main-waiting" || state.activity === "main-completed") {
       result.set(branch, { ...state });
     }
   }
@@ -233,7 +234,7 @@ export function shouldEmitMainCompleted(
   eventDrivenTurn: boolean,
   currentDotActivity: BranchActivity | undefined,
 ): boolean {
-  return !eventDrivenTurn || currentDotActivity === "main-running";
+  return !eventDrivenTurn || currentDotActivity === "main-running" || currentDotActivity === "main-waiting";
 }
 
 /**

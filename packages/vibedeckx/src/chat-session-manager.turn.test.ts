@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MockLanguageModelV3 } from "ai/test";
+import type WebSocket from "ws";
 import { ChatSessionManager } from "./chat-session-manager.js";
 import { openTurn as newTurn } from "./commander-turn.js";
 
@@ -530,7 +531,11 @@ describe("complete_task and wait", () => {
     await idle();
     expect(manager.getSession(id)!.taskCompleted).toBe(false);
     expect(manager.getSession(id)!.turn?.status).toBe("waiting");
-    expect(emitBranchActivityIfChanged).toHaveBeenLastCalledWith("p1", "dev", expect.objectContaining({ activity: "main-running" }));
+    // Withdrawn back to running, then waiting on the new work — never left on completed.
+    const dots = emitBranchActivityIfChanged.mock.calls.map((args) => (args[2] as { activity: string }).activity);
+    // (Repeats are deduped by the real emitter; the mock records each call.)
+    const changes = dots.slice(dots.lastIndexOf("main-completed")).filter((dot, i, all) => i === 0 || dot !== all[i - 1]);
+    expect(changes).toEqual(["main-completed", "main-running", "main-waiting"]);
   });
 
   it.each(["wait", "complete_task"] as const)("%s sees a result that arrived mid-stream before the model did", async (tool) => {
@@ -919,6 +924,33 @@ describe("long-running services", () => {
     expect(phase).toBe(3);
     expect(woken).toContain("[Executor Event: Service Started]");
     expect(turnEnds(manager, id)).toBe(1);
+  });
+});
+
+describe("what the UI sees of a turn", () => {
+  it("a waiting turn reports status waiting and what it waits for; Stop reports stopped and idle", async () => {
+    let phase = 0;
+    const { manager, id, idle, emitBranchActivityIfChanged } = setup(async () => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    const sent: Array<Record<string, unknown>> = [];
+    manager.subscribe(id, { readyState: 1, send: (data: string) => sent.push(JSON.parse(data)) } as unknown as WebSocket);
+    const statuses = () => sent.flatMap((frame) => (frame.JsonPatch as Array<{ path: string; value: { content: string } }> | undefined)
+      ?.filter((op) => op.path === "/status").map((op) => op.value.content) ?? []);
+    const turnStates = () => sent.filter((frame) => "TurnState" in frame).map((frame) => frame.TurnState);
+
+    await manager.sendMessage(id, "Build it");
+    await idle();
+    expect(statuses().at(-1)).toBe("waiting");
+    expect(turnStates().at(-1)).toEqual({ status: "waiting", waitingFor: ['executor "build" on local'] });
+    expect(emitBranchActivityIfChanged).toHaveBeenLastCalledWith("p1", "dev", expect.objectContaining({ activity: "main-waiting" }));
+
+    manager.stopGeneration(id);
+    expect(statuses().at(-1)).toBe("stopped");
+    expect(turnStates().at(-1)).toEqual({ status: "idle", waitingFor: [] });
   });
 });
 

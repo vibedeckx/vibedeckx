@@ -6,6 +6,7 @@ export type WorkspaceStatus =
   | "completed"
   | "stopped"
   | "main-running"
+  | "main-waiting"
   | "main-completed";
 
 /** Normalize null branch (main worktree) to empty string for Map keys. */
@@ -73,9 +74,10 @@ export function computeWorkspaceStatuses(
     }
 
     // Placeholder is active for this branch.
-    if (backend === "main-running") {
-      // Live orchestrator work — always wins over the reset.
-      map.set(branchKey, "main-running");
+    if (backend === "main-running" || backend === "main-waiting") {
+      // Live orchestrator work (streaming, or waiting on its results) —
+      // always wins over the reset.
+      map.set(branchKey, backend);
     } else if (backend === "main-completed") {
       // Terminal orchestrator dot: the reset wins only if it happened after
       // the orchestrator completed. A completion that ran after the reset

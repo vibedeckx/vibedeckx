@@ -35,6 +35,7 @@ describe("ChatSessionManager.subscribe replay", () => {
     expect(unsubscribe).not.toBeNull();
     expect(frames(send)).toEqual([
       { JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "stopped" } }] },
+      { TurnState: { status: "idle", waitingFor: [] } },
       { Ready: true },
     ]);
   });
@@ -58,7 +59,7 @@ describe("ChatSessionManager.subscribe replay", () => {
     manager.subscribe(id, { send } as unknown as WebSocket);
     const out = frames(send);
 
-    expect(out).toHaveLength(3);
+    expect(out).toHaveLength(4);
     expect(out[0]).toEqual({
       JsonPatch: [
         { op: "add", path: "/entries/0", value: { type: "ENTRY", content: { type: "user", content: "hi", timestamp: 1 } } },
@@ -67,7 +68,8 @@ describe("ChatSessionManager.subscribe replay", () => {
       ],
     });
     expect(out[1]).toEqual({ JsonPatch: [{ op: "replace", path: "/status", value: { type: "STATUS", content: "stopped" } }] });
-    expect(out[2]).toEqual({ Ready: true });
+    expect(out[2]).toEqual({ TurnState: { status: "idle", waitingFor: [] } });
+    expect(out[3]).toEqual({ Ready: true });
   });
 
   it("replays nothing after reset", () => {
