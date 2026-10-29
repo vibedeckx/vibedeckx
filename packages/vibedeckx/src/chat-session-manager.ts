@@ -13,7 +13,7 @@ import { ChatPlanState, chatPlanSchema } from "./chat-plan.js";
 import { buildHistoryWindow } from "./session-history-window.js";
 import { generateText } from "ai";
 import {
-  KEEP_RECENT_TURNS, SUMMARY_SYSTEM_PROMPT, capToolResults, fitTurnBudget, summaryMessage, summaryPrompt, textHistory, transcriptText,
+  KEEP_RECENT_TURNS, SUMMARY_SYSTEM_PROMPT, capToolResults, fitTurnBudget, summaryBatch, summaryMessage, summaryPrompt, textHistory,
 } from "./chat-history.js";
 import { z } from "zod";
 import { resolveChatModel, resolveFastChatModel } from "./utils/chat-model.js";
@@ -3665,15 +3665,17 @@ export class ChatSessionManager {
     const end = session.turn?.firstEntryIndex ?? session.store.nextIndex;
     const summary = session.summary;
     return [
-      ...(summary ? [summaryMessage(summary.text)] : []),
+      ...(summary?.text ? [summaryMessage(summary.text)] : []),
       ...textHistory(session.store.entries, summary?.uptoEntryIndex ?? 0, end),
     ];
   }
 
   /**
    * Fold the oldest ended turns into the rolling summary once more than
-   * KEEP_RECENT_TURNS have ended. Runs in the background after a turn ends;
-   * a failure leaves the turns as text and is retried at the next turn end.
+   * KEEP_RECENT_TURNS have ended. Runs in the background after a turn ends,
+   * one batch at a time: the summary only ever covers entries that were
+   * actually handed to the summarizer. A failure leaves the rest as text and
+   * is retried at the next turn end.
    */
   private maybeSummarize(session: ChatSession): void {
     if (session.summarizing || session.turnStarts.length <= KEEP_RECENT_TURNS) return;
@@ -3681,17 +3683,25 @@ export class ChatSessionManager {
     const from = session.summary?.uptoEntryIndex ?? 0;
     if (upto <= from) return;
     const previous = session.summary?.text ?? null;
-    const transcript = transcriptText(session.store.entries, from, upto);
+    const batch = summaryBatch(session.store.entries, from, upto);
     const epoch = session.historyEpoch;
     session.summarizing = true;
-    this.summarize(session, previous, transcript)
+    let advanced = false;
+    this.summarize(session, previous, batch.text)
       .then((text) => {
-        if (session.historyEpoch !== epoch || !text.trim()) return;
-        session.summary = { text: text.trim(), uptoEntryIndex: upto };
-        console.debug(`[ChatSession] history of ${session.id} summarized up to entry ${upto}`);
+        if (session.historyEpoch !== epoch) return;
+        // A batch with no words (only tool entries) moves the boundary on as is.
+        if (!text.trim() && batch.text.trim()) return;
+        session.summary = { text: text.trim() || (previous ?? ""), uptoEntryIndex: batch.end };
+        advanced = true;
+        console.debug(`[ChatSession] history of ${session.id} summarized up to entry ${batch.end}`);
       })
       .catch((err) => console.warn(`[ChatSession] history summary for ${session.id} failed:`, err))
-      .finally(() => { session.summarizing = false; });
+      .finally(() => {
+        session.summarizing = false;
+        // More backlog than one batch: fold in the next piece.
+        if (advanced) this.maybeSummarize(session);
+      });
   }
 
   private async summarize(session: ChatSession, previous: string | null, transcript: string): Promise<string> {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ModelMessage } from "ai";
 import type { AgentMessage } from "./agent-types.js";
-import { capToolResults, fitTurnBudget, summaryMessage, textHistory, transcriptText } from "./chat-history.js";
+import { capToolResults, fitTurnBudget, summaryBatch, summaryMessage, textHistory } from "./chat-history.js";
 
 const toolMessage = (value: unknown, type: "json" | "text" = "json"): ModelMessage => ({
   role: "tool",
@@ -23,12 +23,8 @@ describe("textHistory", () => {
     expect(textHistory(entries, 3, 99)).toEqual([{ role: "user", content: "again" }]);
   });
 
-  it("renders a range as a transcript, keeping the most recent part when long", () => {
-    expect(transcriptText(entries, 0, 5)).toBe("User: hi\n\nAssistant: hello\n\nUser: again");
-    const long: AgentMessage[] = [{ type: "user", content: "x".repeat(70_000), timestamp: 0 }, { type: "assistant", content: "the end", timestamp: 0 }];
-    const text = transcriptText(long, 0, 2);
-    expect(text.length).toBeLessThanOrEqual(60_001);
-    expect(text.endsWith("the end")).toBe(true);
+  it("renders a range as a transcript for the summarizer", () => {
+    expect(summaryBatch(entries, 0, 5)).toEqual({ text: "User: hi\n\nAssistant: hello\n\nUser: again", end: 5 });
   });
 
   it("frames the summary as earlier conversation", () => {
@@ -64,3 +60,29 @@ describe("fitTurnBudget", () => {
     expect(JSON.stringify(messages)).toBe(before);
   });
 });
+
+describe("summaryBatch", () => {
+  const say = (content: string, type: "user" | "assistant" = "user"): AgentMessage => ({ type, content, timestamp: 0 });
+
+  it("hands over the oldest entries first and stops before the batch overflows, skipping nothing", () => {
+    const entries = [say("Never touch the payments module."), say("a".repeat(40_000), "assistant"), say("b".repeat(40_000)), say("c".repeat(100))];
+    const first = summaryBatch(entries, 0, 4, 60_000);
+    expect(first.text.startsWith("User: Never touch the payments module.")).toBe(true);
+    expect(first.end).toBe(2);
+    const second = summaryBatch(entries, first.end, 4, 60_000);
+    expect(second.text).toContain("b".repeat(100));
+    expect(second.text).toContain("c".repeat(100));
+    expect(second.end).toBe(4);
+  });
+
+  it("an entry too long for one batch keeps its head and tail", () => {
+    const entries = [say(`Goal: ship the login page. ${"x".repeat(100_000)} Done when tests pass.`)];
+    const batch = summaryBatch(entries, 0, 1, 1_000);
+    expect(batch.end).toBe(1);
+    expect(batch.text.length).toBeLessThan(1_100);
+    expect(batch.text).toContain("Goal: ship the login page.");
+    expect(batch.text).toContain("Done when tests pass.");
+    expect(batch.text).toContain("(middle omitted)");
+  });
+});
+

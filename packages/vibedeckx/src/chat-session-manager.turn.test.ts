@@ -1027,5 +1027,30 @@ describe("what the model is shown (design §11)", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(manager.getSession(id)!.summary).toBeNull();
   });
+
+  it("a turn longer than one summarizer call is folded in batch by batch, its first words included", async () => {
+    let calls = 0;
+    const { manager, id, idle } = setup(async () => {
+      // Every turn: complete_task, then the reply text. The first reply is very long.
+      const n = calls++;
+      return n % 2 === 0 ? call(`done-${n}`, "complete_task", { summary: "ok" }) : text(n === 1 ? "z".repeat(70_000) : "ok");
+    });
+    const inputs: string[] = [];
+    vi.spyOn(manager as unknown as Summarizer, "summarize").mockImplementation(async (_session, previous, transcript) => {
+      inputs.push(transcript);
+      return `${previous ?? ""}[batch ${inputs.length}]`;
+    });
+    for (const question of ["Constraint: never touch the payments module.", "q2", "q3", "q4"]) {
+      await manager.sendMessage(id, question);
+      await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
+      await idle();
+    }
+    await vi.waitFor(() => expect(manager.getSession(id)!.summarizing).toBe(false));
+    // Turn 1 (the constraint plus a 70k reply) is folded; it does not fit one call.
+    expect(inputs.length).toBe(2);
+    expect(inputs[0]).toContain("Constraint: never touch the payments module.");
+    expect(inputs[1]).toContain("z".repeat(1_000));
+    expect(manager.getSession(id)!.summary!.uptoEntryIndex).toBe(manager.getSession(id)!.turnStarts[1]);
+  });
 });
 

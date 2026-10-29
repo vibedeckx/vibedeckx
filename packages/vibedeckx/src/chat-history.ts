@@ -21,8 +21,8 @@ export const MAX_TOOL_RESULT_CHARS = 8_000;
 /** The open turn's messages are kept under this, dropping the oldest tool outputs first. */
 export const MAX_TURN_CHARS = 120_000;
 
-/** Ended-turn text handed to the summarizer is cut to this, keeping the most recent. */
-const MAX_SUMMARY_INPUT_CHARS = 60_000;
+/** Ended-turn text handed to the summarizer in one call; longer backlogs go in several batches. */
+export const MAX_SUMMARY_INPUT_CHARS = 60_000;
 
 const DROPPED_OUTPUT = "(output dropped to keep the conversation within its context budget; call the tool again if you need it)";
 
@@ -40,12 +40,35 @@ export function textHistory(entries: readonly AgentMessage[], from: number, to: 
   return messages;
 }
 
-/** The same range as plain text, for the summarizer. */
-export function transcriptText(entries: readonly AgentMessage[], from: number, to: number): string {
-  const text = textHistory(entries, from, to)
-    .map((message) => `${message.role === "user" ? "User" : "Assistant"}: ${message.content as string}`)
-    .join("\n\n");
-  return text.length > MAX_SUMMARY_INPUT_CHARS ? `…${text.slice(-MAX_SUMMARY_INPUT_CHARS)}` : text;
+/**
+ * The next piece of entries [from, to) for the summarizer, oldest first: as
+ * many whole entries as fit in `max`, and `end`, the index the summary may
+ * advance to once this text has been folded in. Nothing is skipped: what does
+ * not fit waits for the next batch. A single entry longer than `max` keeps its
+ * head and tail (the head is where goals and constraints usually are) and
+ * loses only its middle.
+ */
+export function summaryBatch(
+  entries: readonly AgentMessage[], from: number, to: number, max = MAX_SUMMARY_INPUT_CHARS,
+): { text: string; end: number } {
+  const parts: string[] = [];
+  let size = 0;
+  let end = from;
+  for (let i = Math.max(0, from); i < Math.min(to, entries.length); i++) {
+    const [message] = textHistory(entries, i, i + 1);
+    if (message) {
+      let line = `${message.role === "user" ? "User" : "Assistant"}: ${message.content as string}`;
+      if (parts.length > 0 && size + line.length + 2 > max) break;
+      if (line.length > max) {
+        const head = Math.floor(max * 0.7);
+        line = `${line.slice(0, head)}\n…(middle omitted)…\n${line.slice(line.length - (max - head))}`;
+      }
+      parts.push(line);
+      size += line.length + 2;
+    }
+    end = i + 1;
+  }
+  return { text: parts.join("\n\n"), end };
 }
 
 /** The summary as the opening message of what the model is shown. */
