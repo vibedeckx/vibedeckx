@@ -429,14 +429,14 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
           not overridable from a class) reserving 6px per side, plus the
           content's own p-4 — 22px per side. */}
       <div className="flex-shrink-0 py-3 px-[22px]">
-        {taskPlans.current && session && (
-          <TaskPlanPanel key={taskPlans.current.key} task={taskPlans.current} sessionId={session.id} />
-        )}
         {isWaiting && turnState.waitingFor.length > 0 && (
           <div className="mb-2 flex items-start gap-1.5 text-xs text-muted-foreground" data-testid="turn-waiting-for">
             <Hourglass className="mt-0.5 h-3 w-3 shrink-0" />
             <span>Waiting for {turnState.waitingFor.join(", ")}</span>
           </div>
+        )}
+        {taskPlans.current && session && (
+          <TaskPlanPanel key={taskPlans.current.key} task={taskPlans.current} sessionId={session.id} />
         )}
         {(isGenerating || isWaiting) && (
           <div className="flex justify-center mb-2">
