@@ -12,6 +12,11 @@ export interface ProxyResult {
   attempts?: number;
   /** Total wall-clock time including all retries */
   totalDurationMs?: number;
+  /**
+   * The request never left the hub (no open tunnel), so it cannot have reached
+   * the worker. Absent on every failure where it may have.
+   */
+  notSent?: true;
 }
 
 /**
@@ -61,6 +66,7 @@ export async function proxyToRemoteAuto(
     status: 0,
     data: { error: "Remote server is not connected" },
     errorCode: "network_error",
+    notSent: true,
     requestId: options?.requestId,
   };
 }

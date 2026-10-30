@@ -24,6 +24,8 @@ export interface RemoteExecuteBody {
 
 export interface RemoteStartRequest {
   executorId: string;
+  /** Shown to the user while the start is being re-delivered. */
+  executorName?: string;
   projectId: string;
   remoteServerId: string;
   branch: string | null;
@@ -35,14 +37,79 @@ export interface RemoteStartRequest {
    * the target is someone else's and is reported, never adopted.
    */
   processId?: string;
+  /**
+   * Only re-send the pending start with `processId`; never start anew. For a
+   * user's "Retry now" on a notice that may be stale: if the hub already
+   * delivered or gave up on that start, a fresh start would run it again.
+   */
+  retryOnly?: boolean;
 }
 
 export type RemoteStartOutcome =
   | { kind: "started"; processId: string }
   | { kind: "already_running"; processId: string }
   | { kind: "starting" }
-  | { kind: "unknown"; error: string }
+  /**
+   * The request may have reached the worker. `retrying`: the hub keeps
+   * delivering it under the same identity until `deadlineAt`; the outcome
+   * arrives as `executor:started` or as an `executor:delivery` event.
+   */
+  | { kind: "unknown"; error: string; reason: DeliveryFailure; retrying: boolean; deadlineAt?: number }
+  /** The hub had already stopped re-delivering it: the delivery window is over. */
+  | { kind: "gave_up" }
+  /** `retryOnly`: that start is no longer pending (delivered or given up); nothing was sent. */
+  | { kind: "retry_ended" }
   | { kind: "rejected"; result: ProxyResult };
+
+/**
+ * How long a lost start is re-delivered under its identity. Must stay below the
+ * worker's memory of a finished process (`LOG_RETENTION_MS`, 30 min after
+ * exit): within it, a re-delivery of a start that did run is answered with
+ * that process instead of running the command again.
+ */
+export const DELIVERY_WINDOW_MS = 20 * 60_000;
+/** Pause between delivery attempts while the worker is connected. */
+export const DELIVERY_RETRY_INTERVAL_MS = 30_000;
+const DELIVERY_TICK_MS = 5_000;
+/** A start the hub gave up on stays listed this long, for the user to act on. */
+const GAVE_UP_RETENTION_MS = 60 * 60_000;
+
+/** Why the last delivery attempt failed. */
+export type DeliveryFailure =
+  /** No open tunnel: the request was not sent. */
+  | "offline"
+  /** The tunnel closed while the request was out. */
+  | "connection_closed"
+  /** No answer in time. */
+  | "timeout";
+
+/**
+ * A start the hub is still delivering (`retrying`), has given up on
+ * (`gave_up`), or that the worker refused on re-delivery (`rejected`, event
+ * only). A delivered start needs no event of its own: `executor:started` says it.
+ */
+export interface ExecutorDelivery {
+  /** Local id (`remote-<executorId>-<id>`) the process runs under once delivered. */
+  processId: string;
+  executorId: string;
+  executorName: string | null;
+  projectId: string;
+  remoteServerId: string;
+  branch: string | null;
+  state: "retrying" | "gave_up" | "rejected";
+  attempts: number;
+  reason: DeliveryFailure | null;
+  error: string | null;
+  /** Null while waiting for the worker to reconnect, or once settled. */
+  nextAttemptAt: number | null;
+  firstSentAt: number;
+  deadlineAt: number;
+  /**
+   * An attempt may have reached the worker (it failed after being sent). When
+   * false every attempt failed before leaving the hub: the command did not run.
+   */
+  mayHaveRun: boolean;
+}
 
 /**
  * A start whose outcome the hub has not observed yet. It keeps the identity the
@@ -54,10 +121,21 @@ interface PendingStart extends RemoteStartRequest {
   processId: string;
   effectFingerprint: string;
   inFlight: boolean;
+  attempts: number;
+  firstSentAt: number;
+  nextAttemptAt: number | null;
+  reason: DeliveryFailure | null;
+  error: string | null;
+  /** A retrying event went out, so the outcome is announced too. */
+  announced: boolean;
+  mayHaveRun: boolean;
 }
 
 const isTransportFailure = (result: ProxyResult): boolean =>
   result.status === 0 || result.errorCode === "timeout" || result.errorCode === "network_error";
+
+const classifyFailure = (result: ProxyResult): DeliveryFailure =>
+  result.notSent ? "offline" : result.errorCode === "timeout" ? "timeout" : "connection_closed";
 
 /**
  * Process ids the worker currently reports as running, or null when the list
@@ -88,6 +166,9 @@ export async function listWorkerRunningProcessIds(
 export function createRemoteExecutorStarts(fastify: FastifyInstance) {
   /** `${executorId}:${remoteServerId}` → unconfirmed start */
   const pending = new Map<string, PendingStart>();
+  /** Same key → a start given up on, until the next start or its retention ends. */
+  const gaveUp = new Map<string, ExecutorDelivery>();
+  let ticker: ReturnType<typeof setInterval> | null = null;
 
   const supportsIdempotentExecute = async (remoteServerId: string): Promise<boolean> => {
     const server = await fastify.storage.remoteServers.getById(remoteServerId);
@@ -128,6 +209,92 @@ export function createRemoteExecutorStarts(fastify: FastifyInstance) {
     return localProcessId;
   };
 
+  const localIdOf = (entry: PendingStart) => `remote-${entry.executorId}-${entry.processId}`;
+
+  const deliveryOf = (entry: PendingStart, state: ExecutorDelivery["state"]): ExecutorDelivery => ({
+    processId: localIdOf(entry),
+    executorId: entry.executorId,
+    executorName: entry.executorName ?? null,
+    projectId: entry.projectId,
+    remoteServerId: entry.remoteServerId,
+    branch: entry.branch,
+    state,
+    attempts: entry.attempts,
+    reason: entry.reason,
+    error: entry.error,
+    nextAttemptAt: state === "retrying" ? entry.nextAttemptAt : null,
+    firstSentAt: entry.firstSentAt,
+    deadlineAt: entry.firstSentAt + DELIVERY_WINDOW_MS,
+    mayHaveRun: entry.mayHaveRun,
+  });
+
+  const announce = (delivery: ExecutorDelivery) => {
+    fastify.eventBus.emit({ type: "executor:delivery", projectId: delivery.projectId, delivery });
+  };
+
+  const ensureTicker = () => {
+    if (ticker) return;
+    ticker = setInterval(() => tick(), DELIVERY_TICK_MS);
+    ticker.unref?.();
+  };
+
+  /**
+   * One delivery of the entry's request. Every attempt carries the same
+   * processId and effect fingerprint: the worker either returns the process an
+   * earlier attempt spawned or starts it now — exactly once either way.
+   */
+  const attempt = async (key: string, entry: PendingStart): Promise<RemoteStartOutcome> => {
+    // Every send — first, timed, on reconnect, or the user's — passes here, so
+    // this is the one check on whether re-sending is still safe.
+    if (isExpired(entry, Date.now())) {
+      giveUp(key, entry);
+      return { kind: "gave_up" };
+    }
+    entry.inFlight = true;
+    entry.attempts++;
+    try {
+      const result = await proxyToRemoteAuto(
+        entry.remoteServerId,
+        "POST",
+        "/api/path/execute",
+        { ...entry.body, processId: entry.processId, effectFingerprint: entry.effectFingerprint },
+        { reverseConnectManager: fastify.reverseConnectManager },
+      );
+      if (result.ok) {
+        pending.delete(key);
+        const remoteProcessId = (result.data as { processId: string }).processId;
+        return { kind: "started", processId: await register(entry, remoteProcessId) };
+      }
+      if (isTransportFailure(result)) {
+        entry.reason = classifyFailure(result);
+        if (!result.notSent) entry.mayHaveRun = true;
+        entry.error = (result.data as { error?: string } | null)?.error ?? "Remote server unreachable";
+        // The request may have reached the worker. Without dedupe a retry could
+        // run it twice, so such workers get no retry: the start is forgotten.
+        if (!(await supportsIdempotentExecute(entry.remoteServerId))) {
+          pending.delete(key);
+          return { kind: "unknown", error: entry.error, reason: entry.reason, retrying: false };
+        }
+        entry.nextAttemptAt = Date.now() + DELIVERY_RETRY_INTERVAL_MS;
+        entry.announced = true;
+        announce(deliveryOf(entry, "retrying"));
+        ensureTicker();
+        return {
+          kind: "unknown", error: entry.error, reason: entry.reason, retrying: true,
+          deadlineAt: entry.firstSentAt + DELIVERY_WINDOW_MS,
+        };
+      }
+      pending.delete(key);
+      if (entry.announced) {
+        entry.error = (result.data as { error?: string } | null)?.error ?? `Remote start failed (HTTP ${result.status})`;
+        announce(deliveryOf(entry, "rejected"));
+      }
+      return { kind: "rejected", result };
+    } finally {
+      entry.inFlight = false;
+    }
+  };
+
   const start = async (request: RemoteStartRequest): Promise<RemoteStartOutcome> => {
     // Everything up to the first await runs as one synchronous block, so two
     // overlapping requests cannot both pass these checks.
@@ -139,9 +306,11 @@ export function createRemoteExecutorStarts(fastify: FastifyInstance) {
     }
     const key = `${request.executorId}:${request.remoteServerId}`;
     let entry = pending.get(key);
+    if (request.retryOnly && (!entry || entry.processId !== request.processId)) return { kind: "retry_ended" };
     if (entry?.inFlight) return { kind: "starting" };
     if (entry && request.processId && entry.processId !== request.processId) return { kind: "starting" };
     if (!entry) {
+      gaveUp.delete(key);
       entry = {
         ...request,
         processId: request.processId ?? randomUUID(),
@@ -149,66 +318,93 @@ export function createRemoteExecutorStarts(fastify: FastifyInstance) {
           .update(JSON.stringify({ executorId: request.executorId, remoteServerId: request.remoteServerId, body: request.body }))
           .digest("hex"),
         inFlight: false,
+        attempts: 0,
+        firstSentAt: Date.now(),
+        nextAttemptAt: null,
+        reason: null,
+        error: null,
+        announced: false,
+        mayHaveRun: false,
       };
       pending.set(key, entry);
     }
-    // A retry of an unconfirmed start reuses the stored identity and body: the
-    // worker either returns the process the first attempt spawned or starts it
-    // now — exactly once either way.
-    const current = entry;
-    current.inFlight = true;
-
-    try {
-      const result = await proxyToRemoteAuto(
-        current.remoteServerId,
-        "POST",
-        "/api/path/execute",
-        { ...current.body, processId: current.processId, effectFingerprint: current.effectFingerprint },
-        { reverseConnectManager: fastify.reverseConnectManager },
-      );
-      if (result.ok) {
-        pending.delete(key);
-        const remoteProcessId = (result.data as { processId: string }).processId;
-        return { kind: "started", processId: await register(current, remoteProcessId) };
-      }
-      if (isTransportFailure(result)) {
-        // The request may have reached the worker. Keep the identity so the
-        // next attempt can be deduplicated — unless the worker can't dedupe,
-        // in which case holding it would only block the user.
-        if (!(await supportsIdempotentExecute(current.remoteServerId))) pending.delete(key);
-        const reason = (result.data as { error?: string } | null)?.error ?? "Remote server unreachable";
-        return { kind: "unknown", error: reason };
-      }
-      pending.delete(key);
-      return { kind: "rejected", result };
-    } finally {
-      current.inFlight = false;
-    }
+    // A retry of an unconfirmed start reuses the stored identity and body.
+    return attempt(key, entry);
   };
 
   /**
-   * After a worker reconnects, look for unconfirmed starts that did happen.
-   * Not seeing one proves nothing (a single listing can't rule the start out),
-   * so absent entries stay pending for the next idempotent Start.
+   * Past the window, re-sending is no longer known to be safe: the worker may
+   * have forgotten a run the start did. (A worker restart forgets it sooner;
+   * that residual risk is accepted — see the design doc.)
    */
-  const reconcile = async (remoteServerId: string): Promise<void> => {
-    const candidates = [...pending.entries()].filter(
-      ([, entry]) => entry.remoteServerId === remoteServerId && !entry.inFlight,
-    );
-    if (candidates.length === 0) return;
-    for (const [, entry] of candidates) entry.inFlight = true;
-    try {
-      const running = await listWorkerRunningProcessIds(fastify, remoteServerId);
-      if (!running) return;
-      for (const [key, entry] of candidates) {
-        if (!running.has(entry.processId) || pending.get(key) !== entry) continue;
-        pending.delete(key);
-        await register(entry, entry.processId);
-        console.log(`[RemoteExecutorStarts] confirmed start after reconnect: executor=${entry.executorId} target=${remoteServerId} process=${entry.processId}`);
+  const isExpired = (entry: PendingStart, now: number): boolean => now >= entry.firstSentAt + DELIVERY_WINDOW_MS;
+
+  const giveUp = (key: string, entry: PendingStart) => {
+    pending.delete(key);
+    const delivery = deliveryOf(entry, "gave_up");
+    gaveUp.set(key, delivery);
+    console.warn(`[RemoteExecutorStarts] gave up delivering start: executor=${entry.executorId} target=${entry.remoteServerId} process=${entry.processId} attempts=${entry.attempts} after ${Math.round((Date.now() - entry.firstSentAt) / 60_000)} min (${entry.error})`);
+    announce(delivery);
+  };
+
+  const redeliver = (key: string, entry: PendingStart) => {
+    attempt(key, entry).catch((error) => {
+      console.error(`[RemoteExecutorStarts] delivery attempt failed for ${entry.processId}:`, error);
+    });
+  };
+
+  /**
+   * Re-deliver due starts, give up on those past the window. A due start whose
+   * worker is offline waits for the reconnect, which delivers it at once.
+   */
+  const tick = (now = Date.now()) => {
+    for (const [key, entry] of pending) {
+      if (entry.inFlight) continue;
+      // Past the window it is given up even while the worker is offline;
+      // anything else is decided by the attempt itself.
+      if (isExpired(entry, now)) {
+        giveUp(key, entry);
+        continue;
       }
-    } finally {
-      for (const [, entry] of candidates) entry.inFlight = false;
+      if (entry.nextAttemptAt !== null && now < entry.nextAttemptAt) continue;
+      if (!fastify.reverseConnectManager.isConnected(entry.remoteServerId)) {
+        if (entry.nextAttemptAt !== null) {
+          entry.nextAttemptAt = null;
+          entry.reason = "offline";
+          announce(deliveryOf(entry, "retrying"));
+        }
+        continue;
+      }
+      // Due, or waiting on a reconnect whose event this start missed.
+      redeliver(key, entry);
     }
+    for (const [key, delivery] of gaveUp) {
+      if (now >= delivery.deadlineAt + GAVE_UP_RETENTION_MS) gaveUp.delete(key);
+    }
+    if (pending.size === 0 && gaveUp.size === 0 && ticker) {
+      clearInterval(ticker);
+      ticker = null;
+    }
+  };
+
+  /** A freshly connected tunnel is the best moment to deliver: try every start bound for it now. */
+  const onReconnect = (remoteServerId: string) => {
+    for (const [key, entry] of pending) {
+      if (entry.remoteServerId !== remoteServerId || entry.inFlight) continue;
+      redeliver(key, entry);
+    }
+  };
+
+  /** Starts still being delivered or given up on, for a project's UI. */
+  const list = (projectId: string): ExecutorDelivery[] => [
+    ...[...pending.values()].filter((entry) => entry.projectId === projectId && entry.announced).map((entry) => deliveryOf(entry, "retrying")),
+    ...[...gaveUp.values()].filter((delivery) => delivery.projectId === projectId),
+  ];
+
+  /** Whether the hub is still delivering the start that would run as this local process id. */
+  const isRetrying = (localProcessId: string): boolean => {
+    for (const entry of pending.values()) if (localIdOf(entry) === localProcessId) return true;
+    return false;
   };
 
   fastify.reverseConnectManager.setStatusChangeHandler((_remoteServerId, status) => {
@@ -217,14 +413,11 @@ export function createRemoteExecutorStarts(fastify: FastifyInstance) {
     // rather than trusting the event's id, so aliased targets resume too.
     const servers = new Set([...pending.values()].map((entry) => entry.remoteServerId));
     for (const serverId of servers) {
-      if (!fastify.reverseConnectManager.isConnected(serverId)) continue;
-      reconcile(serverId).catch((error) => {
-        console.error(`[RemoteExecutorStarts] reconcile failed for ${serverId}:`, error);
-      });
+      if (fastify.reverseConnectManager.isConnected(serverId)) onReconnect(serverId);
     }
   });
 
-  return { start, reconcile };
+  return { start, tick, list, isRetrying };
 }
 
 export type RemoteExecutorStarts = ReturnType<typeof createRemoteExecutorStarts>;

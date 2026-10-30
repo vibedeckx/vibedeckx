@@ -443,6 +443,33 @@ export interface ExecutorProcessErrorBody {
   /** Remote start conflicts: `already_running` (carries processId), `starting`, `start_unknown`. */
   code?: string;
   processId?: string;
+  /** `start_unknown`: the hub keeps re-delivering the start on its own. */
+  retrying?: boolean;
+}
+
+/**
+ * A remote start whose request was lost and that the hub is re-delivering
+ * (`retrying`) or gave up on (`gave_up`). `delivered` / `rejected` only ever
+ * arrive as events, ending the entry.
+ */
+export interface ExecutorDelivery {
+  /** Local process id the start runs under once delivered. */
+  processId: string;
+  executorId: string;
+  executorName: string | null;
+  projectId: string;
+  remoteServerId: string;
+  branch: string | null;
+  state: "retrying" | "gave_up" | "rejected";
+  attempts: number;
+  reason: "offline" | "connection_closed" | "timeout" | null;
+  error: string | null;
+  /** Epoch ms; null while waiting for the remote to reconnect. */
+  nextAttemptAt: number | null;
+  firstSentAt: number;
+  deadlineAt: number;
+  /** An attempt may have reached the remote; false means the command did not run. */
+  mayHaveRun: boolean;
 }
 
 /**
@@ -2424,11 +2451,23 @@ export const api = {
   // Process Control API
   // No branch: the server derives the working directory from the executor's
   // own workspace, so a stale selection here can't run it somewhere else.
-  async startExecutor(executorId: string, target?: string): Promise<string> {
+  async getExecutorDeliveries(projectId: string): Promise<ExecutorDelivery[]> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/executor-deliveries`);
+    if (!res.ok) throw new Error(`Failed to load executor deliveries (${res.status})`);
+    const data = await res.json() as { deliveries: ExecutorDelivery[] };
+    return data.deliveries;
+  },
+
+  /**
+   * `retryProcessId`: re-send only that pending start (a delivery notice's
+   * "Retry now"); the server answers 409 `retry_ended` instead of starting
+   * anew when it is no longer pending.
+   */
+  async startExecutor(executorId: string, target?: string, retryProcessId?: string): Promise<string> {
     const res = await authFetch(`${getApiBase()}/api/executors/${executorId}/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ target }),
+      body: JSON.stringify({ target, ...(retryProcessId ? { retryProcessId } : {}) }),
     });
     if (!res.ok) throw await ExecutorProcessRequestError.fromResponse(res);
     const data = await res.json();

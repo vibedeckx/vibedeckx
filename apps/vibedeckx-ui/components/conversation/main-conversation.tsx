@@ -26,7 +26,9 @@ import { NewLoopDialog } from "./new-loop-dialog";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import { MessageSquare, Loader2, Square, Search, Radio, SquarePen, TriangleAlert, Hourglass } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { api, type WorkflowRun } from "@/lib/api";
+import { api, ExecutorProcessRequestError, type ExecutorDelivery, type WorkflowRun } from "@/lib/api";
+import { useExecutorDeliveries } from "@/hooks/use-executor-deliveries";
+import { ExecutorDeliveryNotice } from "@/components/executor/executor-delivery-notice";
 import { toast } from "sonner";
 
 /**
@@ -127,6 +129,29 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
   // Between replies, still on the task: results (or your answer) are owed. You
   // can speak into it — your message joins the same task — or stop it.
   const isWaiting = status === "waiting";
+
+  // Remote starts of this workspace whose request was lost: the hub is
+  // re-delivering them (or gave up). Shown here because a Main Chat run is
+  // otherwise just "waiting", with no word on why or what the user can do.
+  const deliveries = useExecutorDeliveries(projectId);
+  const branchDeliveries = useMemo(
+    () => [...deliveries.values()].filter((delivery) => (delivery.branch ?? null) === (branch ?? null)),
+    [deliveries, branch],
+  );
+  const retryDelivery = useCallback(async (delivery: ExecutorDelivery) => {
+    try {
+      // "Retry now" names the start it retries; "Run again" (after a give-up) is a fresh start.
+      await api.startExecutor(delivery.executorId, delivery.remoteServerId, delivery.state === "retrying" ? delivery.processId : undefined);
+    } catch (e) {
+      // Still undelivered: the notice keeps showing the retry.
+      if (e instanceof ExecutorProcessRequestError && e.body.code === "start_unknown" && e.body.retrying) return;
+      if (e instanceof ExecutorProcessRequestError && e.body.code === "retry_ended") {
+        toast.info("Already settled", { description: e.message });
+        return;
+      }
+      toast.error("Executor not started", { description: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
 
   const handleSubmit = useCallback(
     async (message: { text: string }) => {
@@ -429,6 +454,15 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
           not overridable from a class) reserving 6px per side, plus the
           content's own p-4 — 22px per side. */}
       <div className="flex-shrink-0 py-3 px-[22px]">
+        {branchDeliveries.map((delivery) => (
+          <ExecutorDeliveryNotice
+            key={delivery.processId}
+            delivery={delivery}
+            showExecutorName
+            onRetry={() => retryDelivery(delivery)}
+            className="mb-2"
+          />
+        ))}
         {isWaiting && turnState.waitingFor.length > 0 && (
           <div className="mb-2 flex items-start gap-1.5 text-xs text-muted-foreground" data-testid="turn-waiting-for">
             <Hourglass className="mt-0.5 h-3 w-3 shrink-0" />

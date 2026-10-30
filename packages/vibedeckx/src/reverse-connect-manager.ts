@@ -154,6 +154,7 @@ export class ReverseConnectManager {
         status: 0,
         data: { error: "Remote not connected" },
         errorCode: "network_error",
+        notSent: true,
       };
     }
 

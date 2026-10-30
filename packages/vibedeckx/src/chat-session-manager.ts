@@ -35,7 +35,7 @@ import type { RemoteExecutorInfo, RemoteSessionInfo } from "./server-types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
 import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
-import type { RemoteExecutorStarts } from "./remote-executor-starts.js";
+import { DELIVERY_WINDOW_MS, type ExecutorDelivery, type RemoteExecutorStarts } from "./remote-executor-starts.js";
 import { AgentDispatchLedger, CommanderOperationLedger, isOperationInFlight, type AgentDispatch, type AgentDispatchChange, type CommanderExecutorOperation } from "./commander-operations.js";
 import {
   PendingRegistry, openTurn, turnAccepts, userPresentAfter,
@@ -662,6 +662,8 @@ export class ChatSessionManager {
       if (event.type === "executor:started") {
         const confirmed = this.operations.markStarted(event.processId);
         if (confirmed?.from === "start_unknown" && confirmed.operation.service) this.reportServiceUp(confirmed.operation);
+      } else if (event.type === "executor:delivery") {
+        this.handleExecutorDelivery(event.delivery);
       } else if (event.type === "executor:stopped") {
         this.handleExecutorFinished(event).catch((err) => {
           console.error(`[ChatSession] handleExecutorFinished unhandled error:`, err);
@@ -919,6 +921,51 @@ export class ChatSessionManager {
    * That is the result its turn waits for: nothing else would wake it — a
    * running service has no exit to report.
    */
+  /**
+   * The hub stopped re-delivering one of this chat's unknown starts without it
+   * ever being confirmed: refused by the worker, or given up on at the end of
+   * the delivery window. Either is the operation's result. A start the model
+   * itself is re-sending right now is still `accepted` and answered by that
+   * tool call instead.
+   */
+  private handleExecutorDelivery(delivery: ExecutorDelivery): void {
+    if (delivery.state !== "gave_up" && delivery.state !== "rejected") return;
+    const operation = this.operations.unknownStartByProcess(delivery.processId);
+    if (!operation) return;
+    const session = this.sessions.get(operation.chatSessionId);
+    if (session) {
+      this.deliverOwn(session, "executor", operation.id, { source: "result", content: [
+        delivery.state === "gave_up" ? `[Executor Event: Delivery Failed]` : `[Executor Event: Start Failed]`,
+        `Executor: "${operation.executorName}"`,
+        `Operation: ${operation.id} (started by your runExecutor call)`,
+        operation.stepId ? `Plan step: ${operation.stepId} (plan ${operation.planId})` : null,
+        this.describeDeliveryEnd(delivery, operation.target),
+      ].filter((line): line is string => line !== null).join("\n") });
+    }
+    if (delivery.state === "gave_up") this.operations.markUndelivered(operation.id);
+    else this.operations.settleStart(operation.id, "rejected");
+  }
+
+  /**
+   * What the end of a re-delivery means for the command. Only when no attempt
+   * can have reached the worker is "it did not run" a fact; otherwise a lost
+   * reply may hide a run, and a later refusal or give-up does not undo it.
+   */
+  private describeDeliveryEnd(delivery: ExecutorDelivery, target: string): string {
+    const minutes = Math.round(DELIVERY_WINDOW_MS / 60_000);
+    const lastError = delivery.error ?? "unknown";
+    const unknownTail = `so its outcome is unknown: do not report it as run or as not run. Tell the user, so they can check on that machine; they can run it again from the Executor tab, or ask you to.`;
+    if (delivery.state === "rejected") {
+      return delivery.mayHaveRun
+        ? `The remote refused the start when it was re-delivered (${lastError}). An earlier attempt may have reached it before that, ${unknownTail}`
+        : `The remote refused the start (${lastError}). No earlier attempt reached it, so the command did not run.`;
+    }
+    if (!delivery.mayHaveRun) {
+      return `The hub could not reach "${target}" in ${minutes} minutes (${delivery.attempts} attempts; it stayed offline). No attempt reached it, so the command did not run; it can be run again once the machine is back.`;
+    }
+    return `The hub could not deliver the start to "${target}" in ${minutes} minutes (${delivery.attempts} attempts; last error: ${lastError}). The command most likely did not run, but it may have run with every reply lost, ${unknownTail}`;
+  }
+
   private reportServiceUp(operation: CommanderExecutorOperation): void {
     const session = this.sessions.get(operation.chatSessionId);
     if (!session) return;
@@ -1095,6 +1142,9 @@ export class ChatSessionManager {
         // the idempotent start path, exactly once) and the chat is told, once,
         // that the outcome is unknown.
         if (operation.unconfirmedReportedAt || age < UNCONFIRMED_START_AGE_MS) continue;
+        // The hub is still re-delivering it: its own result (started, refused
+        // or given up) reaches the chat as an event.
+        if (this.remoteExecutorStarts?.isRetrying(operation.processId)) continue;
         if (this.remoteExecutorMap.has(operation.processId) || (operation.target === "local" && this.processManager.isRunning(operation.processId))) continue;
         this.operations.markUnconfirmedReported(operation.id, now);
         console.warn(`[ChatSession] reconcile: start of ${operation.executorName} on ${operation.target} (operation ${operation.id}) is still unconfirmed after ${Math.round(age / 60_000)} min`);
@@ -2989,11 +3039,21 @@ export class ChatSessionManager {
               // lost request spawned or starts it now — once either way.
               const processPrefix = `remote-${executor.id}-`;
               const resumed = sessionId ? this.operations.findUnknownStart(sessionId, executor.id, resolvedRemote) : undefined;
+              // The hub is already re-delivering it: a second call would only
+              // race that delivery. The pending result stays the earlier call's.
+              if (resumed && this.remoteExecutorStarts.isRetrying(resumed.processId)) {
+                return {
+                  success: false, operationId: resumed.id, ...(resumed.stepId ? { stepId: resumed.stepId } : {}),
+                  startUnknown: true, executorName: executor.name, target: resolvedRemote,
+                  message: `The hub is still re-delivering this start (operation ${resumed.id}) and will not run it twice. Do not call runExecutor for it again: its Process Finished or Delivery Failed event will reach you. The user can retry it right away from the Executor tab.`,
+                };
+              }
               if (resumed) this.operations.supersede(resumed.id);
               const remoteProcessId = resumed ? resumed.processId.slice(processPrefix.length) : randomUUID();
               registerOperation(resolvedRemote, `${processPrefix}${remoteProcessId}`, executor);
               const outcome = await this.remoteExecutorStarts.start({
                 executorId: executor.id,
+                executorName: executor.name,
                 projectId,
                 remoteServerId: resolvedRemote,
                 branch,
@@ -3033,7 +3093,14 @@ export class ChatSessionManager {
                 case "unknown":
                   return settle("start_unknown", {
                     success: false, ...linked, startUnknown: true, executorName: executor.name, target: resolvedRemote,
-                    message: `Start result unknown (${outcome.error}). If the process did start, its Process Finished event will name operation ${operationId}. Do not report it as started or failed yet. Calling runExecutor for it again resumes this same start without launching a second process.`,
+                    message: outcome.retrying
+                      ? `Could not confirm the start on "${resolvedRemote}" (${outcome.error}). The hub is re-delivering it automatically under the same identity, which does not run it twice (unless the worker restarts in between), until ${new Date(outcome.deadlineAt ?? Date.now()).toISOString()}. Do not call runExecutor for it again and do not report it as started or failed yet: you will get its Process Finished event (naming operation ${operationId}) once it is delivered, or a Delivery Failed event if it never is. You may tell the user the start is being retried; they can watch it, or retry it themselves, from the Executor tab.`
+                      : `Start result unknown (${outcome.error}). If the process did start, its Process Finished event will name operation ${operationId}. Do not report it as started or failed yet. Calling runExecutor for it again resumes this same start without launching a second process.`,
+                  });
+                case "gave_up":
+                  return settle("rejected", {
+                    success: false, executorName: executor.name, target: resolvedRemote,
+                    message: `The hub stopped re-delivering an earlier start of "${executor.name}" on "${resolvedRemote}", so this call did not send it. Whether that earlier start ran is unknown: tell the user to check on the machine before running it again.`,
                   });
                 case "rejected":
                   return settle("rejected", {

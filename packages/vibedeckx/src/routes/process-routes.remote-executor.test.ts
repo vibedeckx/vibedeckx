@@ -23,7 +23,7 @@ vi.mock("../utils/remote-proxy.js", async (importOriginal) => {
 });
 
 import processRoutes from "./process-routes.js";
-import { createRemoteExecutorStarts } from "../remote-executor-starts.js";
+import { createRemoteExecutorStarts, DELIVERY_RETRY_INTERVAL_MS, DELIVERY_WINDOW_MS } from "../remote-executor-starts.js";
 import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { createSqliteStorage } from "../storage/sqlite.js";
 import type { Storage } from "../storage/types.js";
@@ -47,6 +47,7 @@ describe("remote executor start/stop over an unreliable tunnel", () => {
   let serverId: string;
   let statusHandler: ((id: string, status: "online" | "offline") => void) | null;
   let remoteExecutorMap: Map<string, RemoteExecutorInfo>;
+  let connected: boolean;
   const monitor = { watch: vi.fn(), unwatch: vi.fn() };
   const emit = vi.fn();
 
@@ -61,6 +62,7 @@ describe("remote executor start/stop over an unreliable tunnel", () => {
     monitor.unwatch.mockClear();
     emit.mockClear();
     statusHandler = null;
+    connected = true;
     proxy.handler = null;
     dir = mkdtempSync(path.join(tmpdir(), "vdx-remote-exec-"));
     storage = await createSqliteStorage(path.join(dir, "test.sqlite"));
@@ -84,7 +86,7 @@ describe("remote executor start/stop over an unreliable tunnel", () => {
     app.decorate("storage", storage);
     app.decorate("processManager", { start: vi.fn(), stop: vi.fn(), getRunningProcessIds: vi.fn(() => []), getProcessProjectId: vi.fn(() => null) });
     app.decorate("reverseConnectManager", {
-      isConnected: () => true,
+      isConnected: () => connected,
       getMachineId: () => null,
       setStatusChangeHandler: vi.fn((handler) => { statusHandler = handler; }),
     });
@@ -196,37 +198,69 @@ describe("remote executor start/stop over an unreliable tunnel", () => {
       expect(secondBody.processId).not.toBe(firstBody.processId);
     });
 
-    it("confirms a lost start that the reconnected worker reports running", async () => {
-      proxy.handler = async () => lost;
-      await startExecutor();
+    it("re-delivers a lost start under the same identity as soon as the worker reconnects", async () => {
+      const spawned = new Set<string>();
+      proxy.handler = async (_s, _m, _p, body) => { spawned.add((body as ExecuteBody).processId!); return lost; };
+      const first = await startExecutor();
+      expect(first.json()).toMatchObject({ code: "start_unknown", retrying: true });
       const { processId } = executeCalls()[0][3] as ExecuteBody;
-      proxy.handler = async (_s, method, p) => {
-        if (method === "GET" && p === "/api/executor-processes/running") return ok({ processes: [{ id: processId }] });
-        throw new Error(`unexpected ${method} ${p}`);
-      };
+      proxy.handler = async (_s, _m, _p, body) => { spawned.add((body as ExecuteBody).processId!); return ok({ processId: (body as ExecuteBody).processId }); };
 
       statusHandler!(serverId, "online");
 
       const localId = `remote-e1-${processId}`;
       await vi.waitFor(() => expect(remoteExecutorMap.has(localId)).toBe(true));
+      expect(spawned).toEqual(new Set([processId]));
       expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "executor:started", processId: localId }));
     });
 
-    it("keeps a lost start pending when the reconnected worker does not list it", async () => {
+    it("Retry now re-sends the pending start it names, under its identity", async () => {
       proxy.handler = async () => lost;
       await startExecutor();
       const { processId } = executeCalls()[0][3] as ExecuteBody;
-      proxy.handler = async () => ok({ processes: [] });
-
-      statusHandler!(serverId, "online");
-      await vi.waitFor(() =>
-        expect(vi.mocked(proxyToRemoteAuto)).toHaveBeenCalledWith(serverId, "GET", "/api/executor-processes/running", undefined, expect.anything()));
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(remoteExecutorMap.size).toBe(0);
-
       proxy.handler = async (_s, _m, _p, body) => ok({ processId: (body as ExecuteBody).processId });
-      await startExecutor();
+
+      const retry = await app.inject({
+        method: "POST", url: "/api/executors/e1/start", payload: { retryProcessId: `remote-e1-${processId}` },
+      });
+
+      expect(retry.statusCode).toBe(200);
       expect((executeCalls()[1][3] as ExecuteBody).processId).toBe(processId);
+    });
+
+    it("Retry now on a stale notice starts nothing once that start has ended", async () => {
+      proxy.handler = async () => lost;
+      await startExecutor();
+      const { processId } = executeCalls()[0][3] as ExecuteBody;
+      // The hub delivered it and the run finished before the page heard.
+      proxy.handler = async (_s, _m, _p, body) => ok({ processId: (body as ExecuteBody).processId });
+      statusHandler!(serverId, "online");
+      await vi.waitFor(() => expect(remoteExecutorMap.has(`remote-e1-${processId}`)).toBe(true));
+      remoteExecutorMap.clear();
+
+      const retry = await app.inject({
+        method: "POST", url: "/api/executors/e1/start", payload: { retryProcessId: `remote-e1-${processId}` },
+      });
+
+      expect(retry.statusCode).toBe(409);
+      expect(retry.json()).toMatchObject({ code: "retry_ended" });
+      expect(executeCalls()).toHaveLength(2);
+    });
+
+    it("lists a start being re-delivered for the project's UI", async () => {
+      proxy.handler = async () => lost;
+      await startExecutor();
+      const { processId } = executeCalls()[0][3] as ExecuteBody;
+
+      const response = await app.inject({ method: "GET", url: "/api/projects/project-1/executor-deliveries" });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().deliveries).toEqual([expect.objectContaining({
+        processId: `remote-e1-${processId}`, executorId: "e1", remoteServerId: serverId, branch: "feat",
+        state: "retrying", attempts: 1, reason: "timeout", nextAttemptAt: expect.any(Number),
+      })]);
+      auth.userId = "someone-else";
+      expect((await app.inject({ method: "GET", url: "/api/projects/project-1/executor-deliveries" })).statusCode).toBe(404);
     });
   });
 
@@ -325,21 +359,109 @@ describe("remote executor start/stop over an unreliable tunnel", () => {
       expect(await starts.start(request("other"))).toEqual({ kind: "already_running", processId: "remote-e1-op-proc" });
     });
 
-    it("request never reached the worker → reconnect finds nothing → the same identity resumes the start", async () => {
+    it("keeps re-delivering on its own until the worker answers, under one identity", async () => {
       proxy.handler = async () => lost;
       const starts = createRemoteExecutorStarts(app);
-      expect((await starts.start(request("op-proc"))).kind).toBe("unknown");
+      const first = await starts.start(request("op-proc"));
+      expect(first).toMatchObject({ kind: "unknown", reason: "timeout", retrying: true });
+      const deadline = (first as { deadlineAt: number }).deadlineAt;
 
-      proxy.handler = async (_s, method, p, body) => {
-        if (method === "GET" && p === "/api/executor-processes/running") return ok({ processes: [] });
-        return ok({ processId: (body as ExecuteBody).processId });
-      };
-      await starts.reconcile(serverId);
-      expect(remoteExecutorMap.size).toBe(0);
+      // Not due yet: nothing is sent.
+      starts.tick(Date.now());
+      expect(executeCalls()).toHaveLength(1);
 
-      expect(await starts.start(request("op-proc"))).toEqual({ kind: "started", processId: "remote-e1-op-proc" });
-      const ids = executeCalls().map(([, , , body]) => (body as ExecuteBody).processId);
-      expect(ids).toEqual(["op-proc", "op-proc"]);
+      starts.tick(Date.now() + DELIVERY_RETRY_INTERVAL_MS);
+      await vi.waitFor(() => expect(executeCalls()).toHaveLength(2));
+      await vi.waitFor(() => expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+        type: "executor:delivery", delivery: expect.objectContaining({ state: "retrying", attempts: 2 }),
+      })));
+
+      proxy.handler = async (_s, _m, _p, body) => ok({ processId: (body as ExecuteBody).processId });
+      starts.tick(Date.now() + 2 * DELIVERY_RETRY_INTERVAL_MS);
+      await vi.waitFor(() => expect(remoteExecutorMap.has("remote-e1-op-proc")).toBe(true));
+      expect(executeCalls().map(([, , , body]) => (body as ExecuteBody).processId)).toEqual(["op-proc", "op-proc", "op-proc"]);
+      expect(starts.list("project-1")).toEqual([]);
+      expect(starts.isRetrying("remote-e1-op-proc")).toBe(false);
+      expect(deadline).toBeGreaterThan(Date.now());
+    });
+
+    it("waits for the reconnect instead of sending while the worker is offline", async () => {
+      connected = false;
+      proxy.handler = async () => ({ ok: false, status: 0, data: { error: "Remote server is not connected" }, errorCode: "network_error", notSent: true });
+      const starts = createRemoteExecutorStarts(app);
+      expect(await starts.start(request("op-proc"))).toMatchObject({ kind: "unknown", reason: "offline", retrying: true });
+
+      starts.tick(Date.now() + DELIVERY_RETRY_INTERVAL_MS);
+      expect(executeCalls()).toHaveLength(1);
+      expect(starts.list("project-1")[0]).toMatchObject({ reason: "offline", nextAttemptAt: null });
+
+      connected = true;
+      proxy.handler = async (_s, _m, _p, body) => ok({ processId: (body as ExecuteBody).processId });
+      statusHandler!(serverId, "online");
+      await vi.waitFor(() => expect(remoteExecutorMap.has("remote-e1-op-proc")).toBe(true));
+    });
+
+    it("gives up at the end of the delivery window; the next start is a fresh one", async () => {
+      proxy.handler = async () => lost;
+      const starts = createRemoteExecutorStarts(app);
+      await starts.start(request("op-proc"));
+      emit.mockClear();
+
+      starts.tick(Date.now() + DELIVERY_WINDOW_MS);
+
+      expect(starts.isRetrying("remote-e1-op-proc")).toBe(false);
+      expect(executeCalls()).toHaveLength(1);
+      expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+        type: "executor:delivery",
+        delivery: expect.objectContaining({ state: "gave_up", processId: "remote-e1-op-proc", attempts: 1, error: "Request timed out after 30000ms" }),
+      }));
+      expect(starts.list("project-1")).toEqual([expect.objectContaining({ state: "gave_up" })]);
+
+      proxy.handler = async (_s, _m, _p, body) => ok({ processId: (body as ExecuteBody).processId });
+      expect(await starts.start(request("op-proc-2"))).toEqual({ kind: "started", processId: "remote-e1-op-proc-2" });
+      expect(starts.list("project-1")).toEqual([]);
+    });
+
+    it("a manual Start past the window sends nothing and reports the give-up", async () => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        proxy.handler = async () => lost;
+        await startExecutor();
+        vi.setSystemTime(Date.now() + DELIVERY_WINDOW_MS);
+
+        const late = await startExecutor();
+
+        expect(late.statusCode).toBe(409);
+        expect(late.json()).toMatchObject({ code: "delivery_gave_up" });
+        expect(executeCalls()).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a start that never left the hub is given up as not run", async () => {
+      connected = false;
+      proxy.handler = async () => ({ ok: false, status: 0, data: { error: "Remote server is not connected" }, errorCode: "network_error", notSent: true });
+      const starts = createRemoteExecutorStarts(app);
+      await starts.start(request("op-proc"));
+
+      starts.tick(Date.now() + DELIVERY_WINDOW_MS);
+
+      expect(starts.list("project-1")).toEqual([expect.objectContaining({ state: "gave_up", mayHaveRun: false })]);
+    });
+
+    it("announces a refusal that comes back on a re-delivery", async () => {
+      proxy.handler = async () => lost;
+      const starts = createRemoteExecutorStarts(app);
+      await starts.start(request("op-proc"));
+      proxy.handler = async () => ({ ok: false, status: 404, data: { error: "Project not found" } });
+
+      statusHandler!(serverId, "online");
+
+      await vi.waitFor(() => expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+        type: "executor:delivery", delivery: expect.objectContaining({ state: "rejected", error: "Project not found", mayHaveRun: true }),
+      })));
+      expect(starts.isRetrying("remote-e1-op-proc")).toBe(false);
     });
 
     it("never adopts someone else's unconfirmed start", async () => {

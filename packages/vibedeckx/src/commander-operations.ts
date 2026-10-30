@@ -22,6 +22,8 @@ export type CommanderOperationStatus =
   | "rejected"
   /** An unknown start whose identity a later call took over to resume it. */
   | "superseded"
+  /** An unknown start the hub gave up delivering: whether it ran stays unknown. */
+  | "undelivered"
   | "finished";
 
 export interface CommanderExecutorOperation {
@@ -65,7 +67,7 @@ export type ExecutorFinishMatch =
 const MAX_SETTLED_OPERATIONS = 500;
 
 const isSettled = (status: CommanderOperationStatus) =>
-  status === "finished" || status === "rejected" || status === "superseded";
+  status === "finished" || status === "rejected" || status === "superseded" || status === "undelivered";
 
 /** Registered, started, or started with an unknown outcome: a result may still arrive. */
 export const isOperationInFlight = (operation: CommanderExecutorOperation): boolean => !isSettled(operation.status);
@@ -130,6 +132,24 @@ export class CommanderOperationLedger {
         && operation.executorId === executorId && operation.target === target) return operation;
     }
     return undefined;
+  }
+
+  /** The unknown start that would run as this process, if any. */
+  unknownStartByProcess(processId: string): CommanderExecutorOperation | undefined {
+    const operation = this.byProcess(processId);
+    return operation?.status === "start_unknown" ? operation : undefined;
+  }
+
+  /**
+   * Settle an unknown start the hub could not deliver. Its identity is
+   * released: a later run is a new start, never a resumption of this one.
+   */
+  markUndelivered(operationId: string): void {
+    const operation = this.byId.get(operationId);
+    if (!operation || operation.status !== "start_unknown") return;
+    operation.status = "undelivered";
+    if (this.byProcessId.get(operation.processId) === operationId) this.byProcessId.delete(operation.processId);
+    this.onChange(operation);
   }
 
   /** Hand an unknown start's process identity to the call resuming it. */

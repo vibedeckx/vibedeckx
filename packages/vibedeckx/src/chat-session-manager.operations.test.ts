@@ -42,6 +42,8 @@ function setup(opts: {
   onLocalStart?: (processId: string) => void;
   running?: Array<{ processId: string; isRunning: boolean }>;
   remoteStart?: (request: RemoteStartRequest) => Promise<RemoteStartOutcome>;
+  /** Whether the hub is still re-delivering the start of this local process id. */
+  retrying?: (processId: string) => boolean;
   /** The local agent session on the branch, for sendToAgentSession. */
   agent?: { id: string; status: string; entries: number; send?: () => Promise<boolean> };
   /** Run the coding agent on a remote: the branch's remote session. */
@@ -96,7 +98,7 @@ function setup(opts: {
   );
   manager.setEventBus(bus);
   const remoteStart = vi.fn(opts.remoteStart ?? (async () => ({ kind: "unknown", error: "unset" }) as RemoteStartOutcome));
-  manager.setRemoteExecutorStarts({ start: remoteStart, reconcile: vi.fn() } as unknown as RemoteExecutorStarts);
+  manager.setRemoteExecutorStarts({ start: remoteStart, isRetrying: vi.fn(opts.retrying ?? (() => false)) } as unknown as RemoteExecutorStarts);
 
   const chatId = manager.getOrCreateSession("p1", "dev", "u1");
   // Tools only ever run inside a turn's stream.
@@ -312,6 +314,99 @@ describe("commander executor operations", () => {
       await settle();
       expect(delivered).toHaveLength(1);
       expect(delivered[0]).toMatch(/Operation: call-2/);
+    });
+
+    describe("hub re-delivers a lost start", () => {
+      const retryingOutcome: RemoteStartOutcome = {
+        kind: "unknown", error: "Remote connection closed", reason: "connection_closed", retrying: true, deadlineAt: Date.now() + 20 * 60_000,
+      };
+      const delivery = (
+        processId: string, state: "gave_up" | "rejected", error: string,
+        more: { mayHaveRun?: boolean } = {},
+      ) => ({
+        type: "executor:delivery" as const, projectId: "p1",
+        delivery: {
+          processId, executorId: "e1", executorName: "build", projectId: "p1", remoteServerId: "srv", branch: "dev", state, attempts: 7,
+          reason: "timeout" as const, error, nextAttemptAt: null, firstSentAt: Date.now(), deadlineAt: Date.now(),
+          mayHaveRun: true, ...more,
+        },
+      });
+
+      it("tells the model to wait for the event instead of retrying itself", async () => {
+        const { run } = setup({ remote: true, remoteStart: async () => retryingOutcome });
+        const result = await run("call-1");
+        expect(result).toMatchObject({ startUnknown: true, operationId: "call-1" });
+        expect(result.message).toMatch(/re-delivering it automatically/);
+        expect(result.message).toMatch(/Do not call runExecutor for it again/);
+      });
+
+      it("does not report it as unconfirmed while the hub is still delivering it", async () => {
+        const { manager, run, delivered } = setup({ remote: true, remoteStart: async () => retryingOutcome, retrying: () => true });
+        await run("call-1");
+        await manager.reconcileInFlight(Date.now() + 11 * 60_000);
+        expect(delivered).toEqual([]);
+        expect(manager.getSession(manager.getOrCreateSession("p1", "dev", "u1"))!.pending.isOpen("executor", "call-1")).toBe(true);
+      });
+
+      it("answers a second call without sending anything while the hub is delivering", async () => {
+        const { run, remoteStart } = setup({ remote: true, remoteStart: async () => retryingOutcome, retrying: () => true });
+        await run("call-1");
+        const again = await run("call-2");
+        expect(remoteStart).toHaveBeenCalledTimes(1);
+        expect(again).toMatchObject({ startUnknown: true, operationId: "call-1" });
+        expect(again.message).toMatch(/still re-delivering/);
+      });
+
+      it("a delivery confirmed later still reaches this operation", async () => {
+        const { bus, run, remoteStart, stop, settle, delivered } = setup({ remote: true, remoteStart: async () => retryingOutcome, retrying: () => true });
+        await run("call-1");
+        const processId = `remote-e1-${remoteStart.mock.calls[0][0].processId}`;
+        bus.emit({ type: "executor:started", projectId: "p1", executorId: "e1", processId, target: "srv" });
+        stop(processId);
+        await settle();
+        expect(delivered).toHaveLength(1);
+        expect(delivered[0]).toMatch(/Process Finished/);
+        expect(delivered[0]).toMatch(/Operation: call-1/);
+      });
+
+      it("reports a delivery the hub gave up on, once, as an unknown outcome — and settles it", async () => {
+        const { manager, chatId, bus, run, remoteStart, delivered } = setup({ remote: true, remoteStart: async () => retryingOutcome });
+        await run("call-1");
+        const processId = `remote-e1-${remoteStart.mock.calls[0][0].processId}`;
+        bus.emit(delivery(processId, "gave_up", "Request timed out after 30000ms"));
+        bus.emit(delivery(processId, "gave_up", "Request timed out after 30000ms"));
+        expect(delivered).toHaveLength(1);
+        expect(delivered[0]).toMatch(/^\[Executor Event: Delivery Failed\]/);
+        expect(delivered[0]).toMatch(/Operation: call-1/);
+        expect(delivered[0]).toMatch(/7 attempts; last error: Request timed out/);
+        expect(delivered[0]).toMatch(/outcome is unknown/);
+        expect(manager.getSession(chatId)!.pending.isOpen("executor", "call-1")).toBe(false);
+        // Its identity is released: a new call starts afresh.
+        const fresh = await run("call-2");
+        expect(fresh).toMatchObject({ operationId: "call-2" });
+        expect(remoteStart.mock.calls[1][0].processId).not.toBe(remoteStart.mock.calls[0][0].processId);
+      });
+
+      it("says it did not run only when no attempt can have reached the worker", async () => {
+        const { bus, run, remoteStart, delivered } = setup({ remote: true, remoteStart: async () => retryingOutcome });
+        await run("call-1");
+        bus.emit(delivery(`remote-e1-${remoteStart.mock.calls[0][0].processId}`, "gave_up", "Remote server is not connected", { mayHaveRun: false }));
+        expect(delivered[0]).toMatch(/did not run/);
+        expect(delivered[0]).not.toMatch(/outcome is unknown/);
+      });
+
+      it("reports a refusal on re-delivery as a failed start", async () => {
+        const { manager, chatId, bus, run, remoteStart, delivered } = setup({ remote: true, remoteStart: async () => retryingOutcome });
+        await run("call-1");
+        bus.emit(delivery(`remote-e1-${remoteStart.mock.calls[0][0].processId}`, "rejected", "Project not found"));
+        expect(delivered).toHaveLength(1);
+        expect(delivered[0]).toMatch(/^\[Executor Event: Start Failed\]/);
+        expect(delivered[0]).toMatch(/Project not found/);
+        // An earlier attempt may have run it: the refusal does not prove otherwise.
+        expect(delivered[0]).toMatch(/outcome is unknown/);
+        expect(delivered[0]).not.toMatch(/did not run/);
+        expect(manager.getSession(chatId)!.pending.isOpen("executor", "call-1")).toBe(false);
+      });
     });
 
     it("a start whose response was lost stays resumable after it is reported as unconfirmed", async () => {

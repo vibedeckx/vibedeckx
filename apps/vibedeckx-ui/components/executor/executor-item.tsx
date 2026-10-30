@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -54,6 +54,8 @@ interface ExecutorItemProps {
   onUpdate: (data: { name?: string; command?: string; executor_type?: ExecutorType; prompt_provider?: PromptProvider | null; cwd?: string | null; lifecycle?: ExecutorLifecycle; target?: string; disabled?: boolean }) => Promise<unknown>;
   onDelete: () => Promise<void>;
   onProcessFinished: (processId: string | null) => void;
+  /** Shown under the header whatever the row's open state: a start being re-delivered. */
+  deliveryNotice?: ReactNode;
 }
 
 export function ExecutorItem({
@@ -69,6 +71,7 @@ export function ExecutorItem({
   onUpdate,
   onDelete,
   onProcessFinished,
+  deliveryNotice,
 }: ExecutorItemProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   // Seed from the running process when available, otherwise from the persisted
@@ -328,6 +331,7 @@ export function ExecutorItem({
               </div>
             </div>
           </CollapsibleTrigger>
+          {deliveryNotice && <div className="px-3 pb-3">{deliveryNotice}</div>}
           <CollapsibleContent>
             <div className="px-3 pb-3">
               <div className="text-xs text-muted-foreground mb-2 font-mono">

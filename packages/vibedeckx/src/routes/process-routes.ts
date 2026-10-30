@@ -70,8 +70,18 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
   });
 
+  // Remote starts the hub is still delivering, or gave up on — the Executor
+  // tab and Main Chat show them so a lost start is never silent.
+  fastify.get<{ Params: { projectId: string } }>("/api/projects/:projectId/executor-deliveries", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
+    if (!project) return reply.code(404).send({ error: "Project not found" });
+    return reply.send({ deliveries: remoteStarts.list(project.id) });
+  });
+
   // 启动 Executor
-  fastify.post<{ Params: { id: string }; Body: { target?: string } }>("/api/executors/:id/start", async (req, reply) => {
+  fastify.post<{ Params: { id: string }; Body: { target?: string; retryProcessId?: string } }>("/api/executors/:id/start", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
 
@@ -144,8 +154,17 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(400).send({ error: `Remote server configuration not found for executor_mode="${executorMode}"` });
       }
 
+      // "Retry now" names the start it retries (by the local id the delivery
+      // notice shows); it must never become a fresh run.
+      const retryProcessId = req.body?.retryProcessId;
+      const retryPrefix = `remote-${executor.id}-`;
+      if (retryProcessId !== undefined && (typeof retryProcessId !== "string" || !retryProcessId.startsWith(retryPrefix))) {
+        return reply.code(400).send({ error: "retryProcessId does not belong to this executor" });
+      }
       const outcome = await remoteStarts.start({
         executorId: executor.id,
+        executorName: executor.name,
+        ...(retryProcessId ? { processId: retryProcessId.slice(retryPrefix.length), retryOnly: true } : {}),
         projectId: project.id,
         remoteServerId: executorMode,
         branch,
@@ -172,8 +191,21 @@ const routes: FastifyPluginAsync = async (fastify) => {
           return reply.code(409).send({ error: "Executor is already starting on this target", code: "starting" });
         case "unknown":
           return reply.code(503).send({
-            error: `Start result unknown (${outcome.error}). Starting again once the remote is back is safe.`,
+            error: outcome.retrying
+              ? `Could not reach the remote (${outcome.error}). Retrying automatically; it will not run twice.`
+              : `Start result unknown (${outcome.error}). Starting again once the remote is back is safe.`,
             code: "start_unknown",
+            retrying: outcome.retrying,
+          });
+        case "retry_ended":
+          return reply.code(409).send({
+            error: "That start is no longer being retried: it was delivered or given up. Nothing new was started.",
+            code: "retry_ended",
+          });
+        case "gave_up":
+          return reply.code(409).send({
+            error: "Retrying stopped: this start could not be delivered in time. Check whether it ran, then start it again.",
+            code: "delivery_gave_up",
           });
         case "rejected":
           return reply.code(proxyStatus(outcome.result)).send(outcome.result.data);

@@ -910,7 +910,7 @@ describe("long-running services", () => {
     vi.mocked(storage.remoteServers.getById).mockResolvedValue({ id: "srv" } as never);
     (storage.projectRemotes as unknown as Record<string, unknown>).getByProjectAndServer = vi.fn(async () => ({ remote_path: "/remote/repo" }));
     const remoteStart = vi.fn(async () => ({ kind: "unknown", error: "Remote server unreachable" }) as RemoteStartOutcome);
-    manager.setRemoteExecutorStarts({ start: remoteStart, reconcile: vi.fn() } as unknown as RemoteExecutorStarts);
+    manager.setRemoteExecutorStarts({ start: remoteStart, isRetrying: vi.fn(() => false) } as unknown as RemoteExecutorStarts);
 
     await manager.sendMessage(id, "Start the dev server");
     await idle();

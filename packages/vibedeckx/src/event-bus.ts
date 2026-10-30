@@ -13,6 +13,10 @@ export type GlobalEvent =
   | { type: "task:deleted"; projectId: string; taskId: string }
   | { type: "executor:started"; projectId: string; executorId: string; processId: string; target?: string }
   | { type: "executor:stopped"; projectId: string; executorId: string; processId: string; exitCode: number; target?: string; tailOutput?: string; finalResult?: string }
+  // A remote start whose request was lost is being re-delivered by the hub, or
+  // that delivery ended (refused, given up; a delivered one is executor:started).
+  // Drives the "retrying" state the Executor tab and Main Chat show.
+  | { type: "executor:delivery"; projectId: string; delivery: import("./remote-executor-starts.js").ExecutorDelivery }
   | { type: "merge-target:updated"; projectId: string; branch: string }
   // The Files tab wrote to a workspace's working tree. No commit is involved,
   // so nothing else announces it — surfaces that show working-tree state (the
@@ -51,6 +55,10 @@ export class EventBus {
   emit(event: GlobalEvent): void {
     if (event.type === "executor:started" || event.type === "executor:stopped") {
       console.log(`[EventBus] ${event.type} executor=${event.executorId} process=${event.processId} target=${event.target ?? "local"} project=${event.projectId}${event.type === "executor:stopped" ? ` exitCode=${event.exitCode}` : ""}`);
+    }
+    if (event.type === "executor:delivery") {
+      const d = event.delivery;
+      console.log(`[EventBus] executor:delivery ${d.state} executor=${d.executorId} process=${d.processId} target=${d.remoteServerId} attempts=${d.attempts}${d.error ? ` error=${d.error}` : ""}`);
     }
     this.emitter.emit("event", event);
   }

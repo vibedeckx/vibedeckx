@@ -356,7 +356,7 @@ export function useExecutors(
   }, [updateEveryList]);
 
   // Start executor
-  const startExecutor = useCallback(async (executorId: string) => {
+  const startExecutor = useCallback(async (executorId: string, retryProcessId?: string) => {
     const target = executorMode ?? "local";
     const trackRunning = (processId: string) => {
       setRunningProcesses((prev) => {
@@ -373,7 +373,7 @@ export function useExecutors(
       });
     };
     try {
-      const processId = await api.startExecutor(executorId, executorMode);
+      const processId = await api.startExecutor(executorId, executorMode, retryProcessId);
       trackRunning(processId);
       // Mirror the SSE handler's optimistic "Last run" update so locally
       // initiated starts also refresh the hover label without waiting for
@@ -402,8 +402,12 @@ export function useExecutors(
       if (runningProcessId) {
         trackRunning(runningProcessId);
         toast.info("Executor is already running", { description: "Stop it before starting again." });
+      } else if (error instanceof ExecutorProcessRequestError && error.body.code === "start_unknown" && error.body.retrying) {
+        // The hub keeps re-delivering it; the row's delivery notice shows how.
+      } else if (error instanceof ExecutorProcessRequestError && error.body.code === "retry_ended") {
+        toast.info("Already settled", { description: error.message });
       } else if (error instanceof ExecutorProcessRequestError
-        && (error.body.code === "starting" || error.body.code === "start_unknown")) {
+        && (error.body.code === "starting" || error.body.code === "start_unknown" || error.body.code === "delivery_gave_up")) {
         toast.error("Executor not started", { description: error.message });
       }
       return null;

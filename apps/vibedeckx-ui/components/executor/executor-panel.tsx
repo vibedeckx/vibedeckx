@@ -7,6 +7,8 @@ import { ExecutorItem } from "./executor-item";
 import { ExecutorForm } from "./executor-form";
 import { ExecutorLogsProvider } from "@/hooks/executor-logs-context";
 import { useExecutors } from "@/hooks/use-executors";
+import { deliveryKey, useExecutorDeliveries } from "@/hooks/use-executor-deliveries";
+import { ExecutorDeliveryNotice } from "./executor-delivery-notice";
 import { ExecutionModeToggle, type ExecutionModeTarget } from "@/components/ui/execution-mode-toggle";
 import { remoteConnectionIcon } from "@/hooks/use-project-remotes";
 import { useProjectRemotesContext } from "@/hooks/project-remotes-context";
@@ -132,6 +134,7 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
     markProcessFinished,
     reorderExecutors,
   } = useExecutors(projectId, selectedBranch, project?.executor_mode);
+  const deliveries = useExecutorDeliveries(projectId);
 
   const loading = executorsLoading;
 
@@ -469,6 +472,16 @@ export function ExecutorPanel({ projectId, selectedBranch, project, onExecutorMo
                     onUpdate={(data) => updateExecutor(executor.id, data)}
                     onDelete={() => deleteExecutor(executor.id)}
                     onProcessFinished={(processId) => markProcessFinished(executor.id, processId)}
+                    deliveryNotice={(() => {
+                      const delivery = deliveries.get(deliveryKey(executor.id, project?.executor_mode ?? "local"));
+                      return delivery
+                        ? <ExecutorDeliveryNotice
+                            delivery={delivery}
+                            // "Retry now" names the start it retries; "Run again" (after a give-up) is a fresh start.
+                            onRetry={() => startExecutor(executor.id, delivery.state === "retrying" ? delivery.processId : undefined)}
+                          />
+                        : null;
+                    })()}
                   />
                 ))}
               </SortableContext>
