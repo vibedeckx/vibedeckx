@@ -4,7 +4,7 @@ import { useEffect, useRef } from "react";
 import type { Task, TaskStatus, TaskPriority, Worktree } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { X } from "lucide-react";
+import { CircleAlert, X } from "lucide-react";
 import { TaskProperties, Property, PANEL_FIELD_CLASS, PANEL_BODY_CLASS } from "./task-properties";
 import { TaskParentSelect } from "./task-parent-select";
 import { RowAction } from "./task-row";
@@ -147,11 +147,19 @@ export function TaskDraftPanel({
             className={`${PANEL_FIELD_CLASS} ${PANEL_BODY_CLASS}`}
           />
         </div>
-
-        {error && (
-          <div className="mt-3 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive">{error}</div>
-        )}
       </div>
+
+      {/* Sits on the actions footer, next to the Create that failed, rather
+          than trailing the description wherever it happens to end. */}
+      {error && (
+        <div
+          role="alert"
+          className="mx-6 mb-3 flex shrink-0 items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-xs text-destructive"
+        >
+          <CircleAlert className="size-3.5 shrink-0" />
+          {error}
+        </div>
+      )}
 
       <div className="flex shrink-0 items-center justify-end gap-2 border-t border-border/60 bg-secondary px-6 py-2.5">
         <label className="mr-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
