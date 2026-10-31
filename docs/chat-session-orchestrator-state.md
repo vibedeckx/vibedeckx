@@ -31,7 +31,7 @@ Both report activity for the **same** sidebar dot (`StatusDot` in
 | `stopped` | amber | stopped / abandoned / stalled | both |
 | `main-running` | violet pulse | orchestrator streaming a reply | `ChatSessionManager` |
 | `main-waiting` | hollow violet ring, slow pulse | orchestrator still on the task between replies, waiting for results or for the user | `ChatSessionManager` |
-| `main-completed` | emerald | orchestrator declared the task done (`complete_task`) | `ChatSessionManager` |
+| `main-completed` | emerald | a turn the user opened ended normally — over to the user (failed stream → `stopped`) | `ChatSessionManager` |
 
 `computeBranchActivity` (`branch-activity.ts`) only derives the agent states
 from `agent_sessions`. The orchestrator emits `main-*` itself via
@@ -163,16 +163,18 @@ itself:
 
 | Verdict | Meaning |
 |---------|---------|
-| `pass` | the turn ends `completed` (`complete_task` was called, the plan is done or blocked/stalled, a plan-less stream called a tool, or the budget gave up quietly) |
+| `pass` | the turn ends `completed`, or `failed` if its stream failed (`complete_task` was called, the plan is done or blocked/stalled, a plan-less stream called a non-lookup tool, or the budget gave up on a turn that never started work) |
 | `nudged` | a `[Plan Continuation]` or `[System Invariant Violation]` message went into the inbox; the turn goes on |
 | `retry` | the stream failed with a plan owing steps; the turn waits out `stallRetryDelayMs`, then decides again |
-| `stalled` | the plan budget ran out: `[Plan Stalled]` entry, dot `stopped`, durable `commander_stalled` milestone |
+| `stalled` | the budget ran out on a plan, or on a plan-less turn that started work: `[Plan Stalled]` / `[Commander Stalled]` entry, dot `stopped`, durable `commander_stalled` milestone |
 
 - **Unfinished plan → plan-idle rule.** Tools called do not count; re-drive
   with `[Plan Continuation]` up to `MAX_TURN_NUDGES = 3`, then stall.
-- **No unfinished plan → no-tool rule.** A stream that called no tool gets a
-  correction, up to the same budget, then is left alone. Because rule 4 runs
-  first, a text-only reply while work is in flight is compliant.
+- **No unfinished plan → no-tool rule.** A stream that called nothing but
+  lookups (`LOOKUP_TOOLS`) gets a correction, up to the same budget. Then a
+  turn that started work (`turn.startedWork`) stalls; one that never did is
+  left alone. Because rule 4 runs first, a text-only reply while work is in
+  flight is compliant.
 - Browser turns always pass (they have no tools to call).
 - Budget (`ChatPlanState.nudges`) resets on a compliant stream, async work
   starting, or the user speaking.
@@ -187,7 +189,8 @@ still in flight — except a service that is up.
 **`complete_task`** declares the turn finished, once. It is refused while work
 the turn started is still owed or a result has arrived the model has not read
 yet; a second call in the same turn changes nothing. New work registered after
-it withdraws the completion (dot back to violet).
+it withdraws the completion. It does not paint the dot: the dot follows the
+turn (`main-completed` when it ends).
 
 **`wait({ timeoutSeconds? })`** is the model's "nothing to tell the user,
 waiting on results". It ends the response; any result, the user speaking, or

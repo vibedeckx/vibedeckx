@@ -402,9 +402,21 @@ describe("no-tool rule (no unfinished plan)", () => {
     expect(manager.getSession(id)!.turn).toBeNull();
   });
 
+  it("a turn that ends without complete_task still turns the dot cyan", async () => {
+    let phase = 0;
+    const { manager, id, idle, emitBranchActivityIfChanged } = setup(async () => {
+      if (phase++ < 4) return text("It is a build tool.");
+      throw new Error(`Unexpected model call ${phase}`);
+    });
+    await manager.sendMessage(id, "What is turbo?");
+    await vi.waitFor(() => expect(phase).toBe(4));
+    await idle();
+    expect(emitBranchActivityIfChanged).toHaveBeenLastCalledWith("p1", "dev", expect.objectContaining({ activity: "main-completed" }));
+  });
+
   it("leaves a failed stream to the user", async () => {
     let phase = 0;
-    const { manager, id, idle, userMessages } = setup(async () => {
+    const { manager, id, idle, userMessages, emitBranchActivityIfChanged } = setup(async () => {
       phase++;
       throw new Error("rate limited");
     });
@@ -414,6 +426,7 @@ describe("no-tool rule (no unfinished plan)", () => {
     expect(phase).toBe(1);
     expect(corrections(userMessages())).toEqual([]);
     expect(manager.getMessages(id).filter((m) => m.type === "error")).toHaveLength(1);
+    expect(emitBranchActivityIfChanged).toHaveBeenLastCalledWith("p1", "dev", expect.objectContaining({ activity: "stopped" }));
   });
 
   it("defers to the plan rule while the plan owes steps", async () => {

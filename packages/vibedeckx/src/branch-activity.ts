@@ -213,31 +213,6 @@ export function overlayOrchestratorActivity(
 }
 
 /**
- * Decide whether the chat orchestrator's `complete_task` tool should repaint
- * the workspace dot to `main-completed`.
- *
- * User-initiated turns always own the orchestrator dot, so they always clear
- * to `main-completed`. On reactive (event-driven) turns the dot normally
- * belongs to the subsystem (coding agent / executor) and must not be
- * repainted — EXCEPT when it still shows the orchestrator's own
- * `main-running`. That happens in the common "kick off async work, end the
- * turn, finish when the event arrives" flow: a prior user turn painted the
- * dot violet without completing, the work finished via an
- * `[Executor Event]` / `[Terminal Event]` / `[Agent Event]` turn, and that
- * reactive turn is where `complete_task` fires. `complete_task` is a
- * definitive "the user's overall task is done" signal, so it must clear that
- * stale violet rather than leave it stuck.
- *
- * Pure function — exported for tests.
- */
-export function shouldEmitMainCompleted(
-  eventDrivenTurn: boolean,
-  currentDotActivity: BranchActivity | undefined,
-): boolean {
-  return !eventDrivenTurn || currentDotActivity === "main-running" || currentDotActivity === "main-waiting";
-}
-
-/**
  * Compare two sessions by `updated_at` (the millisecond-precision text format
  * is lex-sortable by design — see the schema comment in sqlite.ts). Falls back
  * to `created_at` when updated_at is missing on legacy rows.

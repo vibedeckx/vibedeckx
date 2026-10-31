@@ -19,7 +19,7 @@ import { z } from "zod";
 import { resolveChatModel, resolveFastChatModel } from "./utils/chat-model.js";
 import type WebSocket from "ws";
 import type { AgentMessage, AgentType } from "./agent-types.js";
-import { shouldEmitMainCompleted, type BranchActivity } from "./branch-activity.js";
+import type { BranchActivity } from "./branch-activity.js";
 import { ConversationPatch } from "./conversation-patch.js";
 import type { Patch, AgentWsMessage, BrowserCommand, BrowserCommandResult, ChatSessionStatus } from "./conversation-patch.js";
 import type { Executor, Storage } from "./storage/types.js";
@@ -1004,8 +1004,7 @@ export class ChatSessionManager {
    * newer turn — is owed to nobody: a late confirmation or a tool call still
    * finishing after Stop must not make another turn wait for it, and its
    * result comes back like any event. New work after a complete_task means
-   * the turn is not finished after all: the completion is withdrawn, dot
-   * included.
+   * the turn is not finished after all: the completion is withdrawn.
    */
   private owe(session: ChatSession, item: Parameters<PendingRegistry["register"]>[0], turnId: string | null): void {
     if (!session.turn || session.turn.id !== turnId) {
@@ -1018,9 +1017,7 @@ export class ChatSessionManager {
     const fresh = !session.pending.isOpen(item.kind, item.id);
     session.pending.register(item);
     session.turn.startedWork = true;
-    if (!fresh || !session.taskCompleted) return;
-    session.taskCompleted = false;
-    if (this.drivesDot(session)) this.emitChatActivity(session, "main-running");
+    if (fresh) session.taskCompleted = false;
   }
 
   /**
@@ -2159,16 +2156,13 @@ export class ChatSessionManager {
   }
 
   /**
-   * Called by the `complete_task` tool when the model finishes its response
-   * ("done, over to you" — turns the dot cyan). Does NOT abort the in-flight
-   * stream, so the tool's `tool-result` and any trailing assistant text are
-   * still rendered.
-   *
-   * The flag is sticky for the REST OF THE CURRENT TURN — any further emits
-   * within this stream (a post-complete tool-call, or the execute/tool-call
-   * ordering race) keep cyan rather than reverting to violet. It is cleared
-   * when the next stream starts (fresh work = violet)
-   * and by resetSession.
+   * Called by the `complete_task` tool: the model declares the user's task
+   * done, which lets a stream that ends in text end the turn (see
+   * enforceTurnContract). The dot is not touched here — it turns cyan when
+   * the turn ends. Does NOT abort the in-flight stream, so the tool's
+   * `tool-result` and any trailing assistant text are still rendered.
+   * Cleared when a new turn or the user's next message starts a stream, and
+   * by resetSession.
    */
   markCompleted(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
@@ -2177,23 +2171,6 @@ export class ChatSessionManager {
       return false;
     }
     session.taskCompleted = true;
-    // In a turn the user did not open the orchestrator dot normally belongs to
-    // the subsystem (agent/executor) — don't repaint it just because the chat
-    // finished auto-summarizing. The exception: when the dot still shows the
-    // orchestrator's own `main-running` (a prior user turn kicked off async
-    // work, ended without completing, and the work finished via an
-    // [Executor/Terminal/Agent Event] turn — which is where complete_task
-    // fires). That stale violet must be cleared, or it sticks forever. Still
-    // set taskCompleted above so the watchdog treats the turn as well-formed.
-    const currentDot = this.agentSessionManager.getCurrentBranchActivity(
-      session.projectId,
-      session.branch,
-    );
-    const eventDriven = !this.drivesDot(session);
-    if (shouldEmitMainCompleted(eventDriven, currentDot)) {
-      this.emitChatActivity(session, "main-completed");
-      console.debug(`[ChatSession] markCompleted: emitted main-completed for session=${sessionId} project=${session.projectId} branch=${session.branch ?? "(null)"} (eventDriven=${eventDriven}, dotWas=${currentDot ?? "none"})`);
-    }
     return true;
   }
 
@@ -3735,9 +3712,9 @@ export class ChatSessionManager {
     this.broadcastPatch(session, ConversationPatch.updateStatus("running"));
     this.broadcastTurnState(session);
     // `complete_task` declares the turn finished, once. A new turn — or the
-    // user asking for more — is fresh work again (violet).
+    // user asking for more — is fresh work again.
     if (turn.streams === 1 || arrivals.some((arrival) => arrival.source === "user")) session.taskCompleted = false;
-    if (this.drivesDot(session)) this.emitChatActivity(session, session.taskCompleted ? "main-completed" : "main-running");
+    if (this.drivesDot(session)) this.emitChatActivity(session, "main-running");
 
     await this.runStream(session, [...this.historyPrefix(session), ...turn.messages]);
   }
@@ -3841,7 +3818,7 @@ export class ChatSessionManager {
         this.endTurn(session, "stalled");
         return;
       case "pass":
-        this.endTurn(session, "completed");
+        this.endTurn(session, outcome.error ? "failed" : "completed");
         return;
     }
   }
@@ -3849,7 +3826,7 @@ export class ChatSessionManager {
   private enterWaiting(session: ChatSession, turn: CommanderTurn): void {
     turn.status = "waiting";
     // Still on the user's task, between streams (design §13).
-    if (this.drivesDot(session) && !session.taskCompleted) this.emitChatActivity(session, "main-waiting");
+    if (this.drivesDot(session)) this.emitChatActivity(session, "main-waiting");
   }
 
   /**
@@ -3884,9 +3861,14 @@ export class ChatSessionManager {
     }
   }
 
-  private endTurn(session: ChatSession, endedWith: "completed" | "cancelled" | "stalled"): void {
+  private endTurn(session: ChatSession, endedWith: "completed" | "failed" | "cancelled" | "stalled"): void {
     const turn = session.turn;
     if (!turn) return;
+    // Over to the user: cyan when it ended well, amber when its stream failed.
+    // Stop and stall paint amber themselves.
+    if (this.drivesDot(session) && (endedWith === "completed" || endedWith === "failed")) {
+      this.emitChatActivity(session, endedWith === "completed" ? "main-completed" : "stopped");
+    }
     session.turn = null;
     this.cancelStallRetry(session.id);
     this.cancelWaitTimeout(session.id);
@@ -4127,17 +4109,9 @@ export class ChatSessionManager {
             observedSteps[observedSteps.length - 1]?.toolCalls.push(part.toolName);
 
             // Refresh the dot's `since` so a concurrent agent emit can't
-            // override it. Sticky-completed: if complete_task was called
-            // earlier (even in this same stream, e.g. the model called
-            // complete_task then another tool), keep cyan instead of
-            // reverting to violet. Suppressed entirely in turns the user did
-            // not open (the dot belongs to the subsystem there).
-            if (this.drivesDot(session)) {
-              this.emitChatActivity(
-                session,
-                session.taskCompleted ? "main-completed" : "main-running",
-              );
-            }
+            // override it. Suppressed in turns the user did not open (the dot
+            // belongs to the subsystem there).
+            if (this.drivesDot(session)) this.emitChatActivity(session, "main-running");
 
             // Reset so next text starts a new assistant message
             assistantIndex = null;

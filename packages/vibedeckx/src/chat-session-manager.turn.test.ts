@@ -515,8 +515,9 @@ describe("complete_task and wait", () => {
     await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
     expect(phase).toBe(4);
     expect(toolResults(manager, id, "complete_task")[1]).toMatchObject({ completed: true, message: "Task marked complete: Built after all" });
+    // Cyan only once the turn is over, not when the first complete_task ran.
     const dots = emitBranchActivityIfChanged.mock.calls.map((args) => (args[2] as { activity: string }).activity);
-    expect(dots.slice(dots.indexOf("main-completed"))).toContain("main-running");
+    expect(dots.indexOf("main-completed")).toBe(dots.length - 1);
   });
 
   it("new work after complete_task that keeps running leaves the turn waiting, not complete", async () => {
@@ -532,11 +533,10 @@ describe("complete_task and wait", () => {
     await idle();
     expect(manager.getSession(id)!.taskCompleted).toBe(false);
     expect(manager.getSession(id)!.turn?.status).toBe("waiting");
-    // Withdrawn back to running, then waiting on the new work — never left on completed.
+    // Waiting on the new work, never shown as completed.
     const dots = emitBranchActivityIfChanged.mock.calls.map((args) => (args[2] as { activity: string }).activity);
-    // (Repeats are deduped by the real emitter; the mock records each call.)
-    const changes = dots.slice(dots.lastIndexOf("main-completed")).filter((dot, i, all) => i === 0 || dot !== all[i - 1]);
-    expect(changes).toEqual(["main-completed", "main-running", "main-waiting"]);
+    expect(dots).not.toContain("main-completed");
+    expect(dots.at(-1)).toBe("main-waiting");
   });
 
   it.each(["wait", "complete_task"] as const)("%s sees a result that arrived mid-stream before the model did", async (tool) => {

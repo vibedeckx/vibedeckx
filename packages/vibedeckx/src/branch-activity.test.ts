@@ -6,7 +6,6 @@ import {
   BranchActivityDedupe,
   computeBranchActivity,
   overlayOrchestratorActivity,
-  shouldEmitMainCompleted,
   type BranchActivityState,
 } from "./branch-activity.js";
 
@@ -369,30 +368,5 @@ describe("overlayOrchestratorActivity", () => {
     const orchestrator = new Map([["", state("main-completed", 100)]]);
     overlayOrchestratorActivity(computed, orchestrator);
     expect(computed.get("")).toEqual({ activity: "completed", since: 50 });
-  });
-});
-
-describe("shouldEmitMainCompleted", () => {
-  it("user-initiated turn always clears to main-completed", () => {
-    expect(shouldEmitMainCompleted(false, "main-running")).toBe(true);
-    expect(shouldEmitMainCompleted(false, "completed")).toBe(true);
-    expect(shouldEmitMainCompleted(false, undefined)).toBe(true);
-  });
-
-  it("event-driven turn clears a stale orchestrator main-running", () => {
-    // Regression: run executors, the [Executor Event: Process Finished] turn
-    // calls complete_task. The dot still shows the prior user turn's violet
-    // main-running, so complete_task must clear it to main-completed.
-    expect(shouldEmitMainCompleted(true, "main-running")).toBe(true);
-  });
-
-  it("event-driven turn leaves a subsystem-owned dot untouched", () => {
-    // The coding agent / executor owns the dot here — complete_task from a
-    // reactive auto-summary turn must not repaint it.
-    expect(shouldEmitMainCompleted(true, "working")).toBe(false);
-    expect(shouldEmitMainCompleted(true, "completed")).toBe(false);
-    expect(shouldEmitMainCompleted(true, "stopped")).toBe(false);
-    expect(shouldEmitMainCompleted(true, "main-completed")).toBe(false);
-    expect(shouldEmitMainCompleted(true, undefined)).toBe(false);
   });
 });
