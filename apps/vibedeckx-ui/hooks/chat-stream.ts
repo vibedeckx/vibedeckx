@@ -25,7 +25,7 @@ import { sendCommandToIframe, openPreviewFrame } from "@/components/preview/brow
 // ============ Types ============
 
 export type AgentMessage =
-  | { type: "user"; content: string; timestamp: number; event?: { kind: string; sessionId: string; turnEndEntryIndex: number } }
+  | { type: "user"; content: string; timestamp: number; origin?: "commander"; event?: { kind: string; sessionId: string; turnEndEntryIndex: number } }
   | { type: "assistant"; content: string; partial?: boolean; timestamp: number }
   | { type: "tool_use"; tool: string; input: unknown; toolUseId?: string; timestamp: number }
   | { type: "tool_result"; tool: string; output: string; toolUseId?: string; timestamp: number }

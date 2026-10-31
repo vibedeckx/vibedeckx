@@ -20,6 +20,9 @@ export const PLAN_STALLED_PREFIX = "[Plan Stalled]";
 /** Prefix of the synthetic user message that re-drives an unfinished plan. */
 export const PLAN_CONTINUATION_PREFIX = "[Plan Continuation]";
 
+const isFinished = (plan: TaskPlan) =>
+  plan.steps.length > 0 && plan.steps.every((step) => step.status === "completed" || step.status === "skipped");
+
 /** The same snapshots drive the pinned panel and the cards in chat history. */
 export function collectTaskPlans(messages: AgentMessage[]) {
   const history = new Map<string, { plan: TaskPlan; firstIndex: number }>();
@@ -44,9 +47,11 @@ export function collectTaskPlans(messages: AgentMessage[]) {
       stalled = false;
     } else if (message.type === "system" && message.content.startsWith(PLAN_STALLED_PREFIX)) {
       stalled = true;
-    } else if (message.type === "user" && !message.content.startsWith("[")) {
+    } else if (message.type === "user" && message.origin !== "commander") {
       stalled = false;
       answered = true;
+      // The backend retires a finished plan once the user speaks again.
+      if (current && !current.approval && isFinished(current.plan)) current = null;
     }
   }
   if (current && stalled && !current.approval) current = { ...current, stalled: true };

@@ -3699,13 +3699,15 @@ export class ChatSessionManager {
     for (const arrival of arrivals) {
       this.pushEntry(session, {
         type: "user", content: arrival.content, timestamp: Date.now(),
+        ...(arrival.source !== "user" ? { origin: "commander" as const } : {}),
         ...(arrival.eventMeta ? { event: arrival.eventMeta } : {}),
       });
       turn.messages.push({ role: "user", content: arrival.content });
       if (arrival.source === "user") {
-        // The user spoke: the plan gets a fresh nudge budget, and a plan
-        // waiting on them is no longer waiting.
+        // The user spoke: the plan gets a fresh nudge budget, a plan
+        // waiting on them is no longer waiting, and a finished one retires.
         session.planState.resetNudges();
+        session.planState.releaseFinished();
         if (session.planState.current?.waitingOn) delete session.planState.current.waitingOn;
       }
     }

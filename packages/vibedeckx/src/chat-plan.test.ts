@@ -41,6 +41,20 @@ describe("Commander task plans", () => {
     expect(chatPlanSchema.safeParse({ ...input(), steps: [input().steps[0], input().steps[0]] }).success).toBe(false);
   });
 
+  it("retires only a finished, unblocked plan when the user speaks", () => {
+    const state = new ChatPlanState();
+    const plan = state.apply(input());
+    state.releaseFinished();
+    expect(state.current?.planId).toBe(plan.planId);
+    state.apply({ ...plan, steps: [{ ...plan.steps[0], status: "completed", result: "Exit code 0" }] });
+    state.needsConfirmation({ ...plan, goal: "Also deploy it" });
+    state.releaseFinished();
+    expect(state.current?.planId).toBe(plan.planId);
+    state.blocked = false;
+    state.releaseFinished();
+    expect(state.current).toBeNull();
+  });
+
   it("blocks execution tools before plan approval without calling the executor", async () => {
     const getWorkspaceByProjectBranch = vi.fn();
     const manager = new ChatSessionManager(

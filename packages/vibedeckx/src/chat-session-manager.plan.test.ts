@@ -125,6 +125,9 @@ describe("Commander plans across real SDK turns", () => {
     }
     const continuations = manager.getMessages(id).filter((message) => message.type === "user" && message.content.startsWith("[Plan Continuation]"));
     expect(continuations).toHaveLength(2);
+    expect(continuations.every((message) => message.type === "user" && message.origin === "commander")).toBe(true);
+    const typed = manager.getMessages(id).find((message) => message.type === "user" && message.content === "Verify the change");
+    expect(typed?.type === "user" && typed.origin).toBeUndefined();
     expect(manager.getMessages(id).filter((message) => message.type === "tool_approval_request")).toHaveLength(1);
     expect(manager.getMessages(id).filter((message) => message.type === "system")).toEqual([]);
     expect(manager.getSession(id)!.planState.current).toBeNull();

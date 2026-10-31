@@ -26,8 +26,22 @@ describe("collectTaskPlans", () => {
     messages.push(result(asking));
     expect(collectTaskPlans(messages).current?.plan.waitingOn).toBe("Which suite?");
     // System-injected turns are not the user's answer.
-    messages.push({ type: "user", content: "[Plan Continuation]\nact", timestamp: 2 });
+    messages.push({ type: "user", content: "[Plan Continuation]\nact", origin: "commander", timestamp: 2 });
     expect(collectTaskPlans(messages).current?.plan.waitingOn).toBe("Which suite?");
+  });
+
+  it("retires a finished plan once the user speaks again, keeping an unfinished one", () => {
+    const done = { ...plan(), steps: plan().steps.map((step) => ({ ...step, status: "completed" as const })) };
+    const messages: AgentMessage[] = [result(done)];
+    expect(collectTaskPlans(messages).current?.plan.planId).toBe("plan-1");
+    messages.push({ type: "user", content: "[Plan Continuation]\nact", origin: "commander", timestamp: 1 });
+    expect(collectTaskPlans(messages).current?.plan.planId).toBe("plan-1");
+    // Bracket-prefixed text the user typed is still the user speaking.
+    messages.push({ type: "user", content: "[Follow-up] What changed?", timestamp: 2 });
+    const state = collectTaskPlans(messages);
+    expect(state.current).toBeNull();
+    expect(state.history.get("plan-1")?.plan).toEqual(done);
+    expect(collectTaskPlans([result(plan()), { type: "user", content: "Go on", timestamp: 3 }]).current?.plan.planId).toBe("plan-1");
   });
 });
 

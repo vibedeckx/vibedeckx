@@ -52,8 +52,9 @@ export type NotificationDisposition = "result" | "internal" | "milestone-managed
 
 export type AgentMessage =
   // origin marks machine-authored user turns (e.g. workflow-injected reviewer
-  // prompts) so the UI can render them as markdown instead of verbatim text.
-  | { type: 'user'; content: string | ContentPart[]; timestamp: number; origin?: 'workflow'; notificationDisposition?: NotificationDisposition; event?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number } }
+  // prompts) so the UI can render them as markdown instead of verbatim text;
+  // 'commander' marks what the Main Chat injects (events, nudges, results).
+  | { type: 'user'; content: string | ContentPart[]; timestamp: number; origin?: 'workflow' | 'commander'; notificationDisposition?: NotificationDisposition; event?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number } }
   | { type: 'assistant'; content: string; partial?: boolean; agentType?: AgentType; timestamp: number }
   | { type: 'tool_use'; tool: string; input: unknown; toolUseId?: string; timestamp: number }
   | { type: 'tool_result'; tool: string; output: string; toolUseId?: string; timestamp: number }

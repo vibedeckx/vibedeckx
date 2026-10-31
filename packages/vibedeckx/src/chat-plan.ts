@@ -71,6 +71,16 @@ export class ChatPlanState {
     return this.current?.steps.filter((step) => step.status !== "completed" && step.status !== "skipped") ?? [];
   }
 
+  /**
+   * The user spoke after the plan finished: it is history now, so it stops
+   * riding along as `<current-plan>` and pulling new requests into it.
+   */
+  releaseFinished(): void {
+    if (this.current && !this.blocked && this.current.steps.length > 0 && this.unfinishedSteps().length === 0) {
+      this.current = null;
+    }
+  }
+
   /** The user spoke or async work started: the nudge budget is fresh again. */
   resetNudges(): void {
     this.nudges = 0;
