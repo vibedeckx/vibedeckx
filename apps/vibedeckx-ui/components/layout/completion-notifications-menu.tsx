@@ -62,7 +62,7 @@ export const KIND_META: Record<NotificationKind, { label: string; dot: string }>
   session_failed: { label: "Session failed", dot: "bg-destructive" },
   workflow_failed: { label: "Workflow needs attention", dot: "bg-destructive" },
   loop_done: { label: "Loop finished — nothing left to process", dot: "bg-emerald-500" },
-  commander_stalled: { label: "Commander stalled — the plan needs you to continue it", dot: "bg-amber-500" },
+  commander_stalled: { label: "Commander stalled — the task needs you to continue it", dot: "bg-amber-500" },
   // "Stop & send", never "restart": the Restart action wipes conversation
   // history, whereas stopping and sending a message renews the token losslessly.
   cross_remote_token_expired: { label: "Cross-remote expired — stop & send a message to renew", dot: "bg-amber-500" },

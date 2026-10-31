@@ -311,14 +311,15 @@ describe("plan continuation watchdog", () => {
     const { manager, id, idle, continuations } = setup(async () => {
       switch (phase++) {
         case 0: return call("status", "getExecutorStatus", { tailLines: 5 });
-        case 1: return text("The build is idle.");
+        case 1: return call("finish", "complete_task", { summary: "The build is idle." });
+        case 2: return text("The build is idle.");
         default: throw new Error(`Unexpected model call ${phase}`);
       }
     });
     await manager.sendMessage(id, "What is running?");
     await idle();
     expect(continuations()).toEqual([]);
-    expect(phase).toBe(2);
+    expect(phase).toBe(3);
   });
 });
 
@@ -358,6 +359,47 @@ describe("no-tool rule (no unfinished plan)", () => {
     await idle();
     expect(corrections(userMessages())).toHaveLength(2);
     expect(manager.getSession(id)!.planState.nudges).toBe(0);
+  });
+
+  it("a lookup followed by text is corrected like text alone", async () => {
+    let phase = 0;
+    const { manager, id, idle, userMessages } = setup(async () => {
+      switch (phase++) {
+        case 0: return call("status", "getExecutorStatus", { tailLines: 5 });
+        case 1: return text("Now running the build.");
+        case 2: return call("finish", "complete_task", { summary: "Checked" });
+        case 3: return text("Checked.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Run the build");
+    await vi.waitFor(() => expect(phase).toBe(4));
+    await idle();
+    expect(corrections(userMessages())).toHaveLength(1);
+  });
+
+  it("stalls and notifies when a plan-less task stops mid-way", async () => {
+    let phase = 0;
+    const { manager, id, idle, userMessages, stop, start, outboxInsert } = setup(async () => {
+      switch (phase++) {
+        case 0: return call("run", "runExecutor", { executorName: "build" });
+        // Woken by the result: three corrections, then the watchdog gives up.
+        case 1: case 2: case 3: case 4: return text("Build done, now pushing.");
+        default: throw new Error(`Unexpected model call ${phase}`);
+      }
+    });
+    await manager.sendMessage(id, "Build, then push");
+    await idle();
+    stop(start.mock.calls[0][3]);
+    await vi.waitFor(() => expect(phase).toBe(5));
+    await idle();
+    expect(corrections(userMessages())).toHaveLength(3);
+    const stalled = manager.getMessages(id).find((m) => m.type === "system");
+    if (stalled?.type !== "system") throw new Error("no stall entry");
+    expect(stalled.content).toMatch(/^\[Commander Stalled\] /);
+    expect(outboxInsert).toHaveBeenCalledTimes(1);
+    expect(outboxInsert.mock.calls[0][0]).toMatchObject({ kind: "commander_stalled", session_id: id });
+    expect(manager.getSession(id)!.turn).toBeNull();
   });
 
   it("leaves a failed stream to the user", async () => {

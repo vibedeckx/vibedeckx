@@ -19,7 +19,7 @@ import {
 } from "@/components/ai-elements/message";
 import { useChatSession, type AgentMessage } from "@/hooks/use-chat-session";
 import { TaskPlanCard, readPlanResult } from "./task-plan-card";
-import { PLAN_CONTINUATION_PREFIX, PLAN_STALLED_PREFIX, TaskPlanPanel, collectTaskPlans } from "./task-plan-panel";
+import { COMMANDER_STALLED_PREFIX, PLAN_CONTINUATION_PREFIX, PLAN_STALLED_PREFIX, TaskPlanPanel, collectTaskPlans } from "./task-plan-panel";
 import { ToolApprovalCard } from "./tool-approval-card";
 import { ReviewRunPanel } from "./review-run-panel";
 import { NewLoopDialog } from "./new-loop-dialog";
@@ -406,7 +406,8 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
               );
             }
 
-            if (msg.type === "system" && msg.content.startsWith(PLAN_STALLED_PREFIX)) {
+            if (msg.type === "system" && (msg.content.startsWith(PLAN_STALLED_PREFIX) || msg.content.startsWith(COMMANDER_STALLED_PREFIX))) {
+              const prefix = msg.content.startsWith(PLAN_STALLED_PREFIX) ? PLAN_STALLED_PREFIX : COMMANDER_STALLED_PREFIX;
               return (
                 <div
                   key={index}
@@ -414,9 +415,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
                 >
                   <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
                   <div className="min-w-0">
-                    <div className="text-xs font-medium text-amber-600 dark:text-amber-400">Plan stalled</div>
+                    <div className="text-xs font-medium text-amber-600 dark:text-amber-400">{prefix === PLAN_STALLED_PREFIX ? "Plan stalled" : "Commander stalled"}</div>
                     <div className="mt-0.5 whitespace-pre-wrap text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-                      {msg.content.slice(PLAN_STALLED_PREFIX.length).trim()}
+                      {msg.content.slice(prefix.length).trim()}
                     </div>
                   </div>
                 </div>

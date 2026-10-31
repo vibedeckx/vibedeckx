@@ -173,7 +173,8 @@ describe("commander turns", () => {
           case 1:
             expect(JSON.stringify(options.prompt)).toContain("also check the tests");
             return call("status", "getExecutorStatus", { tailLines: 5 });
-          case 2: return text("Both checked.");
+          case 2: return call("finish", "complete_task", { summary: "Both checked." });
+          case 3: return text("Both checked.");
           default: throw new Error(`Unexpected model call ${phase}`);
         }
       } finally {

@@ -182,6 +182,12 @@ const MAX_COMMANDER_STEPS = 6;
  */
 const MAX_TURN_NUDGES = 3;
 
+/**
+ * Tools that only look. A stream that called nothing else has not acted:
+ * "check the status, then say the next step is running" ran nothing.
+ */
+const LOOKUP_TOOLS = new Set(["getAgentConversation", "getExecutorStatus", "listTerminals", "screenshot", "getPageContent", "waitForElement"]);
+
 /** Prefix of the synthetic user message that corrects a turn with no tool call. */
 const NO_TOOL_CORRECTION_PREFIX = "[System Invariant Violation]";
 
@@ -223,6 +229,9 @@ const PLAN_CONTINUATION_PREFIX = "[Plan Continuation]";
 
 /** Prefix of the system entry that marks a plan the watchdog gave up on. */
 const PLAN_STALLED_PREFIX = "[Plan Stalled]";
+
+/** Same, for a task the commander ran without a plan. */
+const COMMANDER_STALLED_PREFIX = "[Commander Stalled]";
 
 /**
  * Tools whose success hands the turn over to an event: the result arrives as
@@ -266,8 +275,6 @@ interface StreamOutcome {
   aborted: boolean;
   error: string | null;
   steps: ObservedStep[];
-  /** Tool calls the model made in the stream (for the no-tool rule). */
-  toolCalls: number;
   /** Set when re-entered from the error backoff timer: decide now, re-checking everything. */
   deferred?: boolean;
 }
@@ -1010,6 +1017,7 @@ export class ChatSessionManager {
     }
     const fresh = !session.pending.isOpen(item.kind, item.id);
     session.pending.register(item);
+    session.turn.startedWork = true;
     if (!fresh || !session.taskCompleted) return;
     session.taskCompleted = false;
     if (this.drivesDot(session)) this.emitChatActivity(session, "main-running");
@@ -1206,9 +1214,10 @@ export class ChatSessionManager {
    * - plan-idle: the plan still owes steps. Tools called in the stream do not
    *   matter — "setPlan, a lookup, then narrate" is the common way a plan
    *   died in place. Out of budget → the plan is stalled and the user notified.
-   * - no-tool: no unfinished plan and the stream invoked no tool at all,
-   *   usually a narrated action that never ran. Out of budget → give up
-   *   quietly; a plan-less chat may just have been answering a question.
+   * - no-tool: no unfinished plan and the stream invoked nothing but lookups,
+   *   usually a narrated action that never ran. Out of budget → a turn that
+   *   started work is stalled and the user notified; one that never did may
+   *   just have been answering a question, and is left alone.
    *
    * A nudge goes into the turn's inbox and the turn goes on; a failed stream
    * waits out a backoff first.
@@ -1231,7 +1240,7 @@ export class ChatSessionManager {
       // A failed stream with no plan behind it is the user's to retry: the
       // error entry is on screen and nothing was promised.
       if (outcome.error) return "pass";
-      if (outcome.toolCalls > 0) {
+      if (outcome.steps.some((step) => step.toolCalls.some((name) => !LOOKUP_TOOLS.has(name)))) {
         planState.nudges = 0;
         return "pass";
       }
@@ -1258,7 +1267,7 @@ export class ChatSessionManager {
     }
 
     if (planState.nudges >= MAX_TURN_NUDGES) {
-      this.stallPlan(session, outcome.error ? `the model stream failed repeatedly (${outcome.error})` : "the model kept ending turns without starting the next step");
+      this.stall(session, outcome.error ? `the model stream failed repeatedly (${outcome.error})` : "the model kept ending turns without starting the next step");
       return "stalled";
     }
     planState.nudges++;
@@ -1304,23 +1313,28 @@ export class ChatSessionManager {
     return "nudged";
   }
 
-  /** The no-plan half of the turn contract: a stream that invoked no tool at all. */
+  /** The no-plan half of the turn contract: a stream that invoked nothing but lookups. */
   private nudgeNoTool(session: ChatSession): ContractVerdict {
     const planState = session.planState;
     if (planState.nudges >= MAX_TURN_NUDGES) {
-      console.warn(`[ChatSession] watchdog: no-tool correction limit (${MAX_TURN_NUDGES}) reached for ${session.id}, giving up`);
-      // Fresh budget for the next violation; giving up injects nothing, so this cannot loop.
+      // Fresh budget for the next violation; neither outcome injects anything, so this cannot loop.
       planState.nudges = 0;
+      if (session.turn?.startedWork) {
+        // Mid-task: left alone, "now running the next step" would read as true.
+        this.stall(session, "the model kept ending turns without starting the next step or completing the task");
+        return "stalled";
+      }
+      console.warn(`[ChatSession] watchdog: no-tool correction limit (${MAX_TURN_NUDGES}) reached for ${session.id}, giving up`);
       return "pass";
     }
     planState.nudges++;
-    console.log(`[ChatSession] watchdog: no tool_use in stream for ${session.id}, injecting correction (attempt ${planState.nudges}/${MAX_TURN_NUDGES})`);
+    console.log(`[ChatSession] watchdog: no action in stream for ${session.id}, injecting correction (attempt ${planState.nudges}/${MAX_TURN_NUDGES})`);
     session.turn?.inbox.push({ source: "nudge", content: [
       NO_TOOL_CORRECTION_PREFIX,
-      "You ended a turn without invoking any tool.",
-      "Either call a tool to make progress, or call `complete_task` to mark the user's task finished.",
-      "Do not narrate actions you did not actually take — only a tool_use block executes anything.",
-      "If you claimed to have started or run something this turn, re-issue that action NOW by invoking the actual tool — do NOT just query status to 'confirm' a step you never executed. A status row may be left over from an earlier turn; check `startedThisTurn`/`finishedThisTurn` before assuming progress.",
+      "You ended the turn without invoking a tool that acts — text and status lookups execute nothing.",
+      "- If the user's task is fully done, call `complete_task` now.",
+      "- If a step remains, invoke its tool now. Saying a step is running does not run it.",
+      "Do not repeat a step whose result you already received.",
     ].join("\n") });
     return "nudged";
   }
@@ -1363,27 +1377,29 @@ export class ChatSessionManager {
   }
 
   /**
-   * The watchdog gives up: mark the plan stalled, say so in the conversation,
-   * paint the dot amber and write a durable attention milestone so the bell
-   * rings even if nobody is looking at this workspace.
+   * The watchdog gives up: mark the plan (if one still owes steps) stalled,
+   * say so in the conversation, paint the dot amber and write a durable
+   * attention milestone so the bell rings even if nobody is looking at this
+   * workspace.
    */
-  private stallPlan(session: ChatSession, reason: string): void {
+  private stall(session: ChatSession, reason: string): void {
     const plan = session.planState.current;
-    if (!plan) return;
-    session.planState.stalled = true;
-    const owed = session.planState.unfinishedSteps().map((step) => step.title).join("; ");
-    this.pushEntry(session, {
-      type: "system",
-      content: `${PLAN_STALLED_PREFIX} The commander stopped before finishing "${plan.goal}": ${reason}. Unfinished: ${owed}. Send a message to continue, or start a new task.`,
-      timestamp: Date.now(),
-    });
+    const owed = session.planState.unfinishedSteps();
+    let content: string;
+    if (plan && owed.length > 0) {
+      session.planState.stalled = true;
+      content = `${PLAN_STALLED_PREFIX} The commander stopped before finishing "${plan.goal}": ${reason}. Unfinished: ${owed.map((step) => step.title).join("; ")}. Send a message to continue, or start a new task.`;
+    } else {
+      content = `${COMMANDER_STALLED_PREFIX} The commander stopped mid-task: ${reason}. Send a message to continue, or start a new task.`;
+    }
+    this.pushEntry(session, { type: "system", content, timestamp: Date.now() });
     this.emitChatActivity(session, "stopped");
-    console.warn(`[ChatSession] plan ${plan.planId} stalled for ${session.id}: ${reason}`);
+    console.warn(`[ChatSession] ${plan && owed.length > 0 ? `plan ${plan.planId}` : "turn"} stalled for ${session.id}: ${reason}`);
     const outbox = this.storage.notificationOutbox;
     if (!outbox) return;
     outbox.insert({
       // One milestone per stall; a plan nudged back to life and stalling again is a new one.
-      id: `commander-stalled:${session.id}:${plan.planId}:${Date.now()}`,
+      id: `commander-stalled:${session.id}:${plan?.planId ?? session.turn?.id}:${Date.now()}`,
       kind: "commander_stalled",
       project_id: session.projectId,
       branch: session.branch,
@@ -3604,7 +3620,7 @@ export class ChatSessionManager {
         this.duringSpawn(sessionId, owningTurnId, async () => spawnExecute(input, options));
     }
     // Confirmation is enforced at the execution boundary, not only in the prompt.
-    const readOnlyTools = new Set(["setPlan", "getAgentConversation", "getExecutorStatus", "listTerminals", "screenshot", "getPageContent", "waitForElement", "wait"]);
+    const readOnlyTools = new Set([...LOOKUP_TOOLS, "setPlan", "wait"]);
     for (const [name, definition] of Object.entries(tools)) {
       const execute = definition.execute;
       if (!execute || readOnlyTools.has(name)) continue;
@@ -3995,15 +4011,7 @@ export class ChatSessionManager {
 
     let assistantIndex: number | null = null;
     let accumulatedText = "";
-    /**
-     * Counts real tool_use blocks emitted by the model during this stream.
-     * After the stream completes the watchdog enforces the invariant
-     * "every turn must invoke at least one tool" — zero tool-calls without
-     * an abort or prior complete_task means the model just talked, which
-     * usually indicates a hallucinated tool call or a missing complete_task.
-     */
-    let toolCallCountInStream = 0;
-    /** Per-step tool calls and results, for the plan-continuation watchdog. */
+    /** Per-step tool calls, for the turn contract. */
     const observedSteps: ObservedStep[] = [];
     /** Message of a stream failure (not an abort), for the error re-drive. */
     let streamError: string | null = null;
@@ -4118,14 +4126,12 @@ export class ChatSessionManager {
             this.pushEntry(session, toolUseMsg);
             observedSteps[observedSteps.length - 1]?.toolCalls.push(part.toolName);
 
-            // Watchdog accounting: model actually invoked a tool this turn.
             // Refresh the dot's `since` so a concurrent agent emit can't
             // override it. Sticky-completed: if complete_task was called
             // earlier (even in this same stream, e.g. the model called
             // complete_task then another tool), keep cyan instead of
             // reverting to violet. Suppressed entirely in turns the user did
             // not open (the dot belongs to the subsystem there).
-            toolCallCountInStream++;
             if (this.drivesDot(session)) {
               this.emitChatActivity(
                 session,
@@ -4271,7 +4277,6 @@ export class ChatSessionManager {
           aborted: abortController.signal.aborted,
           error: streamError,
           steps: observedSteps,
-          toolCalls: toolCallCountInStream,
         };
         if (turn) this.afterStream(session, turn, outcome);
         else this.drainOutside(session);

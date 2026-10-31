@@ -17,6 +17,8 @@ export interface PinnedTaskPlan {
 
 /** Prefix of the system entry the backend pushes when it gives up on a plan. */
 export const PLAN_STALLED_PREFIX = "[Plan Stalled]";
+/** Same, for a task the commander ran without a plan; it does not touch the plan panel. */
+export const COMMANDER_STALLED_PREFIX = "[Commander Stalled]";
 /** Prefix of the synthetic user message that re-drives an unfinished plan. */
 export const PLAN_CONTINUATION_PREFIX = "[Plan Continuation]";
 

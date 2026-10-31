@@ -163,6 +163,8 @@ export interface CommanderTurn {
   /** Arrivals not yet shown to the model; the next stream starts with them. */
   inbox: TurnArrival[];
   streams: number;
+  /** Whether the turn has started work it waited for: a turn mid-task, not a chat. */
+  startedWork: boolean;
   /** Index of the turn's first conversation entry: the turn is entries [firstEntryIndex, …). */
   firstEntryIndex: number;
   /**
@@ -182,6 +184,7 @@ export function openTurn(first: TurnArrival, id: string, now = Date.now()): Comm
     toolless: first.source === "browser",
     inbox: [first],
     streams: 0,
+    startedWork: false,
     firstEntryIndex: 0,
     messages: [],
   };
