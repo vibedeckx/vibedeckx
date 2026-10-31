@@ -60,7 +60,7 @@ export function ToolApprovalCard({
   };
 
   return (
-    <div className={embedded ? undefined : "mx-4 my-1"}>
+    <div className={embedded ? "@container/approval min-w-0" : "@container/approval min-w-0 mx-4 my-1"}>
       <div className={embedded ? "space-y-2" : "rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2"}>
         <div className="flex items-center gap-2">
           <Bot className="h-3.5 w-3.5 text-amber-500 shrink-0" />
@@ -94,11 +94,11 @@ export function ToolApprovalCard({
             {plan ? (resolved === "approved" ? "Plan confirmed" : "Plan declined — describe changes in chat") : (resolved === "approved" ? "Approved — sent." : "Denied — not sent.")}
           </Badge>
         ) : (
-          <div className="flex gap-2">
+          <div className={plan ? "grid grid-cols-1 gap-2 @min-[24rem]/approval:grid-cols-2" : "flex flex-wrap gap-2"}>
             <Button
               onClick={() => decide(true)}
               disabled={pending !== null}
-              className="bg-green-600 hover:bg-green-700 text-white"
+              className="h-auto min-h-8 min-w-0 whitespace-normal py-1.5 bg-green-600 hover:bg-green-700 text-white"
               size="sm"
             >
               {pending === "approve" ? (
@@ -112,6 +112,7 @@ export function ToolApprovalCard({
               onClick={() => decide(false)}
               disabled={pending !== null}
               variant="destructive"
+              className="h-auto min-h-8 min-w-0 whitespace-normal py-1.5"
               size="sm"
             >
               {pending === "deny" ? (
