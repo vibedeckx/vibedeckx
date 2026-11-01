@@ -256,9 +256,9 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
           <span className="grid size-7 shrink-0 place-items-center rounded-lg border border-primary/20 bg-accent text-accent-foreground">
             <Repeat className="size-[15px]" />
           </span>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <DialogTitle className="text-[14.5px] font-semibold tracking-tight">New loop</DialogTitle>
-            <DialogDescription className="mt-0.5 max-w-[46ch] text-[11.5px] leading-snug">
+            <DialogDescription className="mt-0.5 text-[11.5px] leading-snug">
               Runs the same instruction again and again, each time in a fresh session that handles one item, until a
               session reports there is nothing left.
             </DialogDescription>
