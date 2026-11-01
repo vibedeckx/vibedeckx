@@ -3810,7 +3810,7 @@ export const api = {
   async getActiveWorkflowRuns(
     projectId: string,
     branch: string | null,
-  ): Promise<{ runs: WorkflowRun[]; reviewedSessionIds?: string[]; finishedLoops?: WorkflowRun[] }> {
+  ): Promise<{ runs: WorkflowRun[]; reviewedSessionIds?: string[]; awaitingDismissal?: WorkflowRun[] }> {
     const params = new URLSearchParams({ projectId });
     if (branch) params.set("branch", branch);
     const res = await authFetch(`${getApiBase()}/api/workflow-runs?${params}`);
@@ -3819,8 +3819,8 @@ export const api = {
     return {
       runs: data.runs ?? [],
       ...(Array.isArray(data.reviewedSessionIds) ? { reviewedSessionIds: data.reviewedSessionIds } : {}),
-      // Finished loops whose card the user has not closed; absent from old workers.
-      ...(Array.isArray(data.finishedLoops) ? { finishedLoops: data.finishedLoops } : {}),
+      // Finished runs whose card the user has not closed.
+      awaitingDismissal: data.awaitingDismissal ?? [],
     };
   },
 

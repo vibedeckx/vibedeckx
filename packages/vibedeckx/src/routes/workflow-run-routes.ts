@@ -17,7 +17,7 @@ import {
   type RepeatLoopPreset, type StartRepeatLoopOptions,
 } from "../workflow-repeat-loop.js";
 import type { AgentType } from "../agent-types.js";
-import { LOOP_DISMISS_CAPABILITY, LOOP_V2_CAPABILITY } from "../reverse-connect-capabilities.js";
+import { LOOP_V2_CAPABILITY } from "../reverse-connect-capabilities.js";
 
 /** Worker route a hub needs before it may start a repeat loop there (absent on older workers). */
 export const REPEAT_LOOP_CAPABILITY = "http:POST /api/path/workflow-loops";
@@ -1000,15 +1000,14 @@ async function routes(fastify: FastifyInstance) {
           };
           const result = await proxyAuto(info, "GET", `/api/path/workflow-runs?${q}`);
           if (!result.ok) return sendProxyFailure(reply, result);
-          const data = result.data as { runs: WorkflowRun[]; reviewedSessionIds?: string[]; finishedLoops?: WorkflowRun[] };
+          const data = result.data as { runs: WorkflowRun[]; reviewedSessionIds?: string[]; awaitingDismissal?: WorkflowRun[] };
           const mapAndTrack = (r: WorkflowRun) => {
             const mapped = mapRemoteRun(r, info.remoteServerId, projectId);
             trackRemoteRun(mapped, { ...info, bareRunId: r.id, projectId });
             return mapped;
           };
           const runs = (data.runs ?? []).map(mapAndTrack);
-          // Absent from a worker that predates finished-loop cards: no card, as before.
-          const finishedLoops = data.finishedLoops?.map(mapAndTrack);
+          const awaitingDismissal = (data.awaitingDismissal ?? []).map(mapAndTrack);
           // A loop's sessions are created by the worker; this list is one of
           // the places the hub gets to learn them (remote-loop-sessions.ts).
           await Promise.all(runs.map((r) => publishRemoteLoopSessions(loopPublishDeps(), r)));
@@ -1025,17 +1024,17 @@ async function routes(fastify: FastifyInstance) {
             ...(data.reviewedSessionIds
               ? { reviewedSessionIds: data.reviewedSessionIds.map((id) => prefix + id) }
               : {}),
-            ...(finishedLoops ? { finishedLoops } : {}),
+            awaitingDismissal,
           });
         }
       }
-      const [runs, reviewedSessionIds, finishedLoops] = await Promise.all([
+      const [runs, reviewedSessionIds, awaitingDismissal] = await Promise.all([
         fastify.storage.workflowRuns.getActive(projectId, branch ?? null),
         fastify.storage.workflowRuns.listReviewedSourceSessions(projectId, branch ?? null),
         fastify.storage.workflowRuns.getAwaitingDismissal(projectId, branch ?? null),
       ]);
       logRead(runs.length, "local");
-      return reply.send({ runs, reviewedSessionIds, finishedLoops });
+      return reply.send({ runs, reviewedSessionIds, awaitingDismissal });
     });
 
   fastify.get<{ Params: { id: string } }>("/api/workflow-runs/:id", async (req, reply) => {
@@ -1174,18 +1173,13 @@ async function routes(fastify: FastifyInstance) {
       }
     });
 
-  // Close a finished loop's card. A worker without the route cannot have
-  // reported a finished loop, so a 409 here only meets a stale client.
+  // Close a finished run's card in Main Chat (`awaiting_dismissal`).
   fastify.post<{ Params: { id: string } }>("/api/workflow-runs/:id/dismiss", async (req, reply) => {
     const userId = requireAuth(req, reply);
     if (userId === null) return;
     if (req.params.id.startsWith("remote-")) {
       const info = await resolveRemoteRun(req.params.id, userId);
       if (!info) return reply.code(404).send({ error: "Run not found" });
-      const server = await fastify.storage.remoteServers.getById(info.remoteServerId);
-      if (!server?.worker_capabilities?.includes(LOOP_DISMISS_CAPABILITY)) {
-        return reply.code(409).send({ error: "This machine's worker doesn't support closing finished loops yet — update the worker and try again.", code: "worker_unsupported" });
-      }
       const result = await proxyAuto(info, "POST", `/api/workflow-runs/${info.bareRunId}/dismiss`);
       if (!result.ok) return sendProxyFailure(reply, result);
       const localRun = mapRemoteRun((result.data as { run: WorkflowRun }).run, info.remoteServerId, info.projectId);
@@ -1441,13 +1435,13 @@ async function routes(fastify: FastifyInstance) {
     const project =
       (await fastify.storage.projects.getByPath(projectPath)) ??
       (await fastify.storage.projects.getById(`path:${projectPath}`));
-    if (!project) return reply.send({ runs: [], reviewedSessionIds: [], finishedLoops: [] });
-    const [runs, reviewedSessionIds, finishedLoops] = await Promise.all([
+    if (!project) return reply.send({ runs: [], reviewedSessionIds: [], awaitingDismissal: [] });
+    const [runs, reviewedSessionIds, awaitingDismissal] = await Promise.all([
       fastify.storage.workflowRuns.getActive(project.id, branch || null),
       fastify.storage.workflowRuns.listReviewedSourceSessions(project.id, branch || null),
       fastify.storage.workflowRuns.getAwaitingDismissal(project.id, branch || null),
     ]);
-    return reply.send({ runs, reviewedSessionIds, finishedLoops });
+    return reply.send({ runs, reviewedSessionIds, awaitingDismissal });
   });
 }
 

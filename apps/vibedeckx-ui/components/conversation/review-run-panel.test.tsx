@@ -538,7 +538,7 @@ describe("ReviewRunPanel repeat loop", () => {
   it("a finished loop's card stays, names the last session, and closes only on ✕", async () => {
     const done = loopRun({ status: "completed", round: 5, awaiting_dismissal: 1 });
     resetWorkflowRunsInflightForTests();
-    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [], finishedLoops: [done] } as never);
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [], awaitingDismissal: [done] } as never);
     await act(async () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
     });
@@ -547,7 +547,7 @@ describe("ReviewRunPanel repeat loop", () => {
     expect(buttonNamed("结束")).toBeUndefined();
     expect(buttonNamed("Continue loop")).toBeUndefined();
 
-    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [], finishedLoops: [] } as never);
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [], awaitingDismissal: [] } as never);
     await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="关闭"]')!.click(); });
     expect(api.dismissWorkflowRun).toHaveBeenCalledWith("l2");
     await vi.waitFor(() => expect(container.textContent).toBe(""));

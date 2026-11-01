@@ -92,8 +92,8 @@ export function ReviewRunPanel({
   onRunsChange?: (runs: WorkflowRun[]) => void;
 }) {
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
-  /** Finished loops whose card stays until the user closes it (server-side flag, so it survives reloads). */
-  const [finishedLoops, setFinishedLoops] = useState<WorkflowRun[]>([]);
+  /** Finished runs whose card stays until the user closes it (server-side flag, so it survives reloads). */
+  const [awaitingDismissal, setAwaitingDismissal] = useState<WorkflowRun[]>([]);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [editing, setEditing] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -139,11 +139,11 @@ export function ReviewRunPanel({
     const seq = ++reqSeqRef.current;
     const read = fetchActiveWorkflowRunsAt(projectId, branch, opts);
     try {
-      const [active, finished] = await Promise.all([read.request, read.finished]);
+      const [active, toDismiss] = await Promise.all([read.request, read.awaitingDismissal]);
       if (seq !== reqSeqRef.current) return;
       landedRef.current = { at: read.issuedAt, runs: active };
       setRuns(active);
-      setFinishedLoops(finished);
+      setAwaitingDismissal(toDismiss);
       onRunsChange?.(active);
       // 状态一变,上一条失败提示就过期了(讨论完出了终稿、别处已经发送、run
       // 结束……),留着只会误导。无主提示的 status 恒为 null,状态比较对它是
@@ -266,8 +266,8 @@ export function ReviewRunPanel({
   // 面板也不能因为"零活跃 run"直接消失 —— 否则用户点完只看到卡片凭空不见,
   // 得不到任何交代。它不会被对账清掉(status 恒为 null),所以配一个手动关闭。
   const orphanError = actionError && !activeRuns.some((r) => r.id === actionError.runId)
-    && !finishedLoops.some((r) => r.id === actionError.runId) ? actionError : null;
-  if (activeRuns.length === 0 && finishedLoops.length === 0 && !orphanError) return null;
+    && !awaitingDismissal.some((r) => r.id === actionError.runId) ? actionError : null;
+  if (activeRuns.length === 0 && awaitingDismissal.length === 0 && !orphanError) return null;
 
   return (
     // shrink-0 + max-h: the panel sits above the flex-1 conversation; without a
@@ -284,7 +284,7 @@ export function ReviewRunPanel({
           </Button>
         </div>
       )}
-      {[...finishedLoops, ...activeRuns].map((run) => run.kind === "repeat" ? (
+      {[...awaitingDismissal, ...activeRuns].map((run) => run.kind === "repeat" ? (
         <LoopCard key={run.id} run={run} busy={busy === run.id}
           error={actionError?.runId === run.id ? actionError.message : null}
           onAction={(action) => act(run.id, action, () =>

@@ -351,8 +351,8 @@ describe("workflow-run-routes", () => {
     // Rides this poll so the Start Review dialog knows whether a "continue
     // last reviewer" choice exists before it opens.
     expect(res.json().reviewedSessionIds).toEqual(["s-src"]);
-    // A finished loop's card rides the same poll, apart from the active runs.
-    expect(res.json().finishedLoops).toEqual([]);
+    // Finished runs whose card is still open ride the same poll, apart from the active runs.
+    expect(res.json().awaitingDismissal).toEqual([]);
   });
 
   it("dismiss closes a finished loop's card locally (the same route serves the worker side)", async () => {

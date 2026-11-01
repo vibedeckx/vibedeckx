@@ -119,8 +119,7 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   // shipped in the same worker release (LOOP_V2_CAPABILITY below): the hub
   // 409s a `handoff: true` start and a schedule on a worker without it.
   "http:POST /api/path/workflow-runs/:param/schedule-resume": { since: "0.3.55", summary: "循环闸门定时继续" },
-  // Additive. The list route's `finishedLoops` field ships with it: a worker
-  // that reports finished loops can also close their cards.
+  // Additive; ships with the list route's `awaitingDismissal` field.
   "http:POST /api/workflow-runs/:param/dismiss": { since: "0.3.57", summary: "关闭已完成循环的卡片" },
 
   // --- Git / worktrees / diff ---
@@ -198,8 +197,5 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
  * `handoff` on a loop start. Gate on the value being true, never on presence.
  */
 export const LOOP_V2_CAPABILITY = "http:POST /api/path/workflow-runs/:param/schedule-resume";
-
-/** A worker serving this also reports `finishedLoops` on the run list. */
-export const LOOP_DISMISS_CAPABILITY = "http:POST /api/workflow-runs/:param/dismiss";
 
 export const WORKER_CAPABILITY_KEYS = Object.keys(WORKER_CAPABILITIES);

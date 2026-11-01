@@ -557,11 +557,11 @@ export interface WorkflowRun {
   /** The iteration's parsed closing status; null = none yet or unrecognised. */
   outcome_status: WorkflowTaskStatus | null;
   /**
-   * 1 on the last run of a repeat loop that finished (`Status: done`) until the
-   * user closes its card in Main Chat — nothing else clears it.
-   * Absent on runs from a worker that predates it.
+   * 1 = this finished run keeps a card in Main Chat until the user closes it;
+   * nothing else clears it. Set today on the last run of a repeat loop that
+   * reported `Status: done`.
    */
-  awaiting_dismissal?: number;
+  awaiting_dismissal: number;
   created_at: string;
   updated_at: string;
 }
@@ -2220,9 +2220,9 @@ export interface Storage {
     getActiveInLoop(loopId: string): Promise<WorkflowRun | undefined>;
     getById(id: string): Promise<WorkflowRun | undefined>;
     getActive(projectId: string, branch: string | null): Promise<WorkflowRun[]>;
-    /** Finished loops whose card the user has not closed yet (`awaiting_dismissal`). */
+    /** Finished runs whose card the user has not closed yet (`awaiting_dismissal`). */
     getAwaitingDismissal(projectId: string, branch: string | null): Promise<WorkflowRun[]>;
-    /** Close one finished loop's card. False = no such card (never set, or already closed). */
+    /** Close one finished run's card. False = no such card (never set, or already closed). */
     dismiss(id: string): Promise<boolean>;
 
     getAllActive(): Promise<WorkflowRun[]>;

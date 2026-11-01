@@ -14,7 +14,7 @@ import { api, type WorkflowRun } from "@/lib/api";
  * 兜底,复用握手前的请求等于兜底失效。force 请求会替换表里的条目,让随后的
  * 非 force 调用搭这趟新的。
  */
-const inflight = new Map<string, { request: Promise<WorkflowRun[]>; finished: Promise<WorkflowRun[]>; tick: object; issuedAt: number }>();
+const inflight = new Map<string, { request: Promise<WorkflowRun[]>; awaitingDismissal: Promise<WorkflowRun[]>; tick: object; issuedAt: number }>();
 
 function keyOf(projectId: string, branch: string | null): string {
   return `${projectId}\u0000${branch ?? ""}`;
@@ -100,15 +100,15 @@ export function fetchActiveWorkflowRunsAt(
   opts?: { force?: boolean },
 ): {
   request: Promise<WorkflowRun[]>;
-  /** Finished loops whose card is still open — same response; [] from a worker that predates them. */
-  finished: Promise<WorkflowRun[]>;
+  /** Finished runs whose card is still open — same response. */
+  awaitingDismissal: Promise<WorkflowRun[]>;
   issuedAt: number;
 } {
   const key = keyOf(projectId, branch);
   const tick = thisTick();
   const existing = inflight.get(key);
   if (existing && (!opts?.force || existing.tick === tick)) {
-    return { request: existing.request, finished: existing.finished, issuedAt: existing.issuedAt };
+    return { request: existing.request, awaitingDismissal: existing.awaitingDismissal, issuedAt: existing.issuedAt };
   }
   const issuedAt = Date.now();
   const payload = api.getActiveWorkflowRuns(projectId, branch);
@@ -116,17 +116,18 @@ export function fetchActiveWorkflowRunsAt(
     mergeReviewed(key, p.reviewedSessionIds);
     return p.runs;
   });
-  const finished = payload.then((p) => p.finishedLoops ?? []);
+  // Mocked payloads in tests may omit it.
+  const awaitingDismissal = payload.then((p) => p.awaitingDismissal ?? []);
   // Most callers never read it; its rejection is the same one `request` reports.
-  finished.catch(() => {});
-  const entry = { request, finished, tick, issuedAt };
+  awaitingDismissal.catch(() => {});
+  const entry = { request, awaitingDismissal, tick, issuedAt };
   inflight.set(key, entry);
   // 只清理自己那条——被 force 替换后不能误删新的。原 promise 原样返回给调用方,
   // 拒绝也由调用方处理;这里的 catch 只是吞掉 finally 派生链的 unhandled rejection。
   request
     .finally(() => { if (inflight.get(key) === entry) inflight.delete(key); })
     .catch(() => {});
-  return { request, finished, issuedAt };
+  return { request, awaitingDismissal, issuedAt };
 }
 
 export function fetchActiveWorkflowRuns(
