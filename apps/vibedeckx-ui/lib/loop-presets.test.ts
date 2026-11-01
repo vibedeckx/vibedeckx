@@ -74,14 +74,16 @@ describe("generateInstruction — Write my own", () => {
     // Not every item changes the repo; nothing about a plan.
     expect(text).toContain("If nothing in the repository changed, there is nothing to commit");
     expect(text).not.toContain("the plan");
-    expect(text).not.toContain("mark it done:");
+    // Marking a finished item is the description's job; the template only follows it.
+    expect(text).toContain("Otherwise leave the source alone");
     expect(text).not.toContain("Also read these every session");
   });
 
-  it("adds the optional marking and docs", () => {
+  it("adds the docs to read, and ignores a marking field from older drafts", () => {
     const text = generateInstruction("custom", { source: "todo/", markDone: "Move it to done/.", readDocs: "AGENTS.md" });
-    expect(text).toContain("mark it done:\n  > Move it to done/.");
     expect(text).toContain("  - AGENTS.md");
+    expect(text).not.toContain("Move it to done/.");
+    expect(presetFieldsForMeta("custom", { source: "todo/", markDone: "x" })).toEqual({ source: "todo/" });
   });
 });
 

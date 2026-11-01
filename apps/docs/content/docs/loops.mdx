@@ -33,11 +33,10 @@ Use this when the items aren't steps in a plan file, for example every error a l
 
 | Field | What to enter |
 |---|---|
-| **Where items come from** | Required. How a session finds the next item, for example "each error `pnpm lint` reports". No session remembers the previous one, so this has to be enough to find the next item on its own. |
-| **How an item is marked done** | Optional, for example "move its file from `todo/` to `done/`". The loop already records each finished item, so you can leave this blank. |
+| **Where items come from** | Required. How a session finds the next item, and how a finished one drops out of the list, for example "each file in `todo/`; move it to `done/` when finished". No session remembers the previous one, so this has to be enough on its own. |
 | **Docs to read every session** | Optional, as for Plan file. |
 
-Each session handles one item the same way as a plan step: it checks whether the item is already done, then handles it, verifies it, and commits if it changed any files. Make each item safe to process twice: an interrupted item may be picked up again.
+Each session handles one item the same way as a plan step: it checks whether the item is already done, then handles it, verifies it, and commits if it changed any files. The loop also keeps its own record of finished items, but a session only marks an item in the source (moves a file, ticks a box, closes an issue) if your description says how. Make each item safe to process twice: an interrupted item may be picked up again.
 
 ### Editing the instruction
 

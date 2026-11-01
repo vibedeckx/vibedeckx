@@ -74,17 +74,12 @@ export const CUSTOM_PRESET: LoopPreset = {
   fields: [
     {
       key: "source", label: "Where items come from", required: true, multiline: true,
-      placeholder: "Each error `pnpm lint` reports.\nOr: each file in todo/ with no counterpart in done/.",
-      hint: "How a session finds the next item; it remembers nothing from the last one.",
-    },
-    {
-      key: "markDone", label: "How an item is marked done", multiline: true,
-      placeholder: "Move its file from todo/ to done/.",
-      hint: "Optional: the loop already records each finished item. Make handling an item safe to repeat.",
+      placeholder: "Each error `pnpm lint` reports.\nOr: each file in todo/; move it to done/ when finished.",
+      hint: "How a session finds the next item, and how a finished one drops out of the list. Sessions remember nothing of each other.",
     },
     READ_DOCS_FIELD,
   ],
-  defaults: { source: "", markDone: "", readDocs: "" },
+  defaults: { source: "", readDocs: "" },
   // Arbitrary source: a note every turn is not obviously worth its tokens.
   handoffByDefault: false,
 };
@@ -197,13 +192,13 @@ function planInstruction(fields: Record<string, string>): string {
 
 /**
  * Write my own template — the Plan file skeleton with the plan swapped for the
- * user's own description of where items come from (and, optionally, how one is
- * marked done). Nothing without that description: there is no default source.
+ * user's own description of where items come from. How a finished item leaves
+ * the source is that description's job too: the template only follows it, and
+ * never invents a marking step. Nothing without it: there is no default source.
  */
 function customInstruction(fields: Record<string, string>): string {
   const source = lines(fields.source);
   if (!source.length) return "";
-  const markDone = lines(fields.markDone);
   const readDocs = lines(fields.readDocs);
 
   const sections: string[] = [];
@@ -239,13 +234,13 @@ function customInstruction(fields: Record<string, string>): string {
     DEFAULTS_LINE("the item's description"),
   ].join("\n"));
 
-  const done = ["## 5. Mark it done", ""];
-  if (markDone.length) done.push(`Once the item is really handled, mark it done:\n${quoted(markDone)}`);
-  done.push(
+  sections.push([
+    "## 5. Mark it done",
+    "",
     "The loop records completion from the `Item:` line of your final message (section 7).",
+    "If the description of where the items come from says how a finished item is marked (moved, ticked, closed …), do that once the item is really handled. Otherwise leave the source alone.",
     "If you cannot finish the item, do not report it as done; say why in your final message.",
-  );
-  sections.push(done.join("\n"));
+  ].join("\n"));
 
   sections.push([
     "## 6. Commit",
