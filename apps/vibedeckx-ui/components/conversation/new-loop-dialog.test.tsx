@@ -20,6 +20,9 @@ import { loopDraftKey } from "@/lib/loop-presets";
 const refused = (message: string, code?: string) => Object.assign(new Error(message), { status: 409, code });
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+// jsdom lacks what the Radix "Items from" select calls when it opens.
+Element.prototype.scrollIntoView ??= () => {};
+Element.prototype.hasPointerCapture ??= () => false;
 
 describe("NewLoopDialog", () => {
   let container: HTMLDivElement;
@@ -43,6 +46,17 @@ describe("NewLoopDialog", () => {
   };
   const closeDialog = async () => click(buttonNamed("Cancel") ?? buttonNamed("Close"));
   const instructionTab = () => [...document.body.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Instruction");
+  /** Pick an option of the "Items from" select (Radix: keyboard opens it, Enter on an option picks it). */
+  const pickSource = async (label: string) => {
+    const trigger = document.body.querySelector<HTMLButtonElement>('button[aria-label="Items from"]')!;
+    await act(async () => { trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); });
+    const option = [...document.body.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => o.textContent === label);
+    expect(option).toBeDefined();
+    await act(async () => {
+      option!.focus();
+      option!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+  };
   const formTab = () => [...document.body.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent === "Form");
 
   beforeEach(async () => {
@@ -92,22 +106,27 @@ describe("NewLoopDialog", () => {
   });
 
   it("switching to a preset that would overwrite hand-written text asks first", async () => {
-    await click(buttonNamed("Custom"));
-    // Custom keeps the box's text as a starting point; clear it and write our own.
+    await pickSource("Write my own");
+    await type("loop-field-source", "orders.md, one per line");
+    await click(instructionTab());
     await type("loop-prompt", "handle the next order");
-    await click(buttonNamed("Plan file"));
+    await pickSource("Plan file");
     expect(document.body.textContent).toContain("Switching to Plan file replaces the instruction");
     await click(buttonNamed("Keep it"));
     expect(byId<HTMLTextAreaElement>("loop-prompt").value).toBe("handle the next order");
-    await click(buttonNamed("Plan file"));
+    await pickSource("Plan file");
     await click(buttonNamed("Discard my text"));
     expect(byId("loop-field-planFile")).not.toBeNull();
   });
 
-  it("Custom: cannot start without an instruction", async () => {
-    await click(buttonNamed("Custom"));
-    await type("loop-prompt", "   ");
+  it("Write my own: generates nothing, and cannot start, until it says where items come from", async () => {
+    await pickSource("Write my own");
+    expect(byId<HTMLTextAreaElement>("loop-field-source").closest("div")!.textContent).toContain("Required");
     expect(startButton().disabled).toBe(true);
+    await type("loop-field-source", "   ");
+    expect(startButton().disabled).toBe(true);
+    await type("loop-field-source", "orders.md, one per line");
+    expect(startButton().disabled).toBe(false);
   });
 
   it("sends the instruction, limits clamped to what the server accepts, and the preset it came from", async () => {
@@ -125,13 +144,24 @@ describe("NewLoopDialog", () => {
     expect(workflowRunGate).not.toHaveBeenCalled();
   });
 
-  it("Custom sends its text as is and says so", async () => {
-    await click(buttonNamed("Custom"));
-    await type("loop-prompt", "  handle the next order  ");
+  it("Write my own generates the instruction around its source and records it", async () => {
+    await pickSource("Write my own");
+    await type("loop-field-source", "orders.md, one per line");
     await click(startButton());
     expect(createRepeatLoop).toHaveBeenCalledWith(expect.objectContaining({
-      prompt: "handle the next order", preset: { kind: "custom" },
+      prompt: expect.stringContaining("> orders.md, one per line"),
+      preset: { kind: "custom", fields: { source: "orders.md, one per line" } },
     }));
+  });
+
+  it("a Write my own draft from before it had a form comes back as a hand edit", async () => {
+    await closeDialog();
+    window.localStorage.setItem(loopDraftKey("p1"), JSON.stringify({
+      kind: "custom", fields: { planFile: "docs/implementation-plan.md" }, prompt: "handle the next order", edited: false,
+    }));
+    await openDialog();
+    expect(byId<HTMLTextAreaElement>("loop-prompt").value).toBe("handle the next order");
+    expect(document.body.textContent).toContain("Edited by hand");
   });
 
   it("a hand-edited plan is marked edited", async () => {
@@ -159,10 +189,10 @@ describe("NewLoopDialog", () => {
       expect(createRepeatLoop).toHaveBeenCalledWith(expect.objectContaining({ handoff: true }));
     });
 
-    it("is off for Custom, and an explicit false is still sent", async () => {
-      await click(buttonNamed("Custom"));
+    it("is off for Write my own, and an explicit false is still sent", async () => {
+      await pickSource("Write my own");
       expect(handoffBox().checked).toBe(false);
-      await type("loop-prompt", "handle the next order");
+      await type("loop-field-source", "orders.md, one per line");
       await click(startButton());
       expect(createRepeatLoop).toHaveBeenCalledWith(expect.objectContaining({ handoff: false }));
     });

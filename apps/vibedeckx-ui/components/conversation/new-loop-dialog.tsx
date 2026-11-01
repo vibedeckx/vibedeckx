@@ -14,15 +14,16 @@ import {
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import {
   BOX_INPUT,
   CONTROL_INPUT,
+  CONTROL_TRIGGER,
   ControlBox,
   FieldLabel,
   HintLine,
   InlineLink,
-  Segmented,
   Strip,
 } from "@/components/schedule/schedule-form-chrome";
 import {
@@ -104,7 +105,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
     setEdited(false);
     setHandoff(next.handoffByDefault);
     if (next.fields.length === 0) {
-      // Custom keeps whatever is in the box: a generated plan is a fine starting point.
+      // A preset without a form keeps whatever is in the box as a starting point.
       setView("instruction");
       return;
     }
@@ -139,7 +140,9 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
     const k: LoopPresetKind = d.kind === "custom" ? "custom" : "plan";
     const p = presetFor(k);
     const f = { ...p.defaults, ...(d.fields ?? {}) };
-    const wasEdited = p.fields.length > 0 && d.edited === true;
+    // A Write my own draft from before it had a form holds only its text: keep that text as a hand edit.
+    const legacyCustom = k === "custom" && !d.fields?.source?.trim() && !!d.prompt?.trim();
+    const wasEdited = p.fields.length > 0 && (d.edited === true || legacyCustom);
     setKind(k);
     setFields(f);
     setEdited(wasEdited);
@@ -271,14 +274,17 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
 
         <div className="flex min-h-0 min-w-0 flex-col gap-[13px] overflow-x-hidden overflow-y-auto px-4 pt-3.5 pb-1">
           <div className="flex min-w-0 flex-col gap-[7px]">
-            <FieldLabel
-              trailing={
-                <Segmented label="Preset" value={kind} onChange={switchKind}
-                  options={LOOP_PRESETS.map((p) => ({ value: p.kind, label: p.label }))} />
-              }
-            >
-              Preset
-            </FieldLabel>
+            <FieldLabel>Items from</FieldLabel>
+            <Select value={kind} onValueChange={(v) => switchKind(v as LoopPresetKind)}>
+              <SelectTrigger size="sm" aria-label="Items from" className={CONTROL_TRIGGER}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {LOOP_PRESETS.map((p) => (
+                  <SelectItem key={p.kind} value={p.kind}>{p.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <HintLine>{preset.description}</HintLine>
           </div>
 
@@ -328,7 +334,9 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
                 const wide = f.multiline || f.key === "planFile";
                 return (
                   <div key={f.key} className={cn("flex min-w-0 flex-col gap-[7px]", wide && "col-span-2")}>
-                    <FieldLabel><label htmlFor={id}>{f.label}</label></FieldLabel>
+                    <FieldLabel note={f.required && !fields[f.key]?.trim() ? "Required" : undefined}>
+                      <label htmlFor={id}>{f.label}</label>
+                    </FieldLabel>
                     {f.multiline ? (
                       <Textarea id={id} value={fields[f.key] ?? ""} onChange={(e) => setField(f.key, e.target.value)}
                         placeholder={f.placeholder} spellCheck={false}

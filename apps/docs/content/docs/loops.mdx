@@ -11,10 +11,10 @@ Each item gets its own session, listed in the sidebar like any other, so you can
 
 Open **Main Chat** for the workspace and click the loop button (the repeat icon) in its header. A workspace runs one loop at a time; the button is disabled while one is running.
 
-Pick a **Preset**:
+Under **Items from**, choose where the loop's items come from:
 
 - **Plan file**: works through a plan file in the repository, one step per session. Each session implements the step, verifies it, commits it and stops.
-- **Custom**: you write the whole instruction yourself.
+- **Write my own**: you describe where the items come from. The rest of the instruction is generated the same way as for a plan file.
 
 ### Plan file
 
@@ -27,16 +27,21 @@ Fill in two fields:
 
 Before changing anything, each session checks whether its step is already done, for example after a restart. If the step is done, the session reports it instead of redoing it. If the plan file tracks status per step (checkboxes, status lines), the session updates that step in the file's own format. Sessions commit but never push.
 
-The **Instruction** tab shows the full text the preset generates from your fields. You can edit it there. Once you do, the text is what runs and the form stops applying. **Regenerate from form** restores the generated text and discards your edits.
+### Write my own
 
-### Custom
+Use this when the items aren't steps in a plan file, for example every error a lint command reports, or every file in a `todo/` directory.
 
-Write the instruction in the **Instruction** box. No session remembers the previous one, so the instruction must say:
+| Field | What to enter |
+|---|---|
+| **Where items come from** | Required. How a session finds the next item, for example "each error `pnpm lint` reports". No session remembers the previous one, so this has to be enough to find the next item on its own. |
+| **How an item is marked done** | Optional, for example "move its file from `todo/` to `done/`". The loop already records each finished item, so you can leave this blank. |
+| **Docs to read every session** | Optional, as for Plan file. |
 
-- where to find the next unprocessed item,
-- how to mark an item as done.
+Each session handles one item the same way as a plan step: it checks whether the item is already done, then handles it, verifies it, and commits if it changed any files. Make each item safe to process twice: an interrupted item may be picked up again.
 
-Make each item safe to process twice: an interrupted item may be picked up again.
+### Editing the instruction
+
+The **Instruction** tab shows the full text generated from your fields. You can edit it there. Once you do, the text is what runs and the form stops applying. **Regenerate from form** restores the generated text and discards your edits.
 
 ### Settings
 
@@ -46,7 +51,7 @@ Make each item safe to process twice: an interrupted item may be picked up again
 | **Stop after … items** | Pause after this many sessions (default 20, at most 200). |
 | **Stop after … minutes** | Pause after this much time (default 240, at most 1440). |
 | **Check command** | Optional, for example `npm test`. Runs in the worktree after each item; a non-zero exit stops the loop. |
-| **Keep a handoff note between sessions** | See [Handoff notes](#handoff-notes). On by default for Plan file, off for Custom. |
+| **Keep a handoff note between sessions** | See [Handoff notes](#handoff-notes). On by default for Plan file, off for Write my own. |
 | **Run one item first, then decide** | The loop pauses after the first item so you can read that session before letting the rest run. |
 
 The dialog remembers your last settings for each project.

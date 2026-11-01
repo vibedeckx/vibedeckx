@@ -55,8 +55,33 @@ describe("generateInstruction — Plan file", () => {
     expect(presetFieldsForMeta("plan", { planFile: "PLAN.md", pendingMarker: "x" })).toEqual({ planFile: "PLAN.md" });
   });
 
-  it("custom generates nothing", () => {
+});
+
+describe("generateInstruction — Write my own", () => {
+  it("generates nothing until it says where items come from", () => {
     expect(generateInstruction("custom", { planFile: "x" })).toBe("");
+    expect(generateInstruction("custom", { source: " \n " })).toBe("");
+  });
+
+  it("wraps the user's source in the shared skeleton", () => {
+    const text = generateInstruction("custom", { source: "Each error `pnpm lint` reports.\n\nOne per session." });
+    expect(text).toContain("  > Each error `pnpm lint` reports.\n  > One per session.");
+    expect(text).toContain("NOT in the completed list");
+    expect(text).toContain("do not redo it");
+    expect(text).toContain("`Status: done`");
+    expect(text).toContain("`Status: blocked`");
+    expect(text).toContain("`Status: continue`");
+    // Not every item changes the repo; nothing about a plan.
+    expect(text).toContain("If nothing in the repository changed, there is nothing to commit");
+    expect(text).not.toContain("the plan");
+    expect(text).not.toContain("mark it done:");
+    expect(text).not.toContain("Also read these every session");
+  });
+
+  it("adds the optional marking and docs", () => {
+    const text = generateInstruction("custom", { source: "todo/", markDone: "Move it to done/.", readDocs: "AGENTS.md" });
+    expect(text).toContain("mark it done:\n  > Move it to done/.");
+    expect(text).toContain("  - AGENTS.md");
   });
 });
 
@@ -64,13 +89,16 @@ describe("preset metadata", () => {
   it("records only the preset's own non-blank fields", () => {
     expect(presetFieldsForMeta("plan", { planFile: "PLAN.md", readDocs: " ", junk: "x" })).toEqual({ planFile: "PLAN.md" });
     expect(presetFieldsForMeta("custom", { planFile: "x" })).toBeUndefined();
+    expect(presetFieldsForMeta("custom", { planFile: "x", source: "todo/" })).toEqual({ source: "todo/" });
   });
 
   it("labels the card's source line", () => {
     expect(presetSourceLabel({ kind: "plan", fields: { planFile: "PLAN.md" } })).toBe("Plan: PLAN.md");
     expect(presetSourceLabel({ kind: "plan" })).toBe("Plan: docs/implementation-plan.md");
     expect(presetSourceLabel({ kind: "plan", edited: true })).toBe("Plan: docs/implementation-plan.md（已手改）");
-    expect(presetSourceLabel({ kind: "custom" })).toBe("Custom");
+    expect(presetSourceLabel({ kind: "custom" })).toBe("Own instruction");
+    expect(presetSourceLabel({ kind: "custom", fields: { source: "\norders.md\nmore" } })).toBe("Own: orders.md");
+    expect(presetSourceLabel({ kind: "custom", fields: { source: "x".repeat(70) } })).toBe(`Own: ${"x".repeat(60)}…`);
     expect(presetSourceLabel(null)).toBeNull();
     expect(presetSourceLabel({ kind: "tasks" as never })).toBeNull();
   });
