@@ -557,7 +557,7 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
             // only the instruction — not the engine — can make that harmless.
             <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction("pause")}
               title="当前 session 做完这一项后暂停循环">
-              <Pause className="h-3 w-3" />做完这项后停
+              <Pause className="h-3 w-3" />Stop after this item
             </Button>
           )}
           {finished ? (

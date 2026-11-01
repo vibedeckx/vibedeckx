@@ -586,7 +586,7 @@ describe("ReviewRunPanel repeat loop", () => {
     expect(container.textContent).toContain("剩余 4");
     expect(buttonNamed("发送反馈给原 session")).toBeUndefined();
 
-    await act(async () => { buttonNamed("做完这项后停")!.click(); });
+    await act(async () => { buttonNamed("Stop after this item")!.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("l2", "pause");
     await act(async () => { buttonNamed("结束")!.click(); });
     expect(api.cancelWorkflowRun).toHaveBeenCalledWith("l2");
@@ -610,7 +610,7 @@ describe("ReviewRunPanel repeat loop", () => {
       params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, stopAfterCurrent: true }),
     }));
     expect(container.textContent).toContain("做完这一项后暂停");
-    expect(buttonNamed("做完这项后停")).toBeUndefined();
+    expect(buttonNamed("Stop after this item")).toBeUndefined();
   });
 
   it("a resume gate shows why it stopped, names the iteration that stopped, and continues on click", async () => {
