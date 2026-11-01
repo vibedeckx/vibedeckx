@@ -500,6 +500,41 @@ describe("workflow-run-routes", () => {
     expect(resumeLoop).toHaveBeenCalledWith("l1");
   });
 
+  it("schedule-resume validates `at` on the local route and its path mirror; null cancels", async () => {
+    const gate = { ...run, id: "l1", kind: "repeat", status: "waiting_resume" };
+    const scheduleLoopResume = vi.fn(async () => gate);
+    const app = makeApp({
+      engine: { scheduleLoopResume },
+      runs: { getById: async (id: string) => (id === "l1" ? gate : undefined) },
+    });
+    await app.register(workflowRunRoutes);
+    const hour = 60 * 60_000;
+    for (const url of ["/api/workflow-runs/l1/schedule-resume", "/api/path/workflow-runs/l1/schedule-resume"]) {
+      scheduleLoopResume.mockClear();
+      const post = (payload: Record<string, unknown>) => app.inject({ method: "POST", url, payload });
+
+      const past = await post({ at: Date.now() - 1_000 });
+      expect(past.statusCode).toBe(400);
+      expect(past.json().error).toBe("at must be in the future");
+      const tooFar = await post({ at: Date.now() + 7 * 24 * hour + hour });
+      expect(tooFar.statusCode).toBe(400);
+      expect(tooFar.json().error).toBe("at must be at most 7 days ahead");
+      expect((await post({})).statusCode).toBe(400);
+      expect((await post({ at: "tomorrow" })).statusCode).toBe(400);
+      expect(scheduleLoopResume).not.toHaveBeenCalled();
+
+      const at = Date.now() + 5 * hour;
+      expect((await post({ at })).statusCode).toBe(200);
+      expect(scheduleLoopResume).toHaveBeenLastCalledWith("l1", at);
+      expect((await post({ at: null })).statusCode).toBe(200);
+      expect(scheduleLoopResume).toHaveBeenLastCalledWith("l1", null);
+      expect((await app.inject({ method: "POST", url: url.replace("l1", "nope"), payload: { at: null } })).statusCode).toBe(404);
+    }
+
+    scheduleLoopResume.mockRejectedValueOnce(new WorkflowError("bad-state", "循环不在等待继续的状态"));
+    expect((await app.inject({ method: "POST", url: "/api/workflow-runs/l1/schedule-resume", payload: { at: null } })).statusCode).toBe(409);
+  });
+
   it("gate finalize calls requestFinalVerdict and returns the run", async () => {
     const requestFinalVerdict = vi.fn(async () => ({ ...run, status: "waiting_reviewer" }));
     const app = makeApp({ engine: { requestFinalVerdict } });

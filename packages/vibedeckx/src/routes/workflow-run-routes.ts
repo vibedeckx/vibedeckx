@@ -13,15 +13,27 @@ import { bindRemoteSessionMapping, createRemoteWorkflowReviewer, ensureRemoteAge
 import type { ReviewSpan, WorkflowRun } from "../storage/types.js";
 import { publishRemoteLoopSessions } from "../remote-loop-sessions.js";
 import {
-  REPEAT_LOOP_PRESET_KINDS, REPEAT_MAX_ITERATIONS_LIMIT, REPEAT_MAX_MINUTES_LIMIT,
+  REPEAT_LOOP_PRESET_KINDS, REPEAT_MAX_ITERATIONS_LIMIT, REPEAT_MAX_MINUTES_LIMIT, RESUME_SCHEDULE_MAX_MS,
   type RepeatLoopPreset, type StartRepeatLoopOptions,
 } from "../workflow-repeat-loop.js";
 import type { AgentType } from "../agent-types.js";
+import { LOOP_V2_CAPABILITY } from "../reverse-connect-capabilities.js";
 
 /** Worker route a hub needs before it may start a repeat loop there (absent on older workers). */
 export const REPEAT_LOOP_CAPABILITY = "http:POST /api/path/workflow-loops";
 
 type RepeatLoopBody = Omit<StartRepeatLoopOptions, "project" | "branch">;
+
+/** A gate's scheduled-resume time: epoch ms in the next 7 days, `null` = cancel; else the 400 message. */
+export function parseScheduleResumeAt(body: Record<string, unknown> | undefined, now: number): number | null | string {
+  const at = body?.at;
+  if (at === undefined) return "at is required (epoch milliseconds, or null to cancel)";
+  if (at === null) return null;
+  if (typeof at !== "number" || !Number.isSafeInteger(at)) return "at must be epoch milliseconds or null";
+  if (at <= now) return "at must be in the future";
+  if (at - now > RESUME_SCHEDULE_MAX_MS) return "at must be at most 7 days ahead";
+  return at;
+}
 
 /** Validated start parameters of a repeat-until-done loop, or the 400 message. */
 export function parseRepeatLoopBody(body: Record<string, unknown> | undefined): RepeatLoopBody | string {
@@ -901,6 +913,12 @@ async function routes(fastify: FastifyInstance) {
         if (!server?.worker_capabilities?.includes(REPEAT_LOOP_CAPABILITY)) {
           return reply.code(409).send({ error: "This machine's worker doesn't support loops yet — update the worker and try again.", code: "worker_unsupported" });
         }
+        // Gated on the VALUE: an old worker would drop `handoff: true` and run
+        // the loop without notes, silently. A false (the dialog always sends
+        // one) is what an old worker does anyway.
+        if (parsed.handoff === true && !server.worker_capabilities.includes(LOOP_V2_CAPABILITY)) {
+          return reply.code(409).send({ error: "This machine's worker doesn't support handoff notes yet — update the worker, or turn handoff off and try again.", code: "worker_unsupported" });
+        }
         const result = await proxyAuto({ remoteServerId }, "POST", "/api/path/workflow-loops", {
           ...parsed, path: remoteConfig.remote_path, branch,
           // Stable id: a retried start returns the same loop instead of a second one.
@@ -1116,6 +1134,42 @@ async function routes(fastify: FastifyInstance) {
     }
   });
 
+  // Scheduled resume of a loop gate (loop-presets design §4.3). A route of its
+  // own rather than an `at` on gate/resume: an old worker would ignore `at`
+  // and resume NOW — so this has to be a capability the hub can check.
+  fastify.post<{ Params: { id: string }; Body: Record<string, unknown> }>(
+    "/api/workflow-runs/:id/schedule-resume", async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const at = parseScheduleResumeAt(req.body, Date.now());
+      if (typeof at === "string") return reply.code(400).send({ error: at });
+      if (req.params.id.startsWith("remote-")) {
+        const info = await resolveRemoteRun(req.params.id, userId);
+        if (!info) return reply.code(404).send({ error: "Run not found" });
+        const server = await fastify.storage.remoteServers.getById(info.remoteServerId);
+        if (!server?.worker_capabilities?.includes(LOOP_V2_CAPABILITY)) {
+          return reply.code(409).send({ error: "This machine's worker doesn't support scheduled resume yet — update the worker and try again.", code: "worker_unsupported" });
+        }
+        const result = await proxyAuto(info, "POST", `/api/path/workflow-runs/${info.bareRunId}/schedule-resume`, { at });
+        if (!result.ok) return sendProxyFailure(reply, result);
+        const localRun = mapRemoteRun((result.data as { run: WorkflowRun }).run, info.remoteServerId, info.projectId);
+        trackRemoteRun(localRun, info);
+        fastify.eventBus.emit({ type: "workflow:run-updated", projectId: info.projectId, branch: localRun.branch, run: localRun });
+        return reply.send({ run: localRun });
+      }
+      const existing = await fastify.storage.workflowRuns.getById(req.params.id);
+      if (!existing) return reply.code(404).send({ error: "Run not found" });
+      const project = await fastify.storage.projects.getById(existing.project_id, userId);
+      if (!project) return reply.code(404).send({ error: "Run not found" });
+      try {
+        return reply.send({ run: await fastify.workflowEngine.scheduleLoopResume(req.params.id, at) });
+      } catch (err) {
+        const status = errStatus(err);
+        if (status) return reply.code(status).send({ error: (err as Error).message });
+        throw err;
+      }
+    });
+
   // ---- Remote-provider (path-based) mirrors --------------------------------
   // Served under /api/path/* so the remote-provider gate in server.ts applies.
   // A front server proxies here for remote workspaces: it knows the worker's
@@ -1304,6 +1358,24 @@ async function routes(fastify: FastifyInstance) {
       throw err;
     }
   });
+
+  // Worker side of schedule-resume. Bare run id, like gate/cancel; the
+  // mirror exists so the route is a registry entry the hub can gate on.
+  fastify.post<{ Params: { id: string }; Body: Record<string, unknown> }>(
+    "/api/path/workflow-runs/:id/schedule-resume", async (req, reply) => {
+      const userId = requireRawAuth(req, reply);
+      if (userId === null) return;
+      const at = parseScheduleResumeAt(req.body, Date.now());
+      if (typeof at === "string") return reply.code(400).send({ error: at });
+      if (!(await fastify.storage.workflowRuns.getById(req.params.id))) return reply.code(404).send({ error: "Run not found" });
+      try {
+        return reply.send({ run: await fastify.workflowEngine.scheduleLoopResume(req.params.id, at) });
+      } catch (err) {
+        const status = errStatus(err);
+        if (status) return reply.code(status).send({ error: (err as Error).message });
+        throw err;
+      }
+    });
 
   fastify.get<{
     Querystring: { sourceSessionId?: string };

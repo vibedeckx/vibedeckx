@@ -45,6 +45,8 @@ const CHECK_OUTPUT_TAIL = 600;
 const ABNORMAL_END_RECHECK_MS = 1_500;
 /** How much of an iteration's error text the gate reason carries. */
 const ABNORMAL_END_DETAIL_MAX = 300;
+/** How far ahead a gate's scheduled resume may be set (loop-presets design §4.3). */
+export const RESUME_SCHEDULE_MAX_MS = 7 * 24 * 60 * 60_000;
 
 /** Persisted on every iteration's run row (`workflow_runs.params`), copied forward. */
 export interface RepeatLoopParams {
@@ -86,6 +88,11 @@ export interface RepeatLoopParams {
    * writes none, and kept on gates and through resume. Never parsed.
    */
   handoffNote?: string | null;
+  /**
+   * Epoch ms a gate resumes itself at — set by the user from the gate, picked
+   * up by checkDeadlines. Only ever on a `waiting_resume` run; a resume clears it.
+   */
+  resumeAt?: number | null;
 }
 
 export const REPEAT_LOOP_PRESET_KINDS = ["plan", "custom"] as const;
@@ -608,6 +615,10 @@ export class RepeatLoopRunner {
    */
   async checkDeadlines(now: number): Promise<void> {
     for (const run of await this.storage.workflowRuns.getAllActive()) {
+      if (run.kind === "repeat" && run.status === "waiting_resume") {
+        await this.resumeIfDue(run, now).catch((err) => console.error(`[RepeatLoop] scheduled resume of ${run.id} failed:`, err));
+        continue;
+      }
       if (run.kind !== "repeat" || run.status !== "running_task") continue;
       const params = parseRepeatParams(run);
       if (!params || now - params.startedAt <= params.maxMinutes * 60_000) continue;
@@ -619,6 +630,29 @@ export class RepeatLoopRunner {
       // below cannot be mistaken for "stopped by the user".
       if (await this.endIteration(step, "time cap reached", "failed", reason, "max-minutes")) {
         await this.stop(run.source_session_id, STOP_NOTE.timeCap);
+      }
+    }
+  }
+
+  /**
+   * A gate whose scheduled time has come. The params read here are the
+   * resume's precondition: if the user cancelled or moved the schedule while
+   * resume() was awaiting the previous session, its CAS misses and nothing
+   * starts — the next tick reads again.
+   */
+  private async resumeIfDue(gate: WorkflowRun, now: number): Promise<void> {
+    const resumeAt = parseRepeatParams(gate)?.resumeAt;
+    if (typeof resumeAt !== "number" || resumeAt > now) return;
+    try {
+      await this.resume(gate, { expectParams: gate.params });
+    } catch (err) {
+      if (!(err instanceof RepeatLoopError)) throw err;
+      if (err.code !== "session-busy") return; // the gate moved on under us; nothing to retry
+      // Keep resumeAt: the next tick tries again. Same CAS, so a schedule
+      // cancelled meanwhile is not overwritten with a stale reason.
+      const error = `定时继续未能启动：${err.message}下一分钟会再试。`;
+      if (gate.error !== error && await this.storage.workflowRuns.transition(gate.id, "waiting_resume", "waiting_resume", { error }, gate.params)) {
+        this.host.emitRunUpdated((await this.storage.workflowRuns.getById(gate.id))!);
       }
     }
   }
@@ -690,33 +724,62 @@ export class RepeatLoopRunner {
     throw new RepeatLoopError("bad-state", "循环状态变化太快，请再试一次");
   }
 
-  async resume(run: WorkflowRun): Promise<WorkflowRun> {
+  /**
+   * `expectParams`: the gate's `params` exactly as the caller read them — the
+   * scheduled resume's guard (see resumeIfDue). A manual resume passes none.
+   */
+  async resume(run: WorkflowRun, opts: { expectParams?: string | null } = {}): Promise<WorkflowRun> {
     const gate = await this.activeOf(run);
     if (!gate || gate.status !== "waiting_resume") throw new RepeatLoopError("bad-state", "循环不在等待继续的状态");
     const params = parseRepeatParams(gate);
     if (!params) throw new RepeatLoopError("bad-state", "循环参数损坏");
 
     // Two sessions editing one worktree is the thing to prevent.
-    if (params.prevSessionId) {
-      if ((await this.storage.agentSessions.getById(params.prevSessionId))?.status === "running") {
-        throw new RepeatLoopError("session-busy", "上一次迭代的 session 还在运行。等它停下，或先停掉它。");
-      }
-      await this.stop(params.prevSessionId, STOP_NOTE.resumed);
+    if (params.prevSessionId && (await this.storage.agentSessions.getById(params.prevSessionId))?.status === "running") {
+      throw new RepeatLoopError("session-busy", "上一次迭代的 session 还在运行。等它停下，或先停掉它。");
     }
     const overCap = gate.max_rounds !== null && gate.round > gate.max_rounds;
     const overTime = Date.now() - params.startedAt > params.maxMinutes * 60_000;
-    const nextParams: RepeatLoopParams = { ...params, stopAfterCurrent: false, dispatchFailed: false, ...(overTime ? { startedAt: Date.now() } : {}) };
+    const { resumeAt: _scheduled, ...rest } = params;
+    const nextParams: RepeatLoopParams = { ...rest, stopAfterCurrent: false, dispatchFailed: false, ...(overTime ? { startedAt: Date.now() } : {}) };
     // A fresh session id: the old one may be a tombstone from a failed dispatch.
     const resumed = await this.storage.workflowRuns.transition(gate.id, "waiting_resume", "preparing", {
       error: null, params: JSON.stringify(nextParams), source_session_id: randomUUID(),
       ...(overCap ? { max_rounds: gate.max_rounds! + params.maxIterations } : {}),
-    });
+    }, opts.expectParams);
     if (!resumed) throw new RepeatLoopError("bad-state", "循环状态已变化");
+    // After the CAS, not before: a resume that loses it (a schedule cancelled
+    // meanwhile) must leave the previous session alone. It is not running —
+    // checked above — so the order changes nothing for a resume that wins.
+    if (params.prevSessionId) await this.stop(params.prevSessionId, STOP_NOTE.resumed);
     const preparing = (await this.storage.workflowRuns.getById(gate.id))!;
     this.host.untrack(gate);
     this.host.track(preparing);
     this.host.emitRunUpdated(preparing);
     return this.dispatchIteration(preparing.id);
+  }
+
+  /**
+   * Set (`at`) or clear (`null`) the gate's scheduled resume. Addressed by
+   * loop like pause; `at` was validated by the route. Conditional on the
+   * params just read, so a concurrent resume or a second schedule is never
+   * overwritten with a stale copy.
+   */
+  async scheduleResume(run: WorkflowRun, at: number | null): Promise<WorkflowRun> {
+    for (let attempt = 0; attempt < CANCEL_ATTEMPTS; attempt++) {
+      const gate = await this.activeOf(run);
+      if (!gate || gate.status !== "waiting_resume") throw new RepeatLoopError("bad-state", "循环不在等待继续的状态");
+      const params = parseRepeatParams(gate);
+      if (!params) throw new RepeatLoopError("bad-state", "循环参数损坏");
+      const { resumeAt: _previous, ...rest } = params;
+      const next: RepeatLoopParams = at === null ? rest : { ...rest, resumeAt: at };
+      if (await this.storage.workflowRuns.transition(gate.id, "waiting_resume", "waiting_resume", { params: JSON.stringify(next) }, gate.params)) {
+        const updated = (await this.storage.workflowRuns.getById(gate.id))!;
+        this.host.emitRunUpdated(updated);
+        return updated;
+      }
+    }
+    throw new RepeatLoopError("bad-state", "循环状态变化太快，请再试一次");
   }
 
   // ---------- boot ----------

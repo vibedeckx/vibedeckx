@@ -373,6 +373,93 @@ describe("repeat-until-done loop", () => {
     });
   });
 
+  // Loop-presets design §4.3: a gate resumes itself at a time the user picked.
+  describe("scheduled resume", () => {
+    async function blockedGate() {
+      const first = await startLoop();
+      await finish(first, "Status: blocked");
+      return { first, gate: await onlyActive() };
+    }
+
+    it("the tick resumes a gate whose time has come, and not before; the resume clears resumeAt", async () => {
+      const { first, gate } = await blockedGate();
+      const at = Date.now() + 60 * 60_000;
+      const scheduled = await engine.scheduleLoopResume(first.id, at); // a stale id addresses the loop
+      expect(scheduled).toMatchObject({ id: gate.id, status: "waiting_resume" });
+      expect(parseRepeatParams(scheduled)?.resumeAt).toBe(at);
+
+      await engine.checkLoopDeadlines(at - 1);
+      expect((await onlyActive()).status).toBe("waiting_resume");
+      expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
+
+      await engine.checkLoopDeadlines(at);
+      const resumed = await onlyActive();
+      expect(resumed).toMatchObject({ id: gate.id, status: "running_task", error: null });
+      expect(parseRepeatParams(resumed)).not.toHaveProperty("resumeAt");
+      expect(agentOps.activateReviewer).toHaveBeenCalledTimes(2);
+      expect(stopped).toEqual([first.source_session_id]);
+    });
+
+    it("null cancels: a later tick starts nothing", async () => {
+      const { first } = await blockedGate();
+      const at = Date.now() + 60_000;
+      await engine.scheduleLoopResume(first.id, at);
+      const cleared = await engine.scheduleLoopResume(first.id, null);
+      expect(parseRepeatParams(cleared)).not.toHaveProperty("resumeAt");
+      await engine.checkLoopDeadlines(at + 60_000);
+      expect((await onlyActive()).status).toBe("waiting_resume");
+      expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
+    });
+
+    // The tick reads params, then resume() awaits the previous session before
+    // its CAS; the user's change lands in between.
+    for (const [what, change] of [
+      ["cancelled", null],
+      ["moved later", 3 * 60 * 60_000],
+    ] as const) {
+      it(`a schedule ${what} after the tick read it does not start the loop`, async () => {
+        const { first, gate } = await blockedGate();
+        const at = Date.now() + 60_000;
+        await engine.scheduleLoopResume(gate.id, at);
+        const real = storage.agentSessions.getById.bind(storage.agentSessions);
+        vi.spyOn(storage.agentSessions, "getById").mockImplementation(async (id: string) => {
+          if (id === first.source_session_id) {
+            vi.mocked(storage.agentSessions.getById).mockRestore();
+            await engine.scheduleLoopResume(gate.id, change === null ? null : at + change);
+          }
+          return real(id);
+        });
+        await engine.checkLoopDeadlines(at);
+        const after = await onlyActive();
+        expect(after.status).toBe("waiting_resume");
+        expect(parseRepeatParams(after)?.resumeAt).toBe(change === null ? undefined : at + change);
+        expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
+        expect(stopped).toEqual([]); // the previous session is left alone too
+      });
+    }
+
+    it("previous session still running: keeps resumeAt, says why on the gate, and the next tick resumes", async () => {
+      const { first, gate } = await blockedGate();
+      const at = Date.now() + 60_000;
+      await engine.scheduleLoopResume(gate.id, at);
+      await storage.agentSessions.updateStatus(first.source_session_id, "running"); // the user is talking to it
+      await engine.checkLoopDeadlines(at);
+      const busy = await onlyActive();
+      expect(busy.status).toBe("waiting_resume");
+      expect(busy.error).toContain("定时继续未能启动");
+      expect(parseRepeatParams(busy)?.resumeAt).toBe(at);
+
+      await storage.agentSessions.updateStatus(first.source_session_id, "stopped");
+      await engine.checkLoopDeadlines(at + 60_000);
+      expect(await onlyActive()).toMatchObject({ id: gate.id, status: "running_task", error: null });
+    });
+
+    it("only a gate can be scheduled", async () => {
+      const first = await startLoop();
+      await expect(engine.scheduleLoopResume(first.id, Date.now() + 60_000)).rejects.toMatchObject({ code: "bad-state" });
+    });
+  });
+
   it("one loop per workspace", async () => {
     await startLoop();
     await expect(startLoop()).rejects.toMatchObject({ code: "session-busy" });

@@ -704,6 +704,12 @@ export class WorkflowEngine {
     return this.mapRepeatErrors(() => this.repeat.resume(run));
   }
 
+  /** Set (`at`, epoch ms) or clear (`null`) a loop gate's scheduled resume. */
+  async scheduleLoopResume(runId: string, at: number | null): Promise<WorkflowRun> {
+    const run = await this.requireRepeatRun(runId);
+    return this.mapRepeatErrors(() => this.repeat.scheduleResume(run, at));
+  }
+
   private async requireRepeatRun(runId: string): Promise<WorkflowRun> {
     const run = await this.storage.workflowRuns.getById(runId);
     if (!run || run.kind !== "repeat") throw new WorkflowError("bad-state", "这不是一个循环");

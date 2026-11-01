@@ -806,6 +806,58 @@ describe("workflow-run remote proxying (front server)", () => {
     });
   });
 
+  // Loop-presets cut two (design §4.3, §6): one capability marks the release.
+  describe("loop v2 capability", () => {
+    const LOOP_CAP = ["http:POST /api/path/workflow-loops"];
+    const V2_CAP = [...LOOP_CAP, "http:POST /api/path/workflow-runs/:param/schedule-resume"];
+    const loopRun = { ...bareRun, id: UUID_RUN, kind: "repeat", status: "waiting_resume", loop_id: UUID_RUN, round: 2,
+      params: JSON.stringify({ name: "Orders", prompt: "p", anchorSessionId: "it1", maxMinutes: 60, startedAt: Date.now() }) };
+
+    it("an old worker: handoff true is a 409; handoff false starts normally and sends no handoff", async () => {
+      makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER, workerCapabilities: LOOP_CAP });
+      await app.register(workflowRunRoutes);
+      const refused = await app.inject({ method: "POST", url: "/api/workflow-loops", payload: { projectId: UUID_PROJECT, prompt: "p", handoff: true } });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().code).toBe("worker_unsupported");
+      expect(proxyMock).not.toHaveBeenCalled();
+
+      proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: { ...loopRun, status: "running_task" } } });
+      const started = await app.inject({ method: "POST", url: "/api/workflow-loops", payload: { projectId: UUID_PROJECT, prompt: "p", handoff: false } });
+      expect(started.statusCode).toBe(201);
+      expect(proxyMock.mock.calls[0][3]).not.toHaveProperty("handoff");
+    });
+
+    it("a v2 worker gets handoff true", async () => {
+      makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER, workerCapabilities: V2_CAP });
+      await app.register(workflowRunRoutes);
+      proxyMock.mockResolvedValueOnce({ ok: true, status: 201, data: { run: { ...loopRun, status: "running_task" } } });
+      const started = await app.inject({ method: "POST", url: "/api/workflow-loops", payload: { projectId: UUID_PROJECT, prompt: "p", handoff: true } });
+      expect(started.statusCode).toBe(201);
+      expect(proxyMock.mock.calls[0][3]).toMatchObject({ handoff: true });
+    });
+
+    it("schedule-resume: 409 on an old worker, else proxied to the worker's path mirror", async () => {
+      makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER, workerCapabilities: LOOP_CAP });
+      await app.register(workflowRunRoutes);
+      const at = Date.now() + 60 * 60_000;
+      const refused = await app.inject({ method: "POST", url: `/api/workflow-runs/${UUID_RUN_ID}/schedule-resume`, payload: { at } });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().code).toBe("worker_unsupported");
+      expect((await app.inject({ method: "POST", url: `/api/workflow-runs/${UUID_RUN_ID}/schedule-resume`, payload: { at: 1 } })).statusCode).toBe(400);
+      expect(proxyMock).not.toHaveBeenCalled();
+      await app.close();
+
+      const { emit } = makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER, workerCapabilities: V2_CAP });
+      await app.register(workflowRunRoutes);
+      proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { run: loopRun } });
+      const res = await app.inject({ method: "POST", url: `/api/workflow-runs/${UUID_RUN_ID}/schedule-resume`, payload: { at } });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().run.id).toBe(UUID_RUN_ID);
+      expect(proxyMock.mock.calls[0].slice(1, 4)).toEqual(["POST", `/api/path/workflow-runs/${UUID_RUN}/schedule-resume`, { at }]);
+      expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "workflow:run-updated" }));
+    });
+  });
+
   it("gate 404s an unknown remote run id (empty remoteRunMap)", async () => {
     makeApp();
     await app.register(workflowRunRoutes);

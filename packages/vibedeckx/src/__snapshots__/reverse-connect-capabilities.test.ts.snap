@@ -72,6 +72,7 @@ exports[`reverse-connect capability registry > registry snapshot (a diff here IS
   "http:POST /api/path/workflow-loops",
   "http:POST /api/path/workflow-runs",
   "http:POST /api/path/workflow-runs/:param/activate",
+  "http:POST /api/path/workflow-runs/:param/schedule-resume",
   "http:POST /api/path/workflow-runs/prepare",
   "http:POST /api/path/worktrees",
   "http:POST /api/path/worktrees/anchor",

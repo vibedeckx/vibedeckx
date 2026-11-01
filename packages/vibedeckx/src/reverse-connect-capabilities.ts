@@ -115,6 +115,10 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   // The loop's pause / resume ride the existing gate route as new `action`
   // values — only a worker that has this route can have a loop to act on.
   "http:POST /api/path/workflow-loops": { since: "0.3.42", summary: "发起 repeat-until-done 循环(引擎在 worker,逐迭代新建 session)" },
+  // Additive. Doubles as the marker of every loop-presets cut-two feature
+  // shipped in the same worker release (LOOP_V2_CAPABILITY below): the hub
+  // 409s a `handoff: true` start and a schedule on a worker without it.
+  "http:POST /api/path/workflow-runs/:param/schedule-resume": { since: "0.3.55", summary: "循环闸门定时继续" },
 
   // --- Git / worktrees / diff ---
   // Response gained `gitError` (additive): a worker whose Git cannot read the
@@ -185,5 +189,11 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   // passthrough capability instead of per-route entries.
   "passthrough:browser-proxy": { since: "0.2.0", summary: "浏览器预览透传(任意 path+port)" },
 };
+
+/**
+ * Loop-presets design §4.3/§6: a worker serving schedule-resume also parses
+ * `handoff` on a loop start. Gate on the value being true, never on presence.
+ */
+export const LOOP_V2_CAPABILITY = "http:POST /api/path/workflow-runs/:param/schedule-resume";
 
 export const WORKER_CAPABILITY_KEYS = Object.keys(WORKER_CAPABILITIES);
