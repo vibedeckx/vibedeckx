@@ -113,6 +113,10 @@ export const ClaudeResultMessageSchema = z.looseObject({
   subtype: z.string().optional(),
   error: z.string().optional(),
   result: z.string().optional(),
+  // The real failure flag: auth / usage-limit / API errors arrive with
+  // `subtype: "success"`, `is_error: true` and the message in `result`.
+  is_error: z.boolean().optional(),
+  terminal_reason: z.string().optional(),
   duration_ms: z.number().optional(),
   duration_api_ms: z.number().optional(),
   cost_usd: z.number().optional(),

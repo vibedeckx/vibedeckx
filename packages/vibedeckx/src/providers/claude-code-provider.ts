@@ -188,19 +188,26 @@ export class ClaudeCodeProvider implements AgentProvider {
     }
 
     if (msg.type === "result") {
-      const resultMsg = msg as { type: "result"; subtype?: string; error?: string; duration_ms?: number; cost_usd?: number };
-      const events: ParsedAgentEvent[] = [];
-      if (resultMsg.subtype === "error" && resultMsg.error) {
-        events.push({ type: "error", message: resultMsg.error });
-      }
-      events.push({
+      const resultMsg = msg as {
+        type: "result"; subtype?: string; is_error?: boolean; result?: string; terminal_reason?: string;
+        error?: string; duration_ms?: number; cost_usd?: number;
+      };
+      // Auth, usage-limit and API errors end the turn as `subtype: "success"`
+      // with `is_error: true` and the message in `result` — `is_error` is the
+      // real failure flag; `subtype: "error"` is kept for older CLIs.
+      const failed = resultMsg.subtype === "error" || resultMsg.is_error === true;
+      // The error rides on the result only: the session manager turns it into
+      // the transcript's error entry (one entry, not one per event).
+      return [{
         type: "result",
-        subtype: resultMsg.subtype === "error" ? "error" : "success",
-        error: resultMsg.error,
+        subtype: failed ? "error" : "success",
+        error: failed
+          ? resultMsg.error || resultMsg.result
+            || `Claude Code ended the turn with an error (${resultMsg.terminal_reason ?? resultMsg.subtype ?? "unknown"})`
+          : resultMsg.error,
         duration_ms: resultMsg.duration_ms,
         cost_usd: resultMsg.cost_usd,
-      });
-      return events;
+      }];
     }
 
     return [];

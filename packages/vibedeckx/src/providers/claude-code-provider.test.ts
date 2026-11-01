@@ -332,3 +332,35 @@ describe("ClaudeCodeProvider background-task lifecycle parsing", () => {
     });
   });
 });
+
+/**
+ * Turn-ending result lines. The failure shape is real output from Claude Code
+ * with an invalid ANTHROPIC_API_KEY (2026-11-01): auth and usage-limit errors
+ * arrive as `subtype: "success"` with `is_error: true`, not as `subtype: "error"`.
+ */
+describe("ClaudeCodeProvider result parsing", () => {
+  const provider = new ClaudeCodeProvider();
+  const parse = (line: object) => provider.parseStdoutLine(JSON.stringify(line), SESSION);
+
+  it("treats is_error: true as a failed turn carrying the result text", () => {
+    expect(parse({
+      type: "result", subtype: "success", is_error: true, result: "Invalid API key · Fix external API key",
+      terminal_reason: "api_error", duration_ms: 12, total_cost_usd: 0,
+    })).toEqual([{ type: "result", subtype: "error", error: "Invalid API key · Fix external API key", duration_ms: 12, cost_usd: undefined }]);
+  });
+
+  it("names the terminal reason when an is_error result has no text", () => {
+    expect(parse({ type: "result", subtype: "error_during_execution", is_error: true, terminal_reason: "api_error" }))
+      .toEqual([expect.objectContaining({ type: "result", subtype: "error", error: "Claude Code ended the turn with an error (api_error)" })]);
+  });
+
+  it("keeps the legacy subtype: error shape, with the error once (on the result, not as a second event)", () => {
+    expect(parse({ type: "result", subtype: "error", error: "boom" }))
+      .toEqual([expect.objectContaining({ type: "result", subtype: "error", error: "boom" })]);
+  });
+
+  it("leaves an ordinary success alone and does not copy its text into error", () => {
+    expect(parse({ type: "result", subtype: "success", is_error: false, result: "Hello", duration_ms: 5 }))
+      .toEqual([{ type: "result", subtype: "success", error: undefined, duration_ms: 5, cost_usd: undefined }]);
+  });
+});
