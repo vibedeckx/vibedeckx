@@ -60,10 +60,6 @@ export const PLAN_PRESET: LoopPreset = {
       placeholder: "npm run typecheck\nnpm test",
       hint: "The agent runs these. The Check command below is a separate check the loop runs itself.",
     },
-    {
-      key: "readyResources", label: "Already available — not a blocker", multiline: true,
-      placeholder: "gh is logged in\nThe dev database is configured",
-    },
   ],
   defaults: {
     planFile: "docs/implementation-plan.md",
@@ -72,7 +68,6 @@ export const PLAN_PRESET: LoopPreset = {
     readDocs: "",
     constraints: "",
     verifyCommands: "",
-    readyResources: "",
   },
   handoffByDefault: true,
 };
@@ -150,7 +145,6 @@ function planInstruction(fields: Record<string, string>): string {
   const readDocs = lines(fields.readDocs);
   const constraints = lines(fields.constraints);
   const verify = lines(fields.verifyCommands);
-  const ready = lines(fields.readyResources);
 
   const sections: string[] = [];
   sections.push(
@@ -204,13 +198,13 @@ function planInstruction(fields: Record<string, string>): string {
     "The session is not over until the commit is made. Do not push.",
   ].join("\n"));
 
-  const report = [
+  sections.push([
+    "## 7. Report",
+    "",
     `- Every step in the plan is done (no \`${pending}\` left): end with \`Status: done\`.`,
     "- Something only a human can provide blocks the way (secrets, credentials, external accounts, a decision only a person can make): commit as usual, then end with `Status: blocked` and say exactly what is needed and where it goes (which environment variable or file). Do not work around it, do not fake secrets, and never write secrets into the repository.",
-  ];
-  if (ready.length) report.push(`  Already available — not a blocker:\n${bullets(ready, "  ")}`);
-  report.push("- Otherwise: end with `Status: continue`, and set `Item:` to the step number.");
-  sections.push(`## 7. Report\n\n${report.join("\n")}`);
+    "- Otherwise: end with `Status: continue`, and set `Item:` to the step number.",
+  ].join("\n"));
 
   return sections.join("\n\n");
 }
