@@ -1,0 +1,104 @@
+---
+title: Loops
+description: Run one instruction repeatedly, a fresh agent session per item, until nothing is left.
+---
+
+A loop works through a list of items without you starting each one. It sends the same instruction again and again, each time to a new agent session that handles one item, until a session reports there is nothing left. A typical use is having an agent implement a multi-step plan, one step and one commit per session.
+
+Each item gets its own session, listed in the sidebar like any other, so you can open any of them and read what it did.
+
+## Start a loop
+
+Open **Main Chat** for the workspace and click the loop button (the repeat icon) in its header. A workspace runs one loop at a time; the button is disabled while one is running.
+
+Pick a **Preset**:
+
+- **Plan file**: works through a plan file in the repository, one step per session. Each session implements the step, verifies it, commits it and stops.
+- **Custom**: you write the whole instruction yourself.
+
+### Plan file
+
+Fill in two fields:
+
+| Field | What to enter |
+|---|---|
+| **Plan file** | Path to the plan in the repository (default `docs/implementation-plan.md`). Any numbered list of steps works; you don't need checkboxes or status markers. |
+| **Docs to read every session** | Optional. One path per line, for example design docs or `AGENTS.md`. If two of them can disagree, add a line saying which one wins. |
+
+Before changing anything, each session checks whether its step is already done, for example after a restart. If the step is done, the session reports it instead of redoing it. If the plan file tracks status per step (checkboxes, status lines), the session updates that step in the file's own format. Sessions commit but never push.
+
+The **Instruction** tab shows the full text the preset generates from your fields. You can edit it there. Once you do, the text is what runs and the form stops applying. **Regenerate from form** restores the generated text and discards your edits.
+
+### Custom
+
+Write the instruction in the **Instruction** box. No session remembers the previous one, so the instruction must say:
+
+- where to find the next unprocessed item,
+- how to mark an item as done.
+
+Make each item safe to process twice: an interrupted item may be picked up again.
+
+### Settings
+
+| Setting | Meaning |
+|---|---|
+| **Agent** | Claude Code or Codex. |
+| **Stop after … items** | Pause after this many sessions (default 20, at most 200). |
+| **Stop after … minutes** | Pause after this much time (default 240, at most 1440). |
+| **Check command** | Optional, for example `npm test`. Runs in the worktree after each item; a non-zero exit stops the loop. |
+| **Keep a handoff note between sessions** | See [Handoff notes](#handoff-notes). On by default for Plan file, off for Custom. |
+| **Run one item first, then decide** | The loop pauses after the first item so you can read that session before letting the rest run. |
+
+The dialog remembers your last settings for each project.
+
+<Callout type="warn">
+  Loop sessions run in edit mode, and nothing asks you to confirm between items. Use a check command, or **Run one item first**, until you trust the instruction.
+</Callout>
+
+## How a session reports back
+
+The loop appends a closing protocol to your instruction, asking every session to end with:
+
+```
+Status: continue | done | blocked
+Item: <the item it processed>
+Remaining: <how many are left, if known>
+```
+
+- `continue`: the session finished one item, and the loop starts the next session.
+- `done`: nothing is left, so the loop finishes.
+- `blocked`: the session needs something only a person can provide, so the loop stops and waits for you.
+
+The loop keeps a list of completed items and shows it at the top of each new session's instruction. An item goes on the list only when its session reported `continue` and the check command, if you set one, passed.
+
+## Handoff notes
+
+With **Keep a handoff note between sessions** on, each session ends with a short note: lessons learned, what it did, what to watch out for. The loop passes the note to the next session. Each session rewrites the whole note. If a session writes none, the previous note carries over. The note lives in the loop, not in your repository, so it creates no files or commits.
+
+## Follow and control a loop
+
+The loop's card in Main Chat shows the current session, how many items are done (click to see the list), the last item and the remaining count. If notes are on, it also shows the latest handoff note.
+
+- **做完这项后停** (stop after this item) lets the current session finish, then pauses the loop. Use this rather than ending the loop if you don't want to leave an item half done.
+- **结束** (end) ends the loop right away and stops the running session.
+
+## When the loop stops
+
+The loop pauses and waits for you when:
+
+- a session reports `blocked`,
+- a session's reply has no recognisable `Status` line,
+- the check command fails,
+- a session ends abnormally, for example a usage limit, an invalid API key or a crash; the card shows the error text,
+- two sessions in a row report the same item, which suggests no progress,
+- the item or time limit is reached,
+- you asked it to stop after the current item.
+
+The card says why it stopped and names the session involved. Unless you asked for the pause, the bell notifies you; it also notifies you when the loop finishes. Failed sessions are not retried automatically. To go on:
+
+- **继续循环** (continue the loop) starts the next session now. After an item or time limit, continuing allows the same number of items again, or restarts the timer.
+- **定时继续** (continue later) picks a time: in 1 hour, in 5 hours, or a date and time up to 7 days ahead. The loop continues on its own at that time. This is useful when a usage limit resets at a known hour. The card shows the scheduled time; click **取消** (cancel) to clear it.
+
+## On a connected machine
+
+Loops run on the machine where the workspace lives, and keep running if you close the browser. On a [connected machine](/connect-a-machine), loops need worker 0.3.42 or later. Handoff notes and scheduled continue need 0.3.55 or later. On an older worker, starting a loop with handoff notes on is refused with an option to retry without them, and scheduling a continue is refused. See [Upgrading the worker](/connect-a-machine#upgrading-the-worker).
