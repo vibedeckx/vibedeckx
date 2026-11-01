@@ -142,4 +142,10 @@ describe("TASK_STATUS_INSTRUCTIONS ↔ the New loop dialog's preview", () => {
     const { TASK_STATUS_PROTOCOL_PREVIEW } = (await import(uiModule)) as { TASK_STATUS_PROTOCOL_PREVIEW: string };
     expect(TASK_STATUS_PROTOCOL_PREVIEW).toBe(TASK_STATUS_INSTRUCTIONS);
   });
+
+  it("and the handoff part it appends when the loop keeps a note", async () => {
+    const uiModule = new URL("../../../../apps/vibedeckx-ui/lib/loop-presets.ts", import.meta.url).href;
+    const { HANDOFF_PROTOCOL_PREVIEW } = (await import(uiModule)) as { HANDOFF_PROTOCOL_PREVIEW: string };
+    expect(HANDOFF_PROTOCOL_PREVIEW).toBe(HANDOFF_INSTRUCTIONS);
+  });
 });

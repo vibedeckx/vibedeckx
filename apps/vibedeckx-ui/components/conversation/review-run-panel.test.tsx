@@ -16,6 +16,7 @@ vi.mock("@/lib/api", () => ({
     getActiveWorkflowRuns: vi.fn(async () => ({ runs: [runFixture] })),
     workflowRunGate: vi.fn(async () => runFixture),
     cancelWorkflowRun: vi.fn(async () => runFixture),
+    scheduleResume: vi.fn(async () => runFixture),
   },
   // Pure helper — the real one, so the loop card reads params as it does in the app.
   repeatLoopParams: (run: { params?: string | null }) => {
@@ -26,7 +27,7 @@ vi.mock("@/components/ai-elements/message", () => ({
   MessageResponse: ({ children }: { children?: unknown }) => <div>{String(children ?? "")}</div>,
 }));
 
-import { ReviewRunPanel } from "./review-run-panel";
+import { formatResumeAt, ReviewRunPanel } from "./review-run-panel";
 import { NotificationInboxProvider } from "@/hooks/notification-inbox-context";
 import { api } from "@/lib/api";
 import { resetWorkflowRunsInflightForTests } from "@/lib/workflow-runs-fetch";
@@ -587,5 +588,105 @@ describe("ReviewRunPanel repeat loop", () => {
     expect(container.textContent).toContain("Orders #2");
     await act(async () => { buttonNamed("继续循环")!.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("l3", "resume");
+  });
+
+  describe("handoff note", () => {
+    const withNote = (over: Record<string, unknown> = {}) => loopRun({
+      params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, handoff: true, handoffNote: "Known lessons:\n- run pnpm, not npm", ...over }),
+    });
+
+    it("is collapsed under 上一轮交接 and expands on click", async () => {
+      await renderWith(withNote());
+      expect(container.textContent).toContain("上一轮交接");
+      expect(container.querySelector('[data-testid="loop-handoff-note"]')).toBeNull();
+      await act(async () => { buttonNamed("上一轮交接")!.click(); });
+      expect(container.querySelector('[data-testid="loop-handoff-note"]')!.textContent).toBe("Known lessons:\n- run pnpm, not npm");
+    });
+
+    it("no note yet (first iteration, or handoff off) — no row", async () => {
+      await renderWith(withNote({ handoffNote: null }));
+      expect(container.textContent).not.toContain("上一轮交接");
+    });
+  });
+
+  describe("scheduled resume", () => {
+    const NOW = new Date(2026, 10, 1, 9, 30).getTime();
+    const HOUR = 60 * 60 * 1000;
+    const gateRun = (over: Record<string, unknown> = {}) => loopRun({
+      id: "l3", status: "waiting_resume", round: 3, error: "这次迭代异常结束（failed）：You've hit your limit · resets 2pm",
+      params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, ...over }),
+    });
+    const setInput = async (el: HTMLInputElement, value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(el, value);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+    const customInput = () => container.querySelector<HTMLInputElement>('input[aria-label="自定继续时间"]')!;
+
+    beforeEach(() => { vi.spyOn(Date, "now").mockReturnValue(NOW); });
+    afterEach(() => { vi.mocked(Date.now).mockRestore(); });
+
+    it("+1h / +5h schedule the gate that far from now", async () => {
+      await renderWith(gateRun());
+      await act(async () => { buttonNamed("定时继续")!.click(); });
+      await act(async () => { buttonNamed("+1h")!.click(); });
+      expect(api.scheduleResume).toHaveBeenCalledWith("l3", NOW + HOUR);
+      await act(async () => { buttonNamed("定时继续")!.click(); });
+      await act(async () => { buttonNamed("+5h")!.click(); });
+      expect(api.scheduleResume).toHaveBeenLastCalledWith("l3", NOW + 5 * HOUR);
+    });
+
+    it("a custom time is sent as that local moment; a past one is refused before any request", async () => {
+      await renderWith(gateRun());
+      await act(async () => { buttonNamed("定时继续")!.click(); });
+      await setInput(customInput(), "2026-11-01T08:00");
+      await act(async () => { buttonNamed("定在这个时间")!.click(); });
+      expect(container.textContent).toContain("这个时间已经过去了");
+      expect(api.scheduleResume).not.toHaveBeenCalled();
+
+      await setInput(customInput(), "2026-11-01T14:05");
+      await act(async () => { buttonNamed("定在这个时间")!.click(); });
+      expect(api.scheduleResume).toHaveBeenCalledWith("l3", new Date(2026, 10, 1, 14, 5).getTime());
+    });
+
+    it("more than 7 days out is refused too", async () => {
+      await renderWith(gateRun());
+      await act(async () => { buttonNamed("定时继续")!.click(); });
+      await setInput(customInput(), "2026-11-09T09:00");
+      await act(async () => { buttonNamed("定在这个时间")!.click(); });
+      expect(container.textContent).toContain("7 天之内");
+      expect(api.scheduleResume).not.toHaveBeenCalled();
+    });
+
+    it("a scheduled gate says when, can be cancelled, and still resumes by hand", async () => {
+      const at = new Date(2026, 10, 1, 14, 0).getTime();
+      await renderWith(gateRun({ resumeAt: at }));
+      expect(container.textContent).toContain("将于 14:00 自动继续");
+      expect(buttonNamed("定时继续")).toBeUndefined();
+      expect(buttonNamed("继续循环")).toBeDefined();
+      await act(async () => { buttonNamed("取消")!.click(); });
+      expect(api.scheduleResume).toHaveBeenCalledWith("l3", null);
+    });
+
+    it("a refused schedule (old worker) shows the server's reason on the card", async () => {
+      vi.mocked(api.scheduleResume).mockRejectedValueOnce(new Error("This machine's worker doesn't support scheduled resume yet — update the worker and try again."));
+      await renderWith(gateRun());
+      await act(async () => { buttonNamed("定时继续")!.click(); });
+      await act(async () => { buttonNamed("+1h")!.click(); });
+      expect(container.textContent).toContain("doesn't support scheduled resume yet");
+    });
+
+    it("only a gate offers it", async () => {
+      await renderWith(loopRun({ params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, resumeAt: NOW + HOUR }) }));
+      expect(buttonNamed("定时继续")).toBeUndefined();
+      expect(container.textContent).not.toContain("自动继续");
+    });
+  });
+
+  it("formatResumeAt adds the date only when it is not today", () => {
+    const now = new Date(2026, 10, 1, 9, 30).getTime();
+    expect(formatResumeAt(new Date(2026, 10, 1, 14, 0).getTime(), now)).toBe("14:00");
+    expect(formatResumeAt(new Date(2026, 10, 3, 7, 5).getTime(), now)).toBe("11/3 07:05");
   });
 });

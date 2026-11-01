@@ -34,6 +34,8 @@ export interface LoopPreset {
   description: string;
   fields: readonly LoopPresetField[];
   defaults: Readonly<Record<string, string>>;
+  /** Initial state of "Keep a handoff note" (design §5.1): a known source makes the note worth it. */
+  handoffByDefault: boolean;
 }
 
 export const PLAN_PRESET: LoopPreset = {
@@ -74,6 +76,7 @@ export const PLAN_PRESET: LoopPreset = {
     decisionsFile: "docs/decisions.md",
     readyResources: "",
   },
+  handoffByDefault: true,
 };
 
 export const CUSTOM_PRESET: LoopPreset = {
@@ -82,6 +85,8 @@ export const CUSTOM_PRESET: LoopPreset = {
   description: "Write the whole instruction yourself.",
   fields: [],
   defaults: {},
+  // Unknown source: a note every turn is not obviously worth its tokens.
+  handoffByDefault: false,
 };
 
 export const LOOP_PRESETS: readonly LoopPreset[] = [PLAN_PRESET, CUSTOM_PRESET];
@@ -106,6 +111,20 @@ export const TASK_STATUS_PROTOCOL_PREVIEW = [
   "  blocked — you could not complete an item and need a human",
   "Item: <one short line identifying the item you processed; omit when done>",
   "Remaining: <how many items are left, if you know; otherwise omit>",
+].join("\n");
+
+/**
+ * Verbatim copy of the engine's `HANDOFF_INSTRUCTIONS` (same file), appended
+ * after the status protocol when the loop keeps a handoff note. Same drift test.
+ */
+export const HANDOFF_PROTOCOL_PREVIEW = [
+  "",
+  "Then, as the very last part of your message, write a handoff note for the next session:",
+  "Handoff:",
+  "<rewrite the whole note each time: a short \"known lessons\" list (project quirks, dead ends,",
+  "conventions) plus the last few handoffs (step, result, decisions, what to watch). Keep it",
+  "under ~40 lines; drop what no longer applies. Do not start any line of it with",
+  "\"Status:\", \"Item:\" or \"Remaining:\".>",
 ].join("\n");
 
 /** Non-empty trimmed lines of a multi-line field. */
@@ -233,6 +252,8 @@ export interface LoopDraft {
   iterations: string;
   minutes: string;
   checkCommand: string;
+  /** Absent in drafts saved before handoff notes existed → the preset's default. */
+  handoff: boolean;
 }
 
 export const loopDraftKey = (projectId: string): string => `loop-draft:${projectId}`;

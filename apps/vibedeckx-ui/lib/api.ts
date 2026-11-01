@@ -2064,12 +2064,29 @@ export interface RepeatLoopParams {
   dispatchFailed?: boolean;
   /** Where the instruction came from (New loop preset); absent on loops started by older workers. */
   preset?: LoopPresetMeta | null;
-  // Loop v2 (loop-presets design, cut two) — declared ahead, not produced yet.
-  confirmDone?: boolean;
-  confirming?: boolean;
+  /** Each iteration closes with a `Handoff:` note the engine passes to the next. */
   handoff?: boolean;
+  /** The latest note — what the next iteration is (or was) handed. Null until one is written. */
   handoffNote?: string | null;
+  /** Gate only: epoch ms the engine resumes the loop on its own. Absent = not scheduled. */
   resumeAt?: number | null;
+}
+
+/** A refused workflow request; `code` is the server's machine-readable reason (e.g. "worker_unsupported"). */
+export class WorkflowRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code: string | undefined,
+  ) {
+    super(message);
+    this.name = "WorkflowRequestError";
+  }
+}
+
+async function workflowRequestError(res: Response, fallback: string): Promise<WorkflowRequestError> {
+  const body = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
+  return new WorkflowRequestError(body?.error || fallback, res.status, body?.code);
 }
 export function repeatLoopParams(run: Pick<WorkflowRun, "params">): RepeatLoopParams | null {
   if (!run.params) return null;
@@ -3828,16 +3845,29 @@ export const api = {
     maxMinutes?: number;
     checkCommand?: string;
     preset?: LoopPresetMeta;
+    /** Always sent by the dialog: the hub refuses only `true` on a worker that predates it (409 worker_unsupported). */
+    handoff?: boolean;
   }): Promise<WorkflowRun> {
     const res = await authFetch(`${getApiBase()}/api/workflow-loops`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(opts),
     });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.error ?? `Failed to start loop: ${res.status}`);
-    }
+    if (!res.ok) throw await workflowRequestError(res, `Failed to start loop: ${res.status}`);
+    return (await res.json()).run;
+  },
+
+  /**
+   * Have a loop's gate resume itself at `at` (epoch ms, future, ≤ 7 days), or
+   * cancel the schedule with `null`. Addressed to the loop, like pause.
+   */
+  async scheduleResume(runId: string, at: number | null): Promise<WorkflowRun> {
+    const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}/schedule-resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ at }),
+    });
+    if (!res.ok) throw await workflowRequestError(res, `Failed to schedule resume: ${res.status}`);
     return (await res.json()).run;
   },
 

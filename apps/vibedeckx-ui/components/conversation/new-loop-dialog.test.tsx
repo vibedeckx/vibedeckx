@@ -14,7 +14,10 @@ vi.mock("@/lib/api", () => ({
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { NewLoopDialog } from "./new-loop-dialog";
-import { loopDraftKey, TASK_STATUS_PROTOCOL_PREVIEW } from "@/lib/loop-presets";
+import { HANDOFF_PROTOCOL_PREVIEW, loopDraftKey, TASK_STATUS_PROTOCOL_PREVIEW } from "@/lib/loop-presets";
+
+/** What api.ts throws for a refused request (`WorkflowRequestError`) — the dialog reads only `code`. */
+const refused = (message: string, code?: string) => Object.assign(new Error(message), { status: 409, code });
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -66,7 +69,7 @@ describe("NewLoopDialog", () => {
     expect(text).toContain("`PLAN.md`");
     expect(text).not.toContain("implementation-plan.md");
     // The engine's closing protocol is shown, not part of the editable text.
-    expect(document.querySelector('[data-testid="loop-protocol"]')!.textContent).toBe(TASK_STATUS_PROTOCOL_PREVIEW.trim());
+    expect(document.querySelector('[data-testid="loop-protocol"]')!.textContent).toContain(TASK_STATUS_PROTOCOL_PREVIEW.trim());
     expect(text).not.toContain("End your final message with these lines");
   });
 
@@ -146,6 +149,73 @@ describe("NewLoopDialog", () => {
     await click(startButton());
     expect(document.body.textContent).toContain("doesn't support loops yet");
     expect(startButton()).toBeDefined();
+  });
+
+  describe("handoff note", () => {
+    const handoffBox = () => byId<HTMLInputElement>("loop-handoff");
+    const protocol = () => document.querySelector('[data-testid="loop-protocol"]')!.textContent;
+
+    it("is on for the Plan preset and sent as true; the preview shows the part the loop appends for it", async () => {
+      expect(handoffBox().checked).toBe(true);
+      await click(instructionTab());
+      expect(protocol()).toBe((TASK_STATUS_PROTOCOL_PREVIEW + "\n" + HANDOFF_PROTOCOL_PREVIEW).trim());
+      await click(startButton());
+      expect(createRepeatLoop).toHaveBeenCalledWith(expect.objectContaining({ handoff: true }));
+    });
+
+    it("is off for Custom, and an explicit false is still sent", async () => {
+      await click(buttonNamed("Custom"));
+      expect(handoffBox().checked).toBe(false);
+      expect(protocol()).toBe(TASK_STATUS_PROTOCOL_PREVIEW.trim());
+      await type("loop-prompt", "handle the next order");
+      await click(startButton());
+      expect(createRepeatLoop).toHaveBeenCalledWith(expect.objectContaining({ handoff: false }));
+    });
+
+    it("an old worker's refusal says to update it, and offers to retry without the note", async () => {
+      createRepeatLoop.mockRejectedValueOnce(refused(
+        "This machine's worker doesn't support handoff notes yet — update the worker, or turn handoff off and try again.",
+        "worker_unsupported",
+      ));
+      await click(startButton());
+      expect(document.body.textContent).toContain("update the worker");
+      expect(byId("loop-handoff")).not.toBeNull(); // still open
+
+      await click(buttonNamed("Turn off handoff note and retry"));
+      expect(createRepeatLoop).toHaveBeenCalledTimes(2);
+      expect(createRepeatLoop).toHaveBeenLastCalledWith(expect.objectContaining({ handoff: false }));
+      expect(byId("loop-handoff")).toBeNull(); // started, dialog closed
+    });
+
+    it("no retry offer when the switch was already off — turning it off cannot help", async () => {
+      await act(async () => { handoffBox().click(); });
+      createRepeatLoop.mockRejectedValueOnce(refused("This machine's worker doesn't support loops yet", "worker_unsupported"));
+      await click(startButton());
+      expect(document.body.textContent).toContain("doesn't support loops yet");
+      expect(buttonNamed("Turn off handoff note and retry")).toBeUndefined();
+    });
+
+    it("no retry offer for an unrelated failure", async () => {
+      createRepeatLoop.mockRejectedValueOnce(refused("Project not found"));
+      await click(startButton());
+      expect(buttonNamed("Turn off handoff note and retry")).toBeUndefined();
+    });
+
+    it("the last choice is restored with the draft", async () => {
+      await act(async () => { handoffBox().click(); });
+      await closeDialog();
+      await openDialog();
+      expect(handoffBox().checked).toBe(false);
+    });
+
+    it("a draft from before handoff notes falls back to the preset's default", async () => {
+      await closeDialog();
+      const draft = JSON.parse(window.localStorage.getItem(loopDraftKey("p1"))!);
+      delete draft.handoff;
+      window.localStorage.setItem(loopDraftKey("p1"), JSON.stringify(draft));
+      await openDialog();
+      expect(handoffBox().checked).toBe(true);
+    });
   });
 
   describe("run one item first", () => {

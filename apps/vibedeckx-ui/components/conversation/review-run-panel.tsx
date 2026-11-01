@@ -8,9 +8,10 @@ import { useNotificationInbox } from "@/hooks/notification-inbox-context";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MessageResponse } from "@/components/ai-elements/message";
-import { Eye, FileCheck, Loader2, Pause, Pencil, Play, X } from "lucide-react";
+import { AlarmClock, ChevronDown, ChevronRight, Eye, FileCheck, Loader2, Pause, Pencil, Play, X } from "lucide-react";
 
-type GateAction = "approve" | "finalize" | "cancel" | "accept" | "rereview" | "pause" | "resume";
+/** `schedule` = set or clear a loop gate's scheduled resume (not a gate action server-side). */
+type GateAction = "approve" | "finalize" | "cancel" | "accept" | "rereview" | "pause" | "resume" | "schedule";
 
 const ACTIVE = new Set(["preparing", "waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback", "waiting_rereview", "running_task", "waiting_resume"]);
 
@@ -51,7 +52,7 @@ function explainStale(action: GateAction, fresh: WorkflowRun | null): string | n
   if (action === "cancel") return null;
   // 循环的动作按"整个循环"寻址:手里的 run id 过期(那次迭代刚结算、下一次已建)
   // 后端照样能执行,所以真失败时后端原文就是原因,无需改写。
-  if (action === "pause" || action === "resume") return null;
+  if (action === "pause" || action === "resume" || action === "schedule") return null;
   if (!fresh) return "这次 review 已经结束了 —— 反馈可能已经发出,或者 run 已被取消。";
   if (action === "approve") {
     if (fresh.status === "discussing") return "reviewer 已进入讨论:先点「生成终稿」拿到新的结论,再发送反馈。";
@@ -228,7 +229,8 @@ export function ReviewRunPanel({
       // 通知要过 outbox drain,面板先于铃铛拿到结果完全可能。finalize 不同:它
       // 让 run 继续跑,下一轮的未读必须照常亮起来。
       // `rereview` 同 finalize:run 继续跑,下一轮结论的未读要照常亮。
-      markReviewRunRead(runId, { runEnded: action !== "finalize" && action !== "rereview" });
+      // `schedule` 同理:闸门还在,只是换了个继续的时机。
+      markReviewRunRead(runId, { runEnded: action !== "finalize" && action !== "rereview" && action !== "schedule" });
       return;
     }
     let active: WorkflowRun[] | null = null;
@@ -282,7 +284,8 @@ export function ReviewRunPanel({
         <LoopCard key={run.id} run={run} busy={busy === run.id}
           error={actionError?.runId === run.id ? actionError.message : null}
           onAction={(action) => act(run.id, action, () =>
-            action === "cancel" ? api.cancelWorkflowRun(run.id) : api.workflowRunGate(run.id, action))} />
+            action === "cancel" ? api.cancelWorkflowRun(run.id) : api.workflowRunGate(run.id, action))}
+          onScheduleResume={(at) => act(run.id, "schedule", () => api.scheduleResume(run.id, at))} />
       ) : (
         <div key={run.id} className="space-y-2" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
           <div className="flex items-center justify-between">
@@ -413,18 +416,82 @@ export function ReviewRunPanel({
   );
 }
 
+const HOUR_MS = 60 * 60 * 1000;
+/** The server's limit on how far ahead a gate may be scheduled. */
+const RESUME_SCHEDULE_MAX_MS = 7 * 24 * HOUR_MS;
+
+const pad2 = (n: number) => String(n).padStart(2, "0");
+
+/** "14:00", or "11/03 14:00" when it is not today — a schedule may be up to a week out. */
+export function formatResumeAt(at: number, now: number = Date.now()): string {
+  const d = new Date(at);
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return d.toDateString() === new Date(now).toDateString() ? hm : `${d.getMonth() + 1}/${d.getDate()} ${hm}`;
+}
+
+/** `<input type="datetime-local">` value for an epoch, in local time. */
+function toLocalInput(at: number): string {
+  const d = new Date(at);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/**
+ * "定时继续" (loop-presets design §4.3): the user picks a time and the engine
+ * resumes the gate on its own then — covering "usage resets at 14:00" without
+ * any automatic retry. The server re-checks the 7-day window; the check here
+ * only saves a round trip for an obvious slip.
+ */
+function ScheduleResumePicker({ busy, onSchedule, onClose }: {
+  busy: boolean;
+  onSchedule: (at: number) => void;
+  onClose: () => void;
+}) {
+  const [custom, setCustom] = useState("");
+  const [invalid, setInvalid] = useState<string | null>(null);
+  /** When the picker opened — bounds for the native picker only; submit re-checks against the clock. */
+  const [openedAt] = useState(() => Date.now());
+  const submitCustom = () => {
+    const at = new Date(custom).getTime();
+    const now = Date.now();
+    if (!custom || !Number.isFinite(at)) return setInvalid("先选一个时间");
+    if (at <= now) return setInvalid("这个时间已经过去了");
+    if (at - now > RESUME_SCHEDULE_MAX_MS) return setInvalid("最多只能定在 7 天之内");
+    onSchedule(at);
+  };
+  return (
+    <div className="space-y-1.5" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-muted-foreground">多久后继续：</span>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => onSchedule(Date.now() + HOUR_MS)}>+1h</Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => onSchedule(Date.now() + 5 * HOUR_MS)}>+5h</Button>
+        <input type="datetime-local" aria-label="自定继续时间" value={custom}
+          min={toLocalInput(openedAt)} max={toLocalInput(openedAt + RESUME_SCHEDULE_MAX_MS)}
+          onChange={(e) => { setCustom(e.target.value); setInvalid(null); }}
+          className="h-7 rounded-md border bg-background px-1.5 text-xs" />
+        <Button size="sm" variant="outline" disabled={busy || !custom} onClick={submitCustom}>定在这个时间</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>取消</Button>
+      </div>
+      {invalid && <div className="text-destructive">{invalid}</div>}
+    </div>
+  );
+}
+
 /**
  * One repeat-until-done loop (`run.kind === "repeat"`). The run in hand is the
  * loop's single active iteration — or its resume gate. Every action is
  * addressed to the loop as a whole server-side, so a card whose iteration was
  * settled a moment ago still stops / pauses the right thing.
  */
-function LoopCard({ run, busy, error, onAction }: {
+function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
   run: WorkflowRun;
   busy: boolean;
   error: string | null;
   onAction: (action: "pause" | "resume" | "cancel") => void;
+  /** `null` cancels the schedule. */
+  onScheduleResume: (at: number | null) => Promise<void>;
 }) {
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [picking, setPicking] = useState(false);
   const params = repeatLoopParams(run);
   const round = run.round ?? 1;
   const gate = run.status === "waiting_resume";
@@ -436,6 +503,12 @@ function LoopCard({ run, busy, error, onAction }: {
   const pausing = params?.stopAfterCurrent === true;
   // Absent on loops started before presets, or by a worker that predates them.
   const source = presetSourceLabel(params?.preset);
+  const handoffNote = params?.handoffNote?.trim() || null;
+  const resumeAt = gate && typeof params?.resumeAt === "number" ? params.resumeAt : null;
+  const schedule = async (at: number | null) => {
+    await onScheduleResume(at);
+    setPicking(false);
+  };
   return (
     <div className="space-y-2" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
       <div className="flex items-center justify-between gap-2">
@@ -467,6 +540,23 @@ function LoopCard({ run, busy, error, onAction }: {
           {params.remaining && <>剩余：{params.remaining}</>}
         </div>
       )}
+      {handoffNote && (
+        // The note the engine hands the next session (design §5.1) — the only
+        // place it is visible short of opening a transcript.
+        <div style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+          <button type="button" aria-expanded={noteOpen} onClick={() => setNoteOpen((o) => !o)}
+            className="flex items-center text-muted-foreground hover:text-foreground">
+            {noteOpen ? <ChevronDown className="h-3 w-3 mr-1" /> : <ChevronRight className="h-3 w-3 mr-1" />}
+            上一轮交接
+          </button>
+          {noteOpen && (
+            <pre data-testid="loop-handoff-note"
+              className="mt-1 max-h-60 overflow-y-auto whitespace-pre-wrap break-words rounded-md border bg-background px-3 py-2 font-mono text-muted-foreground">
+              {handoffNote}
+            </pre>
+          )}
+        </div>
+      )}
       {run.error && (
         <div className="text-amber-600" style={{ fontSize: "var(--conv-font-size, 12px)" }}>{run.error}</div>
       )}
@@ -485,16 +575,34 @@ function LoopCard({ run, busy, error, onAction }: {
         </div>
       )}
       {gate && (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button size="sm" disabled={busy} onClick={() => onAction("resume")}>
             <Play className="h-3 w-3 mr-1" />继续循环
           </Button>
+          {resumeAt === null && !picking && (
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => setPicking(true)}>
+              <AlarmClock className="h-3 w-3 mr-1" />定时继续
+            </Button>
+          )}
           <span className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
             {failedToStart
               ? `第 ${round} 次迭代没能启动，没有对应的 session`
               : `相关 session：「${params?.name ?? "Loop"} #${shown}」（见侧栏）`}
           </span>
         </div>
+      )}
+      {resumeAt !== null && (
+        <div className="flex items-center gap-1 text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+          <AlarmClock className="h-3 w-3" />
+          <span>将于 {formatResumeAt(resumeAt)} 自动继续 ·</span>
+          <button type="button" disabled={busy} onClick={() => void schedule(null)}
+            className="underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50">
+            取消
+          </button>
+        </div>
+      )}
+      {gate && resumeAt === null && picking && (
+        <ScheduleResumePicker busy={busy} onSchedule={(at) => void schedule(at)} onClose={() => setPicking(false)} />
       )}
       {error && <div className="text-destructive" style={{ fontSize: "var(--conv-font-size, 12px)" }}>{error}</div>}
     </div>

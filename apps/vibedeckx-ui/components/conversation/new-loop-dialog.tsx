@@ -27,6 +27,7 @@ import {
 } from "@/components/schedule/schedule-form-chrome";
 import {
   generateInstruction,
+  HANDOFF_PROTOCOL_PREVIEW,
   loadLoopDraft,
   LOOP_PRESETS,
   type LoopPresetKind,
@@ -42,6 +43,11 @@ import { cn } from "@/lib/utils";
 const noopSubscribe = () => () => {};
 
 const AGENT_LABELS = { "claude-code": "Claude Code", codex: "Codex" } as const;
+
+/** The hub refused a start because this machine's worker predates the feature (api.ts `WorkflowRequestError`). */
+function isWorkerUnsupported(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === "worker_unsupported";
+}
 
 /** Typed text → a value the server accepts (it rejects anything outside 1..max). */
 function clamp(raw: string, fallback: number, max: number): number {
@@ -80,8 +86,11 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
   const [minutes, setMinutes] = useState(String(REPEAT_LOOP_DEFAULT_MINUTES));
   const [checkCommand, setCheckCommand] = useState("");
   const [runOnceFirst, setRunOnceFirst] = useState(false);
+  const [handoff, setHandoff] = useState(() => presetFor("plan").handoffByDefault);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The start was refused because the worker cannot keep handoff notes: offer to retry without one. */
+  const [handoffRefused, setHandoffRefused] = useState(false);
   /** The loop started, but the "stop after the first item" pause could not be set: it is running on. */
   const [pauseFailed, setPauseFailed] = useState<{ run: WorkflowRun; message: string } | null>(null);
 
@@ -95,6 +104,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
     setKind(to);
     setConfirm(null);
     setEdited(false);
+    setHandoff(next.handoffByDefault);
     if (next.fields.length === 0) {
       // Custom keeps whatever is in the box: a generated plan is a fine starting point.
       setView("instruction");
@@ -141,17 +151,19 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
     if (typeof d.iterations === "string") setIterations(d.iterations);
     if (typeof d.minutes === "string") setMinutes(d.minutes);
     if (typeof d.checkCommand === "string") setCheckCommand(d.checkCommand);
+    setHandoff(typeof d.handoff === "boolean" ? d.handoff : p.handoffByDefault);
   };
   const onOpenChange = (next: boolean) => {
     if (next) {
       setError(null);
+      setHandoffRefused(false);
       setConfirm(null);
       setPauseFailed(null);
       // Off on every open, whichever way the last one ended (design §2.5).
       setRunOnceFirst(false);
       if (projectId) restoreDraft(projectId);
     } else if (projectId) {
-      saveLoopDraft(projectId, { kind, fields, prompt, edited, agentType, iterations, minutes, checkCommand });
+      saveLoopDraft(projectId, { kind, fields, prompt, edited, agentType, iterations, minutes, checkCommand, handoff });
     }
     setOpen(next);
   };
@@ -183,10 +195,12 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
     }
   };
 
-  const start = async () => {
+  /** `withHandoff` overrides the switch for "turn it off and retry", which cannot wait for a re-render. */
+  const start = async (withHandoff = handoff) => {
     if (!projectId || !prompt.trim() || busy || pauseFailed) return;
     setBusy(true);
     setError(null);
+    setHandoffRefused(false);
     const metaFields = presetFieldsForMeta(kind, fields);
     const meta: LoopPresetMeta = { kind, ...(metaFields ? { fields: metaFields } : {}), ...(hasForm && edited ? { edited: true } : {}) };
     try {
@@ -197,6 +211,8 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
         maxMinutes: clamp(minutes, REPEAT_LOOP_DEFAULT_MINUTES, REPEAT_LOOP_MAX_MINUTES),
         ...(checkCommand.trim() ? { checkCommand: checkCommand.trim() } : {}),
         preset: meta,
+        // Always sent, false included: the hub gates only `true` (design §4.3).
+        handoff: withHandoff,
       });
       onStarted?.(run);
       // Two calls, not an engine field: the first item takes minutes, so the
@@ -207,9 +223,16 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
       toast.success(runOnceFirst ? "Loop started — it will stop after the first item" : "Loop started");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      // Also code worker_unsupported: a worker without loops at all — no switch fixes that.
+      setHandoffRefused(withHandoff && isWorkerUnsupported(err));
     } finally {
       setBusy(false);
     }
+  };
+
+  const retryWithoutHandoff = () => {
+    setHandoff(false);
+    void start(false);
   };
 
   const isMac = useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
@@ -351,7 +374,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
                   The loop appends this after your instruction (read-only — it is how the loop reads each session&apos;s result):
                 </div>
                 <pre data-testid="loop-protocol" className="mt-1 max-h-[96px] overflow-auto font-mono text-[10.5px] leading-[1.5] whitespace-pre-wrap text-muted-foreground">
-                  {TASK_STATUS_PROTOCOL_PREVIEW.trim()}
+                  {(handoff ? TASK_STATUS_PROTOCOL_PREVIEW + "\n" + HANDOFF_PROTOCOL_PREVIEW : TASK_STATUS_PROTOCOL_PREVIEW).trim()}
                 </pre>
               </div>
             </div>
@@ -421,6 +444,18 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
           </div>
 
           <label className="flex min-w-0 items-start gap-2 text-[12px] leading-snug">
+            <input type="checkbox" id="loop-handoff" checked={handoff} onChange={(e) => setHandoff(e.target.checked)}
+              className="mt-0.5 size-3.5 shrink-0 accent-primary" />
+            <span className="min-w-0">
+              Keep a handoff note between sessions
+              <span className="block text-[10.5px] text-muted-foreground/80">
+                Each session ends with a short note — lessons learned, what it did, what to watch — and the loop hands it
+                to the next session. Nothing is written to the repo.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex min-w-0 items-start gap-2 text-[12px] leading-snug">
             <input type="checkbox" id="loop-run-once" checked={runOnceFirst} onChange={(e) => setRunOnceFirst(e.target.checked)}
               className="mt-0.5 size-3.5 shrink-0 accent-primary" />
             <span className="min-w-0">
@@ -439,7 +474,17 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
             </span>
           </div>
 
-          {error && <Strip tone="rose" icon={<TriangleAlert />}>{error}</Strip>}
+          {error && (
+            <Strip tone="rose" icon={<TriangleAlert />}>
+              {error}
+              {handoffRefused && (
+                <>
+                  {" "}
+                  <InlineLink onClick={retryWithoutHandoff} disabled={busy}>Turn off handoff note and retry</InlineLink>
+                </>
+              )}
+            </Strip>
+          )}
           {pauseFailed && (
             <Strip tone="rose" icon={<TriangleAlert />}>
               The loop started, but the pause could not be set — it is still running item after item. ({pauseFailed.message}){" "}
