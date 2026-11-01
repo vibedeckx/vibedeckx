@@ -17,6 +17,7 @@ vi.mock("@/lib/api", () => ({
     workflowRunGate: vi.fn(async () => runFixture),
     cancelWorkflowRun: vi.fn(async () => runFixture),
     scheduleResume: vi.fn(async () => runFixture),
+    dismissWorkflowRun: vi.fn(async () => runFixture),
   },
   // Pure helper — the real one, so the loop card reads params as it does in the app.
   repeatLoopParams: (run: { params?: string | null }) => {
@@ -532,6 +533,24 @@ describe("ReviewRunPanel repeat loop", () => {
     container.remove();
     vi.clearAllMocks();
     vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [runFixture] } as never);
+  });
+
+  it("a finished loop's card stays, names the last session, and closes only on ✕", async () => {
+    const done = loopRun({ status: "completed", round: 5, awaiting_dismissal: 1 });
+    resetWorkflowRunsInflightForTests();
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [], finishedLoops: [done] } as never);
+    await act(async () => {
+      root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
+    });
+    expect(container.textContent).toContain("已完成");
+    expect(container.textContent).toContain("最后一个 session：「Orders #5」");
+    expect(buttonNamed("结束")).toBeUndefined();
+    expect(buttonNamed("Continue loop")).toBeUndefined();
+
+    vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [], finishedLoops: [] } as never);
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="关闭"]')!.click(); });
+    expect(api.dismissWorkflowRun).toHaveBeenCalledWith("l2");
+    await vi.waitFor(() => expect(container.textContent).toBe(""));
   });
 
   it("a gate for an iteration that could not start names THAT round, and no session that never existed", async () => {

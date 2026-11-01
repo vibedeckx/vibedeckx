@@ -710,6 +710,16 @@ export class WorkflowEngine {
     return this.mapRepeatErrors(() => this.repeat.scheduleResume(run, at));
   }
 
+  /** Close a finished loop's card in Main Chat. Idempotent: closing a closed card is a no-op. */
+  async dismissFinishedLoop(runId: string): Promise<WorkflowRun> {
+    const run = await this.requireRepeatRun(runId);
+    if (run.status !== "completed") throw new WorkflowError("bad-state", "循环还没有结束");
+    if (!(await this.storage.workflowRuns.dismiss(runId))) return run;
+    const done = (await this.storage.workflowRuns.getById(runId))!;
+    this.emitRunUpdated(done);
+    return done;
+  }
+
   private async requireRepeatRun(runId: string): Promise<WorkflowRun> {
     const run = await this.storage.workflowRuns.getById(runId);
     if (!run || run.kind !== "repeat") throw new WorkflowError("bad-state", "这不是一个循环");

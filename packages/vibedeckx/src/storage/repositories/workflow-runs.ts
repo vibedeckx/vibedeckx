@@ -42,6 +42,23 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
         .execute();
       return rows.map(asRun);
     },
+    getAwaitingDismissal: async (projectId, branch) => {
+      const rows = await kdb
+        .selectFrom("workflow_runs").selectAll()
+        .where("project_id", "=", projectId)
+        .where("branch", "is", branch)
+        .where("awaiting_dismissal", "=", 1)
+        .orderBy("created_at", "asc")
+        .execute();
+      return rows.map(asRun);
+    },
+    dismiss: async (id) => {
+      const res = await kdb.updateTable("workflow_runs")
+        .set({ awaiting_dismissal: 0, updated_at: sql`datetime('now')` })
+        .where("id", "=", id).where("awaiting_dismissal", "=", 1)
+        .executeTakeFirst();
+      return Number(res.numUpdatedRows) > 0;
+    },
     getAllActive: async () => {
       const rows = await kdb
         .selectFrom("workflow_runs").selectAll().where("status", "in", ACTIVE)

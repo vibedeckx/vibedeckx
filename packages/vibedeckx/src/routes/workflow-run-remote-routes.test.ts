@@ -858,6 +858,30 @@ describe("workflow-run remote proxying (front server)", () => {
     });
   });
 
+  describe("finished-loop dismiss", () => {
+    const DISMISS_CAP = ["http:POST /api/path/workflow-loops", "http:POST /api/workflow-runs/:param/dismiss"];
+    const doneRun = { ...bareRun, id: UUID_RUN, kind: "repeat", status: "completed", loop_id: UUID_RUN, awaiting_dismissal: 0 };
+
+    it("409 on an old worker, else proxied to the worker's own dismiss route", async () => {
+      makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER, workerCapabilities: ["http:POST /api/path/workflow-loops"] });
+      await app.register(workflowRunRoutes);
+      const refused = await app.inject({ method: "POST", url: `/api/workflow-runs/${UUID_RUN_ID}/dismiss` });
+      expect(refused.statusCode).toBe(409);
+      expect(refused.json().code).toBe("worker_unsupported");
+      expect(proxyMock).not.toHaveBeenCalled();
+      await app.close();
+
+      const { emit } = makeApp({ projectId: UUID_PROJECT, serverId: UUID_SERVER, workerCapabilities: DISMISS_CAP });
+      await app.register(workflowRunRoutes);
+      proxyMock.mockResolvedValueOnce({ ok: true, status: 200, data: { run: doneRun } });
+      const res = await app.inject({ method: "POST", url: `/api/workflow-runs/${UUID_RUN_ID}/dismiss` });
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().run.id).toBe(UUID_RUN_ID);
+      expect(proxyMock.mock.calls[0].slice(1, 3)).toEqual(["POST", `/api/workflow-runs/${UUID_RUN}/dismiss`]);
+      expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "workflow:run-updated" }));
+    });
+  });
+
   it("gate 404s an unknown remote run id (empty remoteRunMap)", async () => {
     makeApp();
     await app.register(workflowRunRoutes);

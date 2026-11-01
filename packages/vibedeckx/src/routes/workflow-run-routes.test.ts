@@ -33,6 +33,7 @@ function makeApp(overrides: { engine?: Record<string, unknown>; runs?: Record<st
     },
     workflowRuns: {
       getActive: async () => [run],
+      getAwaitingDismissal: async () => [],
       getById: async (id: string) => (id === "r1" ? run : undefined),
       listReviewedSourceSessions: async () => ["s-src"],
       ...(overrides.runs ?? {}),
@@ -350,6 +351,19 @@ describe("workflow-run-routes", () => {
     // Rides this poll so the Start Review dialog knows whether a "continue
     // last reviewer" choice exists before it opens.
     expect(res.json().reviewedSessionIds).toEqual(["s-src"]);
+    // A finished loop's card rides the same poll, apart from the active runs.
+    expect(res.json().finishedLoops).toEqual([]);
+  });
+
+  it("dismiss closes a finished loop's card locally (the same route serves the worker side)", async () => {
+    const dismissFinishedLoop = vi.fn(async () => ({ ...run, kind: "repeat", status: "completed", awaiting_dismissal: 0 }));
+    const app = makeApp({ engine: { dismissFinishedLoop } });
+    await app.register(workflowRunRoutes);
+    const res = await app.inject({ method: "POST", url: "/api/workflow-runs/r1/dismiss" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().run.awaiting_dismissal).toBe(0);
+    expect(dismissFinishedLoop).toHaveBeenCalledWith("r1");
+    expect((await app.inject({ method: "POST", url: "/api/workflow-runs/nope/dismiss" })).statusCode).toBe(404);
   });
 
   it("GET /api/path/workflow-runs carries reviewed sessions for the worker side too", async () => {

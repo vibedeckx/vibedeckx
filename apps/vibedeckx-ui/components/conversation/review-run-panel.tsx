@@ -11,7 +11,7 @@ import { MessageResponse } from "@/components/ai-elements/message";
 import { AlarmClock, ChevronDown, ChevronRight, Eye, FileCheck, Loader2, Pause, Pencil, Play, X } from "lucide-react";
 
 /** `schedule` = set or clear a loop gate's scheduled resume (not a gate action server-side). */
-type GateAction = "approve" | "finalize" | "cancel" | "accept" | "rereview" | "pause" | "resume" | "schedule";
+type GateAction = "approve" | "finalize" | "cancel" | "accept" | "rereview" | "pause" | "resume" | "schedule" | "dismiss";
 
 const ACTIVE = new Set(["preparing", "waiting_reviewer", "waiting_feedback", "discussing", "sending_feedback", "waiting_rereview", "running_task", "waiting_resume"]);
 
@@ -52,7 +52,7 @@ function explainStale(action: GateAction, fresh: WorkflowRun | null): string | n
   if (action === "cancel") return null;
   // 循环的动作按"整个循环"寻址:手里的 run id 过期(那次迭代刚结算、下一次已建)
   // 后端照样能执行,所以真失败时后端原文就是原因,无需改写。
-  if (action === "pause" || action === "resume" || action === "schedule") return null;
+  if (action === "pause" || action === "resume" || action === "schedule" || action === "dismiss") return null;
   if (!fresh) return "这次 review 已经结束了 —— 反馈可能已经发出,或者 run 已被取消。";
   if (action === "approve") {
     if (fresh.status === "discussing") return "reviewer 已进入讨论:先点「生成终稿」拿到新的结论,再发送反馈。";
@@ -92,6 +92,8 @@ export function ReviewRunPanel({
   onRunsChange?: (runs: WorkflowRun[]) => void;
 }) {
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
+  /** Finished loops whose card stays until the user closes it (server-side flag, so it survives reloads). */
+  const [finishedLoops, setFinishedLoops] = useState<WorkflowRun[]>([]);
   const [draft, setDraft] = useState<Record<string, string>>({});
   const [editing, setEditing] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -137,10 +139,11 @@ export function ReviewRunPanel({
     const seq = ++reqSeqRef.current;
     const read = fetchActiveWorkflowRunsAt(projectId, branch, opts);
     try {
-      const active = await read.request;
+      const [active, finished] = await Promise.all([read.request, read.finished]);
       if (seq !== reqSeqRef.current) return;
       landedRef.current = { at: read.issuedAt, runs: active };
       setRuns(active);
+      setFinishedLoops(finished);
       onRunsChange?.(active);
       // 状态一变,上一条失败提示就过期了(讨论完出了终稿、别处已经发送、run
       // 结束……),留着只会误导。无主提示的 status 恒为 null,状态比较对它是
@@ -262,8 +265,9 @@ export function ReviewRunPanel({
   // run 已经不在列表里(已结束/被取消/反馈其实已经发出)时,提示没有卡片可挂。
   // 面板也不能因为"零活跃 run"直接消失 —— 否则用户点完只看到卡片凭空不见,
   // 得不到任何交代。它不会被对账清掉(status 恒为 null),所以配一个手动关闭。
-  const orphanError = actionError && !activeRuns.some((r) => r.id === actionError.runId) ? actionError : null;
-  if (activeRuns.length === 0 && !orphanError) return null;
+  const orphanError = actionError && !activeRuns.some((r) => r.id === actionError.runId)
+    && !finishedLoops.some((r) => r.id === actionError.runId) ? actionError : null;
+  if (activeRuns.length === 0 && finishedLoops.length === 0 && !orphanError) return null;
 
   return (
     // shrink-0 + max-h: the panel sits above the flex-1 conversation; without a
@@ -280,11 +284,13 @@ export function ReviewRunPanel({
           </Button>
         </div>
       )}
-      {activeRuns.map((run) => run.kind === "repeat" ? (
+      {[...finishedLoops, ...activeRuns].map((run) => run.kind === "repeat" ? (
         <LoopCard key={run.id} run={run} busy={busy === run.id}
           error={actionError?.runId === run.id ? actionError.message : null}
           onAction={(action) => act(run.id, action, () =>
-            action === "cancel" ? api.cancelWorkflowRun(run.id) : api.workflowRunGate(run.id, action))}
+            action === "cancel" ? api.cancelWorkflowRun(run.id)
+              : action === "dismiss" ? api.dismissWorkflowRun(run.id)
+                : api.workflowRunGate(run.id, action))}
           onScheduleResume={(at) => act(run.id, "schedule", () => api.scheduleResume(run.id, at))} />
       ) : (
         <div key={run.id} className="space-y-2" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
@@ -486,7 +492,7 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
   run: WorkflowRun;
   busy: boolean;
   error: string | null;
-  onAction: (action: "pause" | "resume" | "cancel") => void;
+  onAction: (action: "pause" | "resume" | "cancel" | "dismiss") => void;
   /** `null` cancels the schedule. */
   onScheduleResume: (at: number | null) => Promise<void>;
 }) {
@@ -497,6 +503,8 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
   const doneItems = Array.isArray(params?.doneItems) ? params.doneItems : [];
   const round = run.round ?? 1;
   const gate = run.status === "waiting_resume";
+  /** A loop that reported `Status: done`; its card stays until the user closes it. */
+  const finished = run.status === "completed";
   // A gate is normally the NEXT iteration's run, so the round that stopped is
   // the one before it — unless this very iteration could not start and turned
   // into the gate in place: then it is this round, and it has no session.
@@ -520,15 +528,23 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
             {run.status === "preparing" && "正在启动下一个 session…"}
             {run.status === "running_task" && (pausing ? "做完这一项后暂停…" : "处理中…")}
             {gate && "已停下，等你决定"}
+            {finished && "已完成"}
           </span>
           <span className="ml-2 text-muted-foreground">
             第 {shown}{run.max_rounds ? ` / ${run.max_rounds}` : ""} 次
           </span>
         </span>
-        <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
-          title="立即结束循环，并停掉正在运行的 session">
-          <X className="h-3 w-3 mr-1" />结束
-        </Button>
+        {finished ? (
+          <Button variant="ghost" size="icon-sm" disabled={busy} aria-label="关闭" title="关闭这张卡片"
+            onClick={() => onAction("dismiss")}>
+            <X className="h-3 w-3" />
+          </Button>
+        ) : (
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
+            title="立即结束循环，并停掉正在运行的 session">
+            <X className="h-3 w-3 mr-1" />结束
+          </Button>
+        )}
       </div>
       {source && (
         <div className="text-muted-foreground min-w-0 truncate" style={{ fontSize: "var(--conv-font-size, 12px)" }} title={source}>
@@ -592,6 +608,11 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
               <Pause className="h-3 w-3 mr-1" />做完这项后停
             </Button>
           )}
+        </div>
+      )}
+      {finished && (
+        <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+          最后一个 session：「{params?.name ?? "Loop"} #{round}」（见侧栏）
         </div>
       )}
       {gate && (

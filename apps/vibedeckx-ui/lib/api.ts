@@ -3810,7 +3810,7 @@ export const api = {
   async getActiveWorkflowRuns(
     projectId: string,
     branch: string | null,
-  ): Promise<{ runs: WorkflowRun[]; reviewedSessionIds?: string[] }> {
+  ): Promise<{ runs: WorkflowRun[]; reviewedSessionIds?: string[]; finishedLoops?: WorkflowRun[] }> {
     const params = new URLSearchParams({ projectId });
     if (branch) params.set("branch", branch);
     const res = await authFetch(`${getApiBase()}/api/workflow-runs?${params}`);
@@ -3819,6 +3819,8 @@ export const api = {
     return {
       runs: data.runs ?? [],
       ...(Array.isArray(data.reviewedSessionIds) ? { reviewedSessionIds: data.reviewedSessionIds } : {}),
+      // Finished loops whose card the user has not closed; absent from old workers.
+      ...(Array.isArray(data.finishedLoops) ? { finishedLoops: data.finishedLoops } : {}),
     };
   },
 
@@ -3898,6 +3900,13 @@ export const api = {
    * a stale row is normal. Surfacing that as an error told the user the cancel
    * failed when the run was already over; callers just refresh instead.
    */
+  /** Close a finished loop's card in Main Chat. */
+  async dismissWorkflowRun(runId: string): Promise<WorkflowRun> {
+    const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}/dismiss`, { method: "POST" });
+    if (!res.ok) throw await workflowRequestError(res, `Failed to close loop: ${res.status}`);
+    return (await res.json()).run;
+  },
+
   async cancelWorkflowRun(runId: string): Promise<WorkflowRun | null> {
     const res = await authFetch(`${getApiBase()}/api/workflow-runs/${runId}/cancel`, { method: "POST" });
     if (res.status === 404) return null;

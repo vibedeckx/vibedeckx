@@ -491,7 +491,11 @@ export class RepeatLoopRunner {
         stepId: step.id, turnEndIndex: boundary, outputSnapshot: output,
         run: {
           id: fresh.id, from: LIVE_STATUSES, to: "completed", expectParams: fresh.params,
-          patch: { outcome_status: status, feedback_snapshot: output, error: checkFailure },
+          patch: {
+            outcome_status: status, feedback_snapshot: output, error: checkFailure,
+            // The card stays until the user closes it — the loop may finish unwatched.
+            ...(settlement.next === "finished" ? { awaiting_dismissal: 1 } : {}),
+          },
           outbox,
         },
         insertRun,

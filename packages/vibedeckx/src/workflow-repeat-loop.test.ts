@@ -285,6 +285,36 @@ describe("repeat-until-done loop", () => {
     })]);
   });
 
+  it("done: the finished loop's card waits for the user to close it — and only the user", async () => {
+    const first = await startLoop();
+    const second = await finishAndAdvance(first, "Status: continue\nItem: a");
+    await finish(second, "Status: done");
+
+    // Only the last run carries the card; the iteration before it does not.
+    expect((await storage.workflowRuns.getAwaitingDismissal("p1", "dev")).map((r) => r.id)).toEqual([second.id]);
+    await expect(engine.dismissFinishedLoop(first.id)).resolves.toMatchObject({ awaiting_dismissal: 0 });
+    const closed = await engine.dismissFinishedLoop(second.id);
+    expect(closed).toMatchObject({ status: "completed", awaiting_dismissal: 0 });
+    expect(await storage.workflowRuns.getAwaitingDismissal("p1", "dev")).toEqual([]);
+    // Closing twice is harmless.
+    await expect(engine.dismissFinishedLoop(second.id)).resolves.toMatchObject({ awaiting_dismissal: 0 });
+
+    // A later loop in the same workspace does not close an earlier card.
+    const a = await startLoop();
+    await finish(a, "Status: done");
+    const b = await startLoop();
+    expect((await storage.workflowRuns.getAwaitingDismissal("p1", "dev")).map((r) => r.id)).toEqual([a.id]);
+    await finish(b, "Status: done");
+    expect((await storage.workflowRuns.getAwaitingDismissal("p1", "dev")).map((r) => r.id)).toEqual([a.id, b.id]);
+  });
+
+  it("a cancelled or still-running loop has no card to close", async () => {
+    const run = await startLoop();
+    await expect(engine.dismissFinishedLoop(run.id)).rejects.toThrow("循环还没有结束");
+    await engine.cancelRun(run.id);
+    expect(await storage.workflowRuns.getAwaitingDismissal("p1", "dev")).toEqual([]);
+  });
+
   it.each([
     ["blocked", "Status: blocked", "blocked"],
     ["an unrecognised status", "Status: not done yet", "无法识别"],

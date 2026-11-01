@@ -644,6 +644,7 @@ export interface WorkflowRunsTable {
   kind: Generated<string>;
   params: string | null;
   outcome_status: string | null;
+  awaiting_dismissal: Generated<number>;
   created_at: Generated<string>;
   updated_at: Generated<string>;
 }

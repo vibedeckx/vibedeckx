@@ -1969,6 +1969,7 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
       kind TEXT NOT NULL DEFAULT 'review',
       params TEXT,
       outcome_status TEXT,
+      awaiting_dismissal INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -2192,6 +2193,9 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     ["outcome_status", "outcome_status TEXT"],
     // Unattended review loops: set once the user steps in.
     ["loop_manual", "loop_manual INTEGER NOT NULL DEFAULT 0"],
+    // A finished loop's card stays in Main Chat until the user closes it.
+    // Earlier rows default to 0: no card resurfaces for an old loop.
+    ["awaiting_dismissal", "awaiting_dismissal INTEGER NOT NULL DEFAULT 0"],
   ] as const) {
     if (!workflowRunsInfo.some((col) => col.name === name)) {
       db.exec(`ALTER TABLE workflow_runs ADD COLUMN ${ddl}`);
