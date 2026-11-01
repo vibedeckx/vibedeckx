@@ -8,9 +8,15 @@ describe("generateInstruction — Plan file", () => {
     const text = generateInstruction("plan", { ...PLAN_PRESET.defaults });
     expect(text).not.toMatch(/\{\{|\}\}|TODO|<promise>/);
     expect(text).toContain("`docs/implementation-plan.md`");
-    expect(text).toContain("`**Pass condition.** False`");
-    expect(text).toContain("`**Pass condition.** True`");
     expect(text).toContain("note the value and the reason in the commit body");
+    // No marker vocabulary: the loop's ledger is the source of progress (design §5.3) …
+    expect(text).not.toContain("Pass condition");
+    expect(text).toContain("NOT in the completed list");
+    // … a step found already done is reported, not redone …
+    expect(text).toContain("do not redo it");
+    // … and ticking the file follows the file's own convention, when it has one.
+    expect(text).toContain("the file's own convention");
+    expect(text).toContain("`Remaining:` to the number of steps still not done");
     // Bridge to the loop's closing protocol instead of Ralph's <promise> markers.
     expect(text).toContain("`Status: done`");
     expect(text).toContain("`Status: blocked`");
@@ -39,9 +45,14 @@ describe("generateInstruction — Plan file", () => {
   });
 
   it("blank single-line fields fall back to the defaults", () => {
-    const text = generateInstruction("plan", { planFile: "  ", pendingMarker: "", doneMarker: "" });
+    const text = generateInstruction("plan", { planFile: "  " });
     expect(text).toContain("`docs/implementation-plan.md`");
-    expect(text).toContain("`**Pass condition.** False`");
+  });
+
+  it("ignores the marker fields of drafts saved before they were dropped", () => {
+    const text = generateInstruction("plan", { ...PLAN_PRESET.defaults, pendingMarker: "**Pass condition.** False", doneMarker: "**Pass condition.** True" });
+    expect(text).not.toContain("Pass condition");
+    expect(presetFieldsForMeta("plan", { planFile: "PLAN.md", pendingMarker: "x" })).toEqual({ planFile: "PLAN.md" });
   });
 
   it("custom generates nothing", () => {

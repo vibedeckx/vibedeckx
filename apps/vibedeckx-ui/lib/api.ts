@@ -2059,6 +2059,8 @@ export interface RepeatLoopParams {
   prevSessionId?: string | null;
   prevItem?: string | null;
   remaining?: string | null;
+  /** Every `Item:` a completed iteration reported, in order — the loop's progress ledger. Absent until the first one. */
+  doneItems?: string[];
   stopAfterCurrent?: boolean;
   /** Gate only: this iteration could not start (no session exists for it), as opposed to the previous one having ended. */
   dispatchFailed?: boolean;

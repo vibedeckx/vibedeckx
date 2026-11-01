@@ -41,11 +41,12 @@ export interface LoopPreset {
 export const PLAN_PRESET: LoopPreset = {
   kind: "plan",
   label: "Plan file",
-  description: "Work through a step-by-step plan in the repo, one step per session: implement, verify, commit.",
+  description: "Work through a step-by-step plan in the repo, one step per session: implement, verify, commit. The loop keeps track of which steps are done.",
   fields: [
-    { key: "planFile", label: "Plan file", placeholder: "docs/implementation-plan.md" },
-    { key: "pendingMarker", label: "Pending marker", placeholder: "**Pass condition.** False" },
-    { key: "doneMarker", label: "Done marker", placeholder: "**Pass condition.** True" },
+    {
+      key: "planFile", label: "Plan file", placeholder: "docs/implementation-plan.md",
+      hint: "Any numbered list of steps works; nothing in the file has to be ticked.",
+    },
     {
       key: "readDocs", label: "Docs to read every session", multiline: true,
       placeholder: "AGENTS.md\ndocs/design.md\nOn conflicts, docs/design.md wins.",
@@ -54,8 +55,6 @@ export const PLAN_PRESET: LoopPreset = {
   ],
   defaults: {
     planFile: "docs/implementation-plan.md",
-    pendingMarker: "**Pass condition.** False",
-    doneMarker: "**Pass condition.** True",
     readDocs: "",
   },
   handoffByDefault: true,
@@ -122,15 +121,15 @@ function value(fields: Record<string, string>, key: string): string {
 const bullets = (items: string[], indent = ""): string => items.map((l) => `${indent}- ${l}`).join("\n");
 
 /**
- * Plan file template — a port of the Ralph `prompt.md` skeleton with three
- * differences (design §2.2): no progress.md section, the `<promise>` markers
- * replaced by the loop's closing Status lines, and the verification commands
- * written into the instruction for the agent to run.
+ * Plan file template — a port of the Ralph `prompt.md` skeleton with four
+ * differences (design §2.2, §5.3): no progress.md section, the `<promise>`
+ * markers replaced by the loop's closing Status lines, the verification
+ * commands written into the instruction for the agent to run, and no
+ * pending/done markers — the loop records completed steps from the closing
+ * `Item:` line and shows the list to every session.
  */
 function planInstruction(fields: Record<string, string>): string {
   const plan = value(fields, "planFile");
-  const pending = value(fields, "pendingMarker");
-  const done = value(fields, "doneMarker");
   const readDocs = lines(fields.readDocs);
 
   const sections: string[] = [];
@@ -138,14 +137,18 @@ function planInstruction(fields: Record<string, string>): string {
     `You are implementing this project by following the plan in \`${plan}\`. Each session completes exactly ONE step: implement it, verify it, commit it, then stop.`,
   );
 
-  const read = [`- \`${plan}\` — the plan. Each step ends with a completion marker: \`${pending}\` while pending, \`${done}\` once done.`];
+  const read = [
+    `- \`${plan}\` — the plan, a sequence of numbered steps.`,
+    "- The loop records which steps earlier sessions completed and lists them at the top of this message (\"已完成的项\"). No list means no step has been recorded yet — this is the first session, or a restart.",
+  ];
   if (readDocs.length) read.push(`- Also read these every session:\n${bullets(readDocs, "  ")}`);
   sections.push(`## 1. Read first\n\n${read.join("\n")}`);
 
   sections.push([
     "## 2. Pick the step",
     "",
-    `Go through the steps in order and pick the first one that is still pending (\`${pending}\`) and whose dependencies are all done. Do only that one; do not start later steps early.`,
+    "Go through the steps in order and pick the first one that is NOT in the completed list and whose dependencies are all done. Do only that one; do not start later steps early.",
+    "Before you change anything, check whether the step is in fact already done — an earlier session may have finished it without the loop recording it (a restart, an interrupted session), or the plan file may already mark it done. If its acceptance criteria are met and its verification passes, do not redo it: report it as this session's item (section 7) and stop.",
     "If the step was attempted before and left unfinished, find out why before you start, and do not repeat an approach that already failed.",
   ].join("\n"));
 
@@ -168,13 +171,15 @@ function planInstruction(fields: Record<string, string>): string {
   sections.push([
     "## 5. Mark it done",
     "",
-    `Only once the acceptance criteria are really met and the verification really passed, change the step's marker to \`${done}\`. If you cannot finish it, leave it pending and say why in your final message.`,
+    "The loop records completion from the `Item:` line of your final message (section 7); you do not have to edit the plan for that.",
+    "If the plan file itself tracks per-step status — a checkbox, a status line, a pass-condition flag — update that step's entry in the file's own convention once the criteria are really met. Otherwise leave the plan file alone.",
+    "If you cannot finish the step, do not report it as done; say why in your final message.",
   ].join("\n"));
 
   sections.push([
     "## 6. Commit",
     "",
-    "Commit everything from this session — the code and the plan's marker — in ONE git commit:",
+    "Commit everything from this session — the code, and the plan file if you updated it — in ONE git commit:",
     "- Title like `<step number>: <summary>`.",
     "- Body: what was done, the key decisions, and the verification commands actually run with their results.",
     "",
@@ -184,9 +189,9 @@ function planInstruction(fields: Record<string, string>): string {
   sections.push([
     "## 7. Report",
     "",
-    `- Every step in the plan is done (no \`${pending}\` left): end with \`Status: done\`.`,
+    "- Every step in the plan is done (none left outside the completed list): end with `Status: done`.",
     "- Something only a human can provide blocks the way (secrets, credentials, external accounts, a decision only a person can make): commit as usual, then end with `Status: blocked` and say exactly what is needed and where it goes (which environment variable or file). Do not work around it, do not fake secrets, and never write secrets into the repository.",
-    "- Otherwise: end with `Status: continue`, and set `Item:` to the step number.",
+    "- Otherwise: end with `Status: continue`, set `Item:` to the step number, and `Remaining:` to the number of steps still not done.",
   ].join("\n"));
 
   return sections.join("\n\n");

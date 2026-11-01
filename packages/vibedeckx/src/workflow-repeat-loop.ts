@@ -71,6 +71,15 @@ export interface RepeatLoopParams {
   prevSessionId?: string | null;
   prevItem?: string | null;
   remaining?: string | null;
+  /**
+   * Every `Item:` a `continue` iteration reported (and the check command, if
+   * any, accepted), in order — the loop's own progress ledger (loop-presets
+   * design §5.3). Shown to each session at the top of its instruction so the
+   * instruction need not make the agent tick anything in a file; the engine
+   * never matches items against anything. Never truncated: an instruction
+   * that picks "the first step not in this list" would loop on a dropped one.
+   */
+  doneItems?: string[];
   /** Soft stop: finish the current item, then put up a gate. */
   stopAfterCurrent?: boolean;
   /**
@@ -178,11 +187,36 @@ export function lastErrorMessage(entries: readonly (AgentMessage | null | undefi
   return undefined;
 }
 
-/** The user's prompt, preceded by the previous iteration's note, followed by the closing protocol. */
+/**
+ * An `Item:` is "one short line"; a runaway one must not bloat every later
+ * instruction. This is the only bound: the list grows by at most this much
+ * per iteration, and the loop pauses at its iteration allowance — the user
+ * can resume past it, so there is no fixed lifetime cap.
+ */
+export const DONE_ITEM_MAX_CHARS = 200;
+
+/** The ledger with one more item, newest last. */
+export function appendDoneItem(items: readonly string[] | undefined, item: string): string[] {
+  const chars = Array.from(item.trim());
+  const clipped = chars.length > DONE_ITEM_MAX_CHARS ? `${chars.slice(0, DONE_ITEM_MAX_CHARS).join("")}…` : chars.join("");
+  return [...(items ?? []), clipped];
+}
+
+/** The ledger as the session sees it — nothing when no item has been completed yet. */
+function doneItemsBlock(items: readonly string[] | undefined): string {
+  if (!items?.length) return "";
+  return `## 之前的 session 已完成的项（循环自动记录，共 ${items.length} 项，按完成顺序）\n${items.map((i) => `- ${i}`).join("\n")}\n---\n\n`;
+}
+
+/**
+ * The user's prompt, preceded by the loop's progress ledger and the previous
+ * iteration's note, followed by the closing protocol.
+ */
 function iterationInstruction(params: RepeatLoopParams): string {
+  const done = doneItemsBlock(params.doneItems);
   const note = params.handoffNote ? `## 上一轮留下的交接\n${params.handoffNote}\n---\n\n` : "";
   const closing = params.handoff ? `${TASK_STATUS_INSTRUCTIONS}\n${HANDOFF_INSTRUCTIONS}` : TASK_STATUS_INSTRUCTIONS;
-  return `${note}${params.prompt}\n${closing}`;
+  return `${done}${note}${params.prompt}\n${closing}`;
 }
 
 export const taskActivationKey = (runId: string, sessionId: string): string => `task:${runId}:${sessionId}`;
@@ -435,6 +469,11 @@ export class RepeatLoopRunner {
       const settlement = this.settle(fresh, freshParams, status, item, checkFailure);
       const nextParams: RepeatLoopParams = {
         ...freshParams, prevSessionId: fresh.source_session_id, prevItem: item, remaining, stopAfterCurrent: false,
+        // Only a completed item enters the ledger: a blocked or unreadable
+        // reply names the item it was stuck on, and a `continue` the check
+        // command rejected is a claim, not progress — after the gate the
+        // next session must pick that step up again, not skip it.
+        ...(status === "continue" && item && !checkFailure ? { doneItems: appendDoneItem(freshParams.doneItems, item) } : {}),
         ...(freshParams.handoff ? { handoffNote: handoff ?? freshParams.handoffNote ?? null } : {}),
       };
       const insertRun: WorkflowRepeatRunInput | undefined = settlement.next === "finished" ? undefined : {

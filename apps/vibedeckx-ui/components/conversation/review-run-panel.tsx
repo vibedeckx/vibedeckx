@@ -491,8 +491,10 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
   onScheduleResume: (at: number | null) => Promise<void>;
 }) {
   const [noteOpen, setNoteOpen] = useState(false);
+  const [doneOpen, setDoneOpen] = useState(false);
   const [picking, setPicking] = useState(false);
   const params = repeatLoopParams(run);
+  const doneItems = Array.isArray(params?.doneItems) ? params.doneItems : [];
   const round = run.round ?? 1;
   const gate = run.status === "waiting_resume";
   // A gate is normally the NEXT iteration's run, so the round that stopped is
@@ -533,11 +535,29 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
           {source}
         </div>
       )}
-      {(params?.prevItem || params?.remaining) && (
-        <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-          {params.prevItem && <>上一项：{params.prevItem}</>}
-          {params.prevItem && params.remaining && " · "}
-          {params.remaining && <>剩余：{params.remaining}</>}
+      {(doneItems.length > 0 || params?.prevItem || params?.remaining) && (
+        // Progress: the engine's ledger of completed items (design §5.3), the
+        // last one, and the count the last session reported as left.
+        <div style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+          <div className="flex flex-wrap items-center gap-x-1 text-muted-foreground">
+            {doneItems.length > 0 && (
+              <button type="button" aria-expanded={doneOpen} onClick={() => setDoneOpen((o) => !o)}
+                className="flex items-center hover:text-foreground">
+                {doneOpen ? <ChevronDown className="h-3 w-3 mr-1" /> : <ChevronRight className="h-3 w-3 mr-1" />}
+                已完成 {doneItems.length} 项
+              </button>
+            )}
+            {doneItems.length > 0 && params?.prevItem && <span>·</span>}
+            {params?.prevItem && <span>上一项：{params.prevItem}</span>}
+            {(doneItems.length > 0 || params?.prevItem) && params?.remaining && <span>·</span>}
+            {params?.remaining && <span>剩余：{params.remaining}</span>}
+          </div>
+          {doneOpen && doneItems.length > 0 && (
+            <ol data-testid="loop-done-items"
+              className="mt-1 max-h-60 list-decimal overflow-y-auto rounded-md border bg-background py-2 pl-8 pr-3 font-mono text-muted-foreground">
+              {doneItems.map((item, i) => <li key={i} className="break-words">{item}</li>)}
+            </ol>
+          )}
         </div>
       )}
       {handoffNote && (

@@ -545,6 +545,19 @@ describe("ReviewRunPanel repeat loop", () => {
     expect(container.textContent).not.toContain("#3」");
   });
 
+  it("shows the engine's ledger of completed items as a count that expands into the list", async () => {
+    await renderWith(loopRun({
+      params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, prevItem: "3", remaining: "5", doneItems: ["1", "2", "3"] }),
+    }));
+    expect(container.textContent).toContain("已完成 3 项");
+    expect(container.textContent).toContain("上一项：3");
+    expect(container.textContent).toContain("剩余：5");
+    expect(container.querySelector('[data-testid="loop-done-items"]')).toBeNull();
+    await act(async () => { buttonNamed("已完成 3 项")!.click(); });
+    const list = container.querySelector('[data-testid="loop-done-items"]')!;
+    expect([...list.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["1", "2", "3"]);
+  });
+
   it("a running iteration shows progress and offers the soft stop and the hard stop — never review controls", async () => {
     await renderWith(loopRun());
     expect(container.textContent).toContain("Loop — Orders");

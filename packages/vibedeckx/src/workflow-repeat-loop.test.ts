@@ -7,7 +7,7 @@ import type { Storage, WorkflowRun } from "./storage/types.js";
 import type { AgentMessage } from "./agent-types.js";
 import { EventBus } from "./event-bus.js";
 import { WorkflowEngine, type AgentOps } from "./workflow-engine.js";
-import { parseRepeatParams } from "./workflow-repeat-loop.js";
+import { appendDoneItem, DONE_ITEM_MAX_CHARS, parseRepeatParams } from "./workflow-repeat-loop.js";
 
 // Repeat-until-done loop (docs/superpowers/specs/2026-09-20-workflow-repeat-until-done-design.md).
 describe("repeat-until-done loop", () => {
@@ -163,7 +163,9 @@ describe("repeat-until-done loop", () => {
 
       const second = await finishAndAdvance(first, "Did S1.\nStatus: continue\nItem: S1\nRemaining: 2\nHandoff:\n- npm test needs NODE_ENV=test\n- S1 done");
       expect(parseRepeatParams(second)).toMatchObject({ handoff: true, handoffNote: "- npm test needs NODE_ENV=test\n- S1 done", prevItem: "S1", remaining: "2" });
-      expect(sentAt(1).startsWith("## 上一轮留下的交接\n- npm test needs NODE_ENV=test\n- S1 done\n---\n")).toBe(true);
+      // The note opens the instruction, right after the progress ledger.
+      expect(sentAt(1)).toContain("- S1\n---\n\n## 上一轮留下的交接\n- npm test needs NODE_ENV=test\n- S1 done\n---\n");
+      expect(sentAt(1).indexOf("## 上一轮留下的交接")).toBeLessThan(sentAt(1).indexOf("Process the next unhandled order."));
       expect(sentAt(1)).toContain("Process the next unhandled order.");
 
       const third = await finishAndAdvance(second, "Did S2.\nStatus: continue\nItem: S2");
@@ -203,6 +205,66 @@ describe("repeat-until-done loop", () => {
       const second = await finishAndAdvance(first, "Status: continue\nItem: S1\nHandoff:\nkeep me");
       await finish(second, "", "failed");
       expect(parseRepeatParams(await onlyActive())?.handoffNote).toBe("keep me");
+    });
+  });
+
+  describe("progress ledger (doneItems)", () => {
+    const sentAt = (i: number) => (agentOps.activateReviewer.mock.calls[i][0] as { instruction: string }).instruction;
+
+    it("every continue appends its Item; the next session sees the whole list at the top, before the handoff note", async () => {
+      const first = await startLoop({ handoff: true });
+      expect(parseRepeatParams(first)?.doneItems).toBeUndefined();
+      expect(sentAt(0)).not.toContain("已完成的项");
+
+      const second = await finishAndAdvance(first, "Status: continue\nItem: 1\nRemaining: 2\nHandoff:\nlesson A");
+      expect(parseRepeatParams(second)?.doneItems).toEqual(["1"]);
+      expect(sentAt(1).startsWith("## 之前的 session 已完成的项（循环自动记录，共 1 项，按完成顺序）\n- 1\n---\n\n## 上一轮留下的交接\nlesson A\n---\n")).toBe(true);
+
+      const third = await finishAndAdvance(second, "Status: continue\nItem: 2");
+      expect(parseRepeatParams(third)?.doneItems).toEqual(["1", "2"]);
+      expect(sentAt(2)).toContain("共 2 项，按完成顺序）\n- 1\n- 2\n---");
+      expect(sentAt(2)).toContain("Process the next unhandled order.");
+    });
+
+    it("blocked and unreadable replies do not enter the ledger, even when they name an item", async () => {
+      const first = await startLoop();
+      const second = await finishAndAdvance(first, "Status: continue\nItem: 1");
+      await finish(second, "Status: blocked\nItem: 2");
+      const gate = await onlyActive();
+      expect(gate.status).toBe("waiting_resume");
+      expect(parseRepeatParams(gate)?.doneItems).toEqual(["1"]);
+      const resumed = await engine.resumeLoop(gate.id);
+      expect(parseRepeatParams(resumed)?.doneItems).toEqual(["1"]);
+      expect(sentAt(2)).toContain("共 1 项，按完成顺序）\n- 1\n---");
+      await finish(resumed, "did something\nItem: 2");
+      expect(parseRepeatParams(await onlyActive())?.doneItems).toEqual(["1"]);
+    });
+
+    it("a continue the check command rejects is not progress: after the gate, the step is still open", async () => {
+      const first = await startLoop({ checkCommand: "npm test" });
+      const second = await finishAndAdvance(first, "Status: continue\nItem: 1");
+      expect(parseRepeatParams(second)?.doneItems).toEqual(["1"]);
+      check.mockResolvedValueOnce({ ok: false, output: "2 tests failed" });
+      await finish(second, "Status: continue\nItem: 2");
+      const gate = await onlyActive();
+      expect(gate.status).toBe("waiting_resume");
+      expect(gate.error).toContain("2 tests failed");
+      expect(parseRepeatParams(gate)?.doneItems).toEqual(["1"]);
+      const resumed = await engine.resumeLoop(gate.id);
+      expect(parseRepeatParams(resumed)?.doneItems).toEqual(["1"]);
+      expect(sentAt(2)).toContain("共 1 项，按完成顺序）\n- 1\n---");
+    });
+
+    it("appendDoneItem: the list is never truncated — only a runaway item is clipped", () => {
+      const many = Array.from({ length: 1000 }, (_, i) => `s${i}`);
+      const next = appendDoneItem(many, "new");
+      expect(next).toHaveLength(1001);
+      expect(next[0]).toBe("s0");
+      expect(next.at(-1)).toBe("new");
+      expect(appendDoneItem(undefined, "  x  ")).toEqual(["x"]);
+      const long = appendDoneItem([], "a".repeat(500))[0];
+      expect(long.length).toBe(DONE_ITEM_MAX_CHARS + 1);
+      expect(long.endsWith("…")).toBe(true);
     });
   });
 
