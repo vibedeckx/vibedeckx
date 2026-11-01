@@ -602,12 +602,12 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
               : `相关 session：「${params?.name ?? "Loop"} #${shown}」（见侧栏）`}
           </div>
           <div className="flex flex-wrap items-center justify-center gap-2">
-            <Button size="sm" disabled={busy} onClick={() => onAction("resume")}>
-              <Play className="h-3 w-3 mr-1" />Continue loop
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction("resume")}>
+              <Play className="h-3 w-3" />Continue loop
             </Button>
             {resumeAt === null && !picking && (
               <Button size="sm" variant="outline" disabled={busy} onClick={() => setPicking(true)}>
-                <AlarmClock className="h-3 w-3 mr-1" />Continue later
+                <AlarmClock className="h-3 w-3" />Continue later
               </Button>
             )}
           </div>
