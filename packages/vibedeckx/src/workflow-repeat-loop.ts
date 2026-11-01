@@ -43,6 +43,8 @@ const CHECK_COMMAND_TIMEOUT_MS = 5 * 60_000;
 const CHECK_OUTPUT_TAIL = 600;
 /** A status change can be observed a beat before the turn_end entry is readable. */
 const ABNORMAL_END_RECHECK_MS = 1_500;
+/** How much of an iteration's error text the gate reason carries. */
+const ABNORMAL_END_DETAIL_MAX = 300;
 
 /** Persisted on every iteration's run row (`workflow_runs.params`), copied forward. */
 export interface RepeatLoopParams {
@@ -150,6 +152,23 @@ const ITERATION_TURN = { origin: "workflow", notificationDisposition: "milestone
 export function parseRepeatParams(run: Pick<WorkflowRun, "params">): RepeatLoopParams | null {
   if (!run.params) return null;
   try { return JSON.parse(run.params) as RepeatLoopParams; } catch { return null; }
+}
+
+/**
+ * The last `error` entry's text, truncated — scanned over the whole tail, not
+ * just up to turn_end: a spawn failure's error entry is pushed fire-and-forget
+ * and can land after it.
+ */
+export function lastErrorMessage(entries: readonly (AgentMessage | null | undefined)[]): string | undefined {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e?.type !== "error") continue;
+    const text = e.message.trim();
+    if (!text) continue;
+    const chars = Array.from(text);
+    return chars.length > ABNORMAL_END_DETAIL_MAX ? `${chars.slice(0, ABNORMAL_END_DETAIL_MAX).join("")}…` : text;
+  }
+  return undefined;
 }
 
 /** The user's prompt, preceded by the previous iteration's note, followed by the closing protocol. */
@@ -505,25 +524,32 @@ export class RepeatLoopRunner {
       const index = await this.entryIndexOf(step);
       if (index === null) continue; // dispatch still in flight
       const entries = await this.ops.getRawMessages(sessionId);
-      const turnEnd = entries.slice(index + 1).find((e) => e?.type === "turn_end") as Extract<AgentMessage, { type: "turn_end" }> | undefined;
+      const after = entries.slice(index + 1);
+      const turnEnd = after.find((e) => e?.type === "turn_end") as Extract<AgentMessage, { type: "turn_end" }> | undefined;
       if (!turnEnd) {
         if (recheck) setTimeout(() => void this.onSessionIdle(sessionId, false).catch(() => undefined), ABNORMAL_END_RECHECK_MS).unref();
         continue;
       }
       const outcome = turnEnd.outcome ?? "completed";
       if (outcome === "completed" || outcome === "completed_with_pending_tasks") continue; // taskCompleted handles it
-      await this.abnormalEnd(step, outcome);
+      await this.abnormalEnd(step, outcome, lastErrorMessage(after));
     }
   }
 
-  /** Also the restart path: `outcome` is then `server_restart`. */
-  async abnormalEnd(step: WorkflowRunStep, outcome: string): Promise<void> {
+  /**
+   * Also the restart path: `outcome` is then `server_restart`, with no
+   * `detail`. `detail` is the iteration's last error text (usage limit, auth
+   * expiry, failed launch), shown after the reason so the gate says why.
+   */
+  async abnormalEnd(step: WorkflowRunStep, outcome: string, detail?: string): Promise<void> {
     const byUser = outcome === "stopped";
     const reason = byUser
       ? "这次迭代已由你停止。可以继续循环，或结束它。"
       : outcome === "server_restart"
         ? "这次迭代因服务重启而中断。那一项可能处理到一半——确认后再继续。"
-        : `这次迭代异常结束（${outcome}）。`;
+        : detail
+          ? `这次迭代异常结束（${outcome}）：${detail}`
+          : `这次迭代异常结束（${outcome}）。`;
     // A stop by the user rings no bell: they are right there.
     await this.endIteration(step, `turn ended: ${outcome}`, byUser ? "cancelled" : "failed", reason, byUser ? null : outcome);
   }

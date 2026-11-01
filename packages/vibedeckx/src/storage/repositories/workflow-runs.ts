@@ -115,12 +115,15 @@ export const createWorkflowRunRepos = (kdb: Kysely<DB>): Pick<Storage, "workflow
       const row = await kdb.selectFrom("workflow_runs").selectAll().where("id", "=", id).executeTakeFirst();
       return row ? asRun(row) : undefined;
     },
-    transition: async (id, from, to, patch) => {
-      const result = await kdb.updateTable("workflow_runs")
+    transition: async (id, from, to, patch, expectParams) => {
+      let cas = kdb.updateTable("workflow_runs")
         .set({ ...(patch ?? {}), status: to, updated_at: sql`datetime('now')` })
         .where("id", "=", id)
-        .where("status", "=", from)
-        .executeTakeFirst();
+        .where("status", "=", from);
+      if (expectParams !== undefined) {
+        cas = expectParams === null ? cas.where("params", "is", null) : cas.where("params", "=", expectParams);
+      }
+      const result = await cas.executeTakeFirst();
       return (result.numUpdatedRows ?? 0n) > 0n;
     },
 

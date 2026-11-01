@@ -2242,6 +2242,12 @@ export interface Storage {
       from: WorkflowRunStatus,
       to: WorkflowRunStatus,
       patch?: Partial<Pick<WorkflowRun, "feedback_snapshot" | "error" | "reviewer_session_id" | "source_session_id" | "params" | "max_rounds">>,
+      /**
+       * Optimistic guard, same as `claimStepAndTransition`'s: the run's
+       * `params` must still be exactly this, or nothing is written. Omitted =
+       * no condition on `params`.
+       */
+      expectParams?: string | null,
     ): Promise<boolean>;
     /**
      * `transition` plus an attention milestone, in one transaction. The outbox

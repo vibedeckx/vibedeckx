@@ -311,7 +311,28 @@ describe("repeat-until-done loop", () => {
       expect((await storage.workflowRuns.getById(first.id))?.status).toBe("failed");
       const gate = await vi.waitFor(async () => onlyActive());
       expect(gate.status).toBe("waiting_resume");
+      expect(gate.error).toBe("这次迭代异常结束（failed）。"); // no error entry → plain reason
       expect(await outbox()).toEqual([expect.objectContaining({ kind: "workflow_failed", session_id: first.source_session_id })]);
+    });
+
+    it("failed → the gate reason carries the iteration's last error text, truncated to 300 chars", async () => {
+      const first = await startLoop();
+      const long = "限".repeat(400);
+      transcripts.get(first.source_session_id)!.push(
+        { type: "error", message: "an earlier error", timestamp: 1 },
+        { type: "error", message: `  ${long}  `, timestamp: 1 },
+      );
+      await finish(first, "", "failed");
+      const gate = await vi.waitFor(async () => onlyActive());
+      expect(gate.error).toBe(`这次迭代异常结束（failed）：${"限".repeat(300)}…`);
+      expect((await storage.workflowRuns.getById(first.id))?.error).toBe(gate.error);
+    });
+
+    it("failed with a short error keeps it whole", async () => {
+      const first = await startLoop();
+      transcripts.get(first.source_session_id)!.push({ type: "error", message: "You've hit your limit · resets 2pm", timestamp: 1 });
+      await finish(first, "", "failed");
+      expect((await vi.waitFor(async () => onlyActive())).error).toBe("这次迭代异常结束（failed）：You've hit your limit · resets 2pm");
     });
   });
 
@@ -390,12 +411,16 @@ describe("repeat-until-done loop", () => {
 
     it("an iteration interrupted by the restart is NOT re-run: gate + bell", async () => {
       const first = await startLoop();
-      transcripts.get(first.source_session_id)!.push({ type: "turn_end", timestamp: 2, outcome: "server_restart" } as AgentMessage);
+      transcripts.get(first.source_session_id)!.push(
+        { type: "error", message: "stale error text", timestamp: 1 },
+        { type: "turn_end", timestamp: 2, outcome: "server_restart" } as AgentMessage,
+      );
       await restart();
       expect((await storage.workflowRuns.getById(first.id))?.status).toBe("failed");
       const gate = await onlyActive();
       expect(gate.status).toBe("waiting_resume");
       expect(gate.error).toContain("重启");
+      expect(gate.error).not.toContain("stale error text");
       expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
       expect(await outbox()).toEqual([expect.objectContaining({ kind: "workflow_failed" })]);
     });

@@ -213,6 +213,50 @@ describe("workflowRuns repository", () => {
     });
   });
 
+  /**
+   * A scheduled resume reads params, awaits, then commits. If the user
+   * cancelled or rescheduled meanwhile, params changed — the stale tick must
+   * lose its CAS and write nothing.
+   */
+  describe("transition expectParams", () => {
+    const seed = async (params: string | null) => {
+      await storage.workflowRuns.create(baseRun);
+      await storage.workflowRuns.update("r1", { params });
+    };
+
+    it("applies when params still match", async () => {
+      await seed('{"resumeAt":1}');
+      const ok = await storage.workflowRuns.transition("r1", "waiting_reviewer", "waiting_feedback", { error: "x" }, '{"resumeAt":1}');
+      expect(ok).toBe(true);
+      const run = await storage.workflowRuns.getById("r1");
+      expect(run?.status).toBe("waiting_feedback");
+      expect(run?.error).toBe("x");
+    });
+
+    it("a params mismatch loses the CAS and writes nothing", async () => {
+      await seed('{"resumeAt":null}');
+      const ok = await storage.workflowRuns.transition(
+        "r1", "waiting_reviewer", "waiting_feedback", { error: "x", params: '{"resumeAt":2}' }, '{"resumeAt":1}',
+      );
+      expect(ok).toBe(false);
+      const run = await storage.workflowRuns.getById("r1");
+      expect(run?.status).toBe("waiting_reviewer");
+      expect(run?.error).toBeNull();
+      expect(run?.params).toBe('{"resumeAt":null}');
+    });
+
+    it("null expects params IS NULL", async () => {
+      await seed(null);
+      expect(await storage.workflowRuns.transition("r1", "waiting_reviewer", "waiting_feedback", undefined, "{}")).toBe(false);
+      expect(await storage.workflowRuns.transition("r1", "waiting_reviewer", "waiting_feedback", undefined, null)).toBe(true);
+    });
+
+    it("omitted means no condition on params", async () => {
+      await seed('{"a":1}');
+      expect(await storage.workflowRuns.transition("r1", "waiting_reviewer", "waiting_feedback")).toBe(true);
+    });
+  });
+
   it("defaults review_span to this_turn and round-trips an explicit span", async () => {
     const run = await storage.workflowRuns.create(baseRun);
     expect(run.review_span).toBe("this_turn");
