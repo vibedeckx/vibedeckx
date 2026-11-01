@@ -27,7 +27,6 @@ import {
 } from "@/components/schedule/schedule-form-chrome";
 import {
   generateInstruction,
-  HANDOFF_PROTOCOL_PREVIEW,
   loadLoopDraft,
   LOOP_PRESETS,
   type LoopPresetKind,
@@ -35,7 +34,6 @@ import {
   presetFieldsForMeta,
   presetFor,
   saveLoopDraft,
-  TASK_STATUS_PROTOCOL_PREVIEW,
 } from "@/lib/loop-presets";
 import { isMacPlatform } from "@/lib/tab-shortcuts";
 import { cn } from "@/lib/utils";
@@ -369,14 +367,6 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
                   marked done. Make handling an item safe to repeat — an interrupted item may be picked up again.
                 </HintLine>
               )}
-              <div className="min-w-0 rounded-lg border border-dashed bg-secondary/60 px-2.5 py-2">
-                <div className="text-[10.5px] text-muted-foreground/80">
-                  The loop appends this after your instruction (read-only — it is how the loop reads each session&apos;s result):
-                </div>
-                <pre data-testid="loop-protocol" className="mt-1 max-h-[96px] overflow-auto font-mono text-[10.5px] leading-[1.5] whitespace-pre-wrap text-muted-foreground">
-                  {(handoff ? TASK_STATUS_PROTOCOL_PREVIEW + "\n" + HANDOFF_PROTOCOL_PREVIEW : TASK_STATUS_PROTOCOL_PREVIEW).trim()}
-                </pre>
-              </div>
             </div>
           )}
 

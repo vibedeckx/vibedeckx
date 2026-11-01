@@ -76,38 +76,6 @@ export function presetFor(kind: LoopPresetKind): LoopPreset {
   return kind === "plan" ? PLAN_PRESET : CUSTOM_PRESET;
 }
 
-/**
- * Verbatim copy of the engine's `TASK_STATUS_INSTRUCTIONS`
- * (packages/vibedeckx/src/utils/review-verdict.ts), shown read-only under the
- * instruction: the loop appends it and parses the reply by it. A backend test
- * fails if the two drift apart.
- */
-export const TASK_STATUS_PROTOCOL_PREVIEW = [
-  "",
-  "This instruction runs repeatedly, each time in a fresh session with no memory of the previous ones. Process exactly ONE item, then stop — the next session picks up the next item.",
-  "End your final message with these lines:",
-  "Status: <exactly one of: continue / done / blocked>",
-  "  continue — you completed one item and more remain (or may remain)",
-  "  done — you checked, and there is nothing left to process",
-  "  blocked — you could not complete an item and need a human",
-  "Item: <one short line identifying the item you processed; omit when done>",
-  "Remaining: <how many items are left, if you know; otherwise omit>",
-].join("\n");
-
-/**
- * Verbatim copy of the engine's `HANDOFF_INSTRUCTIONS` (same file), appended
- * after the status protocol when the loop keeps a handoff note. Same drift test.
- */
-export const HANDOFF_PROTOCOL_PREVIEW = [
-  "",
-  "Then, as the very last part of your message, write a handoff note for the next session:",
-  "Handoff:",
-  "<rewrite the whole note each time: a short \"known lessons\" list (project quirks, dead ends,",
-  "conventions) plus the last few handoffs (step, result, decisions, what to watch). Keep it",
-  "under ~40 lines; drop what no longer applies. Do not start any line of it with",
-  "\"Status:\", \"Item:\" or \"Remaining:\".>",
-].join("\n");
-
 /** Non-empty trimmed lines of a multi-line field. */
 function lines(raw: string | undefined): string[] {
   return (raw ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);

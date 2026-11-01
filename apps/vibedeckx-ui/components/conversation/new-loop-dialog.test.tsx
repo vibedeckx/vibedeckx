@@ -14,7 +14,7 @@ vi.mock("@/lib/api", () => ({
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { NewLoopDialog } from "./new-loop-dialog";
-import { HANDOFF_PROTOCOL_PREVIEW, loopDraftKey, TASK_STATUS_PROTOCOL_PREVIEW } from "@/lib/loop-presets";
+import { loopDraftKey } from "@/lib/loop-presets";
 
 /** What api.ts throws for a refused request (`WorkflowRequestError`) — the dialog reads only `code`. */
 const refused = (message: string, code?: string) => Object.assign(new Error(message), { status: 409, code });
@@ -68,8 +68,7 @@ describe("NewLoopDialog", () => {
     const text = byId<HTMLTextAreaElement>("loop-prompt").value;
     expect(text).toContain("`PLAN.md`");
     expect(text).not.toContain("implementation-plan.md");
-    // The engine's closing protocol is shown, not part of the editable text.
-    expect(document.querySelector('[data-testid="loop-protocol"]')!.textContent).toContain(TASK_STATUS_PROTOCOL_PREVIEW.trim());
+    // The engine appends its closing protocol itself; it is not part of the editable text.
     expect(text).not.toContain("End your final message with these lines");
   });
 
@@ -153,12 +152,9 @@ describe("NewLoopDialog", () => {
 
   describe("handoff note", () => {
     const handoffBox = () => byId<HTMLInputElement>("loop-handoff");
-    const protocol = () => document.querySelector('[data-testid="loop-protocol"]')!.textContent;
 
-    it("is on for the Plan preset and sent as true; the preview shows the part the loop appends for it", async () => {
+    it("is on for the Plan preset and sent as true", async () => {
       expect(handoffBox().checked).toBe(true);
-      await click(instructionTab());
-      expect(protocol()).toBe((TASK_STATUS_PROTOCOL_PREVIEW + "\n" + HANDOFF_PROTOCOL_PREVIEW).trim());
       await click(startButton());
       expect(createRepeatLoop).toHaveBeenCalledWith(expect.objectContaining({ handoff: true }));
     });
@@ -166,7 +162,6 @@ describe("NewLoopDialog", () => {
     it("is off for Custom, and an explicit false is still sent", async () => {
       await click(buttonNamed("Custom"));
       expect(handoffBox().checked).toBe(false);
-      expect(protocol()).toBe(TASK_STATUS_PROTOCOL_PREVIEW.trim());
       await type("loop-prompt", "handle the next order");
       await click(startButton());
       expect(createRepeatLoop).toHaveBeenCalledWith(expect.objectContaining({ handoff: false }));
