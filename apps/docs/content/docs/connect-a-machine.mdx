@@ -53,11 +53,21 @@ If the worker starts but cannot connect, for example because the token was revok
 | `vibedeckx connect enable` | Turns auto-start back on and starts it |
 | `vibedeckx connect uninstall` | Removes the service and the `vibedeckx` command; your data and token are kept |
 
-`status` only looks at this machine. Add `--check-update` to also check for a newer version.
+`status` only looks at this machine. Add `--check-update` to also check for a newer version; see [Upgrading the worker](#upgrading-the-worker) if one is available.
 
 On macOS and Windows, a disabled worker does not start at all, so `start` and `restart` refuse until you run `enable`.
 
 On Windows the worker's logs are in `%USERPROFILE%\.vibedeckx\logs`: `vibedeckx.log`, plus `supervise.log` and `worker-console.log` from the supervisor.
+
+### Upgrading the worker
+
+The worker does not upgrade itself. When `vibedeckx connect status --check-update` reports an update, run the install command again with the new version:
+
+```bash
+npx vibedeckx@latest connect install
+```
+
+The token and server URL saved by the first install are reused, so you don't need to pass them again. The new version is installed beside the old one and the worker restarts on it; if the command is interrupted, the previous version keeps running. The restart stops any agent that is running on this machine, so upgrade when it is idle. Afterwards, `vibedeckx connect status --check-update` should show `up to date`.
 
 ### Changing the token
 
