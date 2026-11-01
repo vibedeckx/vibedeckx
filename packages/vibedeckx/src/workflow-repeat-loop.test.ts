@@ -274,12 +274,11 @@ describe("repeat-until-done loop", () => {
     await finish(second, "Nothing left.\n\nStatus: done");
 
     expect(await active()).toHaveLength(0);
-    expect(stopped).toEqual([first.source_session_id, second.source_session_id]);
-    // The transcript says what happens next: more items, or the end.
+    // The last session stays up, so it stays in the sidebar for the user to open.
+    expect(stopped).toEqual([first.source_session_id]);
     const notes = agentOps.stopSession.mock.calls.map(([, o]) => (o as { note: string }).note);
+    expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("next item runs in a fresh session");
-    expect(notes[1]).toMatch(/^Loop finished/);
-    expect(notes[1]).not.toContain("next item");
     expect(await outbox()).toEqual([expect.objectContaining({
       kind: "loop_done", session_id: first.source_session_id, workflow_run_id: second.id,
       id: `workflow:${first.id}:round:2:done`,

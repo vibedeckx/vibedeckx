@@ -131,7 +131,6 @@ export interface StartRepeatLoopOptions {
 /** The system note left in an iteration's transcript when the LOOP stops its session. */
 const STOP_NOTE = {
   itemDone: "Loop: this iteration finished its item; the session was closed. The next item runs in a fresh session.",
-  finished: "Loop finished: this session reported nothing left to process (Status: done). The loop is complete; no further sessions will start.",
   paused: "Loop paused after this item; the session was closed. The loop is waiting for you — resume or end it from the loop card.",
   cancelled: "Loop ended; the session was closed.",
   timeCap: "Loop: time cap reached; the session was stopped.",
@@ -513,15 +512,15 @@ export class RepeatLoopRunner {
     if (outbox) this.host.milestoneCreated();
 
     // A session that needs a human stays up — the user will want to look, and
-    // probably keep talking. Everything else is stopped: one item per session.
-    const keepSession = settlement.next === "gate" && (status === "blocked" || status === null || checkFailure !== null);
+    // probably keep talking. So does the last one of a finished loop: the
+    // sidebar lists only live sessions, and it is where the user goes to see
+    // how the loop ended. Everything else is stopped: one item per session.
+    const keepSession = settlement.next === "finished"
+      || (settlement.next === "gate" && (status === "blocked" || status === null || checkFailure !== null));
     if (!keepSession) {
-      // The note must say what happens NEXT: a finished loop claiming "the next
+      // The note must say what happens NEXT: a paused loop claiming "the next
       // item runs in a fresh session" reads as if it were still going.
-      const note = settlement.next === "finished" ? STOP_NOTE.finished
-        : settlement.next === "gate" ? STOP_NOTE.paused
-          : STOP_NOTE.itemDone;
-      await this.stop(run.source_session_id, note);
+      await this.stop(run.source_session_id, settlement.next === "gate" ? STOP_NOTE.paused : STOP_NOTE.itemDone);
     }
 
     if (!insertRun) return;
