@@ -291,7 +291,7 @@ export function presetSourceLabel(preset: LoopPresetMeta | null | undefined): st
     ? `Plan: ${preset.fields?.planFile?.trim() || PLAN_PRESET.defaults.planFile}`
     : preset.kind === "custom" ? ownSourceLabel(preset.fields?.source) : null;
   if (!base) return null;
-  return preset.edited ? `${base}（已手改）` : base;
+  return preset.edited ? `${base} (edited)` : base;
 }
 
 // ---------- last-used settings (design §2.4) ----------

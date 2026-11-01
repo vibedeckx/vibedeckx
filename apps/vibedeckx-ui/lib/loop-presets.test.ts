@@ -97,7 +97,7 @@ describe("preset metadata", () => {
   it("labels the card's source line", () => {
     expect(presetSourceLabel({ kind: "plan", fields: { planFile: "PLAN.md" } })).toBe("Plan: PLAN.md");
     expect(presetSourceLabel({ kind: "plan" })).toBe("Plan: docs/implementation-plan.md");
-    expect(presetSourceLabel({ kind: "plan", edited: true })).toBe("Plan: docs/implementation-plan.md（已手改）");
+    expect(presetSourceLabel({ kind: "plan", edited: true })).toBe("Plan: docs/implementation-plan.md (edited)");
     expect(presetSourceLabel({ kind: "custom" })).toBe("Own instruction");
     expect(presetSourceLabel({ kind: "custom", fields: { source: "\norders.md\nmore" } })).toBe("Own: orders.md");
     expect(presetSourceLabel({ kind: "custom", fields: { source: "x".repeat(70) } })).toBe(`Own: ${"x".repeat(60)}…`);

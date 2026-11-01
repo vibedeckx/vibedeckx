@@ -459,28 +459,30 @@ function ScheduleResumePicker({ busy, onSchedule, onClose }: {
   const submitCustom = () => {
     const at = new Date(custom).getTime();
     const now = Date.now();
-    if (!custom || !Number.isFinite(at)) return setInvalid("先选一个时间");
-    if (at <= now) return setInvalid("这个时间已经过去了");
-    if (at - now > RESUME_SCHEDULE_MAX_MS) return setInvalid("最多只能定在 7 天之内");
+    if (!custom || !Number.isFinite(at)) return setInvalid("Pick a time first");
+    if (at <= now) return setInvalid("That time has already passed");
+    if (at - now > RESUME_SCHEDULE_MAX_MS) return setInvalid("It has to be within 7 days");
     onSchedule(at);
   };
   return (
     <div className="space-y-1.5" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-muted-foreground">多久后继续：</span>
+        <span className="text-muted-foreground">Continue in:</span>
         <Button size="sm" variant="outline" disabled={busy} onClick={() => onSchedule(Date.now() + HOUR_MS)}>+1h</Button>
         <Button size="sm" variant="outline" disabled={busy} onClick={() => onSchedule(Date.now() + 5 * HOUR_MS)}>+5h</Button>
-        <input type="datetime-local" aria-label="自定继续时间" value={custom}
+        <input type="datetime-local" aria-label="Custom resume time" value={custom}
           min={toLocalInput(openedAt)} max={toLocalInput(openedAt + RESUME_SCHEDULE_MAX_MS)}
           onChange={(e) => { setCustom(e.target.value); setInvalid(null); }}
           className="h-7 rounded-md border bg-background px-1.5 text-xs" />
-        <Button size="sm" variant="outline" disabled={busy || !custom} onClick={submitCustom}>定在这个时间</Button>
-        <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>取消</Button>
+        <Button size="sm" variant="outline" disabled={busy || !custom} onClick={submitCustom}>Set this time</Button>
+        <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>Cancel</Button>
       </div>
       {invalid && <div className="text-destructive">{invalid}</div>}
     </div>
   );
 }
+
+const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
 
 /**
  * One repeat-until-done loop (`run.kind === "repeat"`). The run in hand is the
@@ -526,10 +528,18 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
   const remainingCount = params?.remaining && /^\d+$/.test(params.remaining.trim()) ? Number(params.remaining.trim()) : null;
   const total = remainingCount !== null && doneItems.length > 0 ? doneItems.length + remainingCount : null;
   const percent = total ? Math.round((doneItems.length / total) * 100) : finished ? 100 : null;
-  const statusText = run.status === "preparing" ? "正在启动下一个 session…"
-    : run.status === "running_task" ? (pausing ? "做完这一项后暂停…" : "处理中")
-      : gate ? "已停下，等你决定"
-        : finished ? "已完成" : null;
+  const working = run.status === "preparing" || run.status === "running_task";
+  const statusText = run.status === "preparing" ? `Starting ${name} #${round}…`
+    : run.status === "running_task" ? `${name} #${round} ${pausing ? "will pause after this item…" : "is working"}`
+      : gate ? "Paused — waiting for you"
+        : finished ? "Done" : null;
+  // The iteration cap is a safety limit, not progress — the bar is progress.
+  // It only earns a place on the card once it is about to stop the loop, or did.
+  const runsLeft = run.max_rounds != null ? run.max_rounds - round : null;
+  const capNote = gate && isOverRoundCap(run) ? `Reached the ${run.max_rounds}-iteration limit`
+    : working && runsLeft !== null && runsLeft <= 3
+      ? (runsLeft <= 0 ? `Last iteration (limit ${run.max_rounds})` : `${plural(runsLeft, "iteration")} left before the limit`)
+      : null;
   const tone = gate ? "bg-amber-500" : finished ? "bg-emerald-500" : "bg-sky-500";
   const meta = { fontSize: "var(--conv-font-size, 12px)" };
   const disclosure = "inline-flex items-center gap-1 rounded-md border bg-background px-2 py-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground";
@@ -545,10 +555,15 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
             <span className="shrink-0 rounded-sm bg-muted px-1.5 py-px font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Loop</span>
             <span className="min-w-0 truncate font-medium" title={name}>{name}</span>
           </div>
-          <div className="flex items-center gap-1.5 pl-4 text-muted-foreground" style={meta}>
-            {statusText && <span className={gate ? "text-amber-700 dark:text-amber-400" : undefined}>{statusText}</span>}
-            {statusText && <span aria-hidden>·</span>}
-            <span className="tabular-nums">第 {shown}{run.max_rounds ? ` / ${run.max_rounds}` : ""} 次</span>
+          <div className="flex min-w-0 items-center gap-1.5 pl-4 text-muted-foreground" style={meta}>
+            {working && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
+            {statusText && <span className={`min-w-0 truncate ${gate ? "text-amber-700 dark:text-amber-400" : ""}`}>{statusText}</span>}
+            {capNote && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="shrink-0 text-amber-700 dark:text-amber-400">{capNote}</span>
+              </>
+            )}
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -556,20 +571,20 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
             // The safer stop: a hard stop can leave an item half-processed, and
             // only the instruction — not the engine — can make that harmless.
             <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction("pause")}
-              title="当前 session 做完这一项后暂停循环">
+              title="Pause the loop once the current session finishes this item">
               <Pause className="h-3 w-3" />Stop after this item
             </Button>
           )}
           {finished ? (
-            <Button variant="ghost" size="icon-sm" disabled={busy} aria-label="关闭" title="关闭这张卡片"
+            <Button variant="ghost" size="icon-sm" disabled={busy} aria-label="Close" title="Close this card"
               onClick={() => onAction("dismiss")}>
               <X className="h-3 w-3" />
             </Button>
           ) : (
             <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
               className="text-muted-foreground hover:text-destructive"
-              title="立即结束循环，并停掉正在运行的 session">
-              <X className="h-3 w-3" />结束
+              title="End the loop now and stop the running session">
+              <X className="h-3 w-3" />End
             </Button>
           )}
         </div>
@@ -593,27 +608,21 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
           )}
           <span className="shrink-0 tabular-nums text-muted-foreground">
             {/* With a total the bar already says what is left; a free-form remainder has no total. */}
-            {total !== null ? `${doneItems.length} / ${total}` : params?.remaining && `剩余 ${params.remaining}`}
+            {total !== null ? `${doneItems.length} / ${total}` : params?.remaining && `${params.remaining} left`}
           </span>
         </div>
       )}
       {params?.prevItem && (
         <div className="flex min-w-0 items-baseline gap-2 rounded-md bg-muted/50 px-2.5 py-1.5" style={meta}>
           <span className="flex shrink-0 items-center gap-1 text-muted-foreground">
-            <Check className="h-3 w-3 self-center text-emerald-600 dark:text-emerald-400" />上一项
+            <Check className="h-3 w-3 self-center text-emerald-600 dark:text-emerald-400" />Last item
           </span>
           <span className="min-w-0 break-words">{params.prevItem}</span>
         </div>
       )}
-      {run.status === "running_task" && (
-        <div className="flex items-center gap-1.5 text-muted-foreground" style={meta}>
-          <Loader2 className="h-3 w-3 animate-spin" />
-          <span>session「{name} #{round}」正在工作</span>
-        </div>
-      )}
       {finished && (
         <div className="text-muted-foreground" style={meta}>
-          最后一个 session：「{name} #{round}」（见侧栏）
+          Last session: {name} #{round} (in the sidebar)
         </div>
       )}
       {run.error && (
@@ -628,7 +637,7 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
             {doneItems.length > 0 && (
               <button type="button" aria-expanded={doneOpen} onClick={() => setDoneOpen((o) => !o)} className={disclosure}>
                 {doneOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                已完成 {doneItems.length} 项
+                {plural(doneItems.length, "item")} done
               </button>
             )}
             {handoffNote && (
@@ -636,7 +645,7 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
               // place it is visible short of opening a transcript.
               <button type="button" aria-expanded={noteOpen} onClick={() => setNoteOpen((o) => !o)} className={disclosure}>
                 {noteOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                上一轮交接
+                Last handoff
               </button>
             )}
           </div>
@@ -658,8 +667,8 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
         <>
           <div className="text-muted-foreground" style={meta}>
             {failedToStart
-              ? `第 ${round} 次迭代没能启动，没有对应的 session`
-              : `相关 session：「${name} #${shown}」（见侧栏）`}
+              ? `Iteration #${round} could not start, so it has no session`
+              : `Session: ${name} #${shown} (in the sidebar)`}
           </div>
           <div className="flex flex-wrap items-center justify-center gap-2">
             <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction("resume")}>
@@ -676,10 +685,10 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
       {resumeAt !== null && (
         <div className="flex items-center gap-1 text-muted-foreground" style={meta}>
           <AlarmClock className="h-3 w-3" />
-          <span>将于 {formatResumeAt(resumeAt)} 自动继续 ·</span>
+          <span>Continues automatically at {formatResumeAt(resumeAt)} ·</span>
           <button type="button" disabled={busy} onClick={() => void schedule(null)}
             className="underline-offset-2 hover:text-foreground hover:underline disabled:opacity-50">
-            取消
+            Cancel
           </button>
         </div>
       )}

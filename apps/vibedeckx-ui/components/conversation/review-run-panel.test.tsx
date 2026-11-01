@@ -542,24 +542,23 @@ describe("ReviewRunPanel repeat loop", () => {
     await act(async () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
     });
-    expect(container.textContent).toContain("已完成");
-    expect(container.textContent).toContain("最后一个 session：「Orders #5」");
-    expect(buttonNamed("结束")).toBeUndefined();
+    expect(container.textContent).toContain("Done");
+    expect(container.textContent).toContain("Last session: Orders #5");
+    expect(buttonNamed("End")).toBeUndefined();
     expect(buttonNamed("Continue loop")).toBeUndefined();
 
     vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [], awaitingDismissal: [] } as never);
-    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="关闭"]')!.click(); });
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click(); });
     expect(api.dismissWorkflowRun).toHaveBeenCalledWith("l2");
     await vi.waitFor(() => expect(container.textContent).toBe(""));
   });
 
   it("a gate for an iteration that could not start names THAT round, and no session that never existed", async () => {
     await renderWith(loopRun({
-      status: "waiting_resume", round: 3, error: "无法启动迭代 session：resident_limit",
+      status: "waiting_resume", round: 3, error: "Could not start the iteration session: resident_limit",
       params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, dispatchFailed: true }),
     }));
-    expect(container.textContent).toContain("第 3 / 20 次");
-    expect(container.textContent).toContain("第 3 次迭代没能启动");
+    expect(container.textContent).toContain("Iteration #3 could not start");
     expect(container.textContent).not.toContain("#2");
     expect(container.textContent).not.toContain("#3」");
   });
@@ -568,12 +567,12 @@ describe("ReviewRunPanel repeat loop", () => {
     await renderWith(loopRun({
       params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, prevItem: "3", remaining: "5", doneItems: ["1", "2", "3"] }),
     }));
-    expect(container.textContent).toContain("已完成 3 项");
-    expect(container.textContent).toContain("上一项3");
+    expect(container.textContent).toContain("3 items done");
+    expect(container.textContent).toContain("Last item3");
     expect(container.textContent).toContain("3 / 8");
-    expect(container.textContent).not.toContain("剩余");
+    expect(container.textContent).not.toContain("left");
     expect(container.querySelector('[data-testid="loop-done-items"]')).toBeNull();
-    await act(async () => { buttonNamed("已完成 3 项")!.click(); });
+    await act(async () => { buttonNamed("3 items done")!.click(); });
     const list = container.querySelector('[data-testid="loop-done-items"]')!;
     expect([...list.querySelectorAll("li")].map((li) => li.textContent)).toEqual(["1", "2", "3"]);
   });
@@ -581,22 +580,38 @@ describe("ReviewRunPanel repeat loop", () => {
   it("a running iteration shows progress and offers the soft stop and the hard stop — never review controls", async () => {
     await renderWith(loopRun());
     expect(container.textContent).toContain("Orders");
-    expect(container.textContent).toContain("第 2 / 20 次");
-    expect(container.textContent).toContain("上一项order 17");
-    expect(container.textContent).toContain("剩余 4");
+    expect(container.textContent).toContain("Orders #2 is working");
+    expect(container.textContent).not.toContain("limit");
+    expect(container.textContent).toContain("Last itemorder 17");
+    expect(container.textContent).toContain("4 left");
     expect(buttonNamed("发送反馈给原 session")).toBeUndefined();
 
     await act(async () => { buttonNamed("Stop after this item")!.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("l2", "pause");
-    await act(async () => { buttonNamed("结束")!.click(); });
+    await act(async () => { buttonNamed("End")!.click(); });
     expect(api.cancelWorkflowRun).toHaveBeenCalledWith("l2");
+  });
+
+  describe("iteration cap — shown only once it is about to stop the loop, or did", () => {
+    it("near the cap", async () => {
+      await renderWith(loopRun({ round: 18 }));
+      expect(container.textContent).toContain("2 iterations left before the limit");
+    });
+    it("on the last iteration", async () => {
+      await renderWith(loopRun({ round: 20 }));
+      expect(container.textContent).toContain("Last iteration (limit 20)");
+    });
+    it("a gate past the cap", async () => {
+      await renderWith(loopRun({ status: "waiting_resume", round: 21 }));
+      expect(container.textContent).toContain("Reached the 20-iteration limit");
+    });
   });
 
   it("names where the instruction came from under the loop's name", async () => {
     await renderWith(loopRun({
       params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, preset: { kind: "plan", fields: { planFile: "PLAN.md" }, edited: true } }),
     }));
-    expect(container.textContent).toContain("Plan: PLAN.md（已手改）");
+    expect(container.textContent).toContain("Plan: PLAN.md (edited)");
   });
 
   it("a loop without preset metadata (older worker) just has no source line", async () => {
@@ -609,14 +624,14 @@ describe("ReviewRunPanel repeat loop", () => {
     await renderWith(loopRun({
       params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, stopAfterCurrent: true }),
     }));
-    expect(container.textContent).toContain("做完这一项后暂停");
+    expect(container.textContent).toContain("will pause after this item");
     expect(buttonNamed("Stop after this item")).toBeUndefined();
   });
 
   it("a resume gate shows why it stopped, names the iteration that stopped, and continues on click", async () => {
-    await renderWith(loopRun({ id: "l3", status: "waiting_resume", round: 3, error: "这次迭代报告 blocked：需要你处理后再继续。" }));
-    expect(container.textContent).toContain("已停下，等你决定");
-    expect(container.textContent).toContain("报告 blocked");
+    await renderWith(loopRun({ id: "l3", status: "waiting_resume", round: 3, error: "This iteration reported blocked: it needs you before the loop can go on." }));
+    expect(container.textContent).toContain("Paused — waiting for you");
+    expect(container.textContent).toContain("reported blocked");
     // The gate row is round 3 — the iteration the user needs to look at is #2.
     expect(container.textContent).toContain("Orders #2");
     await act(async () => { buttonNamed("Continue loop")!.click(); });
@@ -628,17 +643,17 @@ describe("ReviewRunPanel repeat loop", () => {
       params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, handoff: true, handoffNote: "Known lessons:\n- run pnpm, not npm", ...over }),
     });
 
-    it("is collapsed under 上一轮交接 and expands on click", async () => {
+    it("is collapsed under Last handoff and expands on click", async () => {
       await renderWith(withNote());
-      expect(container.textContent).toContain("上一轮交接");
+      expect(container.textContent).toContain("Last handoff");
       expect(container.querySelector('[data-testid="loop-handoff-note"]')).toBeNull();
-      await act(async () => { buttonNamed("上一轮交接")!.click(); });
+      await act(async () => { buttonNamed("Last handoff")!.click(); });
       expect(container.querySelector('[data-testid="loop-handoff-note"]')!.textContent).toBe("Known lessons:\n- run pnpm, not npm");
     });
 
     it("no note yet (first iteration, or handoff off) — no row", async () => {
       await renderWith(withNote({ handoffNote: null }));
-      expect(container.textContent).not.toContain("上一轮交接");
+      expect(container.textContent).not.toContain("Last handoff");
     });
   });
 
@@ -646,7 +661,7 @@ describe("ReviewRunPanel repeat loop", () => {
     const NOW = new Date(2026, 10, 1, 9, 30).getTime();
     const HOUR = 60 * 60 * 1000;
     const gateRun = (over: Record<string, unknown> = {}) => loopRun({
-      id: "l3", status: "waiting_resume", round: 3, error: "这次迭代异常结束（failed）：You've hit your limit · resets 2pm",
+      id: "l3", status: "waiting_resume", round: 3, error: "This iteration ended abnormally (failed): You've hit your limit · resets 2pm",
       params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, ...over }),
     });
     const setInput = async (el: HTMLInputElement, value: string) => {
@@ -655,7 +670,7 @@ describe("ReviewRunPanel repeat loop", () => {
         el.dispatchEvent(new Event("input", { bubbles: true }));
       });
     };
-    const customInput = () => container.querySelector<HTMLInputElement>('input[aria-label="自定继续时间"]')!;
+    const customInput = () => container.querySelector<HTMLInputElement>('input[aria-label="Custom resume time"]')!;
 
     beforeEach(() => { vi.spyOn(Date, "now").mockReturnValue(NOW); });
     afterEach(() => { vi.mocked(Date.now).mockRestore(); });
@@ -674,12 +689,12 @@ describe("ReviewRunPanel repeat loop", () => {
       await renderWith(gateRun());
       await act(async () => { buttonNamed("Continue later")!.click(); });
       await setInput(customInput(), "2026-11-01T08:00");
-      await act(async () => { buttonNamed("定在这个时间")!.click(); });
-      expect(container.textContent).toContain("这个时间已经过去了");
+      await act(async () => { buttonNamed("Set this time")!.click(); });
+      expect(container.textContent).toContain("That time has already passed");
       expect(api.scheduleResume).not.toHaveBeenCalled();
 
       await setInput(customInput(), "2026-11-01T14:05");
-      await act(async () => { buttonNamed("定在这个时间")!.click(); });
+      await act(async () => { buttonNamed("Set this time")!.click(); });
       expect(api.scheduleResume).toHaveBeenCalledWith("l3", new Date(2026, 10, 1, 14, 5).getTime());
     });
 
@@ -687,18 +702,18 @@ describe("ReviewRunPanel repeat loop", () => {
       await renderWith(gateRun());
       await act(async () => { buttonNamed("Continue later")!.click(); });
       await setInput(customInput(), "2026-11-09T09:00");
-      await act(async () => { buttonNamed("定在这个时间")!.click(); });
-      expect(container.textContent).toContain("7 天之内");
+      await act(async () => { buttonNamed("Set this time")!.click(); });
+      expect(container.textContent).toContain("within 7 days");
       expect(api.scheduleResume).not.toHaveBeenCalled();
     });
 
     it("a scheduled gate says when, can be cancelled, and still resumes by hand", async () => {
       const at = new Date(2026, 10, 1, 14, 0).getTime();
       await renderWith(gateRun({ resumeAt: at }));
-      expect(container.textContent).toContain("将于 14:00 自动继续");
+      expect(container.textContent).toContain("Continues automatically at 14:00");
       expect(buttonNamed("Continue later")).toBeUndefined();
       expect(buttonNamed("Continue loop")).toBeDefined();
-      await act(async () => { buttonNamed("取消")!.click(); });
+      await act(async () => { buttonNamed("Cancel")!.click(); });
       expect(api.scheduleResume).toHaveBeenCalledWith("l3", null);
     });
 
@@ -713,7 +728,7 @@ describe("ReviewRunPanel repeat loop", () => {
     it("only a gate offers it", async () => {
       await renderWith(loopRun({ params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, resumeAt: NOW + HOUR }) }));
       expect(buttonNamed("Continue later")).toBeUndefined();
-      expect(container.textContent).not.toContain("自动继续");
+      expect(container.textContent).not.toContain("Continues automatically");
     });
   });
 
