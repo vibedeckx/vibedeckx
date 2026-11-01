@@ -60,7 +60,6 @@ export const PLAN_PRESET: LoopPreset = {
       placeholder: "npm run typecheck\nnpm test",
       hint: "The agent runs these. The Check command below is a separate check the loop runs itself.",
     },
-    { key: "decisionsFile", label: "Decisions doc", placeholder: "docs/decisions.md" },
     {
       key: "readyResources", label: "Already available — not a blocker", multiline: true,
       placeholder: "gh is logged in\nThe dev database is configured",
@@ -73,7 +72,6 @@ export const PLAN_PRESET: LoopPreset = {
     readDocs: "",
     constraints: "",
     verifyCommands: "",
-    decisionsFile: "docs/decisions.md",
     readyResources: "",
   },
   handoffByDefault: true,
@@ -149,7 +147,6 @@ function planInstruction(fields: Record<string, string>): string {
   const plan = value(fields, "planFile");
   const pending = value(fields, "pendingMarker");
   const done = value(fields, "doneMarker");
-  const decisions = fields.decisionsFile?.trim() ?? "";
   const readDocs = lines(fields.readDocs);
   const constraints = lines(fields.constraints);
   const verify = lines(fields.verifyCommands);
@@ -187,7 +184,7 @@ function planInstruction(fields: Record<string, string>): string {
   if (verify.length) verifyLines.push(`- Run these every session:\n${verify.map((c) => `  - \`${c}\``).join("\n")}`);
   verifyLines.push(
     "- If the environment truly cannot satisfy a check, use the fallback the plan gives, and say which check, why, and when it will be made up — in your final message and in the commit message.",
-    `- A threshold or parameter the plan does not specify is not a blocker: pick a defensible default, keep it in one configurable place (a constants module or config), record the value and the reason in ${decisions ? `\`${decisions}\`` : "the project's docs"}, and carry on.`,
+    "- A threshold or parameter the plan does not specify is not a blocker: pick a defensible default, keep it in one configurable place (a constants module or config), note the value and the reason in the commit body, and carry on.",
   );
   sections.push(`## 4. Verify\n\n${verifyLines.join("\n")}`);
 

@@ -10,7 +10,7 @@ describe("generateInstruction — Plan file", () => {
     expect(text).toContain("`docs/implementation-plan.md`");
     expect(text).toContain("`**Pass condition.** False`");
     expect(text).toContain("`**Pass condition.** True`");
-    expect(text).toContain("`docs/decisions.md`");
+    expect(text).toContain("note the value and the reason in the commit body");
     // Bridge to the loop's closing protocol instead of Ralph's <promise> markers.
     expect(text).toContain("`Status: done`");
     expect(text).toContain("`Status: blocked`");
@@ -44,11 +44,10 @@ describe("generateInstruction — Plan file", () => {
     expect(text).toContain("  - gh is logged in");
   });
 
-  it("blank single-line fields fall back to the defaults; a blank decisions doc reads as generic", () => {
-    const text = generateInstruction("plan", { planFile: "  ", pendingMarker: "", doneMarker: "", decisionsFile: "" });
+  it("blank single-line fields fall back to the defaults", () => {
+    const text = generateInstruction("plan", { planFile: "  ", pendingMarker: "", doneMarker: "" });
     expect(text).toContain("`docs/implementation-plan.md`");
     expect(text).toContain("`**Pass condition.** False`");
-    expect(text).toContain("in the project's docs");
   });
 
   it("custom generates nothing", () => {
