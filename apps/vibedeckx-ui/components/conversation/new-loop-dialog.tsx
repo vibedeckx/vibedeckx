@@ -36,6 +36,7 @@ import {
   presetFor,
   saveLoopDraft,
 } from "@/lib/loop-presets";
+import { DOCS_URL } from "@/components/layout/docs-button";
 import { isMacPlatform } from "@/lib/tab-shortcuts";
 import { cn } from "@/lib/utils";
 
@@ -263,7 +264,11 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
             <DialogTitle className="text-[14.5px] font-semibold tracking-tight">New loop</DialogTitle>
             <DialogDescription className="mt-0.5 text-[11.5px] leading-snug">
               Runs the same instruction again and again, each time in a fresh session that handles one item, until a
-              session reports there is nothing left.
+              session reports there is nothing left.{" "}
+              <a href={`${DOCS_URL}/loops`} target="_blank" rel="noopener noreferrer"
+                className="whitespace-nowrap text-foreground underline underline-offset-2 hover:text-primary">
+                Learn more
+              </a>
             </DialogDescription>
           </div>
           <DialogClose className="ml-auto grid size-6 shrink-0 place-items-center rounded-md border border-transparent text-muted-foreground/70 transition-colors hover:border-border hover:bg-muted hover:text-foreground">
