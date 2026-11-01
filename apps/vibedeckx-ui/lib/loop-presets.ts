@@ -51,17 +51,12 @@ export const PLAN_PRESET: LoopPreset = {
       placeholder: "AGENTS.md\ndocs/design.md\nOn conflicts, docs/design.md wins.",
       hint: "One per line; say which wins on a conflict.",
     },
-    {
-      key: "constraints", label: "Constraints that must never be violated", multiline: true,
-      placeholder: "No new runtime dependencies\nAll DB access goes through the repository layer",
-    },
   ],
   defaults: {
     planFile: "docs/implementation-plan.md",
     pendingMarker: "**Pass condition.** False",
     doneMarker: "**Pass condition.** True",
     readDocs: "",
-    constraints: "",
   },
   handoffByDefault: true,
 };
@@ -137,7 +132,6 @@ function planInstruction(fields: Record<string, string>): string {
   const pending = value(fields, "pendingMarker");
   const done = value(fields, "doneMarker");
   const readDocs = lines(fields.readDocs);
-  const constraints = lines(fields.constraints);
 
   const sections: string[] = [];
   sections.push(
@@ -159,21 +153,17 @@ function planInstruction(fields: Record<string, string>): string {
     "- Before changing anything, read the design sections the step references and the existing code around it. Implement what is written, reuse the existing abstractions, and do not build a parallel one.",
     "- Change only what is in scope for this step; the main branch must always build and run.",
   ];
-  if (constraints.length) {
-    implement.push(`- Constraints that must never be violated — breaking any of them means the step is not done:\n${bullets(constraints, "  ")}`);
-  }
   sections.push(`## 3. Implement\n\n${implement.join("\n")}`);
 
-  const verifyLines = [
+  sections.push([
+    "## 4. Verify",
+    "",
     "Meet every acceptance criterion of the step, and actually RUN the verification — do not just claim it passes.",
     "",
-  ];
-  verifyLines.push(
     "- Also run the project's own checks every session — typecheck, tests, lint, whatever its docs or scripts define.",
     "- If the environment truly cannot satisfy a check, use the fallback the plan gives, and say which check, why, and when it will be made up — in your final message and in the commit message.",
     "- A threshold or parameter the plan does not specify is not a blocker: pick a defensible default, keep it in one configurable place (a constants module or config), note the value and the reason in the commit body, and carry on.",
-  );
-  sections.push(`## 4. Verify\n\n${verifyLines.join("\n")}`);
+  ].join("\n"));
 
   sections.push([
     "## 5. Mark it done",

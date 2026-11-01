@@ -32,12 +32,10 @@ describe("generateInstruction — Plan file", () => {
       ...PLAN_PRESET.defaults,
       planFile: "PLAN.md",
       readDocs: "AGENTS.md\n\n  docs/design.md  ",
-      constraints: "No new deps",
     });
     expect(text).toContain("`PLAN.md`");
     expect(text).not.toContain("implementation-plan.md");
     expect(text).toContain("  - AGENTS.md\n  - docs/design.md");
-    expect(text).toContain("  - No new deps");
   });
 
   it("blank single-line fields fall back to the defaults", () => {
@@ -53,7 +51,7 @@ describe("generateInstruction — Plan file", () => {
 
 describe("preset metadata", () => {
   it("records only the preset's own non-blank fields", () => {
-    expect(presetFieldsForMeta("plan", { planFile: "PLAN.md", constraints: " ", junk: "x" })).toEqual({ planFile: "PLAN.md" });
+    expect(presetFieldsForMeta("plan", { planFile: "PLAN.md", readDocs: " ", junk: "x" })).toEqual({ planFile: "PLAN.md" });
     expect(presetFieldsForMeta("custom", { planFile: "x" })).toBeUndefined();
   });
 
