@@ -713,7 +713,7 @@ export class WorkflowEngine {
   /** Close a finished loop's card in Main Chat. Idempotent: closing a closed card is a no-op. */
   async dismissFinishedLoop(runId: string): Promise<WorkflowRun> {
     const run = await this.requireRepeatRun(runId);
-    if (run.status !== "completed") throw new WorkflowError("bad-state", "循环还没有结束");
+    if (run.status !== "completed") throw new WorkflowError("bad-state", "The loop has not finished yet");
     if (!(await this.storage.workflowRuns.dismiss(runId))) return run;
     const done = (await this.storage.workflowRuns.getById(runId))!;
     this.emitRunUpdated(done);
@@ -722,7 +722,7 @@ export class WorkflowEngine {
 
   private async requireRepeatRun(runId: string): Promise<WorkflowRun> {
     const run = await this.storage.workflowRuns.getById(runId);
-    if (!run || run.kind !== "repeat") throw new WorkflowError("bad-state", "这不是一个循环");
+    if (!run || run.kind !== "repeat") throw new WorkflowError("bad-state", "This run is not a loop");
     return run;
   }
 

@@ -310,15 +310,15 @@ describe("repeat-until-done loop", () => {
 
   it("a cancelled or still-running loop has no card to close", async () => {
     const run = await startLoop();
-    await expect(engine.dismissFinishedLoop(run.id)).rejects.toThrow("循环还没有结束");
+    await expect(engine.dismissFinishedLoop(run.id)).rejects.toThrow("The loop has not finished yet");
     await engine.cancelRun(run.id);
     expect(await storage.workflowRuns.getAwaitingDismissal("p1", "dev")).toEqual([]);
   });
 
   it.each([
     ["blocked", "Status: blocked", "blocked"],
-    ["an unrecognised status", "Status: not done yet", "无法识别"],
-    ["no status at all", "All finished I think.", "无法识别"],
+    ["an unrecognised status", "Status: not done yet", "Could not read the Status line"],
+    ["no status at all", "All finished I think.", "Could not read the Status line"],
   ])("%s: stops at a resume gate, keeps the session up, rings the bell", async (_label, reply, reason) => {
     const first = await startLoop();
     await finish(first, reply);
@@ -338,7 +338,7 @@ describe("repeat-until-done loop", () => {
       await finish(first, "Status: continue\nItem: a");
       const gate = await onlyActive();
       expect(gate).toMatchObject({ status: "waiting_resume", round: 2, max_rounds: 1 });
-      expect(gate.error).toContain("迭代上限");
+      expect(gate.error).toContain("iteration limit");
 
       const resumed = await engine.resumeLoop(first.id); // a stale id addresses the loop
       expect(resumed).toMatchObject({ id: gate.id, status: "running_task", max_rounds: 2, error: null });
@@ -348,7 +348,7 @@ describe("repeat-until-done loop", () => {
     it("the same Item twice in a row → gate (no progress)", async () => {
       const second = await finishAndAdvance(await startLoop(), "Status: continue\nItem: order 17");
       await finish(second, "Status: continue\nItem: order 17");
-      expect((await onlyActive()).error).toContain("同一项");
+      expect((await onlyActive()).error).toContain("same item");
     });
 
     it("time cap → gate; resume restarts the clock", async () => {
@@ -356,7 +356,7 @@ describe("repeat-until-done loop", () => {
       const params = parseRepeatParams(first)!;
       await storage.workflowRuns.update(first.id, { params: JSON.stringify({ ...params, startedAt: Date.now() - 11 * 60_000 }) });
       await finish(first, "Status: continue\nItem: a");
-      expect((await onlyActive()).error).toContain("时长上限");
+      expect((await onlyActive()).error).toContain("time limit");
       const resumed = await engine.resumeLoop(first.id);
       expect(Date.now() - parseRepeatParams(resumed)!.startedAt).toBeLessThan(5_000);
     });
@@ -367,7 +367,7 @@ describe("repeat-until-done loop", () => {
       await finish(first, "Status: continue\nItem: a");
       const gate = await onlyActive();
       expect(gate.status).toBe("waiting_resume");
-      expect(gate.error).toContain("暂停");
+      expect(gate.error).toContain("Paused after this item");
       expect(stopped).toEqual([first.source_session_id]);
       expect(agentOps.stopSession.mock.calls[0][1]).toEqual({ note: expect.stringMatching(/^Loop paused/) });
       expect(await outbox()).toHaveLength(0);
@@ -392,7 +392,7 @@ describe("repeat-until-done loop", () => {
       expect(await storage.workflowRuns.getById(first.id)).toMatchObject({ status: "cancelled" });
       const gate = await vi.waitFor(async () => onlyActive());
       expect(gate).toMatchObject({ status: "waiting_resume", round: 2 });
-      expect(gate.error).toContain("由你停止");
+      expect(gate.error).toContain("You stopped this iteration");
       expect(await outbox()).toHaveLength(0);
     });
 
@@ -402,7 +402,7 @@ describe("repeat-until-done loop", () => {
       expect((await storage.workflowRuns.getById(first.id))?.status).toBe("failed");
       const gate = await vi.waitFor(async () => onlyActive());
       expect(gate.status).toBe("waiting_resume");
-      expect(gate.error).toBe("这次迭代异常结束（failed）。"); // no error entry → plain reason
+      expect(gate.error).toBe("This iteration ended abnormally (failed)."); // no error entry → plain reason
       expect(await outbox()).toEqual([expect.objectContaining({ kind: "workflow_failed", session_id: first.source_session_id })]);
     });
 
@@ -415,7 +415,7 @@ describe("repeat-until-done loop", () => {
       );
       await finish(first, "", "failed");
       const gate = await vi.waitFor(async () => onlyActive());
-      expect(gate.error).toBe(`这次迭代异常结束（failed）：${"限".repeat(300)}…`);
+      expect(gate.error).toBe(`This iteration ended abnormally (failed): ${"限".repeat(300)}…`);
       expect((await storage.workflowRuns.getById(first.id))?.error).toBe(gate.error);
     });
 
@@ -423,7 +423,7 @@ describe("repeat-until-done loop", () => {
       const first = await startLoop();
       transcripts.get(first.source_session_id)!.push({ type: "error", message: "You've hit your limit · resets 2pm", timestamp: 1 });
       await finish(first, "", "failed");
-      expect((await vi.waitFor(async () => onlyActive())).error).toBe("这次迭代异常结束（failed）：You've hit your limit · resets 2pm");
+      expect((await vi.waitFor(async () => onlyActive())).error).toBe("This iteration ended abnormally (failed): You've hit your limit · resets 2pm");
     });
   });
 
@@ -537,7 +537,7 @@ describe("repeat-until-done loop", () => {
       await engine.checkLoopDeadlines(at);
       const busy = await onlyActive();
       expect(busy.status).toBe("waiting_resume");
-      expect(busy.error).toContain("定时继续未能启动");
+      expect(busy.error).toContain("The scheduled continue could not start");
       expect(parseRepeatParams(busy)?.resumeAt).toBe(at);
 
       await storage.agentSessions.updateStatus(first.source_session_id, "stopped");
@@ -597,7 +597,7 @@ describe("repeat-until-done loop", () => {
       expect((await storage.workflowRuns.getById(first.id))?.status).toBe("failed");
       const gate = await onlyActive();
       expect(gate.status).toBe("waiting_resume");
-      expect(gate.error).toContain("重启");
+      expect(gate.error).toContain("restart");
       expect(gate.error).not.toContain("stale error text");
       expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
       expect(await outbox()).toEqual([expect.objectContaining({ kind: "workflow_failed" })]);
@@ -739,7 +739,7 @@ describe("repeat-until-done loop", () => {
       expect(paused?.status).toBe("running_task");
       const gate = await vi.waitFor(async () => { const r = await onlyActive(); expect(r.round).toBe(2); return r; });
       expect(gate.status).toBe("waiting_resume");
-      expect(gate.error).toContain("暂停");
+      expect(gate.error).toContain("Paused after this item");
       expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
     });
 
@@ -774,7 +774,7 @@ describe("repeat-until-done loop", () => {
       expect(stopped).toEqual([first.source_session_id]);
       const gate = await onlyActive();
       expect(gate).toMatchObject({ status: "waiting_resume", round: 2 });
-      expect(gate.error).toContain("时长上限");
+      expect(gate.error).toContain("time limit");
       expect(await outbox()).toEqual([expect.objectContaining({ kind: "workflow_failed", session_id: first.source_session_id })]);
       // The stop we issued must not be read as "stopped by the user".
       bus.emit({ type: "session:status", projectId: "p1", branch: "dev", sessionId: first.source_session_id, status: "stopped" });
@@ -791,7 +791,7 @@ describe("repeat-until-done loop", () => {
       await finish(first, "Status: continue\nItem: a");
       const gate = await vi.waitFor(async () => { const r = await onlyActive(); expect(r.round).toBe(2); return r; });
       expect(gate.status).toBe("waiting_resume");
-      expect(gate.error).toContain("暂停");
+      expect(gate.error).toContain("Paused after this item");
       expect(agentOps.activateReviewer).toHaveBeenCalledTimes(1);
     });
   });

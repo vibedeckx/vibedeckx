@@ -247,10 +247,10 @@ export class RepeatLoopRunner {
       const existing = await this.storage.workflowRuns.getById(opts.runId);
       if (existing) return this.replayedStart(existing, opts);
     }
-    if (!opts.project.path) throw new RepeatLoopError("bad-state", "项目没有本地路径，无法运行循环");
+    if (!opts.project.path) throw new RepeatLoopError("bad-state", "The project has no local path, so the loop cannot run");
     const active = await this.storage.workflowRuns.getActive(opts.project.id, opts.branch);
     if (active.some((r) => r.kind === "repeat")) {
-      throw new RepeatLoopError("session-busy", "这个 workspace 已有一个进行中的循环，请先结束它");
+      throw new RepeatLoopError("session-busy", "This workspace already has a loop running. End it first.");
     }
     const id = opts.runId ?? randomUUID();
     const sessionId = randomUUID();
@@ -284,7 +284,7 @@ export class RepeatLoopRunner {
       if (!(err instanceof Error && err.message.includes("UNIQUE constraint failed"))) throw err;
       const replay = opts.runId ? await this.storage.workflowRuns.getById(opts.runId) : undefined;
       if (replay) return this.replayedStart(replay, opts);
-      throw new RepeatLoopError("session-busy", "这个 workspace 已有一个进行中的循环，请先结束它");
+      throw new RepeatLoopError("session-busy", "This workspace already has a loop running. End it first.");
     }
     this.host.track(run);
     this.host.emitRunUpdated(run);
@@ -300,7 +300,7 @@ export class RepeatLoopRunner {
   private replayedStart(existing: WorkflowRun, opts: StartRepeatLoopOptions): WorkflowRun {
     const same = existing.kind === "repeat" && existing.project_id === opts.project.id
       && existing.branch === opts.branch && parseRepeatParams(existing)?.prompt === opts.prompt;
-    if (!same) throw new RepeatLoopError("bad-state", "runId 已被另一个 run 占用");
+    if (!same) throw new RepeatLoopError("bad-state", "runId is already taken by another run");
     return existing;
   }
 
@@ -317,7 +317,7 @@ export class RepeatLoopRunner {
     const run = await this.storage.workflowRuns.getById(runId);
     if (!run || run.status !== "preparing") return run!;
     const params = parseRepeatParams(run);
-    if (!params) return this.toGateInPlace(run, "循环参数损坏，无法派发");
+    if (!params) return this.toGateInPlace(run, "The loop's parameters are corrupt, so the iteration cannot be dispatched");
     const sessionId = run.source_session_id;
     const key = taskActivationKey(run.id, sessionId);
 
@@ -331,7 +331,7 @@ export class RepeatLoopRunner {
         purpose: "workflow_task", owner: { kind: "workflow_run", id: run.id },
       });
       if (prepared.kind !== "prepared" && prepared.kind !== "replayed") {
-        return this.toGateInPlace(run, `无法创建迭代 session：${prepared.kind}`);
+        return this.toGateInPlace(run, `Could not create the iteration session: ${prepared.kind}`);
       }
       if (!(await this.stillPreparing(run.id))) { await this.tearDown(run); return (await this.storage.workflowRuns.getById(run.id))!; }
 
@@ -347,7 +347,7 @@ export class RepeatLoopRunner {
         sessionId, activationKey: key, instruction, ...ITERATION_TURN, announceRunning: true,
       });
     } catch (err) {
-      return this.toGateInPlace(run, `派发迭代失败：${err instanceof Error ? err.message : String(err)}`);
+      return this.toGateInPlace(run, `Dispatching the iteration failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     if ((outcome.kind === "activated" || outcome.kind === "replayed" || outcome.kind === "uncertain")
@@ -364,10 +364,10 @@ export class RepeatLoopRunner {
       case "uncertain":
         // Durable prompt, unprovable stdin. Never re-send; if the session did
         // start, its completion is still attributed (step stays dispatched).
-        note = "这次迭代的指令投递结果未知：服务在投递期间中断。若 session 没有开始工作，请结束循环后重新发起。";
+        note = "It is unknown whether this iteration's instruction was delivered: the service was interrupted while sending it. If the session has not started working, end the loop and start it again.";
         break;
       default:
-        return this.toGateInPlace(run, `无法启动迭代 session：${outcome.kind}`);
+        return this.toGateInPlace(run, `Could not start the iteration session: ${outcome.kind}`);
     }
     const started = await this.storage.workflowRuns.transition(run.id, "preparing", "running_task", { error: note });
     if (!started) {
@@ -447,7 +447,7 @@ export class RepeatLoopRunner {
       const check = cwd
         ? await (this.host.runCheckCommand ?? defaultRunCheckCommand)(params.checkCommand, cwd)
         : { ok: false, output: "project has no local path" };
-      if (!check.ok) checkFailure = `检查命令未通过：${check.output || "(no output)"}`;
+      if (!check.ok) checkFailure = `The check command failed: ${check.output || "(no output)"}`;
     }
 
     // Everything above is about the TURN and is computed once. What follows is
@@ -541,20 +541,20 @@ export class RepeatLoopRunner {
   ): Settlement {
     if (checkFailure) return { next: "gate", reason: checkFailure, milestone: "check-failed" };
     if (status === "done") return { next: "finished" };
-    if (status === "blocked") return { next: "gate", reason: "这次迭代报告 blocked：需要你处理后再继续。", milestone: "blocked" };
+    if (status === "blocked") return { next: "gate", reason: "This iteration reported blocked: it needs you before the loop can go on.", milestone: "blocked" };
     if (status === null) {
-      return { next: "gate", reason: "无法识别这次迭代结尾的 Status 字段（应为 continue / done / blocked 之一），已停下等你判断。", milestone: "unrecognised" };
+      return { next: "gate", reason: "Could not read the Status line at the end of this iteration (expected continue, done or blocked). Paused for you to decide.", milestone: "unrecognised" };
     }
     // continue — the brakes.
-    if (params.stopAfterCurrent) return { next: "gate", reason: "已按你的要求在这一项完成后暂停。", milestone: null };
+    if (params.stopAfterCurrent) return { next: "gate", reason: "Paused after this item, as you asked.", milestone: null };
     if (run.max_rounds !== null && run.round >= run.max_rounds) {
-      return { next: "gate", reason: `已达迭代上限（${run.max_rounds} 次）。继续将再追加 ${params.maxIterations} 次。`, milestone: "max-iterations" };
+      return { next: "gate", reason: `Reached the iteration limit (${run.max_rounds}). Continuing allows ${params.maxIterations} more.`, milestone: "max-iterations" };
     }
     if (Date.now() - params.startedAt > params.maxMinutes * 60_000) {
-      return { next: "gate", reason: `已达时长上限（${params.maxMinutes} 分钟）。继续将重新计时。`, milestone: "max-minutes" };
+      return { next: "gate", reason: `Reached the time limit (${params.maxMinutes} min). Continuing restarts the timer.`, milestone: "max-minutes" };
     }
     if (item && params.prevItem && item === params.prevItem) {
-      return { next: "gate", reason: `连续两次迭代处理的是同一项（${item}）——可能没有进展。`, milestone: "no-progress" };
+      return { next: "gate", reason: `Two iterations in a row worked on the same item (${item}), so the loop may not be making progress.`, milestone: "no-progress" };
     }
     return { next: "iterate" };
   }
@@ -593,12 +593,12 @@ export class RepeatLoopRunner {
   async abnormalEnd(step: WorkflowRunStep, outcome: string, detail?: string): Promise<void> {
     const byUser = outcome === "stopped";
     const reason = byUser
-      ? "这次迭代已由你停止。可以继续循环，或结束它。"
+      ? "You stopped this iteration. Continue the loop, or end it."
       : outcome === "server_restart"
-        ? "这次迭代因服务重启而中断。那一项可能处理到一半——确认后再继续。"
+        ? "This iteration was interrupted by a service restart. Its item may be half done, so check it before continuing."
         : detail
-          ? `这次迭代异常结束（${outcome}）：${detail}`
-          : `这次迭代异常结束（${outcome}）。`;
+          ? `This iteration ended abnormally (${outcome}): ${detail}`
+          : `This iteration ended abnormally (${outcome}).`;
     // A stop by the user rings no bell: they are right there.
     await this.endIteration(step, `turn ended: ${outcome}`, byUser ? "cancelled" : "failed", reason, byUser ? null : outcome);
   }
@@ -667,7 +667,7 @@ export class RepeatLoopRunner {
       const step = (await this.storage.workflowRunSteps.listByRun(run.id))
         .find((st) => st.kind === "task_prompt" && st.status === "dispatched");
       if (!step) { console.warn(`[RepeatLoop] run ${run.id} is over its time cap but has no open step`); continue; }
-      const reason = `已达时长上限（${params.maxMinutes} 分钟），这次迭代已被停止——那一项可能处理到一半。继续将重新计时。`;
+      const reason = `Reached the time limit (${params.maxMinutes} min), so this iteration was stopped. Its item may be half done. Continuing restarts the timer.`;
       // The run first, the session second: once the step is settled, the stop
       // below cannot be mistaken for "stopped by the user".
       if (await this.endIteration(step, "time cap reached", "failed", reason, "max-minutes")) {
@@ -692,7 +692,7 @@ export class RepeatLoopRunner {
       if (err.code !== "session-busy") return; // the gate moved on under us; nothing to retry
       // Keep resumeAt: the next tick tries again. Same CAS, so a schedule
       // cancelled meanwhile is not overwritten with a stale reason.
-      const error = `定时继续未能启动：${err.message}下一分钟会再试。`;
+      const error = `The scheduled continue could not start: ${err.message} Retrying in a minute.`;
       if (gate.error !== error && await this.storage.workflowRuns.transition(gate.id, "waiting_resume", "waiting_resume", { error }, gate.params)) {
         this.host.emitRunUpdated((await this.storage.workflowRuns.getById(gate.id))!);
       }
@@ -718,7 +718,7 @@ export class RepeatLoopRunner {
 
   /** Hard stop — the ctrl-c. Ends the loop; no gate. */
   async cancel(run: WorkflowRun, reason?: string): Promise<WorkflowRun> {
-    const patch = { error: reason ?? "循环已由你结束。" };
+    const patch = { error: reason ?? "You ended the loop." };
     const from = (["preparing", "running_task", "waiting_resume"] as const);
     // The loop's active run can change between reading it and the CAS: the
     // iteration settles and the next one is inserted (one transaction, so
@@ -743,7 +743,7 @@ export class RepeatLoopRunner {
       this.host.emitRunUpdated(cancelled);
       return cancelled;
     }
-    throw new RepeatLoopError("bad-state", "循环状态变化太快，没能停下，请再试一次");
+    throw new RepeatLoopError("bad-state", "The loop's state changed too quickly to stop it. Try again.");
   }
 
   /** Soft stop: let the current item finish, then put up a gate. */
@@ -752,10 +752,10 @@ export class RepeatLoopRunner {
     // flag landed on a finished row — put it on the run that replaced it.
     for (let attempt = 0; attempt < CANCEL_ATTEMPTS; attempt++) {
       const active = await this.activeOf(run);
-      if (!active) throw new RepeatLoopError("bad-state", "循环已经结束");
+      if (!active) throw new RepeatLoopError("bad-state", "The loop has already ended");
       if (active.status === "waiting_resume") return active;
       const params = parseRepeatParams(active);
-      if (!params) throw new RepeatLoopError("bad-state", "循环参数损坏");
+      if (!params) throw new RepeatLoopError("bad-state", "The loop's parameters are corrupt");
       await this.storage.workflowRuns.update(active.id, { params: JSON.stringify({ ...params, stopAfterCurrent: true }) });
       const after = await this.storage.workflowRuns.getById(active.id);
       if (after && (after.status === "preparing" || after.status === "running_task")) {
@@ -763,7 +763,7 @@ export class RepeatLoopRunner {
         return after;
       }
     }
-    throw new RepeatLoopError("bad-state", "循环状态变化太快，请再试一次");
+    throw new RepeatLoopError("bad-state", "The loop's state changed too quickly. Try again.");
   }
 
   /**
@@ -772,13 +772,13 @@ export class RepeatLoopRunner {
    */
   async resume(run: WorkflowRun, opts: { expectParams?: string | null } = {}): Promise<WorkflowRun> {
     const gate = await this.activeOf(run);
-    if (!gate || gate.status !== "waiting_resume") throw new RepeatLoopError("bad-state", "循环不在等待继续的状态");
+    if (!gate || gate.status !== "waiting_resume") throw new RepeatLoopError("bad-state", "The loop is not waiting to continue");
     const params = parseRepeatParams(gate);
-    if (!params) throw new RepeatLoopError("bad-state", "循环参数损坏");
+    if (!params) throw new RepeatLoopError("bad-state", "The loop's parameters are corrupt");
 
     // Two sessions editing one worktree is the thing to prevent.
     if (params.prevSessionId && (await this.storage.agentSessions.getById(params.prevSessionId))?.status === "running") {
-      throw new RepeatLoopError("session-busy", "上一次迭代的 session 还在运行。等它停下，或先停掉它。");
+      throw new RepeatLoopError("session-busy", "The previous iteration's session is still running. Wait for it to stop, or stop it first.");
     }
     const overCap = gate.max_rounds !== null && gate.round > gate.max_rounds;
     const overTime = Date.now() - params.startedAt > params.maxMinutes * 60_000;
@@ -789,7 +789,7 @@ export class RepeatLoopRunner {
       error: null, params: JSON.stringify(nextParams), source_session_id: randomUUID(),
       ...(overCap ? { max_rounds: gate.max_rounds! + params.maxIterations } : {}),
     }, opts.expectParams);
-    if (!resumed) throw new RepeatLoopError("bad-state", "循环状态已变化");
+    if (!resumed) throw new RepeatLoopError("bad-state", "The loop's state has changed");
     // After the CAS, not before: a resume that loses it (a schedule cancelled
     // meanwhile) must leave the previous session alone. It is not running —
     // checked above — so the order changes nothing for a resume that wins.
@@ -810,9 +810,9 @@ export class RepeatLoopRunner {
   async scheduleResume(run: WorkflowRun, at: number | null): Promise<WorkflowRun> {
     for (let attempt = 0; attempt < CANCEL_ATTEMPTS; attempt++) {
       const gate = await this.activeOf(run);
-      if (!gate || gate.status !== "waiting_resume") throw new RepeatLoopError("bad-state", "循环不在等待继续的状态");
+      if (!gate || gate.status !== "waiting_resume") throw new RepeatLoopError("bad-state", "The loop is not waiting to continue");
       const params = parseRepeatParams(gate);
-      if (!params) throw new RepeatLoopError("bad-state", "循环参数损坏");
+      if (!params) throw new RepeatLoopError("bad-state", "The loop's parameters are corrupt");
       const { resumeAt: _previous, ...rest } = params;
       const next: RepeatLoopParams = at === null ? rest : { ...rest, resumeAt: at };
       if (await this.storage.workflowRuns.transition(gate.id, "waiting_resume", "waiting_resume", { params: JSON.stringify(next) }, gate.params)) {
@@ -821,7 +821,7 @@ export class RepeatLoopRunner {
         return updated;
       }
     }
-    throw new RepeatLoopError("bad-state", "循环状态变化太快，请再试一次");
+    throw new RepeatLoopError("bad-state", "The loop's state changed too quickly. Try again.");
   }
 
   // ---------- boot ----------

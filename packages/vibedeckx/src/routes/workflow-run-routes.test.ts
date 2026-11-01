@@ -545,7 +545,7 @@ describe("workflow-run-routes", () => {
       expect((await app.inject({ method: "POST", url: url.replace("l1", "nope"), payload: { at: null } })).statusCode).toBe(404);
     }
 
-    scheduleLoopResume.mockRejectedValueOnce(new WorkflowError("bad-state", "循环不在等待继续的状态"));
+    scheduleLoopResume.mockRejectedValueOnce(new WorkflowError("bad-state", "The loop is not waiting to continue"));
     expect((await app.inject({ method: "POST", url: "/api/workflow-runs/l1/schedule-resume", payload: { at: null } })).statusCode).toBe(409);
   });
 
