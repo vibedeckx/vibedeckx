@@ -436,7 +436,7 @@ function toLocalInput(at: number): string {
 }
 
 /**
- * "定时继续" (loop-presets design §4.3): the user picks a time and the engine
+ * "Continue later" (loop-presets design §4.3): the user picks a time and the engine
  * resumes the gate on its own then — covering "usage resets at 14:00" without
  * any automatic retry. The server re-checks the 7-day window; the check here
  * only saves a round trip for an obvious slip.
@@ -595,21 +595,23 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
         </div>
       )}
       {gate && (
-        <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" disabled={busy} onClick={() => onAction("resume")}>
-            <Play className="h-3 w-3 mr-1" />继续循环
-          </Button>
-          {resumeAt === null && !picking && (
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => setPicking(true)}>
-              <AlarmClock className="h-3 w-3 mr-1" />定时继续
-            </Button>
-          )}
-          <span className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+        <>
+          <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
             {failedToStart
               ? `第 ${round} 次迭代没能启动，没有对应的 session`
               : `相关 session：「${params?.name ?? "Loop"} #${shown}」（见侧栏）`}
-          </span>
-        </div>
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <Button size="sm" disabled={busy} onClick={() => onAction("resume")}>
+              <Play className="h-3 w-3 mr-1" />Continue loop
+            </Button>
+            {resumeAt === null && !picking && (
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => setPicking(true)}>
+                <AlarmClock className="h-3 w-3 mr-1" />Continue later
+              </Button>
+            )}
+          </div>
+        </>
       )}
       {resumeAt !== null && (
         <div className="flex items-center gap-1 text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>

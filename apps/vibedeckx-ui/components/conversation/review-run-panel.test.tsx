@@ -599,7 +599,7 @@ describe("ReviewRunPanel repeat loop", () => {
     expect(container.textContent).toContain("报告 blocked");
     // The gate row is round 3 — the iteration the user needs to look at is #2.
     expect(container.textContent).toContain("Orders #2");
-    await act(async () => { buttonNamed("继续循环")!.click(); });
+    await act(async () => { buttonNamed("Continue loop")!.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("l3", "resume");
   });
 
@@ -642,17 +642,17 @@ describe("ReviewRunPanel repeat loop", () => {
 
     it("+1h / +5h schedule the gate that far from now", async () => {
       await renderWith(gateRun());
-      await act(async () => { buttonNamed("定时继续")!.click(); });
+      await act(async () => { buttonNamed("Continue later")!.click(); });
       await act(async () => { buttonNamed("+1h")!.click(); });
       expect(api.scheduleResume).toHaveBeenCalledWith("l3", NOW + HOUR);
-      await act(async () => { buttonNamed("定时继续")!.click(); });
+      await act(async () => { buttonNamed("Continue later")!.click(); });
       await act(async () => { buttonNamed("+5h")!.click(); });
       expect(api.scheduleResume).toHaveBeenLastCalledWith("l3", NOW + 5 * HOUR);
     });
 
     it("a custom time is sent as that local moment; a past one is refused before any request", async () => {
       await renderWith(gateRun());
-      await act(async () => { buttonNamed("定时继续")!.click(); });
+      await act(async () => { buttonNamed("Continue later")!.click(); });
       await setInput(customInput(), "2026-11-01T08:00");
       await act(async () => { buttonNamed("定在这个时间")!.click(); });
       expect(container.textContent).toContain("这个时间已经过去了");
@@ -665,7 +665,7 @@ describe("ReviewRunPanel repeat loop", () => {
 
     it("more than 7 days out is refused too", async () => {
       await renderWith(gateRun());
-      await act(async () => { buttonNamed("定时继续")!.click(); });
+      await act(async () => { buttonNamed("Continue later")!.click(); });
       await setInput(customInput(), "2026-11-09T09:00");
       await act(async () => { buttonNamed("定在这个时间")!.click(); });
       expect(container.textContent).toContain("7 天之内");
@@ -676,8 +676,8 @@ describe("ReviewRunPanel repeat loop", () => {
       const at = new Date(2026, 10, 1, 14, 0).getTime();
       await renderWith(gateRun({ resumeAt: at }));
       expect(container.textContent).toContain("将于 14:00 自动继续");
-      expect(buttonNamed("定时继续")).toBeUndefined();
-      expect(buttonNamed("继续循环")).toBeDefined();
+      expect(buttonNamed("Continue later")).toBeUndefined();
+      expect(buttonNamed("Continue loop")).toBeDefined();
       await act(async () => { buttonNamed("取消")!.click(); });
       expect(api.scheduleResume).toHaveBeenCalledWith("l3", null);
     });
@@ -685,14 +685,14 @@ describe("ReviewRunPanel repeat loop", () => {
     it("a refused schedule (old worker) shows the server's reason on the card", async () => {
       vi.mocked(api.scheduleResume).mockRejectedValueOnce(new Error("This machine's worker doesn't support scheduled resume yet — update the worker and try again."));
       await renderWith(gateRun());
-      await act(async () => { buttonNamed("定时继续")!.click(); });
+      await act(async () => { buttonNamed("Continue later")!.click(); });
       await act(async () => { buttonNamed("+1h")!.click(); });
       expect(container.textContent).toContain("doesn't support scheduled resume yet");
     });
 
     it("only a gate offers it", async () => {
       await renderWith(loopRun({ params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, resumeAt: NOW + HOUR }) }));
-      expect(buttonNamed("定时继续")).toBeUndefined();
+      expect(buttonNamed("Continue later")).toBeUndefined();
       expect(container.textContent).not.toContain("自动继续");
     });
   });
