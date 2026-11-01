@@ -150,6 +150,62 @@ describe("repeat-until-done loop", () => {
     expect(sent.every((i) => !i.includes("PLAN.md"))).toBe(true);
   });
 
+  describe("handoff note", () => {
+    const sentAt = (i: number) => (agentOps.activateReviewer.mock.calls[i][0] as { instruction: string }).instruction;
+
+    it("three-round chain: round 2 opens with round 1's note; round 3, with none written, inherits it", async () => {
+      const first = await startLoop({ handoff: true });
+      expect(parseRepeatParams(first)).toMatchObject({ handoff: true, handoffNote: null });
+      expect(sentAt(0)).not.toContain("## 上一轮留下的交接");
+      expect(sentAt(0)).toContain("Then, as the very last part of your message, write a handoff note");
+      // Closing protocol: status contract first, the handoff instructions after it.
+      expect(sentAt(0).indexOf("Status: <exactly one of")).toBeLessThan(sentAt(0).indexOf("Handoff:"));
+
+      const second = await finishAndAdvance(first, "Did S1.\nStatus: continue\nItem: S1\nRemaining: 2\nHandoff:\n- npm test needs NODE_ENV=test\n- S1 done");
+      expect(parseRepeatParams(second)).toMatchObject({ handoff: true, handoffNote: "- npm test needs NODE_ENV=test\n- S1 done", prevItem: "S1", remaining: "2" });
+      expect(sentAt(1).startsWith("## 上一轮留下的交接\n- npm test needs NODE_ENV=test\n- S1 done\n---\n")).toBe(true);
+      expect(sentAt(1)).toContain("Process the next unhandled order.");
+
+      const third = await finishAndAdvance(second, "Did S2.\nStatus: continue\nItem: S2");
+      expect(parseRepeatParams(third)?.handoffNote).toBe("- npm test needs NODE_ENV=test\n- S1 done");
+      expect(sentAt(2)).toContain("## 上一轮留下的交接\n- npm test needs NODE_ENV=test\n- S1 done\n---");
+    });
+
+    it("a Status: line inside the note does not decide the iteration", async () => {
+      const first = await startLoop({ handoff: true });
+      const second = await finishAndAdvance(first, "Status: continue\nItem: S1\nHandoff:\nprevious step ended with\nStatus: done");
+      expect(await storage.workflowRuns.getById(first.id)).toMatchObject({ status: "completed", outcome_status: "continue" });
+      expect(parseRepeatParams(second)?.handoffNote).toBe("previous step ended with\nStatus: done");
+    });
+
+    it("switch off: the reply is parsed whole, nothing is cut or injected", async () => {
+      const first = await startLoop();
+      expect(sentAt(0)).not.toContain("handoff note");
+      const second = await finishAndAdvance(first, "Handoff: notes for later\nStatus: continue\nItem: a");
+      expect(parseRepeatParams(second)?.handoffNote ?? null).toBeNull();
+      expect(parseRepeatParams(second)?.prevItem).toBe("a");
+      expect(sentAt(1)).not.toContain("## 上一轮留下的交接");
+    });
+
+    it("the note survives a gate and its resume", async () => {
+      const first = await startLoop({ handoff: true });
+      await finish(first, "Status: blocked\nHandoff:\nstuck on auth");
+      const gate = await onlyActive();
+      expect(gate.status).toBe("waiting_resume");
+      expect(parseRepeatParams(gate)?.handoffNote).toBe("stuck on auth");
+      const resumed = await engine.resumeLoop(gate.id);
+      expect(parseRepeatParams(resumed)?.handoffNote).toBe("stuck on auth");
+      expect(sentAt(1)).toContain("## 上一轮留下的交接\nstuck on auth\n---");
+    });
+
+    it("an iteration that ends abnormally keeps the previous note on the gate", async () => {
+      const first = await startLoop({ handoff: true });
+      const second = await finishAndAdvance(first, "Status: continue\nItem: S1\nHandoff:\nkeep me");
+      await finish(second, "", "failed");
+      expect(parseRepeatParams(await onlyActive())?.handoffNote).toBe("keep me");
+    });
+  });
+
   it("done: the loop finishes, and says so on the ANCHOR session's outbox", async () => {
     const first = await startLoop();
     const second = await finishAndAdvance(first, "Status: continue\nItem: a");

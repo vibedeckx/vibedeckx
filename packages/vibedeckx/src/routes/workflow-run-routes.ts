@@ -41,6 +41,7 @@ export function parseRepeatLoopBody(body: Record<string, unknown> | undefined): 
     if (b[field] !== undefined && b[field] !== null && typeof b[field] !== "string") return `${field} must be a string`;
   }
   if (typeof b.checkCommand === "string" && b.checkCommand.length > 2000) return "checkCommand is too long";
+  if (b.handoff !== undefined && b.handoff !== null && typeof b.handoff !== "boolean") return "handoff must be a boolean";
   const preset = parseRepeatLoopPreset(b.preset);
   if (typeof preset === "string") return preset;
   return {
@@ -50,6 +51,7 @@ export function parseRepeatLoopBody(body: Record<string, unknown> | undefined): 
     model: typeof b.model === "string" ? b.model : undefined,
     checkCommand: typeof b.checkCommand === "string" ? b.checkCommand : undefined,
     ...(preset ? { preset } : {}),
+    ...(b.handoff === true ? { handoff: true } : {}),
     runId: typeof b.runId === "string" ? b.runId : undefined,
   };
 }

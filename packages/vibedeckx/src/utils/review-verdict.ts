@@ -102,3 +102,48 @@ export function parseTaskStatus(text: string | null | undefined): WorkflowTaskSt
   const value = raw.replace(/^[\s<\-—–.。]+|[\s>\-—–.。]+$/g, "").toLowerCase();
   return (TASK_STATUSES as readonly string[]).includes(value) ? (value as WorkflowTaskStatus) : null;
 }
+
+// ---------- repeat-loop handoff note (loop-presets design §5) ----------
+
+export const HANDOFF_MAX_LINES = 60;
+export const HANDOFF_MAX_CHARS = 4000;
+
+/**
+ * Appended after TASK_STATUS_INSTRUCTIONS when the loop's `handoff` switch is
+ * on. The engine keeps the note and puts it in front of the next iteration's
+ * instruction; it never reads what the note says.
+ */
+export const HANDOFF_INSTRUCTIONS = [
+  "",
+  "Then, as the very last part of your message, write a handoff note for the next session:",
+  "Handoff:",
+  "<rewrite the whole note each time: a short \"known lessons\" list (project quirks, dead ends,",
+  "conventions) plus the last few handoffs (step, result, decisions, what to watch). Keep it",
+  "under ~40 lines; drop what no longer applies. Do not start any line of it with",
+  "\"Status:\", \"Item:\" or \"Remaining:\".>",
+].join("\n");
+
+const HANDOFF_OPENER = /^\s*(?:#+|>|[-*+])?\s*[*_`]*Handoff[*_`]*\s*[:：][*_`]*\s*(.*)$/i;
+
+/**
+ * Split a reply into the part the closing fields are parsed from and the
+ * handoff note. Callers split only when the loop's switch is on: a Custom
+ * loop's reply that happens to contain "Handoff:" must not be cut.
+ *
+ * The boundary is the FIRST line that opens with `Handoff:`. Taking the last
+ * would leave the first half of a note that repeats the marker in the parse
+ * area, where a `Status:` line in it would override the real result. Taking
+ * the first costs, at worst, a status written after the note → null → gate:
+ * one click, the same discipline as parseTaskStatus.
+ */
+export function splitHandoff(text: string | null | undefined): { body: string | null; handoff: string | null } {
+  if (!text) return { body: text ?? null, handoff: null };
+  const lines = text.split(/\r?\n/);
+  const at = lines.findIndex((l) => HANDOFF_OPENER.test(l));
+  if (at < 0) return { body: text, handoff: null };
+  const first = HANDOFF_OPENER.exec(lines[at])![1];
+  const note = [first, ...lines.slice(at + 1)].join("\n").trim()
+    .split("\n").slice(0, HANDOFF_MAX_LINES).join("\n")
+    .slice(0, HANDOFF_MAX_CHARS).trimEnd();
+  return { body: lines.slice(0, at).join("\n"), handoff: note === "" ? null : note };
+}

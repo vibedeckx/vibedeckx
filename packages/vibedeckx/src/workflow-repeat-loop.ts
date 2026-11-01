@@ -29,7 +29,9 @@ import { loopMilestoneId } from "./notification-milestones.js";
 import type {
   NotificationOutboxEvent, Project, Storage, WorkflowRepeatRunInput, WorkflowRun, WorkflowRunStep, WorkflowTaskStatus,
 } from "./storage/types.js";
-import { parseClosingLine, parseTaskStatus, TASK_STATUS_INSTRUCTIONS } from "./utils/review-verdict.js";
+import {
+  HANDOFF_INSTRUCTIONS, parseClosingLine, parseTaskStatus, splitHandoff, TASK_STATUS_INSTRUCTIONS,
+} from "./utils/review-verdict.js";
 import { resolveWorktreePath } from "./utils/worktree-paths.js";
 import type { AgentOps } from "./workflow-engine.js";
 
@@ -75,6 +77,13 @@ export interface RepeatLoopParams {
   dispatchFailed?: boolean;
   /** Where the instruction came from (New loop dialog preset). Display only — the engine never reads it. */
   preset?: RepeatLoopPreset | null;
+  /** Ask each iteration for a closing `Handoff:` note and hand it to the next one (loop-presets design §5). */
+  handoff?: boolean;
+  /**
+   * The latest note an iteration wrote — carried forward as is when one
+   * writes none, and kept on gates and through resume. Never parsed.
+   */
+  handoffNote?: string | null;
 }
 
 export const REPEAT_LOOP_PRESET_KINDS = ["plan", "custom"] as const;
@@ -96,6 +105,7 @@ export interface StartRepeatLoopOptions {
   maxMinutes?: number;
   checkCommand?: string | null;
   preset?: RepeatLoopPreset;
+  handoff?: boolean;
   /** Stable id from a hub replay of the start request. */
   runId?: string;
 }
@@ -140,6 +150,13 @@ const ITERATION_TURN = { origin: "workflow", notificationDisposition: "milestone
 export function parseRepeatParams(run: Pick<WorkflowRun, "params">): RepeatLoopParams | null {
   if (!run.params) return null;
   try { return JSON.parse(run.params) as RepeatLoopParams; } catch { return null; }
+}
+
+/** The user's prompt, preceded by the previous iteration's note, followed by the closing protocol. */
+function iterationInstruction(params: RepeatLoopParams): string {
+  const note = params.handoffNote ? `## 上一轮留下的交接\n${params.handoffNote}\n---\n\n` : "";
+  const closing = params.handoff ? `${TASK_STATUS_INSTRUCTIONS}\n${HANDOFF_INSTRUCTIONS}` : TASK_STATUS_INSTRUCTIONS;
+  return `${note}${params.prompt}\n${closing}`;
 }
 
 export const taskActivationKey = (runId: string, sessionId: string): string => `task:${runId}:${sessionId}`;
@@ -190,6 +207,7 @@ export class RepeatLoopRunner {
       startedAt: Date.now(),
       anchorSessionId: sessionId,
       ...(opts.preset ? { preset: opts.preset } : {}),
+      ...(opts.handoff ? { handoff: true, handoffNote: null } : {}),
     };
     let run: WorkflowRun;
     try {
@@ -261,7 +279,7 @@ export class RepeatLoopRunner {
       await this.ops.setFinalSessionTitle(sessionId, `${params.name} #${run.round}`)
         .catch((err) => console.warn(`[RepeatLoop] title for ${sessionId} failed:`, err));
 
-      const instruction = `${params.prompt}\n${TASK_STATUS_INSTRUCTIONS}`;
+      const instruction = iterationInstruction(params);
       step = (await this.storage.workflowRunSteps.open({
         id: randomUUID(), run_id: run.id, role: "source", kind: "task_prompt", session_id: sessionId,
         idempotency_key: key, payload_hash: instructionContentHash(instruction),
@@ -355,9 +373,11 @@ export class RepeatLoopRunner {
       return;
     }
 
-    let status: WorkflowTaskStatus | null = parseTaskStatus(output);
-    const item = parseClosingLine(output, "Item");
-    const remaining = parseClosingLine(output, "Remaining");
+    // The note first: a `Status:` line inside it must not decide the iteration.
+    const { body, handoff } = params.handoff ? splitHandoff(output) : { body: output, handoff: null };
+    let status: WorkflowTaskStatus | null = parseTaskStatus(body);
+    const item = parseClosingLine(body, "Item");
+    const remaining = parseClosingLine(body, "Remaining");
     let checkFailure: string | null = null;
     if (params.checkCommand && (status === "continue" || status === "done")) {
       // The session's own checkout first (same preference as review target
@@ -389,6 +409,7 @@ export class RepeatLoopRunner {
       const settlement = this.settle(fresh, freshParams, status, item, checkFailure);
       const nextParams: RepeatLoopParams = {
         ...freshParams, prevSessionId: fresh.source_session_id, prevItem: item, remaining, stopAfterCurrent: false,
+        ...(freshParams.handoff ? { handoffNote: handoff ?? freshParams.handoffNote ?? null } : {}),
       };
       const insertRun: WorkflowRepeatRunInput | undefined = settlement.next === "finished" ? undefined : {
         id: randomUUID(), project_id: fresh.project_id, branch: fresh.branch,

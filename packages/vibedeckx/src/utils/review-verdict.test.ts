@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { parseClosingLine, parseTaskStatus, parseVerdict, TASK_STATUS_INSTRUCTIONS } from "./review-verdict.js";
+import {
+  HANDOFF_INSTRUCTIONS, HANDOFF_MAX_CHARS, HANDOFF_MAX_LINES, parseClosingLine, parseTaskStatus, parseVerdict, splitHandoff,
+  TASK_STATUS_INSTRUCTIONS,
+} from "./review-verdict.js";
 
 describe("parseVerdict", () => {
   it("reads the shapes real reviewers produced (2026-09-18 live runs)", () => {
@@ -78,6 +81,57 @@ describe("parseClosingLine", () => {
   it("returns the raw value of the last labelled line", () => {
     expect(parseClosingLine("Status: continue\nItem: `order 17` — refund\nRemaining: 4", "Item")).toBe("order 17 — refund");
     expect(parseClosingLine("Status: done", "Item")).toBeNull();
+  });
+});
+
+describe("splitHandoff", () => {
+  it("everything from the first standalone Handoff: line on is the note; the rest is the body", () => {
+    const reply = "Did S2.\n\nStatus: continue\nItem: S2\nRemaining: 1\n\nHandoff:\n- tests need NODE_ENV=test\n- S3 next";
+    expect(splitHandoff(reply)).toEqual({
+      body: "Did S2.\n\nStatus: continue\nItem: S2\nRemaining: 1\n",
+      handoff: "- tests need NODE_ENV=test\n- S3 next",
+    });
+    // Text on the marker line itself belongs to the note; markdown marks are allowed.
+    expect(splitHandoff("Status: done\n**Handoff:** all clear").handoff).toBe("all clear");
+    expect(splitHandoff("Status: done\n## Handoff:\nx").handoff).toBe("x");
+  });
+
+  it("a Status: line inside the note cannot override the real status", () => {
+    const reply = "Status: continue\nItem: S1\nHandoff:\nlast time S0 ended with\nStatus: blocked";
+    const { body, handoff } = splitHandoff(reply);
+    expect(parseTaskStatus(body)).toBe("continue");
+    expect(parseClosingLine(body, "Item")).toBe("S1");
+    expect(handoff).toContain("Status: blocked");
+  });
+
+  it("a repeated Handoff: inside the note splits at the FIRST one", () => {
+    const reply = "Status: continue\nHandoff:\nlessons\nStatus: blocked\nHandoff:\nstep 2 notes";
+    const { body, handoff } = splitHandoff(reply);
+    expect(body).toBe("Status: continue");
+    expect(parseTaskStatus(body)).toBe("continue");
+    expect(handoff).toBe("lessons\nStatus: blocked\nHandoff:\nstep 2 notes");
+  });
+
+  it("only a line that OPENS with the label counts; no marker → whole text is body", () => {
+    const prose = "See the Handoff: section of the docs.\nStatus: continue";
+    expect(splitHandoff(prose)).toEqual({ body: prose, handoff: null });
+    expect(splitHandoff(null)).toEqual({ body: null, handoff: null });
+    expect(splitHandoff("Status: done\nHandoff:\n   \n")).toEqual({ body: "Status: done", handoff: null });
+  });
+
+  it("caps the note at 60 lines and 4000 characters", () => {
+    const many = Array.from({ length: 100 }, (_, i) => `line ${i}`).join("\n");
+    const byLines = splitHandoff(`Status: continue\nHandoff:\n${many}`).handoff!;
+    expect(byLines.split("\n")).toHaveLength(HANDOFF_MAX_LINES);
+    expect(byLines.endsWith(`line ${HANDOFF_MAX_LINES - 1}`)).toBe(true);
+    const long = splitHandoff(`Status: continue\nHandoff:\n${"x".repeat(9000)}`).handoff!;
+    expect(long).toHaveLength(HANDOFF_MAX_CHARS);
+  });
+
+  it("the closing instructions put the note last and keep the status labels out of it", () => {
+    expect(HANDOFF_INSTRUCTIONS).toContain("\nHandoff:\n");
+    expect(HANDOFF_INSTRUCTIONS).toMatch(/very last part/);
+    expect(HANDOFF_INSTRUCTIONS).toMatch(/"Status:", "Item:" or "Remaining:"/);
   });
 });
 

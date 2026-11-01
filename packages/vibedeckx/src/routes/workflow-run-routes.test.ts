@@ -484,6 +484,16 @@ describe("workflow-run-routes", () => {
     }
     expect(startRepeatLoop).toHaveBeenCalledTimes(2);
 
+    // The handoff switch (loop-presets design §5) is a plain boolean.
+    expect((await app.inject({
+      method: "POST", url: "/api/workflow-loops", payload: { projectId: "p1", prompt: "next step", handoff: true },
+    })).statusCode).toBe(201);
+    expect(startRepeatLoop).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: "next step", handoff: true }));
+    const badHandoff = await app.inject({ method: "POST", url: "/api/workflow-loops", payload: { projectId: "p1", prompt: "p", handoff: "yes" } });
+    expect(badHandoff.statusCode).toBe(400);
+    expect(badHandoff.json().error).toBe("handoff must be a boolean");
+    expect(startRepeatLoop).toHaveBeenCalledTimes(3);
+
     expect((await app.inject({ method: "POST", url: "/api/workflow-runs/l1/gate", payload: { action: "pause" } })).statusCode).toBe(200);
     expect((await app.inject({ method: "POST", url: "/api/workflow-runs/l1/gate", payload: { action: "resume" } })).statusCode).toBe(200);
     expect(pauseLoop).toHaveBeenCalledWith("l1");
