@@ -33,13 +33,11 @@ describe("generateInstruction — Plan file", () => {
       planFile: "PLAN.md",
       readDocs: "AGENTS.md\n\n  docs/design.md  ",
       constraints: "No new deps",
-      verifyCommands: "pnpm test\npnpm lint",
     });
     expect(text).toContain("`PLAN.md`");
     expect(text).not.toContain("implementation-plan.md");
     expect(text).toContain("  - AGENTS.md\n  - docs/design.md");
     expect(text).toContain("  - No new deps");
-    expect(text).toContain("  - `pnpm test`\n  - `pnpm lint`");
   });
 
   it("blank single-line fields fall back to the defaults", () => {

@@ -55,11 +55,6 @@ export const PLAN_PRESET: LoopPreset = {
       key: "constraints", label: "Constraints that must never be violated", multiline: true,
       placeholder: "No new runtime dependencies\nAll DB access goes through the repository layer",
     },
-    {
-      key: "verifyCommands", label: "Verification commands (run by the agent)", multiline: true,
-      placeholder: "npm run typecheck\nnpm test",
-      hint: "The agent runs these. The Check command below is a separate check the loop runs itself.",
-    },
   ],
   defaults: {
     planFile: "docs/implementation-plan.md",
@@ -67,7 +62,6 @@ export const PLAN_PRESET: LoopPreset = {
     doneMarker: "**Pass condition.** True",
     readDocs: "",
     constraints: "",
-    verifyCommands: "",
   },
   handoffByDefault: true,
 };
@@ -144,7 +138,6 @@ function planInstruction(fields: Record<string, string>): string {
   const done = value(fields, "doneMarker");
   const readDocs = lines(fields.readDocs);
   const constraints = lines(fields.constraints);
-  const verify = lines(fields.verifyCommands);
 
   const sections: string[] = [];
   sections.push(
@@ -175,8 +168,8 @@ function planInstruction(fields: Record<string, string>): string {
     "Meet every acceptance criterion of the step, and actually RUN the verification — do not just claim it passes.",
     "",
   ];
-  if (verify.length) verifyLines.push(`- Run these every session:\n${verify.map((c) => `  - \`${c}\``).join("\n")}`);
   verifyLines.push(
+    "- Also run the project's own checks every session — typecheck, tests, lint, whatever its docs or scripts define.",
     "- If the environment truly cannot satisfy a check, use the fallback the plan gives, and say which check, why, and when it will be made up — in your final message and in the commit message.",
     "- A threshold or parameter the plan does not specify is not a blocker: pick a defensible default, keep it in one configurable place (a constants module or config), note the value and the reason in the commit body, and carry on.",
   );
