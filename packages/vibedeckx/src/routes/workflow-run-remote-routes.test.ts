@@ -740,12 +740,17 @@ describe("workflow-run remote proxying (front server)", () => {
       const before = Date.now();
       const res = await app.inject({
         method: "POST", url: "/api/workflow-loops",
-        payload: { projectId: UUID_PROJECT, branch: "dev", prompt: "do the next one", maxIterations: 5, maxMinutes: 60 },
+        payload: {
+          projectId: UUID_PROJECT, branch: "dev", prompt: "do the next one", maxIterations: 5, maxMinutes: 60,
+          preset: { kind: "custom" },
+        },
       });
       expect(res.statusCode).toBe(201);
       expect(proxyMock.mock.calls[0].slice(1, 3)).toEqual(["POST", "/api/path/workflow-loops"]);
+      // `preset` is not capability-gated: an old worker drops it and the card loses one line.
       expect(proxyMock.mock.calls[0][3]).toMatchObject({
         path: "/w/repo", branch: "dev", prompt: "do the next one", maxIterations: 5, maxMinutes: 60, runId: expect.any(String),
+        preset: { kind: "custom" },
       });
 
       const run = res.json().run;

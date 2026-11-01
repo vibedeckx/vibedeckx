@@ -1,4 +1,5 @@
 import { appendTargetFailures, type RetainedBranch, type WorkspaceMachineCheck, type WorkspaceMachineState, type WorkspaceTargetState, type WorktreeTargetOutcome } from "@/lib/worktree-target-results";
+import type { LoopPresetMeta } from "@/lib/loop-presets";
 
 // ============ Auth Token Management ============
 // `_authToken` is a warm cache of the last-known Clerk session JWT. It exists so
@@ -2061,6 +2062,14 @@ export interface RepeatLoopParams {
   stopAfterCurrent?: boolean;
   /** Gate only: this iteration could not start (no session exists for it), as opposed to the previous one having ended. */
   dispatchFailed?: boolean;
+  /** Where the instruction came from (New loop preset); absent on loops started by older workers. */
+  preset?: LoopPresetMeta | null;
+  // Loop v2 (loop-presets design, cut two) — declared ahead, not produced yet.
+  confirmDone?: boolean;
+  confirming?: boolean;
+  handoff?: boolean;
+  handoffNote?: string | null;
+  resumeAt?: number | null;
 }
 export function repeatLoopParams(run: Pick<WorkflowRun, "params">): RepeatLoopParams | null {
   if (!run.params) return null;
@@ -3818,6 +3827,7 @@ export const api = {
     maxIterations?: number;
     maxMinutes?: number;
     checkCommand?: string;
+    preset?: LoopPresetMeta;
   }): Promise<WorkflowRun> {
     const res = await authFetch(`${getApiBase()}/api/workflow-loops`, {
       method: "POST",

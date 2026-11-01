@@ -558,6 +558,19 @@ describe("ReviewRunPanel repeat loop", () => {
     expect(api.cancelWorkflowRun).toHaveBeenCalledWith("l2");
   });
 
+  it("names where the instruction came from under the loop's name", async () => {
+    await renderWith(loopRun({
+      params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, preset: { kind: "plan", fields: { planFile: "PLAN.md" }, edited: true } }),
+    }));
+    expect(container.textContent).toContain("Plan: PLAN.md（已手改）");
+  });
+
+  it("a loop without preset metadata (older worker) just has no source line", async () => {
+    await renderWith(loopRun());
+    expect(container.textContent).not.toContain("Plan:");
+    expect(container.textContent).not.toContain("Custom");
+  });
+
   it("once a pause is requested the soft-stop button is gone and the card says so", async () => {
     await renderWith(loopRun({
       params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, stopAfterCurrent: true }),

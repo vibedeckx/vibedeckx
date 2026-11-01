@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, repeatLoopParams, type WorkflowRun, type WorkflowVerdict } from "@/lib/api";
 import { fetchActiveWorkflowRunsAt } from "@/lib/workflow-runs-fetch";
+import { presetSourceLabel } from "@/lib/loop-presets";
 import { useNotificationInbox } from "@/hooks/notification-inbox-context";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -433,6 +434,8 @@ function LoopCard({ run, busy, error, onAction }: {
   const failedToStart = gate && params?.dispatchFailed === true;
   const shown = gate && !failedToStart ? Math.max(1, round - 1) : round;
   const pausing = params?.stopAfterCurrent === true;
+  // Absent on loops started before presets, or by a worker that predates them.
+  const source = presetSourceLabel(params?.preset);
   return (
     <div className="space-y-2" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
       <div className="flex items-center justify-between gap-2">
@@ -452,6 +455,11 @@ function LoopCard({ run, busy, error, onAction }: {
           <X className="h-3 w-3 mr-1" />结束
         </Button>
       </div>
+      {source && (
+        <div className="text-muted-foreground min-w-0 truncate" style={{ fontSize: "var(--conv-font-size, 12px)" }} title={source}>
+          {source}
+        </div>
+      )}
       {(params?.prevItem || params?.remaining) && (
         <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
           {params.prevItem && <>上一项：{params.prevItem}</>}

@@ -73,6 +73,16 @@ export interface RepeatLoopParams {
    * difference: the round that stopped is this one, and it has no session.
    */
   dispatchFailed?: boolean;
+  /** Where the instruction came from (New loop dialog preset). Display only — the engine never reads it. */
+  preset?: RepeatLoopPreset | null;
+}
+
+export const REPEAT_LOOP_PRESET_KINDS = ["plan", "custom"] as const;
+export interface RepeatLoopPreset {
+  kind: (typeof REPEAT_LOOP_PRESET_KINDS)[number];
+  fields?: Record<string, string>;
+  /** The generated instruction was edited by hand. */
+  edited?: boolean;
 }
 
 export interface StartRepeatLoopOptions {
@@ -85,6 +95,7 @@ export interface StartRepeatLoopOptions {
   maxIterations?: number;
   maxMinutes?: number;
   checkCommand?: string | null;
+  preset?: RepeatLoopPreset;
   /** Stable id from a hub replay of the start request. */
   runId?: string;
 }
@@ -178,6 +189,7 @@ export class RepeatLoopRunner {
       checkCommand: opts.checkCommand?.trim() || null,
       startedAt: Date.now(),
       anchorSessionId: sessionId,
+      ...(opts.preset ? { preset: opts.preset } : {}),
     };
     let run: WorkflowRun;
     try {

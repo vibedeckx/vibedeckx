@@ -137,6 +137,19 @@ describe("repeat-until-done loop", () => {
     expect(await outbox()).toHaveLength(0);
   });
 
+  it("keeps the dialog's preset on every iteration and on the gate, without reading it", async () => {
+    const preset = { kind: "plan" as const, fields: { planFile: "PLAN.md" }, edited: false };
+    const first = await startLoop({ preset });
+    expect(parseRepeatParams(first)?.preset).toEqual(preset);
+    const second = await finishAndAdvance(first, "Status: continue\nItem: 1");
+    expect(parseRepeatParams(second)?.preset).toEqual(preset);
+    await finish(second, "Status: blocked");
+    expect(parseRepeatParams(await onlyActive())?.preset).toEqual(preset);
+    // Not part of what the agent is told.
+    const sent = agentOps.activateReviewer.mock.calls.map(([c]) => (c as { instruction: string }).instruction);
+    expect(sent.every((i) => !i.includes("PLAN.md"))).toBe(true);
+  });
+
   it("done: the loop finishes, and says so on the ANCHOR session's outbox", async () => {
     const first = await startLoop();
     const second = await finishAndAdvance(first, "Status: continue\nItem: a");

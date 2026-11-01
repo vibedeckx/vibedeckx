@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseClosingLine, parseTaskStatus, parseVerdict } from "./review-verdict.js";
+import { parseClosingLine, parseTaskStatus, parseVerdict, TASK_STATUS_INSTRUCTIONS } from "./review-verdict.js";
 
 describe("parseVerdict", () => {
   it("reads the shapes real reviewers produced (2026-09-18 live runs)", () => {
@@ -78,5 +78,14 @@ describe("parseClosingLine", () => {
   it("returns the raw value of the last labelled line", () => {
     expect(parseClosingLine("Status: continue\nItem: `order 17` — refund\nRemaining: 4", "Item")).toBe("order 17 — refund");
     expect(parseClosingLine("Status: done", "Item")).toBeNull();
+  });
+});
+
+describe("TASK_STATUS_INSTRUCTIONS ↔ the New loop dialog's preview", () => {
+  it("the UI shows exactly what the engine appends (apps/vibedeckx-ui/lib/loop-presets.ts)", async () => {
+    // A path in a variable: the UI file is outside this package's tsc rootDir.
+    const uiModule = new URL("../../../../apps/vibedeckx-ui/lib/loop-presets.ts", import.meta.url).href;
+    const { TASK_STATUS_PROTOCOL_PREVIEW } = (await import(uiModule)) as { TASK_STATUS_PROTOCOL_PREVIEW: string };
+    expect(TASK_STATUS_PROTOCOL_PREVIEW).toBe(TASK_STATUS_INSTRUCTIONS);
   });
 });

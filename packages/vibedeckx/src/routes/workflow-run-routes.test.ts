@@ -467,6 +467,23 @@ describe("workflow-run-routes", () => {
     }));
     expect((await app.inject({ method: "POST", url: "/api/workflow-loops", payload: { projectId: "p1" } })).statusCode).toBe(400);
 
+    // The dialog's preset rides along untouched (display only) …
+    const preset = { kind: "plan", fields: { planFile: "PLAN.md" }, edited: true };
+    expect((await app.inject({
+      method: "POST", url: "/api/workflow-loops", payload: { projectId: "p1", prompt: "next step", preset },
+    })).statusCode).toBe(201);
+    expect(startRepeatLoop).toHaveBeenLastCalledWith(expect.objectContaining({ prompt: "next step", preset }));
+    // … and a malformed one is refused, not silently dropped.
+    for (const bad of [
+      "plan", { kind: "tasks" }, { kind: "plan", fields: { planFile: 3 } }, { kind: "plan", fields: ["x"] },
+      { kind: "plan", edited: "yes" }, { kind: "plan", fields: { big: "x".repeat(16 * 1024 + 1) } },
+    ]) {
+      const res = await app.inject({ method: "POST", url: "/api/workflow-loops", payload: { projectId: "p1", prompt: "p", preset: bad } });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/^preset/);
+    }
+    expect(startRepeatLoop).toHaveBeenCalledTimes(2);
+
     expect((await app.inject({ method: "POST", url: "/api/workflow-runs/l1/gate", payload: { action: "pause" } })).statusCode).toBe(200);
     expect((await app.inject({ method: "POST", url: "/api/workflow-runs/l1/gate", payload: { action: "resume" } })).statusCode).toBe(200);
     expect(pauseLoop).toHaveBeenCalledWith("l1");

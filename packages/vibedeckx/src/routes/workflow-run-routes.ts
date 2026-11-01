@@ -13,7 +13,8 @@ import { bindRemoteSessionMapping, createRemoteWorkflowReviewer, ensureRemoteAge
 import type { ReviewSpan, WorkflowRun } from "../storage/types.js";
 import { publishRemoteLoopSessions } from "../remote-loop-sessions.js";
 import {
-  REPEAT_MAX_ITERATIONS_LIMIT, REPEAT_MAX_MINUTES_LIMIT, type StartRepeatLoopOptions,
+  REPEAT_LOOP_PRESET_KINDS, REPEAT_MAX_ITERATIONS_LIMIT, REPEAT_MAX_MINUTES_LIMIT,
+  type RepeatLoopPreset, type StartRepeatLoopOptions,
 } from "../workflow-repeat-loop.js";
 import type { AgentType } from "../agent-types.js";
 
@@ -40,13 +41,50 @@ export function parseRepeatLoopBody(body: Record<string, unknown> | undefined): 
     if (b[field] !== undefined && b[field] !== null && typeof b[field] !== "string") return `${field} must be a string`;
   }
   if (typeof b.checkCommand === "string" && b.checkCommand.length > 2000) return "checkCommand is too long";
+  const preset = parseRepeatLoopPreset(b.preset);
+  if (typeof preset === "string") return preset;
   return {
     prompt: b.prompt,
     name: typeof b.name === "string" ? b.name.slice(0, 80) : undefined,
     agentType, maxIterations, maxMinutes,
     model: typeof b.model === "string" ? b.model : undefined,
     checkCommand: typeof b.checkCommand === "string" ? b.checkCommand : undefined,
+    ...(preset ? { preset } : {}),
     runId: typeof b.runId === "string" ? b.runId : undefined,
+  };
+}
+
+const PRESET_FIELDS_MAX = 16 * 1024;
+
+/**
+ * Optional `preset` of a loop start (loop-presets design §2.3): where the
+ * instruction came from, kept for the card's source line. The engine never
+ * reads it. undefined = absent; a string = the 400 message.
+ */
+export function parseRepeatLoopPreset(raw: unknown): RepeatLoopPreset | undefined | string {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) return "preset must be an object";
+  const p = raw as { kind?: unknown; fields?: unknown; edited?: unknown };
+  if (!(REPEAT_LOOP_PRESET_KINDS as readonly unknown[]).includes(p.kind)) {
+    return `preset.kind must be one of: ${REPEAT_LOOP_PRESET_KINDS.join(", ")}`;
+  }
+  if (p.edited !== undefined && typeof p.edited !== "boolean") return "preset.edited must be a boolean";
+  let fields: Record<string, string> | undefined;
+  if (p.fields !== undefined && p.fields !== null) {
+    if (typeof p.fields !== "object" || Array.isArray(p.fields)) return "preset.fields must be an object of strings";
+    let size = 0;
+    fields = {};
+    for (const [k, v] of Object.entries(p.fields as Record<string, unknown>)) {
+      if (typeof v !== "string") return "preset.fields must be an object of strings";
+      size += k.length + v.length;
+      fields[k] = v;
+    }
+    if (size > PRESET_FIELDS_MAX) return "preset.fields is too long";
+  }
+  return {
+    kind: p.kind as RepeatLoopPreset["kind"],
+    ...(fields ? { fields } : {}),
+    ...(p.edited !== undefined ? { edited: p.edited } : {}),
   };
 }
 
