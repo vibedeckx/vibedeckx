@@ -464,14 +464,6 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
             </span>
           </label>
 
-          <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-2 text-[11.5px] leading-snug text-amber-700 dark:text-amber-300">
-            <TriangleAlert className="mt-px size-[13px] shrink-0" />
-            <span className="min-w-0">
-              Sessions run in edit mode with no confirmation between items. The loop stops on its own when an item is
-              blocked, fails, or a limit is reached — and you can stop it any time.
-            </span>
-          </div>
-
           {error && (
             <Strip tone="rose" icon={<TriangleAlert />}>
               {error}
