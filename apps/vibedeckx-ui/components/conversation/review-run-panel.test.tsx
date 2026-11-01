@@ -569,8 +569,9 @@ describe("ReviewRunPanel repeat loop", () => {
       params: JSON.stringify({ name: "Orders", prompt: "p", maxIterations: 20, maxMinutes: 240, prevItem: "3", remaining: "5", doneItems: ["1", "2", "3"] }),
     }));
     expect(container.textContent).toContain("已完成 3 项");
-    expect(container.textContent).toContain("上一项：3");
-    expect(container.textContent).toContain("剩余：5");
+    expect(container.textContent).toContain("上一项3");
+    expect(container.textContent).toContain("3 / 8");
+    expect(container.textContent).not.toContain("剩余");
     expect(container.querySelector('[data-testid="loop-done-items"]')).toBeNull();
     await act(async () => { buttonNamed("已完成 3 项")!.click(); });
     const list = container.querySelector('[data-testid="loop-done-items"]')!;
@@ -579,10 +580,10 @@ describe("ReviewRunPanel repeat loop", () => {
 
   it("a running iteration shows progress and offers the soft stop and the hard stop — never review controls", async () => {
     await renderWith(loopRun());
-    expect(container.textContent).toContain("Loop — Orders");
+    expect(container.textContent).toContain("Orders");
     expect(container.textContent).toContain("第 2 / 20 次");
-    expect(container.textContent).toContain("上一项：order 17");
-    expect(container.textContent).toContain("剩余：4");
+    expect(container.textContent).toContain("上一项order 17");
+    expect(container.textContent).toContain("剩余 4");
     expect(buttonNamed("发送反馈给原 session")).toBeUndefined();
 
     await act(async () => { buttonNamed("做完这项后停")!.click(); });

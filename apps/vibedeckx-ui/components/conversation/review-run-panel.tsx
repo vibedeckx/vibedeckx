@@ -8,7 +8,7 @@ import { useNotificationInbox } from "@/hooks/notification-inbox-context";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MessageResponse } from "@/components/ai-elements/message";
-import { AlarmClock, ChevronDown, ChevronRight, Eye, FileCheck, Loader2, Pause, Pencil, Play, X } from "lucide-react";
+import { AlarmClock, AlertTriangle, Check, ChevronDown, ChevronRight, Eye, FileCheck, FileText, Loader2, Pause, Pencil, Play, X } from "lucide-react";
 
 /** `schedule` = set or clear a loop gate's scheduled resume (not a gate action server-side). */
 type GateAction = "approve" | "finalize" | "cancel" | "accept" | "rereview" | "pause" | "resume" | "schedule" | "dismiss";
@@ -519,108 +519,147 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
     await onScheduleResume(at);
     setPicking(false);
   };
+  const name = params?.name ?? "Loop";
+  // A bar only when the ledger has entries and the session reported a plain
+  // count; free-form remainders ("about a dozen") and loops without a ledger
+  // stay text — "0 / 4" would misstate items done before the ledger existed.
+  const remainingCount = params?.remaining && /^\d+$/.test(params.remaining.trim()) ? Number(params.remaining.trim()) : null;
+  const total = remainingCount !== null && doneItems.length > 0 ? doneItems.length + remainingCount : null;
+  const percent = total ? Math.round((doneItems.length / total) * 100) : finished ? 100 : null;
+  const statusText = run.status === "preparing" ? "正在启动下一个 session…"
+    : run.status === "running_task" ? (pausing ? "做完这一项后暂停…" : "处理中")
+      : gate ? "已停下，等你决定"
+        : finished ? "已完成" : null;
+  const tone = gate ? "bg-amber-500" : finished ? "bg-emerald-500" : "bg-sky-500";
+  const meta = { fontSize: "var(--conv-font-size, 12px)" };
+  const disclosure = "inline-flex items-center gap-1 rounded-md border bg-background px-2 py-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground aria-expanded:bg-muted aria-expanded:text-foreground";
   return (
-    <div className="space-y-2" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-medium min-w-0 truncate">
-          Loop — {params?.name ?? "Loop"}
-          <span className="ml-2 text-muted-foreground">
-            {run.status === "preparing" && "正在启动下一个 session…"}
-            {run.status === "running_task" && (pausing ? "做完这一项后暂停…" : "处理中…")}
-            {gate && "已停下，等你决定"}
-            {finished && "已完成"}
-          </span>
-          <span className="ml-2 text-muted-foreground">
-            第 {shown}{run.max_rounds ? ` / ${run.max_rounds}` : ""} 次
-          </span>
-        </span>
-        {finished ? (
-          <Button variant="ghost" size="icon-sm" disabled={busy} aria-label="关闭" title="关闭这张卡片"
-            onClick={() => onAction("dismiss")}>
-            <X className="h-3 w-3" />
-          </Button>
-        ) : (
-          <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
-            title="立即结束循环，并停掉正在运行的 session">
-            <X className="h-3 w-3 mr-1" />结束
-          </Button>
-        )}
+    <div className="space-y-2.5 rounded-lg border bg-background/70 p-3 shadow-xs" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 space-y-0.5">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+              {!gate && !finished && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${tone}`} />}
+              <span className={`relative inline-flex h-2 w-2 rounded-full ${tone}`} />
+            </span>
+            <span className="shrink-0 rounded-sm bg-muted px-1.5 py-px font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Loop</span>
+            <span className="min-w-0 truncate font-medium" title={name}>{name}</span>
+          </div>
+          <div className="flex items-center gap-1.5 pl-4 text-muted-foreground" style={meta}>
+            {statusText && <span className={gate ? "text-amber-700 dark:text-amber-400" : undefined}>{statusText}</span>}
+            {statusText && <span aria-hidden>·</span>}
+            <span className="tabular-nums">第 {shown}{run.max_rounds ? ` / ${run.max_rounds}` : ""} 次</span>
+          </div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {run.status === "running_task" && !pausing && (
+            // The safer stop: a hard stop can leave an item half-processed, and
+            // only the instruction — not the engine — can make that harmless.
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction("pause")}
+              title="当前 session 做完这一项后暂停循环">
+              <Pause className="h-3 w-3" />做完这项后停
+            </Button>
+          )}
+          {finished ? (
+            <Button variant="ghost" size="icon-sm" disabled={busy} aria-label="关闭" title="关闭这张卡片"
+              onClick={() => onAction("dismiss")}>
+              <X className="h-3 w-3" />
+            </Button>
+          ) : (
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
+              className="text-muted-foreground hover:text-destructive"
+              title="立即结束循环，并停掉正在运行的 session">
+              <X className="h-3 w-3" />结束
+            </Button>
+          )}
+        </div>
       </div>
       {source && (
-        <div className="text-muted-foreground min-w-0 truncate" style={{ fontSize: "var(--conv-font-size, 12px)" }} title={source}>
-          {source}
+        <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground" style={meta} title={source}>
+          <FileText className="h-3 w-3 shrink-0" />
+          <span className="min-w-0 truncate font-mono">{source}</span>
         </div>
       )}
-      {(doneItems.length > 0 || params?.prevItem || params?.remaining) && (
-        // Progress: the engine's ledger of completed items (design §5.3), the
-        // last one, and the count the last session reported as left.
-        <div style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-          <div className="flex flex-wrap items-center gap-x-1 text-muted-foreground">
+      {(percent !== null || params?.remaining) && (
+        // Progress: the engine's ledger of completed items (design §5.3) against
+        // the count the last session reported as left.
+        <div className="flex items-center gap-3" style={meta}>
+          {percent !== null && (
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted" role="progressbar"
+              aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+              <div className={`h-full rounded-full transition-all ${finished ? "bg-emerald-500" : "bg-primary/70"}`}
+                style={{ width: `${percent}%` }} />
+            </div>
+          )}
+          <span className="shrink-0 tabular-nums text-muted-foreground">
+            {/* With a total the bar already says what is left; a free-form remainder has no total. */}
+            {total !== null ? `${doneItems.length} / ${total}` : params?.remaining && `剩余 ${params.remaining}`}
+          </span>
+        </div>
+      )}
+      {params?.prevItem && (
+        <div className="flex min-w-0 items-baseline gap-2 rounded-md bg-muted/50 px-2.5 py-1.5" style={meta}>
+          <span className="flex shrink-0 items-center gap-1 text-muted-foreground">
+            <Check className="h-3 w-3 self-center text-emerald-600 dark:text-emerald-400" />上一项
+          </span>
+          <span className="min-w-0 break-words">{params.prevItem}</span>
+        </div>
+      )}
+      {run.status === "running_task" && (
+        <div className="flex items-center gap-1.5 text-muted-foreground" style={meta}>
+          <Loader2 className="h-3 w-3 animate-spin" />
+          <span>session「{name} #{round}」正在工作</span>
+        </div>
+      )}
+      {finished && (
+        <div className="text-muted-foreground" style={meta}>
+          最后一个 session：「{name} #{round}」（见侧栏）
+        </div>
+      )}
+      {run.error && (
+        <div className="flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-amber-700 dark:text-amber-400" style={meta}>
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span className="min-w-0 break-words">{run.error}</span>
+        </div>
+      )}
+      {(doneItems.length > 0 || handoffNote) && (
+        <div className="space-y-2" style={meta}>
+          <div className="flex flex-wrap items-center gap-1.5">
             {doneItems.length > 0 && (
-              <button type="button" aria-expanded={doneOpen} onClick={() => setDoneOpen((o) => !o)}
-                className="flex items-center hover:text-foreground">
-                {doneOpen ? <ChevronDown className="h-3 w-3 mr-1" /> : <ChevronRight className="h-3 w-3 mr-1" />}
+              <button type="button" aria-expanded={doneOpen} onClick={() => setDoneOpen((o) => !o)} className={disclosure}>
+                {doneOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
                 已完成 {doneItems.length} 项
               </button>
             )}
-            {doneItems.length > 0 && params?.prevItem && <span>·</span>}
-            {params?.prevItem && <span>上一项：{params.prevItem}</span>}
-            {(doneItems.length > 0 || params?.prevItem) && params?.remaining && <span>·</span>}
-            {params?.remaining && <span>剩余：{params.remaining}</span>}
+            {handoffNote && (
+              // The note the engine hands the next session (design §5.1) — the only
+              // place it is visible short of opening a transcript.
+              <button type="button" aria-expanded={noteOpen} onClick={() => setNoteOpen((o) => !o)} className={disclosure}>
+                {noteOpen ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                上一轮交接
+              </button>
+            )}
           </div>
           {doneOpen && doneItems.length > 0 && (
             <ol data-testid="loop-done-items"
-              className="mt-1 max-h-60 list-decimal overflow-y-auto rounded-md border bg-background py-2 pl-8 pr-3 font-mono text-muted-foreground">
+              className="max-h-60 list-decimal overflow-y-auto rounded-md border bg-background py-2 pl-8 pr-3 font-mono text-muted-foreground">
               {doneItems.map((item, i) => <li key={i} className="break-words">{item}</li>)}
             </ol>
           )}
-        </div>
-      )}
-      {handoffNote && (
-        // The note the engine hands the next session (design §5.1) — the only
-        // place it is visible short of opening a transcript.
-        <div style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-          <button type="button" aria-expanded={noteOpen} onClick={() => setNoteOpen((o) => !o)}
-            className="flex items-center text-muted-foreground hover:text-foreground">
-            {noteOpen ? <ChevronDown className="h-3 w-3 mr-1" /> : <ChevronRight className="h-3 w-3 mr-1" />}
-            上一轮交接
-          </button>
           {noteOpen && (
             <pre data-testid="loop-handoff-note"
-              className="mt-1 max-h-60 overflow-y-auto whitespace-pre-wrap break-words rounded-md border bg-background px-3 py-2 font-mono text-muted-foreground">
+              className="max-h-60 overflow-y-auto whitespace-pre-wrap break-words rounded-md border bg-background px-3 py-2 font-mono text-muted-foreground">
               {handoffNote}
             </pre>
           )}
         </div>
       )}
-      {run.error && (
-        <div className="text-amber-600" style={{ fontSize: "var(--conv-font-size, 12px)" }}>{run.error}</div>
-      )}
-      {run.status === "running_task" && (
-        <div className="flex items-center gap-2">
-          <span className="flex items-center text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-            <Loader2 className="h-3 w-3 mr-1 animate-spin" /> session「{params?.name ?? "Loop"} #{round}」正在工作
-          </span>
-          {!pausing && (
-            // The safer stop: a hard stop can leave an item half-processed, and
-            // only the instruction — not the engine — can make that harmless.
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction("pause")}>
-              <Pause className="h-3 w-3 mr-1" />做完这项后停
-            </Button>
-          )}
-        </div>
-      )}
-      {finished && (
-        <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-          最后一个 session：「{params?.name ?? "Loop"} #{round}」（见侧栏）
-        </div>
-      )}
       {gate && (
         <>
-          <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+          <div className="text-muted-foreground" style={meta}>
             {failedToStart
               ? `第 ${round} 次迭代没能启动，没有对应的 session`
-              : `相关 session：「${params?.name ?? "Loop"} #${shown}」（见侧栏）`}
+              : `相关 session：「${name} #${shown}」（见侧栏）`}
           </div>
           <div className="flex flex-wrap items-center justify-center gap-2">
             <Button size="sm" variant="outline" disabled={busy} onClick={() => onAction("resume")}>
@@ -635,7 +674,7 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
         </>
       )}
       {resumeAt !== null && (
-        <div className="flex items-center gap-1 text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
+        <div className="flex items-center gap-1 text-muted-foreground" style={meta}>
           <AlarmClock className="h-3 w-3" />
           <span>将于 {formatResumeAt(resumeAt)} 自动继续 ·</span>
           <button type="button" disabled={busy} onClick={() => void schedule(null)}
@@ -647,7 +686,7 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
       {gate && resumeAt === null && picking && (
         <ScheduleResumePicker busy={busy} onSchedule={(at) => void schedule(at)} onClose={() => setPicking(false)} />
       )}
-      {error && <div className="text-destructive" style={{ fontSize: "var(--conv-font-size, 12px)" }}>{error}</div>}
+      {error && <div className="text-destructive" style={meta}>{error}</div>}
     </div>
   );
 }
