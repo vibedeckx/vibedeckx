@@ -34,12 +34,16 @@ const VARIANTS = {
   "logo-light-tile": { tile: "#fbfcfe", back: "#0e1117", front: "#3d5ccf" },
   "logo-dark-tile": { tile: "#090c11", back: "#f0f2f6", front: "#5b83ff" },
   "logo-indigo-tile": { tile: "#3d5ccf", back: "#fbfcfe", front: "#f0f2f6" },
+  // Full-bleed squares (no corner radius) for hosts that crop/round avatars
+  // themselves, e.g. GitHub org/user avatars — the rounded tiles leave empty corners.
+  "logo-light-square": { tile: "#fbfcfe", back: "#0e1117", front: "#3d5ccf", radius: 0 },
+  "logo-dark-square": { tile: "#090c11", back: "#f0f2f6", front: "#5b83ff", radius: 0 },
+  "logo-indigo-square": { tile: "#3d5ccf", back: "#fbfcfe", front: "#f0f2f6", radius: 0 },
 };
 
-function svg({ tile, back, front }) {
-  const bg = tile
-    ? `  <rect width="${SIZE}" height="${SIZE}" rx="${TILE_RADIUS}" fill="${tile}"/>\n`
-    : "";
+function svg({ tile, back, front, radius = TILE_RADIUS }) {
+  const rx = radius ? ` rx="${radius}"` : "";
+  const bg = tile ? `  <rect width="${SIZE}" height="${SIZE}"${rx} fill="${tile}"/>\n` : "";
   // The <g> reuses the exact 64-unit coordinates from logo.tsx.
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${SIZE}" height="${SIZE}" viewBox="0 0 ${SIZE} ${SIZE}">
 ${bg}  <g transform="translate(58 52) scale(6)">
