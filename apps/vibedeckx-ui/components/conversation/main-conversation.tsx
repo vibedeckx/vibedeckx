@@ -499,19 +499,6 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
         {taskPlans.current && session && (
           <TaskPlanPanel key={taskPlans.current.key} task={taskPlans.current} sessionId={session.id} />
         )}
-        {(isGenerating || isWaiting) && (
-          <div className="flex justify-center mb-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={stopGeneration}
-              className="gap-1.5"
-            >
-              <Square className="h-3 w-3" />
-              {isGenerating ? "Stop generating" : "Stop"}
-            </Button>
-          </div>
-        )}
         <PromptInput
           onSubmit={handleSubmit}
           className="w-full"
@@ -566,10 +553,25 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
               height: "calc(1lh + 1.5rem)",
             }}
           >
-            <PromptInputSubmit
-              className="pointer-events-auto"
-              disabled={!isInitialized || isGenerating || !draft.trim()}
-            />
+            {/* While a turn runs the submit button doubles as Stop. A waiting
+                turn still accepts additions, so typed text flips it back to
+                Send. */}
+            {isGenerating || (isWaiting && !draft.trim()) ? (
+              <PromptInputSubmit
+                className="pointer-events-auto"
+                type="button"
+                aria-label={isGenerating ? "Stop generating" : "Stop"}
+                title={isGenerating ? "Stop generating" : "Stop"}
+                onClick={stopGeneration}
+              >
+                <Square className="size-3.5 fill-current" />
+              </PromptInputSubmit>
+            ) : (
+              <PromptInputSubmit
+                className="pointer-events-auto"
+                disabled={!isInitialized || !draft.trim()}
+              />
+            )}
           </div>
         </PromptInput>
       </div>
