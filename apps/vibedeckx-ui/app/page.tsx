@@ -1,9 +1,6 @@
 'use client';
 import { useState, useEffect, useRef, useCallback, useMemo, useTransition, useSyncExternalStore } from 'react';
 import { MAIN_CHAT_SHORTCUT_CODE, comboShortcutHint, isMacPlatform, matchComboShortcut } from '@/lib/tab-shortcuts';
-import { WorkspaceTabs } from '@/components/workspace/workspace-tabs';
-import { useRules } from '@/hooks/use-rules';
-import { useCommands } from '@/hooks/use-commands';
 import { ProjectInfoView } from '@/components/project/project-info-view';
 import { ProjectChatWorkbench } from '@/components/project-chat';
 import { useProjects } from '@/hooks/use-projects';
@@ -309,8 +306,6 @@ export default function Home() {
     refetch: refetchBranchActivity,
     setOptimisticActivity,
   } = useBranchActivity(currentProject?.id ?? null);
-  const { rules, createRule, updateRule, deleteRule } = useRules(currentProject?.id ?? null, selectedBranch);
-  const { commands, createCommand, updateCommand, deleteCommand } = useCommands(currentProject?.id ?? null, selectedBranch);
   const mainChatRef = useRef<MainConversationHandle>(null);
   // Main Chat column collapse. The panel group's autoSaveId persists the
   // collapsed layout, and the library fires onCollapse/onExpand on mount, so
@@ -584,12 +579,6 @@ export default function Home() {
   useGlobalEvents(currentProject?.id ?? null, {
     onTaskChanged: handleGlobalTaskChanged,
   });
-
-  // Compute assigned task for the currently selected branch
-  const assignedTask = useMemo(() => {
-    const branchKey = toBranchKey(selectedBranch);
-    return tasks.find((t) => t.assigned_branch === branchKey) ?? null;
-  }, [tasks, selectedBranch]);
 
   const handleStartTask = useCallback((task: Task) => {
     startTaskTransition(async () => {
@@ -1035,18 +1024,6 @@ export default function Home() {
     selectProject(target);
   }, [currentProject?.id, projects, handleSidebarBranchChange, selectProject]);
 
-  // Guard against double-click sending the same command twice: ignore a repeat
-  // of the same content within a short window (a native double-click fires two
-  // click events before the session status can update).
-  const lastExecuteRef = useRef<{ content: string; at: number }>({ content: "", at: 0 });
-  const handleExecuteCommand = useCallback((content: string) => {
-    const now = Date.now();
-    const last = lastExecuteRef.current;
-    if (last.content === content && now - last.at < 600) return;
-    lastExecuteRef.current = { content, at: now };
-    mainChatRef.current?.sendMessage(content);
-  }, []);
-
   const handleMergeRequest = useCallback(() => {
     const prompt = `Please perform the following git operations for this worktree:
 
@@ -1283,26 +1260,6 @@ Please proceed step by step and let me know if there are any issues or conflicts
                 onExpand={() => setMainChatCollapsed(false)}
               >
                 <div data-focus-region="default" className="h-full flex flex-col overflow-hidden">
-                  {currentProject && (
-                    <div className="px-4 py-3 border-b border-border/60 flex-shrink-0">
-                      <WorkspaceTabs
-                        assignedTask={assignedTask}
-                        rules={rules}
-                        commands={commands}
-                        onCreateRule={createRule}
-                        onUpdateRule={updateRule}
-                        onDeleteRule={deleteRule}
-                        onCreateCommand={createCommand}
-                        onUpdateCommand={updateCommand}
-                        onDeleteCommand={deleteCommand}
-                        onExecuteCommand={handleExecuteCommand}
-                        onUpdateTaskTitle={(id, title) => updateTask(id, { title })}
-                        onCompleteTask={(id) => {
-                          updateTask(id, { status: "done", assigned_branch: null });
-                        }}
-                      />
-                    </div>
-                  )}
                   <div className="flex-1 overflow-hidden">
                     {/* Keyed on the workspace: a different workspace is a different
                         conversation, so its UI state (draft, scroll, run panel) resets by

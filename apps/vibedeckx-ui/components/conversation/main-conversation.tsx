@@ -24,6 +24,9 @@ import { ToolApprovalCard } from "./tool-approval-card";
 import { ReviewRunPanel } from "./review-run-panel";
 import { NewLoopDialog } from "./new-loop-dialog";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
+import { useCommands } from "@/hooks/use-commands";
+import { useFocusRegion } from "@/components/locate/focus-region";
+import { CommandsMenu } from "@/components/commands/commands-menu";
 import { MessageSquare, Loader2, Square, Search, Radio, SquarePen, TriangleAlert, Hourglass } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { api, ExecutorProcessRequestError, type ExecutorDelivery, type WorkflowRun } from "@/lib/api";
@@ -109,6 +112,10 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
   } = useChatSession(projectId, branch);
 
   const { settings: convSettings } = useConversationSettings();
+  const { region: focusRegion } = useFocusRegion();
+  const { commands, createCommand, updateCommand, deleteCommand } = useCommands(projectId, branch);
+  const [commandsOpen, setCommandsOpen] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [activeRuns, setActiveRuns] = useState<WorkflowRun[]>([]);
   const taskPlans = useMemo(() => collectTaskPlans(messages), [messages]);
 
@@ -181,16 +188,35 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
       className="h-full flex flex-col min-h-0"
       style={{ "--conv-font-size": `${convSettings.chatFontSize}px` } as React.CSSProperties}
     >
-      {/* Header */}
+      {/* Tab bar — the same row as the right panel's tab bar, so both panels'
+          two header rows line up. A single tab is the panel's title, not a
+          switch: no hover, no click. Its underline follows the focus region
+          the same way the right panel's does. */}
+      <div className="flex-shrink-0 flex items-center px-3 gap-4 border-b border-border">
+        <span
+          className={`flex items-center gap-0.5 py-2.5 text-xs font-medium border-b-2 text-foreground ${
+            focusRegion === "default" ? "border-primary" : "border-foreground/25"
+          }`}
+        >
+          <MessageSquare className="h-3.5 w-3.5" />
+          Main Chat
+        </span>
+      </div>
+
+      {/* Toolbar — matches the h-10 toolbar every right-panel tab carries */}
       <div className="flex-shrink-0 flex items-center justify-between px-4 h-10 border-b border-border/60 bg-muted/20">
-        <div className="flex items-center gap-2">
-          <MessageSquare className="h-3.5 w-3.5 text-primary" />
-          <span className="text-xs font-medium text-foreground">Main Chat</span>
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           {isGenerating && (
-            <Loader2 className="h-3 w-3 animate-spin text-primary/60" />
+            <>
+              <Loader2 className="h-3 w-3 animate-spin text-primary/60" />
+              Working…
+            </>
           )}
           {isWaiting && (
-            <Hourglass className="h-3 w-3 text-primary/60" aria-label="Waiting for results" />
+            <>
+              <Hourglass className="h-3 w-3 text-primary/60" aria-label="Waiting for results" />
+              Waiting for results
+            </>
           )}
         </div>
         {session && (
@@ -490,22 +516,46 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
           onSubmit={handleSubmit}
           className="w-full"
         >
-          <PromptInputTextarea
-            disabled={!isInitialized || isGenerating}
-            placeholder={
-              !isInitialized
-                ? "Connecting..."
-                : isGenerating
-                  ? "Waiting for response..."
-                  : isWaiting
-                    ? "Still on it — add to the task..."
-                    : "Type a message..."
-            }
-            className="pr-12"
-            style={{ fontSize: "var(--conv-font-size, 14px)" }}
-            value={draft}
-            onChange={(e) => setDraft(e.currentTarget.value)}
-          />
+          {/* Input row: [commands button] [textarea] [submit button]. A size
+              container so the commands button can show its label only when
+              the panel is wide enough. */}
+          <div className="@container flex w-full items-center">
+            <CommandsMenu
+              commands={commands}
+              open={commandsOpen}
+              onOpenChange={setCommandsOpen}
+              disabled={!isInitialized || isGenerating}
+              onExecute={(content) => { void sendMessage(content); }}
+              onCreate={createCommand}
+              onUpdate={updateCommand}
+              onDelete={deleteCommand}
+              onCloseFocus={() => textareaRef.current?.focus()}
+            />
+            <PromptInputTextarea
+              ref={textareaRef}
+              disabled={!isInitialized || isGenerating}
+              placeholder={
+                !isInitialized
+                  ? "Connecting..."
+                  : isGenerating
+                    ? "Waiting for response..."
+                    : isWaiting
+                      ? "Still on it — add to the task..."
+                      : "Type a message, / for commands..."
+              }
+              className="pr-12"
+              style={{ fontSize: "var(--conv-font-size, 14px)" }}
+              value={draft}
+              onChange={(e) => setDraft(e.currentTarget.value)}
+              onKeyDown={(e) => {
+                // "/" in an empty draft opens the commands menu instead of typing.
+                if (e.key === "/" && draft === "" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  setCommandsOpen(true);
+                }
+              }}
+            />
+          </div>
           {/* Wrapper height = one textarea line (1lh must match the
               textarea's font classes; 1.5rem = its py-3): centered on a
               single line, hugs the last line when multiline */}

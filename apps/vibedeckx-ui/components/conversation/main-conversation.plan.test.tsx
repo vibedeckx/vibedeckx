@@ -25,6 +25,8 @@ vi.mock("@/components/ai-elements/prompt-input", () => ({
 }));
 vi.mock("./review-run-panel", () => ({ ReviewRunPanel: () => null }));
 vi.mock("./new-loop-dialog", () => ({ NewLoopDialog: () => null }));
+vi.mock("@/components/commands/commands-menu", () => ({ CommandsMenu: () => null }));
+vi.mock("@/hooks/use-commands", () => ({ useCommands: () => ({ commands: [], createCommand: vi.fn(), updateCommand: vi.fn(), deleteCommand: vi.fn() }) }));
 import { MainConversation } from "./main-conversation";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
