@@ -20,6 +20,7 @@ import { createExecutorRepos } from "./repositories/executors.js";
 import { createAgentSessionRepos } from "./repositories/agent-sessions.js";
 import { createWorkspaceRepos } from "./repositories/workspace.js";
 import { createCrossRemoteAuditRepo } from "./repositories/cross-remote-audit.js";
+import { createLlmUsageRepo } from "./repositories/llm-usage.js";
 import { createSessionRemoteGrantRepo } from "./repositories/session-remote-grants.js";
 import { createSessionRemoteTouchRepo } from "./repositories/session-remote-touches.js";
 import { createSessionRetentionHoldRepo } from "./repositories/session-retention-holds.js";
@@ -640,6 +641,34 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
     );
 
     CREATE INDEX IF NOT EXISTS idx_cross_remote_audit_target ON cross_remote_audit(target_remote_id, seq);
+
+    -- One row per hub-side model call (usage/ meters every model the chat
+    -- registry hands out). The authoritative ledger for usage limits and,
+    -- later, billing — Langfuse traces are observability only. cost_nanousd
+    -- is integer USD×1e9 so sums stay exact; NULL when the provider reported
+    -- no cost and no price is known. cost_source: 'actual' (provider-billed,
+    -- e.g. AI Gateway) | 'estimated' (local price table).
+    CREATE TABLE IF NOT EXISTS llm_usage (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      user_id TEXT NOT NULL,
+      feature TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      resolved_provider TEXT,
+      key_source TEXT NOT NULL,
+      input_tokens INTEGER NOT NULL,
+      cached_input_tokens INTEGER NOT NULL,
+      output_tokens INTEGER NOT NULL,
+      reasoning_tokens INTEGER NOT NULL,
+      cost_nanousd INTEGER,
+      cost_source TEXT,
+      generation_id TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_llm_usage_user_time ON llm_usage(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_llm_usage_time ON llm_usage(created_at);
 
     -- Briefly served "which machines has this session touched?" before that
     -- moved to agent_session_remote_touches; the audit is time-pruned now and
@@ -2429,6 +2458,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createAgentSessionRepos(kdb, h),
     ...createWorkspaceRepos(kdb, h),
     ...createCrossRemoteAuditRepo(kdb),
+    ...createLlmUsageRepo(kdb),
     ...createSessionRemoteGrantRepo(kdb),
     ...createSessionRemoteTouchRepo(kdb),
     ...createSessionRetentionHoldRepo(kdb),

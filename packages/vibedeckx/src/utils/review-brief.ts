@@ -592,8 +592,8 @@ async function distillConversation(
     // where the fast lane is weakest, and it is one call per review start.
     // Mechanical slice compression stays on the fast lane: up to MAX_FOLD_CALLS
     // parallel calls, and compression needs recall, not judgment.
-    const distillModel = mainOk ? await resolveChatModel(storage, userId) : await resolveFastChatModel(storage, userId);
-    const compactModel = fastOk ? await resolveFastChatModel(storage, userId) : distillModel;
+    const distillModel = mainOk ? await resolveChatModel(storage, userId, "review-intent-brief") : await resolveFastChatModel(storage, userId, "review-intent-brief");
+    const compactModel = fastOk ? await resolveFastChatModel(storage, userId, "review-intent-brief") : distillModel;
 
     if (conversation.length <= COMPACT_TRIGGER_CHARS) {
       try {

@@ -1,9 +1,11 @@
 import { createDeepSeek } from "@ai-sdk/deepseek";
 import { createOpenRouter } from "@openrouter/ai-sdk-provider";
-import { createGateway } from "ai";
+import { createGateway, wrapLanguageModel } from "ai";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyLanguageModel = any;
 import type { Storage } from "../storage/types.js";
+import { usageMiddleware } from "../usage/middleware.js";
+import type { LlmFeature } from "../usage/types.js";
 
 /**
  * Provider registry — the single place where provider-specific knowledge lives.
@@ -170,10 +172,30 @@ export async function getChatProviderConfig(storage: Storage, userId: string): P
   return parseChatProviderConfig(raw);
 }
 
-function resolveModel(choice: ModelChoice, apiKeys: Record<ProviderId, string>): AnyLanguageModel {
+/**
+ * The one place a model is built, so every hub-side model call is metered:
+ * the usage middleware checks the active usage policy before each call and
+ * records tokens + cost after (see usage/). A key from the user's settings is
+ * BYOK; falling back to the server's env key means the operator pays.
+ */
+function resolveModel(
+  choice: ModelChoice,
+  apiKeys: Record<ProviderId, string>,
+  storage: Storage,
+  userId: string,
+  feature: LlmFeature,
+): AnyLanguageModel {
   const def = PROVIDERS[choice.provider];
-  const apiKey = apiKeys[choice.provider] || process.env[def.envKey] || "";
-  return def.create(apiKey, choice.model || def.defaultModel);
+  const userKey = apiKeys[choice.provider];
+  const apiKey = userKey || process.env[def.envKey] || "";
+  const model = choice.model || def.defaultModel;
+  return wrapLanguageModel({
+    model: def.create(apiKey, model),
+    middleware: usageMiddleware(
+      { userId, feature, provider: choice.provider, model, keySource: userKey ? "byok" : "platform" },
+      storage,
+    ),
+  });
 }
 
 /** Whether the given model choice has an API key available (stored or env). */
@@ -183,16 +205,16 @@ export function isModelConfigured(config: ChatProviderConfig, choice: ModelChoic
 }
 
 /** Resolve the primary chat model for one user — used by the main chat session. */
-export async function resolveChatModel(storage: Storage, userId: string): Promise<AnyLanguageModel> {
+export async function resolveChatModel(storage: Storage, userId: string, feature: LlmFeature): Promise<AnyLanguageModel> {
   const config = await getChatProviderConfig(storage, userId);
-  return resolveModel(config.main, config.apiKeys);
+  return resolveModel(config.main, config.apiKeys, storage, userId, feature);
 }
 
 /**
  * Resolve one user's "fast" chat model — used by lightweight background
  * features (translate, agent session titles).
  */
-export async function resolveFastChatModel(storage: Storage, userId: string): Promise<AnyLanguageModel> {
+export async function resolveFastChatModel(storage: Storage, userId: string, feature: LlmFeature): Promise<AnyLanguageModel> {
   const config = await getChatProviderConfig(storage, userId);
-  return resolveModel(config.fast, config.apiKeys);
+  return resolveModel(config.fast, config.apiKeys, storage, userId, feature);
 }

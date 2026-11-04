@@ -690,6 +690,25 @@ export interface CrossRemoteAuditTable {
   created_at: string;
 }
 
+export interface LlmUsageTable {
+  seq: Generated<number>;
+  id: string;
+  user_id: string;
+  feature: string;
+  provider: string;
+  model: string;
+  resolved_provider: string | null;
+  key_source: string;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  cost_nanousd: number | null;
+  cost_source: string | null;
+  generation_id: string | null;
+  created_at: string;
+}
+
 export interface DB {
   projects: ProjectsTable;
   workspaces: WorkspacesTable;
@@ -732,6 +751,7 @@ export interface DB {
   scheduled_task_execution_claims: ScheduledTaskExecutionClaimsTable;
   scheduled_task_run_requests: ScheduledTaskRunRequestsTable;
   cross_remote_audit: CrossRemoteAuditTable;
+  llm_usage: LlmUsageTable;
   workflow_runs: WorkflowRunsTable;
   turn_snapshots: TurnSnapshotsTable;
   workflow_run_steps: WorkflowRunStepsTable;

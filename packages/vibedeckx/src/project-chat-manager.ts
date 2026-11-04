@@ -345,7 +345,7 @@ class DefaultProjectChatModelRunner implements ProjectChatModelRunner {
   async *run(input: ProjectChatRunInput): AsyncGenerator<ProjectChatStreamEvent> {
     const tools = input.tools ? projectChatAiTools(input.tools) : {};
     const result = streamText({
-      model: await resolveChatModel(this.storage, input.userId),
+      model: await resolveChatModel(this.storage, input.userId, "project-chat"),
       system: PROJECT_CHAT_SYSTEM_PROMPT,
       messages: input.messages
         .filter((message) => message.type === "user" || message.type === "assistant" || message.type === "system")

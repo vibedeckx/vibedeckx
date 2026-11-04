@@ -243,5 +243,5 @@ export async function generateConversationTitle(
   userId: string,
 ): Promise<string | null> {
   if (!(await isChatModelConfigured(storage, userId))) return null;
-  return generateConversationTitleWithModel(await resolveFastChatModel(storage, userId), userMessage, { userId });
+  return generateConversationTitleWithModel(await resolveFastChatModel(storage, userId, "conversation-title"), userMessage, { userId });
 }

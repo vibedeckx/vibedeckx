@@ -11,6 +11,7 @@ import sharedServices from "./plugins/shared-services.js";
 import projectRoutes from "./routes/project-routes.js";
 import remoteServerRoutes from "./routes/remote-server-routes.js";
 import workerStatsRoutes from "./routes/worker-stats-routes.js";
+import llmUsageRoutes from "./routes/llm-usage-routes.js";
 import projectRemoteRoutes from "./routes/project-remote-routes.js";
 import executorRoutes from "./routes/executor-routes.js";
 import processRoutes from "./routes/process-routes.js";
@@ -397,6 +398,7 @@ export const createServer = async (opts: {
   server.register(projectRoutes);
   server.register(remoteServerRoutes);
   server.register(workerStatsRoutes);
+  server.register(llmUsageRoutes);
   server.register(projectRemoteRoutes);
   server.register(searchRoutes);
   server.register(executorRoutes);

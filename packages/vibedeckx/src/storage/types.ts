@@ -24,6 +24,45 @@ export interface CrossRemoteAuditRow extends CrossRemoteAuditEntry {
   created_at: string;
 }
 
+export type LlmKeySource = 'platform' | 'byok';
+export type LlmCostSource = 'actual' | 'estimated';
+
+export interface LlmUsageEntry {
+  user_id: string;
+  feature: string;
+  provider: string;
+  model: string;
+  resolved_provider: string | null;
+  key_source: LlmKeySource;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  /** USD × 1e9 (exact integer arithmetic); null = cost unknown. */
+  cost_nanousd: number | null;
+  cost_source: LlmCostSource | null;
+  generation_id: string | null;
+}
+
+export type LlmUsageGroupKey = 'day' | 'user' | 'feature' | 'model' | 'key_source';
+
+export interface LlmUsageSummaryRow {
+  /** Present only for the requested group keys; `day` is the UTC date. */
+  day?: string;
+  user?: string;
+  feature?: string;
+  model?: string;
+  key_source?: string;
+  calls: number;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  cost_nanousd: number;
+  /** Calls whose cost is unknown — cost_nanousd undercounts by these. */
+  unknown_cost_calls: number;
+}
+
 export interface RemoteServer {
   id: string;
   name: string;
@@ -1128,6 +1167,15 @@ export interface Storage {
     listSessionIds(): Promise<string[]>;
     /** Whole-set replacement in one transaction; `[]` releases every hold. */
     replace(sessionId: string, holds: RetentionHold[]): Promise<void>;
+  };
+  llmUsage: {
+    insert(entry: LlmUsageEntry): Promise<void>;
+    /** Known cost (nano-USD) of one user's calls at or after `since`. */
+    costSince(userId: string, since: Date, keySource?: LlmKeySource): Promise<number>;
+    /** Input + output tokens of one user's calls at or after `since` whose cost is unknown. */
+    unpricedTokensSince(userId: string, since: Date, keySource?: LlmKeySource): Promise<number>;
+    /** Aggregate over [from, to), grouped by the given keys (none = one total row). */
+    summarize(from: Date, to: Date, groupBy: LlmUsageGroupKey[]): Promise<LlmUsageSummaryRow[]>;
   };
   crossRemoteAudit: {
     insert(entry: CrossRemoteAuditEntry): Promise<void>;
