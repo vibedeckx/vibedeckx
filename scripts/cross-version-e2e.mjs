@@ -76,6 +76,9 @@ const COVERED_BY = {
   // Only meaningful on a gated loop, which needs the same real agent as above. The local
   // route test pins validation on both mirrors; the remote test pins the 409 gate and proxy.
   "http:POST /api/path/workflow-runs/:param/schedule-resume": { file: "packages/vibedeckx/src/routes/workflow-run-routes.test.ts", marker: '"/api/path/workflow-runs/l1/schedule-resume"' },
+  // Only valid on a finished loop, which needs the same real agent as above. The local route
+  // test pins the worker side; the remote test pins the hub proxy.
+  "http:POST /api/workflow-runs/:param/dismiss": { file: "packages/vibedeckx/src/routes/workflow-run-remote-routes.test.ts", marker: "dismiss is proxied to the worker's own dismiss route" },
   "http:GET /api/executor-processes/running": { file: "packages/vibedeckx/src/routes/process-routes.auth.test.ts", marker: "/api/executor-processes/running" },
   // Registered by "anchor main workspace to its current branch" without a
   // coverage entry here, which left this list unsatisfiable. Local route test.
