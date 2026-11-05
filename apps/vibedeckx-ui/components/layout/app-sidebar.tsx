@@ -756,8 +756,11 @@ export function AppSidebar({
                                     onClick={() => onResidentSessionSelect?.(session)}
                                     className={cn(
                                       "min-w-0 flex items-center gap-1.5 rounded-[3px] py-0.5 pl-1.5 pr-2 font-mono text-[11px] transition-colors",
+                                      // The active row steps past the workspace
+                                      // label it sits under — deeper indigo in
+                                      // light, pure white in dark.
                                       !sessionActive && "text-foreground/70 hover:text-foreground",
-                                      sessionActive && "text-accent-foreground font-medium"
+                                      sessionActive && "text-[oklch(0.42_0.22_268)] dark:text-white font-medium"
                                     )}
                                   >
                                     <span className="shrink-0 text-muted-foreground/70">└</span>

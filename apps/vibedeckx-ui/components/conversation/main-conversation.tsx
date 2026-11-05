@@ -64,8 +64,6 @@ function ExecutorEventReStick({ messages }: { messages: AgentMessage[] }) {
   return null;
 }
 
-const FULL_PLACEHOLDER = "Type a message, / for commands...";
-
 /**
  * Whether `text` fits on one line of the textarea's content box. A placeholder
  * that wraps grows the auto-sized textarea to two lines, so narrow panels fall
@@ -147,7 +145,6 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
   const { commands, createCommand, updateCommand, deleteCommand } = useCommands(projectId, branch);
   const [commandsOpen, setCommandsOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const fitsFullPlaceholder = useFitsOnOneLine(textareaRef, FULL_PLACEHOLDER);
   const [activeRuns, setActiveRuns] = useState<WorkflowRun[]>([]);
   const taskPlans = useMemo(() => collectTaskPlans(messages), [messages]);
 
@@ -168,6 +165,16 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
   // Between replies, still on the task: results (or your answer) are owed. You
   // can speak into it — your message joins the same task — or stop it.
   const isWaiting = status === "waiting";
+
+  // [full, short] — the short form is used when the full one would wrap.
+  const [fullPlaceholder, shortPlaceholder] = !isInitialized
+    ? ["Connecting...", "Connecting..."]
+    : isGenerating
+      ? ["Waiting for response...", "Waiting for response..."]
+      : isWaiting
+        ? ["Still on it — add to the task...", "Add to the task..."]
+        : ["Type a message, / for commands...", "Type a message..."];
+  const fitsFullPlaceholder = useFitsOnOneLine(textareaRef, fullPlaceholder);
 
   // Remote starts of this workspace whose request was lost: the hub is
   // re-delivering them (or gave up). Shown here because a Main Chat run is
@@ -553,17 +560,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             <PromptInputTextarea
               ref={textareaRef}
               disabled={!isInitialized || isGenerating}
-              placeholder={
-                !isInitialized
-                  ? "Connecting..."
-                  : isGenerating
-                    ? "Waiting for response..."
-                    : isWaiting
-                      ? "Still on it — add to the task..."
-                      : fitsFullPlaceholder
-                        ? FULL_PLACEHOLDER
-                        : "Type a message..."
-              }
+              placeholder={fitsFullPlaceholder ? fullPlaceholder : shortPlaceholder}
               className="pr-12"
               style={{ fontSize: "var(--conv-font-size, 14px)" }}
               value={draft}
