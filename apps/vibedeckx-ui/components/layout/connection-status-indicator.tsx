@@ -48,9 +48,11 @@ export function ConnectionStatusIndicator() {
 
   // Version skew: this tab runs an older UI build than the server serves. The
   // stale pill above wins — a dead stream is the more urgent signal, and skew
-  // was detected over that same stream anyway. A hidden tab reloads silently
-  // (see global-event-stream.tsx); this pill is the visible-tab path, where
-  // the user chooses the moment.
+  // was detected over that same stream anyway. The tab never reloads itself
+  // for an update: a hidden tab may be a sleeping laptop's maintenance wake,
+  // where a reload dies mid-load on a network that is about to vanish. The
+  // user picks the moment; a lazy chunk that 404s first is handled by the
+  // chunk-recovery script in app/layout.tsx.
   if (updateAvailable) {
     return (
       <button

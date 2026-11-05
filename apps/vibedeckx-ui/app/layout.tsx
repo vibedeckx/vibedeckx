@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, Instrument_Serif, Inter, JetBrains_Mono } from "next/font/google";
 import { ClientProviders } from "@/components/auth/client-providers";
 import { ThemedToaster } from "@/components/auth/themed-toaster";
+import { CHUNK_RECOVERY_SCRIPT } from "@/lib/chunk-recovery";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -63,6 +64,8 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
+        {/* Before any chunk loads, so a chunk that never arrives is still recoverable. */}
+        <script dangerouslySetInnerHTML={{ __html: CHUNK_RECOVERY_SCRIPT }} />
       </head>
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${inter.variable} ${instrumentSerif.variable} ${jetbrainsMono.variable} antialiased`}

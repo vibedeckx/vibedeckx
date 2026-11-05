@@ -333,22 +333,6 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
     };
   }, [loading, authEnabled, markAlive]);
 
-  // Silent convergence: when a newer build is available and the tab is hidden
-  // (user on another tab, machine waking from sleep), reload it in the
-  // background — the user comes back to the new version without ever seeing a
-  // banner. Safe to be aggressive: all real state is server-side and the URL
-  // carries the route, so a hidden reload loses nothing the user is looking
-  // at. A visible tab is never yanked; it gets the update pill instead.
-  useEffect(() => {
-    if (!updateAvailable) return;
-    const reloadIfHidden = () => {
-      if (document.visibilityState === "hidden") window.location.reload();
-    };
-    reloadIfHidden();
-    document.addEventListener("visibilitychange", reloadIfHidden);
-    return () => document.removeEventListener("visibilitychange", reloadIfHidden);
-  }, [updateAvailable]);
-
   // Stable so `useGlobalEventStream` consumers don't re-subscribe on every
   // heartbeat (subscribe + reconnect are both memoized).
   const streamValue = useMemo<GlobalEventStreamValue>(
