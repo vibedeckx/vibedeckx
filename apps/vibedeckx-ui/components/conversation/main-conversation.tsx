@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, useMemo, forwardRef, useImperativeHandle } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo, forwardRef, useImperativeHandle, type RefObject } from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import {
   Conversation,
@@ -64,6 +64,37 @@ function ExecutorEventReStick({ messages }: { messages: AgentMessage[] }) {
   return null;
 }
 
+const FULL_PLACEHOLDER = "Type a message, / for commands...";
+
+/**
+ * Whether `text` fits on one line of the textarea's content box. A placeholder
+ * that wraps grows the auto-sized textarea to two lines, so narrow panels fall
+ * back to a shorter one. Measured against the textarea's own font, so it
+ * tracks the conversation font-size setting as well as the panel width.
+ */
+function useFitsOnOneLine(ref: RefObject<HTMLTextAreaElement | null>, text: string): boolean {
+  const [fits, setFits] = useState(true);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ctx = document.createElement("canvas").getContext("2d");
+    if (!ctx) return;
+    const measure = () => {
+      const style = getComputedStyle(el);
+      ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      const available = el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+      setFits(ctx.measureText(text).width <= available);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref, text]);
+
+  return fits;
+}
+
 function getToolLabel(tool: string): string {
   switch (tool) {
     case "getExecutorStatus":
@@ -116,6 +147,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
   const { commands, createCommand, updateCommand, deleteCommand } = useCommands(projectId, branch);
   const [commandsOpen, setCommandsOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fitsFullPlaceholder = useFitsOnOneLine(textareaRef, FULL_PLACEHOLDER);
   const [activeRuns, setActiveRuns] = useState<WorkflowRun[]>([]);
   const taskPlans = useMemo(() => collectTaskPlans(messages), [messages]);
 
@@ -528,7 +560,9 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
                     ? "Waiting for response..."
                     : isWaiting
                       ? "Still on it — add to the task..."
-                      : "Type a message, / for commands..."
+                      : fitsFullPlaceholder
+                        ? FULL_PLACEHOLDER
+                        : "Type a message..."
               }
               className="pr-12"
               style={{ fontSize: "var(--conv-font-size, 14px)" }}
