@@ -4,12 +4,12 @@ import { useEffect, useState } from "react";
 import { useConnectionStatus } from "@/hooks/global-event-stream";
 
 function formatAgo(ts: number | null): string {
-  if (ts === null) return "尚未连接";
+  if (ts === null) return "never";
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
-  if (s < 60) return `${s} 秒前`;
+  if (s < 60) return `${s}s ago`;
   const m = Math.floor(s / 60);
-  if (m < 60) return `${m} 分钟前`;
-  return `${Math.floor(m / 60)} 小时前`;
+  if (m < 60) return `${m}m ago`;
+  return `${Math.floor(m / 60)}h ago`;
 }
 
 /**
@@ -37,11 +37,11 @@ export function ConnectionStatusIndicator() {
       <button
         type="button"
         onClick={reconnect}
-        title={`实时更新已断开 · 上次更新 ${formatAgo(lastEventAt)} · 点击重新连接`}
+        title={`Disconnected · last update ${formatAgo(lastEventAt)} · click to reconnect`}
         className="flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] font-medium text-amber-600 transition-colors hover:bg-amber-500/20"
       >
         <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-        实时更新已断开
+        Disconnected
       </button>
     );
   }
@@ -58,11 +58,11 @@ export function ConnectionStatusIndicator() {
       <button
         type="button"
         onClick={() => window.location.reload()}
-        title="服务器已更新到新版本 · 点击刷新页面加载"
+        title="A new version is available · click to reload"
         className="flex items-center gap-1.5 rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[11px] font-medium text-sky-600 transition-colors hover:bg-sky-500/20"
       >
         <span className="h-1.5 w-1.5 rounded-full bg-sky-500" />
-        有新版本 · 点击刷新
+        Update available
       </button>
     );
   }
@@ -72,11 +72,11 @@ export function ConnectionStatusIndicator() {
     <span
       title={
         isLive
-          ? `实时更新正常 · 上次更新 ${formatAgo(lastEventAt)}`
-          : "正在连接实时更新…"
+          ? `Connected · last update ${formatAgo(lastEventAt)}`
+          : "Connecting…"
       }
       className="flex items-center px-1"
-      aria-label={isLive ? "实时更新正常" : "正在连接实时更新"}
+      aria-label={isLive ? "Connected" : "Connecting"}
     >
       <span
         className={
