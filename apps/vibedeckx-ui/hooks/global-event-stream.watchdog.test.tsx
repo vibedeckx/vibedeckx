@@ -215,6 +215,38 @@ describe("SSE watchdog", () => {
     expect(dispatched).toEqual([STREAM_RECONNECTED_EVENT]);
   });
 
+  it("flags a hard outage, not just a silent socket", async () => {
+    await renderLive();
+
+    // Server down / network gone: every stream errors straight away, so the
+    // retry loop alone would sit in a quiet "connecting" forever.
+    const failNewest = () => act(async () => {
+      FakeEventSource.instances.at(-1)?.onerror?.();
+    });
+    await failNewest();
+    expect(state).toBe("connecting");
+
+    for (let elapsed = 0; elapsed < 45000; elapsed += 5000) {
+      await tick(5000);
+      await failNewest();
+    }
+    expect(state).toBe("stale");
+
+    // Further failed retries keep the warning up.
+    await tick(5000);
+    await failNewest();
+    expect(state).toBe("stale");
+
+    // The server comes back.
+    await tick(5000);
+    await act(async () => {
+      const es = FakeEventSource.instances.at(-1)!;
+      es.onopen?.();
+      es.onmessage?.({ data: JSON.stringify({ type: "ping" }) });
+    });
+    expect(state).toBe("live");
+  });
+
   it("leaves a healthy stream alone", async () => {
     await renderLive();
 

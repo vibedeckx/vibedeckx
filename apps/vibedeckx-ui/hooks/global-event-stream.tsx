@@ -37,10 +37,12 @@ export const STREAM_RECONNECTED_EVENT = "stream:reconnected";
 // Connection liveness for display:
 //   - connecting — opening or (auto-)reconnecting, no live stream yet
 //   - live       — open and receiving data (events or heartbeats)
-//   - stale      — open but silent past the heartbeat deadline (zombie socket);
-//                  shown to the user while the watchdog reopens it on its own
-//                  backoff ladder, and holds until a frame actually arrives —
-//                  the manual reconnect click is the immediate override
+//   - stale      — no frame past the heartbeat deadline after having been live:
+//                  an open-but-silent zombie socket, or reconnects that keep
+//                  failing (server down, network gone). Shown to the user while
+//                  recovery continues underneath, and holds until a frame
+//                  actually arrives — the manual reconnect click is the
+//                  immediate override
 export type ConnectionState = "connecting" | "live" | "stale";
 
 interface GlobalEventStreamValue {
@@ -215,7 +217,9 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
 
     function scheduleReconnect() {
       if (cancelled) return;
-      setState("connecting");
+      // Each failed retry must not downgrade an already-raised `stale` back to
+      // a quiet "connecting" — that is exactly the outage the pill reports.
+      setState((prev) => (prev === "stale" ? prev : "connecting"));
       const delay = Math.min(1000 * 2 ** attempt, MAX_RETRY_MS);
       attempt += 1;
       retryTimer = setTimeout(connect, delay);
@@ -302,15 +306,17 @@ export function GlobalEventStreamProvider({ children }: { children: ReactNode })
 
     // Watchdog: a silently-dead connection never fires `onerror`, so detect it
     // by the absence of frames (the 15s backend heartbeat included), flag it
-    // `stale` for the indicator, and reopen it. The manual click on the stale
-    // pill stays as the immediate override.
+    // `stale` for the indicator, and reopen it. The same deadline catches a
+    // hard outage: there `onerror` fires and the retry loop sits in
+    // `connecting`, which on its own is just a muted dot nobody notices. The
+    // manual click on the stale pill stays as the immediate override.
     const watchdog = setInterval(() => {
       if (cancelled) return;
       const last = lastEventAtRef.current;
       if (last === null) return; // never connected yet — `connecting` covers it
       const now = Date.now();
       if (now - last <= STALE_AFTER_MS) return;
-      setState((prev) => (prev === "connecting" ? prev : "stale"));
+      setState("stale");
       if (now < staleRecoveryNotBeforeRef.current) return;
       const attempt = staleRecoveryAttemptRef.current;
       staleRecoveryAttemptRef.current = attempt + 1;
