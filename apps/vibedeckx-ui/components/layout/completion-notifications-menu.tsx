@@ -175,7 +175,12 @@ export function CompletionNotificationsMenu({
                   }}
                   className={cn(
                     "group flex flex-col items-start gap-0.5 rounded-none px-3 py-2",
-                    unread && "bg-primary/[0.08]",
+                    // The stock focus fill (--accent) is nearly the popover's own
+                    // color in dark mode, so the current row gets a stronger
+                    // fill; unread rows add a primary tint plus a left bar.
+                    unread
+                      ? "bg-primary/[0.08] shadow-[inset_3px_0_0_0_var(--primary)] focus:bg-primary/[0.14] dark:bg-primary/[0.16] dark:focus:bg-primary/[0.26]"
+                      : "focus:bg-foreground/[0.06] dark:focus:bg-foreground/[0.11]",
                   )}
                 >
                   <div className="flex w-full items-center gap-2">
