@@ -29,7 +29,10 @@ describe("previewLinks", () => {
     expect(b.slug).not.toBe(a.slug);
     expect(a.slug).toMatch(/^[a-z0-9]{10}$/);
     expect(await storage.previewLinks.getBySlug(a.slug)).toMatchObject({ project_id: "p1", target_id: "local", port: 3000, user_id: "user-1" });
-    expect((await storage.previewLinks.listByProject("p1", "user-1")).map((l) => l.slug)).toEqual([a.slug, b.slug]);
+    // Ordered by created_at, then slug: back-to-back upserts usually share a
+    // millisecond, so the random slug decides — not insertion order.
+    const expected = [a, b].sort((x, y) => x.created_at.localeCompare(y.created_at) || x.slug.localeCompare(y.slug));
+    expect((await storage.previewLinks.listByProject("p1", "user-1")).map((l) => l.slug)).toEqual(expected.map((l) => l.slug));
     expect(await storage.previewLinks.listByProject("p1", "someone-else")).toEqual([]);
   });
 
