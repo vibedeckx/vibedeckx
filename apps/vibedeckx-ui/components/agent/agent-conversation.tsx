@@ -1853,6 +1853,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             messageCount={messages.length}
             turnInFlight={turnInFlight}
             sessionId={session?.id ?? null}
+            firstEntryKey={messages.length > 0 ? (messageEntryIndices[0] ?? 0) : null}
           />
         </Conversation>
         <UserInputMarkers messages={messages} contentRef={messagesRef} />

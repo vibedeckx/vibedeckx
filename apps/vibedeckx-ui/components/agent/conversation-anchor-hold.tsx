@@ -131,17 +131,29 @@ export function clampedLastScrollTop({
  * Opening a transcript is a separate question and answered separately: a
  * conversation always opens at its latest turn (see the pin effect below).
  *
- * The settle window arms on history fill, on a session switch and on file-ref
- * index arrival, and closes after SETTLE_QUIET_MS without height changes.
+ * Loading earlier turns is a height change within the open transcript too,
+ * just one that lands ABOVE the reader: the topmost visible message keeps its
+ * viewport offset, so the reader can carry on scrolling up from where they
+ * were. Native scroll anchoring can't be relied on here — the reader who just
+ * clicked "Load earlier turns" sits at scrollTop 0, where browsers select no
+ * anchor at all and the prepended turns push their place out of view.
+ *
+ * The settle window arms on history fill, on a session switch, on file-ref
+ * index arrival and on an earlier-history prepend, and closes after
+ * SETTLE_QUIET_MS without height changes.
  */
 export function ConversationAnchorHold({
   messageCount,
   turnInFlight,
   sessionId,
+  firstEntryKey,
 }: {
   messageCount: number;
   turnInFlight: boolean;
   sessionId: string | null;
+  /** Stable identity of the first rendered message; a change with a larger
+   * count in the same session means earlier history was prepended. */
+  firstEntryKey: number | null;
 }) {
   const { scrollToBottom, scrollRef, contentRef, state: stickState } = useStickToBottomContext();
   const { index } = useFileNavigation();
@@ -153,6 +165,10 @@ export function ConversationAnchorHold({
     settleHardCap: 0,
     prevScrollHeight: 0,
     prevClientHeight: 0,
+    // Topmost visible message and its viewport offset, as of the last scroll
+    // (or the last uncorrected resize). Shared with the prepend layout effect,
+    // which must use the pre-commit anchor.
+    anchor: null as { el: HTMLElement; offset: number } | null,
   });
   stateRef.current.turnInFlight = turnInFlight;
 
@@ -171,6 +187,9 @@ export function ConversationAnchorHold({
   const wasEmptyRef = useRef(true);
   const lastVersionRef = useRef(version);
   const lastSessionRef = useRef(sessionId);
+  const lastFirstKeyRef = useRef(firstEntryKey);
+  const lastCountRef = useRef(messageCount);
+  const lastPrependSessionRef = useRef(sessionId);
 
   // Opening a transcript — the one-shot instant pin. Two triggers, one landing:
   //
@@ -215,6 +234,38 @@ export function ConversationAnchorHold({
     if (messageCount > 0) armSettle();
   }, [version, messageCount]);
 
+  // Earlier history prepended: hold the reader's place. Runs in the prepend's
+  // own commit, before paint, using the anchor captured before the commit;
+  // the settle window then keeps holding it while the new turns' markdown
+  // renders in phases above it.
+  useLayoutEffect(() => {
+    const prevFirst = lastFirstKeyRef.current;
+    const prevCount = lastCountRef.current;
+    const prevSession = lastPrependSessionRef.current;
+    lastFirstKeyRef.current = firstEntryKey;
+    lastCountRef.current = messageCount;
+    lastPrependSessionRef.current = sessionId;
+    // A session switch is the pin effect's business, never a prepend.
+    if (prevSession !== sessionId) return;
+    if (prevFirst === null || firstEntryKey === null) return;
+    if (firstEntryKey === prevFirst || messageCount <= prevCount) return;
+    const scroller = scrollRef.current;
+    const anchor = stateRef.current.anchor;
+    if (!scroller || !anchor?.el.isConnected) return;
+    armSettle();
+    // A pinned reader is held at the bottom by the resize observer instead.
+    const s = stateRef.current;
+    if (scroller.scrollTop + s.prevClientHeight >= s.prevScrollHeight - 6) return;
+    scroller.scrollTop = anchor.el.offsetTop - anchor.offset;
+    // The prepend's growth is fully accounted for: rebase the observer on the
+    // new layout. Left on the old height, its pending callback would compare
+    // the compensated scrollTop with the pre-prepend scrollHeight, read a
+    // reader who is now far from the bottom as pinned, and drop them there.
+    s.prevScrollHeight = scroller.scrollHeight;
+    s.prevClientHeight = scroller.clientHeight;
+    diag("prepend", { messageCount, prevCount, scrollTop: Math.round(scroller.scrollTop) });
+  }, [firstEntryKey, messageCount, sessionId, scrollRef]);
+
   // The synchronous pre-paint hold.
   useEffect(() => {
     const scroller = scrollRef.current;
@@ -226,7 +277,6 @@ export function ConversationAnchorHold({
 
     // Mid-list anchor, refreshed on every scroll (user scrolls → new anchor;
     // our own corrections re-derive the same anchor, which is a no-op).
-    let anchor: { el: HTMLElement; offset: number } | null = null;
     let lastScrollTop = scroller.scrollTop;
     const refreshAnchor = () => {
       const top = scroller.scrollTop;
@@ -236,13 +286,18 @@ export function ConversationAnchorHold({
         diag("scroll-jump", { from: Math.round(lastScrollTop), to: Math.round(top) });
       }
       lastScrollTop = top;
-      anchor = null;
+      captureAnchor();
+    };
+    const captureAnchor = () => {
+      const top = scroller.scrollTop;
+      let next: { el: HTMLElement; offset: number } | null = null;
       for (const el of content.querySelectorAll<HTMLElement>("[data-message-idx]")) {
         if (el.offsetTop + el.offsetHeight > top) {
-          anchor = { el, offset: el.offsetTop - top };
+          next = { el, offset: el.offsetTop - top };
           break;
         }
       }
+      stateRef.current.anchor = next;
     };
     refreshAnchor();
     scroller.addEventListener("scroll", refreshAnchor, { passive: true });
@@ -316,6 +371,7 @@ export function ConversationAnchorHold({
       if (settling) armSettle(); // still churning — extend the quiet window
       const wasAtBottom = scroller.scrollTop + prevClient >= prev - 6;
       const hold = shouldHoldBottom({ settling, turnInFlight: s.turnInFlight, wasAtBottom });
+      const anchor = s.anchor;
 
       if (hold) {
         scroller.scrollTop = next; // clamps to max; synchronous, pre-paint
@@ -323,6 +379,11 @@ export function ConversationAnchorHold({
         // Mid-list reader during settle churn: keep the anchored message at its
         // viewport offset. Outside settling, native scroll anchoring suffices.
         scroller.scrollTop = anchor.el.offsetTop - anchor.offset;
+      } else if (!settling) {
+        // Nothing corrected and no scroll event will follow, so record where
+        // the reader now sits — a later prepend must anchor to what they
+        // actually see, not to a pre-resize layout.
+        captureAnchor();
       }
 
       const distAfter = next - scroller.clientHeight - scroller.scrollTop;

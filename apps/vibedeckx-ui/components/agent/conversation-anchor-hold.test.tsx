@@ -67,12 +67,18 @@ async function renderWith(
   count: number,
   index: FileRefIndex | null = null,
   turnInFlight = false,
-  sessionId: string | null = "s1"
+  sessionId: string | null = "s1",
+  firstEntryKey: number | null = count > 0 ? 0 : null
 ) {
   await act(async () => {
     root!.render(
       <FileNavigationProvider value={{ openFile: () => {}, index }}>
-        <ConversationAnchorHold messageCount={count} turnInFlight={turnInFlight} sessionId={sessionId} />
+        <ConversationAnchorHold
+          messageCount={count}
+          turnInFlight={turnInFlight}
+          sessionId={sessionId}
+          firstEntryKey={firstEntryKey}
+        />
       </FileNavigationProvider>
     );
   });
@@ -320,19 +326,91 @@ describe("ConversationAnchorHold — viewport-shift wiring", () => {
     act(() => localRoot.unmount());
     localContainer.remove();
     delete (globalThis as { ResizeObserver?: unknown }).ResizeObserver;
+    (stickCtx.contentRef.current as HTMLElement | null)?.remove();
     stickCtx.scrollRef.current = scroller;
     stickCtx.contentRef.current = null;
   });
 
-  async function mount() {
+  async function mount(messageCount = 42, firstEntryKey: number | null = 0) {
     await act(async () => {
       localRoot.render(
         <FileNavigationProvider value={{ openFile: () => {}, index: null }}>
-          <ConversationAnchorHold messageCount={42} turnInFlight={false} sessionId="s1" />
+          <ConversationAnchorHold
+            messageCount={messageCount}
+            turnInFlight={false}
+            sessionId="s1"
+            firstEntryKey={firstEntryKey}
+          />
         </FileNavigationProvider>
       );
     });
   }
+
+  function addMessage(offsetTop: number, offsetHeight: number) {
+    const el = document.createElement("div");
+    el.setAttribute("data-message-idx", "0");
+    const box = { offsetTop, offsetHeight };
+    Object.defineProperties(el, {
+      offsetTop: { get: () => box.offsetTop, configurable: true },
+      offsetHeight: { get: () => box.offsetHeight, configurable: true },
+    });
+    const content = stickCtx.contentRef.current as unknown as HTMLElement;
+    content.appendChild(el);
+    document.body.appendChild(content); // anchors must be connected
+    return box;
+  }
+
+  // "Load earlier turns": the reader is at the very top (where native scroll
+  // anchoring selects nothing) and the older turns land above what they see.
+  it("keeps the reader's message in place when earlier turns are prepended", async () => {
+    const first = addMessage(40, 300);
+    await mount(42, 100);
+    domScroller.scrollTop = 0;
+    domScroller.dispatchEvent(new Event("scroll")); // anchor: first message at +40
+
+    first.offsetTop += 5000;
+    geom.scrollHeight += 5000;
+    await mount(60, 50);
+
+    expect(domScroller.scrollTop).toBe(5000);
+  });
+
+  // The prepend outgrows the old scroll range: the compensated scrollTop must
+  // not read as "pinned" to the observer that fires after the commit.
+  it("keeps the reader's place through the post-prepend resize callback", async () => {
+    geom.scrollHeight = 4000;
+    geom.clientHeight = 1000;
+    const first = addMessage(40, 300);
+    await mount(42, 100);
+    domScroller.scrollTop = 0;
+    domScroller.dispatchEvent(new Event("scroll"));
+
+    first.offsetTop += 5000;
+    geom.scrollHeight += 5000;
+    await mount(60, 50);
+    expect(domScroller.scrollTop).toBe(5000);
+
+    act(() => ro!.fire());
+    expect(domScroller.scrollTop).toBe(5000);
+
+    // Phased markdown render above the anchor, still inside the settle window.
+    first.offsetTop += 200;
+    geom.scrollHeight += 200;
+    act(() => ro!.fire());
+    expect(domScroller.scrollTop).toBe(5200);
+  });
+
+  it("does not treat same-session growth at the tail as a prepend", async () => {
+    addMessage(40, 300);
+    await mount(42, 100);
+    domScroller.scrollTop = 0;
+    domScroller.dispatchEvent(new Event("scroll"));
+
+    geom.scrollHeight += 5000;
+    await mount(43, 100);
+
+    expect(domScroller.scrollTop).toBe(0);
+  });
 
   it("observes the scroller as well as the content", async () => {
     await mount();
