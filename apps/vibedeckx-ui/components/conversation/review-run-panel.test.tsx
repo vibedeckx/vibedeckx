@@ -54,20 +54,20 @@ describe("ReviewRunPanel discussing state", () => {
     vi.clearAllMocks();
   });
 
-  it("shows the discussing hint and an icon-only finalize button", async () => {
-    expect(container.textContent).toContain("讨论中");
+  it("shows the discussing hint and a Finalize button", async () => {
+    expect(container.textContent).toContain("Discussing");
     const btn = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="生成 review 终稿"]',
+      'button[aria-label="Finalize review"]',
     );
     expect(btn).not.toBeNull();
-    expect(btn!.textContent).toBe("");
+    expect(btn!.textContent).toBe("Finalize");
     // 讨论态不显示发送/编辑(那是 waiting_feedback 的控件)。
-    expect(container.textContent).not.toContain("发送反馈给原 session");
+    expect(container.textContent).not.toContain("Send feedback");
   });
 
   it("clicking finalize calls the gate with the finalize action", async () => {
     const btn = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="生成 review 终稿"]',
+      'button[aria-label="Finalize review"]',
     )!;
     await act(async () => { btn.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "finalize");
@@ -109,28 +109,28 @@ describe("ReviewRunPanel review loop", () => {
   it("ship: accepting is the primary action and sends nothing; sending the notes stays possible", async () => {
     await renderWith({ ...runFixture, status: "waiting_feedback", verdict: "ship", loop_id: "r1", round: 2, max_rounds: 3 });
     expect(container.textContent).toContain("ship");
-    expect(container.textContent).toContain("第 2 / 3 轮");
-    expect(buttonNamed("仍发送反馈")).toBeDefined();
-    await act(async () => { buttonNamed("接受并结束")!.click(); });
+    expect(container.textContent).toContain("Round 2 / 3");
+    expect(buttonNamed("Send feedback")).toBeDefined();
+    await act(async () => { buttonNamed("Accept")!.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "accept");
   });
 
   it("needs-changes keeps today's gate, with the verdict shown; a single-pass run shows no round", async () => {
     await renderWith({ ...runFixture, status: "waiting_feedback", verdict: "needs-changes" });
     expect(container.textContent).toContain("needs-changes");
-    expect(container.textContent).not.toContain("轮");
-    expect(buttonNamed("接受并结束")).toBeUndefined();
-    expect(buttonNamed("发送反馈给原 session")).toBeDefined();
+    expect(container.textContent).not.toContain("Round");
+    expect(buttonNamed("Accept")).toBeUndefined();
+    expect(buttonNamed("Send feedback")).toBeDefined();
   });
 
   it("an unrecognised verdict is labelled as the user's call — and a pre-loop worker's run renders the same", async () => {
     await renderWith({ ...runFixture, status: "waiting_feedback", verdict: null });
-    expect(container.textContent).toContain("未识别");
+    expect(container.textContent).toContain("Not detected");
     act(() => root.unmount());
     root = createRoot(container);
     await renderWith({ ...runFixture, status: "waiting_feedback" }); // no verdict field at all
-    expect(container.textContent).toContain("未识别");
-    expect(buttonNamed("发送反馈给原 session")).toBeDefined();
+    expect(container.textContent).toContain("Not detected");
+    expect(buttonNamed("Send feedback")).toBeDefined();
   });
 
   it("the re-review gate confirms the next round or ends the loop", async () => {
@@ -138,18 +138,18 @@ describe("ReviewRunPanel review loop", () => {
     await renderWith(gate);
     // Every action re-reads the list; keep serving the gate so both buttons can be exercised.
     vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [gate] } as never);
-    expect(container.textContent).toContain("等你确认复审");
-    await act(async () => { buttonNamed("发起第 2 轮复审")!.click(); });
+    expect(container.textContent).toContain("Changes made — waiting for you");
+    await act(async () => { buttonNamed("Re-review")!.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "rereview", undefined, { extend: false });
-    await act(async () => { buttonNamed("结束循环")!.click(); });
+    await act(async () => { buttonNamed("End loop")!.click(); });
     expect(api.cancelWorkflowRun).toHaveBeenCalledWith("r1");
   });
 
   it("past the cap the gate asks for one more round explicitly", async () => {
     await renderWith({ ...runFixture, status: "waiting_rereview", reviewer_session_id: null, loop_id: "r0", round: 4, max_rounds: 3 });
-    expect(container.textContent).toContain("已达上限 3 轮");
-    expect(buttonNamed("发起第 4 轮复审")).toBeUndefined();
-    await act(async () => { buttonNamed("再加一轮")!.click(); });
+    expect(container.textContent).toContain("3-round limit");
+    expect(buttonNamed("Re-review")).toBeUndefined();
+    await act(async () => { buttonNamed("Add round")!.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "rereview", undefined, { extend: true });
   });
 
@@ -158,10 +158,10 @@ describe("ReviewRunPanel review loop", () => {
     await renderWith(gate);
     vi.mocked(api.workflowRunGate).mockRejectedValueOnce(new Error("reviewer 正在回复中，复审未发出。请等待其完成后重试。"));
     vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [gate] } as never);
-    await act(async () => { buttonNamed("发起第 2 轮复审")!.click(); });
+    await act(async () => { buttonNamed("Re-review")!.click(); });
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(container.textContent).toContain("复审未发出");
-    expect(buttonNamed("发起第 2 轮复审")).toBeDefined();
+    expect(buttonNamed("Re-review")).toBeDefined();
   });
 });
 
@@ -199,7 +199,7 @@ describe("ReviewRunPanel WS reconnect reconciliation", () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={1} />);
     });
     expect(api.getActiveWorkflowRuns).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain("等你确认反馈");
+    expect(container.textContent).toContain("Feedback ready — waiting for you");
   });
 
   it("does not re-read when nothing but an unrelated re-render happens", async () => {
@@ -248,11 +248,11 @@ describe("ReviewRunPanel out-of-order reads", () => {
     await act(async () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={1} />);
     });
-    expect(container.textContent).toContain("等你确认反馈");
+    expect(container.textContent).toContain("Feedback ready — waiting for you");
 
     // mount 那次姗姗来迟的空快照必须被丢弃。
     await act(async () => { resolveMount({ runs: [] }); });
-    expect(container.textContent).toContain("等你确认反馈");
+    expect(container.textContent).toContain("Feedback ready — waiting for you");
   });
 });
 
@@ -300,7 +300,7 @@ describe("ReviewRunPanel clears the run's bell entry", () => {
   // 发反馈 = 已经读过这条 review,不该再要求用户点进 reviewer session 消红点。
   it("marks the run read after the feedback is sent back to the source session", async () => {
     await mount();
-    await clickText("发送反馈给原 session");
+    await clickText("Send feedback");
     expect(api.workflowRunGate).toHaveBeenCalledWith("r1", "approve", undefined);
     // approve 之后 run → completed,所以连迟到的通知也一并交给 hook 收掉。
     expect(markReviewRunRead).toHaveBeenCalledWith("r1", { runEnded: true });
@@ -309,7 +309,7 @@ describe("ReviewRunPanel clears the run's bell entry", () => {
   // 结论是 ship 时用户直接关掉卡片,同样算看过了。
   it("marks the run read after ending the run from the panel", async () => {
     await mount();
-    await clickText("结束");
+    await clickText("End");
     expect(api.cancelWorkflowRun).toHaveBeenCalledWith("r1");
     expect(markReviewRunRead).toHaveBeenCalledWith("r1", { runEnded: true });
   });
@@ -318,7 +318,7 @@ describe("ReviewRunPanel clears the run's bell entry", () => {
   it("does not mark the run ended when only finalizing the current round", async () => {
     vi.mocked(api.getActiveWorkflowRuns).mockResolvedValue({ runs: [{ ...runFixture, status: "discussing" as const }] });
     await mount();
-    const btn = container.querySelector<HTMLButtonElement>('button[aria-label="生成 review 终稿"]')!;
+    const btn = container.querySelector<HTMLButtonElement>('button[aria-label="Finalize review"]')!;
     await act(async () => { btn.click(); });
     await act(async () => {});
     expect(markReviewRunRead).toHaveBeenCalledWith("r1", { runEnded: false });
@@ -328,7 +328,7 @@ describe("ReviewRunPanel clears the run's bell entry", () => {
   it("leaves the bell alone when the gate action fails", async () => {
     vi.mocked(api.workflowRunGate).mockRejectedValue(new Error("run 不在等待反馈确认的状态"));
     await mount();
-    await clickText("发送反馈给原 session");
+    await clickText("Send feedback");
     expect(markReviewRunRead).not.toHaveBeenCalled();
   });
 });
@@ -341,7 +341,7 @@ describe("ReviewRunPanel stale-click errors", () => {
   const discussing = { ...runFixture, status: "discussing" as const };
   const clickApprove = async () => {
     const btn = Array.from(container.querySelectorAll("button"))
-      .find((b) => b.textContent?.includes("发送反馈给原 session"))!;
+      .find((b) => b.textContent?.includes("Send feedback"))!;
     await act(async () => { btn.click(); });
     await act(async () => {});
   };
@@ -370,7 +370,7 @@ describe("ReviewRunPanel stale-click errors", () => {
     });
     await clickApprove();
 
-    expect(container.textContent).toContain("先点「生成终稿」");
+    expect(container.textContent).toContain("click Finalize");
     expect(container.textContent).not.toContain("run 不在等待反馈确认的状态");
   });
 
@@ -387,13 +387,13 @@ describe("ReviewRunPanel stale-click errors", () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
     });
     await clickApprove();
-    expect(container.textContent).toContain("先点「生成终稿」");
+    expect(container.textContent).toContain("click Finalize");
 
     await act(async () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={1} />);
     });
-    expect(container.textContent).not.toContain("先点「生成终稿」");
-    expect(container.textContent).toContain("等你确认反馈");
+    expect(container.textContent).not.toContain("click Finalize");
+    expect(container.textContent).toContain("Feedback ready — waiting for you");
   });
 
   // run 在点击落地前就没了(已结束/被取消/反馈其实已发出):提示没有卡片可挂,
@@ -408,9 +408,9 @@ describe("ReviewRunPanel stale-click errors", () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
     });
     await clickApprove();
-    expect(container.textContent).toContain("这次 review 已经结束了");
+    expect(container.textContent).toContain("This review has already ended");
 
-    const dismiss = container.querySelector<HTMLButtonElement>('button[aria-label="关闭提示"]')!;
+    const dismiss = container.querySelector<HTMLButtonElement>('button[aria-label="Dismiss"]')!;
     await act(async () => { dismiss.click(); });
     expect(container.textContent).toBe("");
   });
@@ -437,7 +437,7 @@ describe("ReviewRunPanel stale-click errors", () => {
     await act(async () => { resolveOwn({ runs: [waiting] }); });
     await act(async () => {});
 
-    expect(container.textContent).toContain("先点「生成终稿」");
+    expect(container.textContent).toContain("click Finalize");
     expect(container.textContent).not.toContain("run 不在等待反馈确认的状态");
   });
 
@@ -455,13 +455,13 @@ describe("ReviewRunPanel stale-click errors", () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={0} />);
     });
     await clickApprove();
-    expect(container.textContent).toContain("这次 review 已经结束了");
+    expect(container.textContent).toContain("This review has already ended");
 
     await act(async () => {
       root.render(<ReviewRunPanel projectId="p1" branch="dev" runUpdate={null} streamEpoch={1} />);
     });
-    expect(container.textContent).not.toContain("这次 review 已经结束了");
-    expect(container.textContent).toContain("讨论中");
+    expect(container.textContent).not.toContain("This review has already ended");
+    expect(container.textContent).toContain("Discussing");
   });
 
   // 按钮在 finally 里就放开了,用户可以在第一趟对账还没回来时重试。重试成功之后
@@ -584,7 +584,7 @@ describe("ReviewRunPanel repeat loop", () => {
     expect(container.textContent).not.toContain("limit");
     expect(container.textContent).toContain("Last itemorder 17");
     expect(container.textContent).toContain("4 left");
-    expect(buttonNamed("发送反馈给原 session")).toBeUndefined();
+    expect(buttonNamed("Send feedback")).toBeUndefined();
 
     await act(async () => { buttonNamed("Stop after this item")!.click(); });
     expect(api.workflowRunGate).toHaveBeenCalledWith("l2", "pause");

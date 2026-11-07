@@ -8,6 +8,7 @@ import { useNotificationInbox } from "@/hooks/notification-inbox-context";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MessageResponse } from "@/components/ai-elements/message";
+import { Hint } from "@/components/ui/hint";
 import { AlarmClock, AlertTriangle, Check, ChevronDown, ChevronRight, Eye, FileCheck, FileText, Loader2, Pause, Pencil, Play, X } from "lucide-react";
 
 /** `schedule` = set or clear a loop gate's scheduled resume (not a gate action server-side). */
@@ -25,8 +26,8 @@ const VERDICT_LABEL: Record<WorkflowVerdict, { text: string; className: string }
 function roundLabel(run: WorkflowRun): string | null {
   if (!run.loop_id) return null;
   const round = run.round ?? 1;
-  const label = run.max_rounds ? `第 ${round} / ${run.max_rounds} 轮` : `第 ${round} 轮`;
-  return run.loop_manual ? `${label} · 已转人工` : label;
+  const label = run.max_rounds ? `Round ${round} / ${run.max_rounds}` : `Round ${round}`;
+  return run.loop_manual ? `${label} · manual` : label;
 }
 
 /** The gate run's round is the one about to start; past the cap it needs an explicit extension. */
@@ -53,26 +54,26 @@ function explainStale(action: GateAction, fresh: WorkflowRun | null): string | n
   // 循环的动作按"整个循环"寻址:手里的 run id 过期(那次迭代刚结算、下一次已建)
   // 后端照样能执行,所以真失败时后端原文就是原因,无需改写。
   if (action === "pause" || action === "resume" || action === "schedule" || action === "dismiss") return null;
-  if (!fresh) return "这次 review 已经结束了 —— 反馈可能已经发出,或者 run 已被取消。";
+  if (!fresh) return "This review has already ended — the feedback may have been sent, or the run was cancelled.";
   if (action === "approve") {
-    if (fresh.status === "discussing") return "reviewer 已进入讨论:先点「生成终稿」拿到新的结论,再发送反馈。";
-    if (fresh.status === "waiting_reviewer") return "reviewer 正在重新出稿,等它完成后再发送。";
-    if (fresh.status === "sending_feedback") return "反馈正在发送中。";
+    if (fresh.status === "discussing") return "The reviewer is in discussion: click Finalize for an updated verdict, then send the feedback.";
+    if (fresh.status === "waiting_reviewer") return "The reviewer is redrafting — send once it finishes.";
+    if (fresh.status === "sending_feedback") return "The feedback is being sent.";
   }
   if (action === "finalize") {
-    if (fresh.status === "waiting_feedback") return "终稿已经出来了,直接发送反馈即可。";
-    if (fresh.status === "waiting_reviewer") return "reviewer 正在出稿,稍候再试。";
+    if (fresh.status === "waiting_feedback") return "The final review is already out — just send the feedback.";
+    if (fresh.status === "waiting_reviewer") return "The reviewer is drafting — try again shortly.";
   }
   if (action === "accept") {
-    if (fresh.status === "discussing") return "reviewer 已进入讨论:先点「生成终稿」拿到新的结论。";
-    if (fresh.status === "waiting_reviewer") return "reviewer 正在重新出稿,等它完成后再决定。";
-    if (fresh.status === "sending_feedback") return "反馈正在发送中。";
+    if (fresh.status === "discussing") return "The reviewer is in discussion: click Finalize for an updated verdict.";
+    if (fresh.status === "waiting_reviewer") return "The reviewer is redrafting — decide once it finishes.";
+    if (fresh.status === "sending_feedback") return "The feedback is being sent.";
   }
   if (action === "rereview") {
     // 仍在闸门上 = 复审没发出去(reviewer 忙 / 未送达),后端原文就是原因。
     if (fresh.status === "waiting_rereview") return null;
-    if (fresh.status === "waiting_reviewer") return "复审已经发起,reviewer 正在审查。";
-    if (fresh.status === "waiting_feedback") return "这一轮复审已经出结论了。";
+    if (fresh.status === "waiting_reviewer") return "The re-review has started — the reviewer is on it.";
+    if (fresh.status === "waiting_feedback") return "This re-review round already has a verdict.";
   }
   return null;
 }
@@ -274,12 +275,15 @@ export function ReviewRunPanel({
     // cap, the content-sized feedback textarea below would grow the panel past
     // the viewport and push the rest of the chat off-screen with no way to
     // scroll to it.
-    <div className="shrink-0 border-b bg-muted/30 px-4 py-2 space-y-2 max-h-[50vh] overflow-y-auto">
+    <div className="shrink-0 border-b bg-muted/30 px-3 py-2.5 space-y-2 max-h-[50vh] overflow-y-auto">
       {orphanError && (
-        <div className="flex items-start justify-between gap-2 text-destructive"
+        <div className="flex items-start justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 py-1 pl-2.5 pr-1 text-destructive"
           style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-          <span>{orphanError.message}</span>
-          <Button variant="ghost" size="icon-sm" aria-label="关闭提示" onClick={() => setActionError(null)}>
+          <span className="flex min-w-0 items-start gap-1.5 py-0.5">
+            <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+            <span className="min-w-0 break-words">{orphanError.message}</span>
+          </span>
+          <Button variant="ghost" size="icon-sm" aria-label="Dismiss" onClick={() => setActionError(null)}>
             <X className="h-3 w-3" />
           </Button>
         </div>
@@ -293,131 +297,207 @@ export function ReviewRunPanel({
                 : api.workflowRunGate(run.id, action))}
           onScheduleResume={(at) => act(run.id, "schedule", () => api.scheduleResume(run.id, at))} />
       ) : (
-        <div key={run.id} className="space-y-2" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
-          <div className="flex items-center justify-between">
-            <span className="font-medium">
-              Review{run.review_focus ? ` — ${run.review_focus}` : ""}
-              <span className="ml-2 text-muted-foreground">
-                {run.status === "preparing" && "准备中…"}
-                {run.status === "waiting_reviewer" && "reviewer 审查中…"}
-                {run.status === "waiting_feedback" && "等你确认反馈"}
-                {run.status === "discussing" && "讨论中"}
-                {run.status === "sending_feedback" && "发送中…"}
-                {run.status === "waiting_rereview" && "等你确认复审"}
-              </span>
-              {roundLabel(run) && <span className="ml-2 text-muted-foreground">{roundLabel(run)}</span>}
+        <ReviewCard key={run.id} run={run} busy={busy === run.id}
+          error={actionError?.runId === run.id ? actionError.message : null}
+          editing={!!editing[run.id]}
+          draft={draft[run.id]}
+          onDraftChange={(text) => setDraft((d) => ({ ...d, [run.id]: text }))}
+          onToggleEditing={() => setEditing((e) => ({ ...e, [run.id]: !e[run.id] }))}
+          onAction={(action, opts) => act(run.id, action, () =>
+            action === "cancel" ? api.cancelWorkflowRun(run.id)
+              : action === "approve" ? api.workflowRunGate(run.id, "approve", draft[run.id] ?? undefined)
+                : action === "rereview" ? api.workflowRunGate(run.id, "rereview", undefined, { extend: !!opts?.extend })
+                  : api.workflowRunGate(run.id, action))} />
+      ))}
+    </div>
+  );
+}
+
+const REVIEW_STATUS_TEXT: Partial<Record<WorkflowRun["status"], string>> = {
+  preparing: "Preparing…",
+  waiting_reviewer: "Reviewer is reviewing…",
+  waiting_feedback: "Feedback ready — waiting for you",
+  discussing: "Discussing",
+  sending_feedback: "Sending feedback…",
+  waiting_rereview: "Changes made — waiting for you",
+};
+
+/**
+ * One review run. Visual language mirrors LoopCard: a status dot (pulsing while
+ * the reviewer works, amber while it waits on you), a kind tag, the focus as
+ * title, and the state as a muted second line — so the two cards read as one
+ * family when they stack in the panel.
+ */
+export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, onToggleEditing, onAction }: {
+  run: WorkflowRun;
+  busy: boolean;
+  error: string | null;
+  editing: boolean;
+  draft: string | undefined;
+  onDraftChange: (text: string) => void;
+  onToggleEditing: () => void;
+  onAction: (action: "cancel" | "finalize" | "accept" | "approve" | "rereview", opts?: { extend?: boolean }) => void;
+}) {
+  const waitingOnYou = run.status === "waiting_feedback" || run.status === "waiting_rereview" || run.status === "discussing";
+  const working = run.status === "preparing" || run.status === "waiting_reviewer" || run.status === "sending_feedback";
+  const tone = waitingOnYou ? "bg-amber-500" : "bg-sky-500";
+  const round = roundLabel(run);
+  const overCap = isOverRoundCap(run);
+  const verdict = run.verdict ? VERDICT_LABEL[run.verdict] : null;
+  const feedback = draft ?? run.feedback_snapshot ?? "";
+  const meta = { fontSize: "var(--conv-font-size, 12px)" };
+  const statusText = REVIEW_STATUS_TEXT[run.status];
+  return (
+    <div className="space-y-2.5 rounded-lg border bg-background/70 p-3 shadow-xs" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 space-y-0.5">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+              {working && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${tone}`} />}
+              <span className={`relative inline-flex h-2 w-2 rounded-full ${tone}`} />
             </span>
-            <Button variant="ghost" size="sm" disabled={busy === run.id}
-              onClick={() => act(run.id, "cancel", () => api.cancelWorkflowRun(run.id))}>
-              <X className="h-3 w-3 mr-1" />结束
+            <span className="shrink-0 rounded-sm bg-muted px-1.5 py-px font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Review</span>
+            <span className="min-w-0 truncate font-medium" title={run.review_focus ?? undefined}>
+              {run.review_focus || "Code review"}
+            </span>
+          </div>
+          <div className="flex min-w-0 items-center gap-1.5 pl-4 text-muted-foreground" style={meta}>
+            {working && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
+            {statusText && <span className={`min-w-0 truncate ${waitingOnYou ? "text-amber-700 dark:text-amber-400" : ""}`}>{statusText}</span>}
+            {round && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="shrink-0 tabular-nums">{round}</span>
+              </>
+            )}
+          </div>
+        </div>
+        <Hint label="End this review">
+          <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
+            className="shrink-0 text-muted-foreground hover:text-destructive">
+            <X className="h-3 w-3" />End
+          </Button>
+        </Hint>
+      </div>
+      {run.error && (
+        <div className="flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-amber-700 dark:text-amber-400" style={meta}>
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span className="min-w-0 break-words">{run.error}</span>
+        </div>
+      )}
+      {run.status === "preparing" && (
+        <div className="rounded-md bg-muted/50 px-2.5 py-1.5 text-muted-foreground" style={meta}>
+          Distilling context and starting the reviewer
+        </div>
+      )}
+      {run.status === "waiting_reviewer" && (
+        <div className="rounded-md bg-muted/50 px-2.5 py-1.5 text-muted-foreground" style={meta}>
+          The reviewer session is working
+        </div>
+      )}
+      {run.status === "discussing" && (
+        <div className="flex items-center justify-between gap-2 rounded-md bg-muted/50 py-1 pl-2.5 pr-1">
+          <span className="min-w-0 text-muted-foreground" style={meta}>
+            Discuss with the reviewer, then finalize the review to send it
+          </span>
+          <Hint label="Have the reviewer write its final review from the discussion">
+            <Button
+              size="sm"
+              variant="outline"
+              aria-label="Finalize review"
+              className="shrink-0 bg-background"
+              disabled={busy}
+              onClick={() => onAction("finalize")}>
+              <FileCheck className="h-3 w-3" />Finalize
+            </Button>
+          </Hint>
+        </div>
+      )}
+      {run.status === "waiting_rereview" && (
+        // Loop gate: the source finished the turn our feedback opened. A clear
+        // needs-changes within the cap re-reviews on its own; the gate is
+        // what is left — another verdict, the cap, a failed attempt, or a
+        // loop the user stepped into.
+        <>
+          <div className="rounded-md bg-muted/50 px-2.5 py-1.5 text-muted-foreground" style={meta}>
+            {overCap
+              ? `The source session applied the feedback. It reached the ${run.max_rounds}-round limit — add another round?`
+              : "The source session applied the feedback. Have the same reviewer re-review the changes?"}
+          </div>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button variant="outline" size="sm" disabled={busy} onClick={() => onAction("cancel")}>
+              End loop
+            </Button>
+            {/* The round number is already on the status line above. */}
+            <Hint label={overCap ? "Raise the round limit and re-review" : "Have the same reviewer review the new changes"}>
+              <Button size="sm" disabled={busy} onClick={() => onAction("rereview", { extend: overCap })}>
+                {overCap ? "Add round" : "Re-review"}
+              </Button>
+            </Hint>
+          </div>
+        </>
+      )}
+      {run.status === "waiting_feedback" && (
+        <div className="overflow-hidden rounded-md border bg-background">
+          <div className="flex items-center justify-between gap-2 border-b bg-muted/40 py-1 pl-2.5 pr-1" style={meta}>
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="shrink-0 text-muted-foreground">Verdict</span>
+              {verdict
+                ? <span className={`rounded border px-1.5 py-px font-mono ${verdict.className}`}>{verdict.text}</span>
+                : <span className="truncate rounded border border-dashed px-1.5 py-px text-muted-foreground">Not detected — use your judgment</span>}
+            </div>
+            <Button variant="ghost" size="sm" disabled={busy} onClick={onToggleEditing}
+              className="h-6 shrink-0 px-2 text-muted-foreground">
+              {editing
+                ? <><Eye className="h-3 w-3 mr-1" />Preview</>
+                : <><Pencil className="h-3 w-3 mr-1" />Edit</>}
             </Button>
           </div>
-          {run.error && (
-            <div className="text-amber-600" style={{ fontSize: "var(--conv-font-size, 12px)" }}>{run.error}</div>
-          )}
-          {run.status === "preparing" && (
-            <div className="flex items-center text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-              <Loader2 className="h-3 w-3 mr-1 animate-spin" /> 正在蒸馏上下文并启动 reviewer
+          {/* Rendered markdown by default; the textarea only appears while
+              editing. Both are max-h capped (the textarea auto-grows via
+              field-sizing-content) so a long review scrolls inside its box
+              instead of inflating the panel. */}
+          {editing ? (
+            <Textarea
+              className="font-mono min-h-28 max-h-72 rounded-none border-0 shadow-none focus-visible:ring-0"
+              style={meta}
+              value={feedback}
+              onChange={(e) => onDraftChange(e.target.value)}
+            />
+          ) : (
+            <div className="max-h-72 overflow-y-auto px-3 py-2" style={meta}>
+              <MessageResponse>{feedback}</MessageResponse>
             </div>
-          )}
-          {run.status === "waiting_reviewer" && (
-            <div className="flex items-center text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-              <Loader2 className="h-3 w-3 mr-1 animate-spin" /> reviewer session 正在工作
-            </div>
-          )}
-          {run.status === "discussing" && (
-            <div className="flex items-center gap-2">
-              <span className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-                与 reviewer 讨论后，生成终稿再发送
-              </span>
-              <Button
-                size="icon-sm"
-                variant="outline"
-                aria-label="生成 review 终稿"
-                disabled={busy === run.id}
-                onClick={() => act(run.id, "finalize", () => api.workflowRunGate(run.id, "finalize"))}>
-                <FileCheck className="h-3 w-3" />
-              </Button>
-            </div>
-          )}
-          {run.status === "waiting_rereview" && (
-            // Loop gate: the source finished the turn our feedback opened. A clear
-            // needs-changes within the cap re-reviews on its own; the gate is
-            // what is left — another verdict, the cap, a failed attempt, or a
-            // loop the user stepped into.
-            <>
-              <div className="text-muted-foreground" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-                {isOverRoundCap(run)
-                  ? `source 已按反馈完成修改。已达上限 ${run.max_rounds} 轮——要再加一轮吗？`
-                  : "source 已按反馈完成修改。由同一个 reviewer 复审这次修改？"}
-              </div>
-              <div className="flex gap-2">
-                <Button size="sm" disabled={busy === run.id}
-                  onClick={() => act(run.id, "rereview", () =>
-                    api.workflowRunGate(run.id, "rereview", undefined, { extend: isOverRoundCap(run) }))}>
-                  {isOverRoundCap(run) ? "再加一轮" : `发起第 ${run.round ?? 2} 轮复审`}
-                </Button>
-                <Button variant="outline" size="sm" disabled={busy === run.id}
-                  onClick={() => act(run.id, "cancel", () => api.cancelWorkflowRun(run.id))}>
-                  结束循环
-                </Button>
-              </div>
-            </>
-          )}
-          {run.status === "waiting_feedback" && (
-            <>
-              <div className="flex items-center gap-2" style={{ fontSize: "var(--conv-font-size, 12px)" }}>
-                <span className="text-muted-foreground">reviewer 结论</span>
-                {run.verdict
-                  ? <span className={`rounded border px-1.5 py-px font-mono ${VERDICT_LABEL[run.verdict].className}`}>{VERDICT_LABEL[run.verdict].text}</span>
-                  : <span className="rounded border border-dashed px-1.5 py-px text-muted-foreground">未识别，请自行判断</span>}
-              </div>
-              {/* Rendered markdown by default; the textarea only appears while
-                  editing. Both are max-h capped (the textarea auto-grows via
-                  field-sizing-content) so a long review scrolls inside its box
-                  instead of inflating the panel. */}
-              {editing[run.id] ? (
-                <Textarea
-                  className="font-mono min-h-28 max-h-72"
-                  style={{ fontSize: "var(--conv-font-size, 12px)" }}
-                  value={draft[run.id] ?? run.feedback_snapshot ?? ""}
-                  onChange={(e) => setDraft((d) => ({ ...d, [run.id]: e.target.value }))}
-                />
-              ) : (
-                <div
-                  className="border rounded-md bg-background px-3 py-2 max-h-72 overflow-y-auto"
-                  style={{ fontSize: "var(--conv-font-size, 12px)" }}
-                >
-                  <MessageResponse>{draft[run.id] ?? run.feedback_snapshot ?? ""}</MessageResponse>
-                </div>
-              )}
-              <div className="flex gap-2">
-                {run.verdict === "ship" && (
-                  // Nothing blocking: taking the result is the natural exit, and
-                  // it sends nothing. Sending the notes anyway stays possible.
-                  <Button size="sm" disabled={busy === run.id}
-                    onClick={() => act(run.id, "accept", () => api.workflowRunGate(run.id, "accept"))}>
-                    接受并结束
-                  </Button>
-                )}
-                <Button size="sm" variant={run.verdict === "ship" ? "outline" : "default"} disabled={busy === run.id}
-                  onClick={() => act(run.id, "approve", () => api.workflowRunGate(run.id, "approve", draft[run.id] ?? undefined))}>
-                  {run.verdict === "ship" ? "仍发送反馈" : "发送反馈给原 session"}
-                </Button>
-                <Button variant="outline" size="sm" disabled={busy === run.id}
-                  onClick={() => setEditing((e) => ({ ...e, [run.id]: !e[run.id] }))}>
-                  {editing[run.id]
-                    ? <><Eye className="h-3 w-3 mr-1" />预览</>
-                    : <><Pencil className="h-3 w-3 mr-1" />编辑</>}
-                </Button>
-              </div>
-            </>
-          )}
-          {actionError?.runId === run.id && (
-            <div className="text-destructive" style={{ fontSize: "var(--conv-font-size, 12px)" }}>{actionError.message}</div>
           )}
         </div>
-      ))}
+      )}
+      {run.status === "waiting_feedback" && (
+        <div className="flex flex-wrap justify-end gap-2">
+          {/* With a ship verdict this is the secondary choice — the outline style
+              carries the "anyway" a longer label used to spell out. */}
+          <Hint label="Send this feedback to the source session">
+            <Button size="sm" variant={run.verdict === "ship" ? "outline" : "default"} disabled={busy}
+              onClick={() => onAction("approve")}>
+              Send feedback
+            </Button>
+          </Hint>
+          {run.verdict === "ship" && (
+            // Nothing blocking: taking the result is the natural exit, and
+            // it sends nothing. Sending the notes anyway stays possible.
+            <Hint label="Accept the verdict and end the review without sending anything">
+              <Button size="sm" disabled={busy} onClick={() => onAction("accept")}>
+                Accept
+              </Button>
+            </Hint>
+          )}
+        </div>
+      )}
+      {error && (
+        <div className="flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-destructive" style={meta}>
+          <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
+          <span className="min-w-0 break-words">{error}</span>
+        </div>
+      )}
     </div>
   );
 }
