@@ -98,6 +98,10 @@ const COVERED_BY = {
   // listing, and invalid requests without requiring a live schedule here.
   "http:PUT /api/path/retention-holds/:param": { file: "packages/vibedeckx/src/routes/session-retention-routes.test.ts", marker: "`/api/path/retention-holds/${sessionId}`" },
   "http:GET /api/path/retention-holds": { file: "packages/vibedeckx/src/routes/session-retention-routes.test.ts", marker: '"/api/path/retention-holds"' },
+  // A smoke would need a dev server on the worker plus a minted preview link
+  // and ticket→cookie exchange. The proxy test pins what the hub puts on the
+  // tunnel (method, path, port, base64 body) and how it relays the answer.
+  "passthrough:preview-proxy": { file: "packages/vibedeckx/src/preview/preview-proxy.test.ts", marker: "forwards the remote branch's bytes" },
 };
 
 // The irreducible remainder — no smoke and no existing test. Each reason names
@@ -107,7 +111,6 @@ const EXEMPT = {
   "http:POST /api/agent-sessions/:param/approve": "approvals never arise under --dangerously-skip-permissions (stub runs edit mode); no route test exists",
   "http:POST /api/agent-sessions/:param/agent-type": "switching to the only other agent type (codex) would download a real binary in CI; no route test exists",
   "http:POST /api/path/terminals/:param/send": "only driven by the project-chat LLM tool; no test exists",
-  "passthrough:browser-proxy": "requires a running browser-preview target app",
 };
 
 // ---------------------------------------------------------------------------
