@@ -16,7 +16,6 @@ import type { ProxyConfig } from "../utils/proxy-manager.js";
 import { proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { RemotePatchCache } from "../remote-patch-cache.js";
 import { ReverseConnectManager } from "../reverse-connect-manager.js";
-import { BrowserManager } from "../browser-manager.js";
 import { RemoteExecutorMonitor } from "../remote-executor-monitor.js";
 import { SchedulerService } from "../scheduler.js";
 import { NotificationService } from "../notification-service.js";
@@ -121,12 +120,13 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
       if (config.type !== "none") {
         console.log(`[ProxyManager] Loaded ${config.type} proxy: ${config.host}:${config.port}`);
         if (opts.authEnabled) {
-          // The browser-preview proxy egresses directly (with SSRF IP filtering),
-          // not through this proxy. Make that explicit so the configured proxy is
-          // not mistaken for the egress-control point in hosted mode.
+          // Preview links reach dev servers over the reverse-connect tunnel
+          // (or loopback in solo mode), never through this proxy. Make that
+          // explicit so the configured proxy is not mistaken for an
+          // egress-control point in hosted mode.
           console.warn(
             "[ProxyManager] --auth is on with an outbound proxy configured. " +
-            "Browser-preview egress uses direct connections with SSRF filtering and does NOT route through this proxy. " +
+            "Preview links do NOT route through this proxy (they use the reverse-connect tunnel). " +
             "Enforce any additional egress policy at the proxy itself.",
           );
         }
@@ -144,7 +144,6 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     remoteSessionMap,
     sources: [scheduleHoldSource(opts.storage), taskHoldSource(opts.storage)],
   });
-  const browserManager = new BrowserManager();
   // Watches remote executor processes for completion independently of any
   // frontend log-proxy subscription (see RemoteExecutorMonitor). Shared across
   // all remoteExecutorMap.set sites (panel start, boot recovery, chat).
@@ -154,7 +153,7 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     remoteExecutorMap,
     remoteExecutorMonitor,
   });
-  const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager, browserManager);
+  const chatSessionManager = new ChatSessionManager(opts.storage, processManager, agentSessionManager, remoteSessionMap, remoteExecutorMap, remotePatchCache, reverseConnectManager);
   const projectChatRemoteSessions = createRemoteProjectSessionReader({
     storage: opts.storage,
     proxy: (remoteServerId, method, apiPath) => proxyToRemoteAuto(
@@ -415,7 +414,6 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
   fastify.decorate("remotePatchCache", remotePatchCache);
   fastify.decorate("remoteLiveness", new RemoteLivenessTracker(eventBus));
   fastify.decorate("reverseConnectManager", reverseConnectManager);
-  fastify.decorate("browserManager", browserManager);
   fastify.decorate("scheduler", scheduler);
   fastify.decorate("retentionHolds", retentionHolds);
   subscribeTaskHoldSync(eventBus, retentionHolds);
@@ -647,7 +645,6 @@ const sharedServices: FastifyPluginAsync<SharedServicesOptions> = async (fastify
     remoteExecutorMonitor.shutdown();
     reverseConnectManager.shutdown();
     await projectChatManager.shutdown();
-    await browserManager.shutdown();
   });
 };
 

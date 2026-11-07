@@ -65,7 +65,7 @@ if it waits; and that turn does not end while it still owes results.**
 
 | Field | Meaning |
 |-------|---------|
-| `openedBy` | `user`, or `listened_event` (an event the user opted to listen to, a browser event, a late result of abandoned work) |
+| `openedBy` | `user`, or `listened_event` (an event the user opted to listen to, a late result of abandoned work) |
 | `status` | `running` (a stream is live or parked on an approval) / `waiting` (no stream; results or the user owed) |
 | `userPresent` | whether the user was there when the current stream started — gates outbound agent actions (§8) |
 | `toolless` | a browser-event turn: no tools, and nothing else joins it |
@@ -85,8 +85,10 @@ event), `browser`, `nudge` (the turn contract) or `wait_timeout`.
 - **Open turn** → the arrival joins its inbox. A `waiting` turn wakes at once
   (next stream, same turn id); a `running` one shows it to the model when the
   current stream ends.
-- **Browser events** never join an open turn, and nothing joins a browser
-  turn: such arrivals wait in `ChatSession.outside` for the next turn.
+- `ChatSession.outside` holds arrivals that could not join (a stopped turn's
+  unread inbox) until the next turn. (Page-controlled browser events, which
+  used to be kept out of turns here, were removed with the hub-side browser
+  tools — see `preview-links-design.md`.)
 
 A user message during a stream therefore no longer starts a second, concurrent
 stream; it joins the turn.
@@ -230,9 +232,6 @@ user message → present; a result, event or timeout → not; a nudge alone →
 unchanged. This replaces the old `wokenByEvent` content sniffing with the same
 effect: "agent finishes → commander wakes → dispatches again" still asks first
 (see [`event-driven-outbound-approval-design.md`](./event-driven-outbound-approval-design.md)).
-
-Browser events are page-controlled: their turns get no tools, and they never
-join a turn that has them.
 
 The orchestrator dot follows only turns the user opened (`drivesDot`);
 listened-event turns leave the dot to the subsystem that fired.

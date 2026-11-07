@@ -4,6 +4,7 @@ import { buildApplication, buildCommand, buildRouteMap } from "@stricli/core";
 import { createSqliteStorage } from "./storage/sqlite.js";
 import { createServer, type TLSOptions } from "./server.js";
 import { resolveUiRoot } from "./ui-root.js";
+import { previewOrigin, resolvePreviewHostConfig, type PreviewHostConfig } from "./preview/preview-host.js";
 import { DEFAULT_PORT, VIBEDECKX_HOME } from "./constants.js";
 import { setupLogging, shutdownLogging } from "./logger.js";
 import {
@@ -139,6 +140,12 @@ const startCommand = buildCommand({
         brief: "Serve the API only; skip UI assets entirely (no lookup, no download)",
         optional: true,
       },
+      "preview-host": {
+        kind: "parsed",
+        parse: String,
+        brief: "Domain that serves preview links as <slug>.<domain>[:port] (wildcard DNS + cert pointing at this server; use a domain separate from the app's). Default without --auth: preview.localhost:<port>. With --auth and no value, preview links are off. Env: VIBEDECKX_PREVIEW_HOST",
+        optional: true,
+      },
     },
   },
   func: async (flags: {
@@ -156,6 +163,7 @@ const startCommand = buildCommand({
     "log-level": string | undefined;
     "ui-dir": string | undefined;
     "no-ui": boolean | undefined;
+    "preview-host": string | undefined;
   }) => {
     const dataDir = flags["data-dir"] ?? VIBEDECKX_HOME;
     setupLogging({ dataDir, level: flags["log-level"] });
@@ -165,6 +173,25 @@ const startCommand = buildCommand({
     const authEnabled = flags.auth ?? false;
     const noLocalProjects = flags["no-local-projects"] ?? false;
     const tls = loadTLSOptions(flags);
+
+    // Preview links: a bad value is a config error, not something to limp past
+    // (the only alternative to a working preview origin is no preview at all).
+    let previewHost: PreviewHostConfig | null;
+    try {
+      previewHost = resolvePreviewHostConfig({
+        value: flags["preview-host"] ?? process.env.VIBEDECKX_PREVIEW_HOST,
+        authEnabled,
+        tls: !!tls,
+        publicUrl: process.env.VIBEDECKX_PUBLIC_URL,
+        listenPort: port,
+      });
+    } catch (err) {
+      console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+    if (authEnabled && !previewHost) {
+      console.log("Preview links are off: set --preview-host (or VIBEDECKX_PREVIEW_HOST) to a wildcard domain pointing at this server to enable the Browser tab.");
+    }
 
     // Binding beyond loopback puts the (per-route-unauthenticated) executor API
     // on the network. Without --auth, anyone who can reach the host can run
@@ -199,10 +226,13 @@ const startCommand = buildCommand({
 
     const dbPath = path.join(dataDir, "data.sqlite");
     const storage = await createSqliteStorage(dbPath);
-    const server = await createServer({ storage, authEnabled, noLocalProjects, tls, uiRoot });
+    const server = await createServer({ storage, authEnabled, noLocalProjects, tls, uiRoot, previewHost });
 
     const url = await server.start(port, host);
     console.log(`Server running at ${url}`);
+    if (previewHost) {
+      console.log(`Preview links served at ${previewOrigin("<slug>", previewHost)}`);
+    }
 
     // Skip auto-open when TLS is on: the cert is for the public domain,
     // so https://localhost would just show a cert warning. API-only mode has

@@ -123,7 +123,7 @@ afterEach(() => {
 });
 
 type Internal = {
-  deliver: (id: string, arrival: { source: "user" | "result" | "notice" | "browser" | "nudge"; content: string }) => void;
+  deliver: (id: string, arrival: { source: "user" | "result" | "notice" | "nudge"; content: string }) => void;
   startTerminalWatcher: (sessionId: string, terminalId: string, turnId: string | null) => void;
   startRemoteTerminalWatcher: (sessionId: string, terminalId: string, info: { remoteServerId: string; remoteProcessId: string }, turnId: string | null) => void;
   reverseConnectManager: unknown;
@@ -239,34 +239,6 @@ describe("commander turns", () => {
     await manager.sendMessage(id, "carry on");
     await idle();
     expect(manager.getSession(id)!.turn!.userPresent).toBe(true);
-  });
-
-  it("a browser event waits for the next turn and is summarized without tools", async () => {
-    let phase = 0;
-    let browserTools: unknown;
-    const { manager, id, idle, stop, start, userMessages } = setup(async (options) => {
-      switch (phase++) {
-        case 0: return call("run", "runExecutor", { executorName: "build" });
-        case 1: return call("finish", "complete_task", { summary: "Built" });
-        case 2: return text("Built.");
-        case 3:
-          browserTools = options.tools;
-          return text("The page logged an error.");
-        default: throw new Error(`Unexpected model call ${phase}`);
-      }
-    });
-    const internal = manager as unknown as Internal;
-    await manager.sendMessage(id, "Build it");
-    await idle();
-    internal.deliver(id, { source: "browser", content: "[Browser Event: Console Error]\nboom" });
-    expect(manager.getSession(id)!.turn!.inbox).toEqual([]);
-
-    stop(start.mock.calls[0][3]);
-    await vi.waitFor(() => expect(phase).toBe(4));
-    await vi.waitFor(() => expect(manager.getSession(id)!.turn).toBeNull());
-    expect(browserTools ?? []).toEqual([]);
-    expect(userMessages().at(-1)).toMatch(/^\[Browser Event/);
-    expect(turnEnds(manager, id)).toBe(2);
   });
 
   it("only a turn the user opened paints the orchestrator dot", async () => {

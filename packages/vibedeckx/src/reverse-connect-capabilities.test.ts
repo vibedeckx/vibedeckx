@@ -44,7 +44,7 @@ const HARVEST_FUNCTIONS: Record<string, { fn: string; method: string }> = {
 // Files allowed to send caller-supplied paths (unbounded by design), covered
 // by a passthrough registry entry instead of per-route ones.
 const PASSTHROUGH_FILES: Record<string, string> = {
-  "routes/browser-proxy-routes.ts": "passthrough:browser-proxy",
+  "preview/preview-proxy.ts": "passthrough:preview-proxy",
 };
 
 // Skip: the tunnel plumbing itself (its inner sends are the transport, not

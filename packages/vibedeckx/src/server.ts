@@ -4,9 +4,15 @@ import { fastifyStatic } from "@fastify/static";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyMultipart from "@fastify/multipart";
 import fs from "node:fs";
+import http from "node:http";
+import https from "node:https";
+import { randomBytes } from "node:crypto";
 import path from "path";
 import { fileURLToPath } from "url";
 import type { Storage } from "./storage/types.js";
+import type { PreviewHostConfig } from "./preview/preview-host.js";
+import { PreviewAuth } from "./preview/preview-auth.js";
+import { createPreviewDispatch, createPreviewProxy } from "./preview/preview-proxy.js";
 import sharedServices from "./plugins/shared-services.js";
 import projectRoutes from "./routes/project-routes.js";
 import remoteServerRoutes from "./routes/remote-server-routes.js";
@@ -37,8 +43,7 @@ import websocketRoutes from "./routes/websocket-routes.js";
 import reverseConnectRoutes from "./routes/reverse-connect-routes.js";
 import eventRoutes from "./routes/event-routes.js";
 import terminalRoutes from "./routes/terminal-routes.js";
-import browserRoutes from "./routes/browser-routes.js";
-import browserProxyRoutes from "./routes/browser-proxy-routes.js";
+import previewLinkRoutes from "./routes/preview-link-routes.js";
 import crossRemoteTargetRoutes from "./routes/cross-remote-target-routes.js";
 import crossRemoteMcpRoutes from "./routes/cross-remote-mcp-routes.js";
 import { crossRemoteMcpEnabled } from "./cross-remote-mcp-config.js";
@@ -153,11 +158,17 @@ export const createServer = async (opts: {
   // exists (legacy default); null = API-only, no UI served (reverse-connect
   // workers, --no-ui). Resolved by resolveUiRoot() in command.ts.
   uiRoot?: string | null;
+  // Preview links (docs/preview-links-design.md): the origin that serves
+  // `<slug>.<host>`. Resolved by resolvePreviewHostConfig() in command.ts;
+  // null/undefined = feature off (the only fallback — never same-origin).
+  previewHost?: PreviewHostConfig | null;
 }) => {
   const authEnabled = opts.authEnabled ?? false;
   const acceptRemote = opts.acceptRemote ?? false;
   const noLocalProjects = opts.noLocalProjects ?? false;
   const tls = opts.tls;
+  const previewHost = opts.previewHost ?? null;
+  const previewDispatch = previewHost ? createPreviewDispatch(previewHost) : null;
 
   // Validate Clerk env vars when auth is enabled
   if (authEnabled) {
@@ -216,17 +227,27 @@ export const createServer = async (opts: {
     // version's Logger type across every consumer.
     loggerInstance: getLogger().child({ mod: "http" }) as FastifyBaseLogger,
     disableRequestLogging: true,
-    ...(tls && {
-      https: {
-        cert: tls.cert,
-        key: tls.key,
-        ...(tls.clientCA && {
-          ca: tls.clientCA,
-          requestCert: true,
-          rejectUnauthorized: true,
-        }),
-      },
-    }),
+    // The Node server is ours so preview hosts can be dispatched BEFORE
+    // Fastify routing (docs/preview-links-design.md): a request for
+    // `<slug>.<preview-host>` must never meet the app's routes, hooks or Clerk
+    // middleware. With a factory Fastify applies none of its own server
+    // defaults, so the one that matters (keep-alive) is set here to match.
+    serverFactory: (handler) => {
+      const raw = tls
+        ? https.createServer({
+            cert: tls.cert,
+            key: tls.key,
+            ...(tls.clientCA && { ca: tls.clientCA, requestCert: true, rejectUnauthorized: true }),
+          })
+        : http.createServer();
+      raw.keepAliveTimeout = 72_000;
+      if (previewDispatch) previewDispatch.attachUpgrade(raw);
+      raw.on("request", (req, res) => {
+        if (previewDispatch?.matches(req)) previewDispatch.handleRequest(req, res);
+        else handler(req, res);
+      });
+      return raw as unknown as http.Server;
+    },
   });
 
   // Diagnostic: log raw HTTP upgrade events to confirm they reach the server
@@ -237,6 +258,20 @@ export const createServer = async (opts: {
 
   // Decorate authEnabled so routes can access it
   server.decorate("authEnabled", authEnabled);
+
+  // Preview links: host config + the ticket/cookie authority the mint routes
+  // and the preview proxy share. Null = feature off.
+  server.decorate(
+    "previewLinks",
+    previewHost
+      ? {
+          config: previewHost,
+          auth: new PreviewAuth(() =>
+            opts.storage.settings.getOrCreate("preview_cookie_secret", () => randomBytes(32).toString("hex")),
+          ),
+        }
+      : null,
+  );
 
   // Build id of the served UI, for the /api/events skew-detection handshake
   server.decorate("uiBuildId", uiBuildId);
@@ -344,6 +379,9 @@ export const createServer = async (opts: {
     // solo/no-auth mode (the mint refuses an unscoped token), so the UI hides
     // the entry rather than offering a control that cannot do anything.
     crossRemoteSessionGrants: crossRemoteMcpEnabled() && authEnabled,
+    // Preview links (the Browser tab). Off when no preview host is configured
+    // — the UI then explains how to enable it instead of offering dead controls.
+    previewLinks: previewHost !== null,
   }));
 
   // Register plugins and routes
@@ -426,9 +464,23 @@ export const createServer = async (opts: {
   server.register(notificationRoutes);
   server.register(notificationOutboxRoutes);
   server.register(terminalRoutes);
-  server.register(browserRoutes);
-  server.register(browserProxyRoutes);
+  server.register(previewLinkRoutes);
   server.register(crossRemoteTargetRoutes);
+
+  // The preview proxy needs storage and the tunnel manager, which exist once
+  // the shared-services plugin has loaded; until then preview hosts get a 503.
+  if (previewDispatch && previewHost) {
+    server.addHook("onReady", async () => {
+      previewDispatch.setProxy(createPreviewProxy({
+        config: previewHost,
+        storage: server.storage,
+        reverseConnectManager: server.reverseConnectManager,
+        auth: server.previewLinks!.auth,
+        authEnabled,
+        publicUrl: process.env.VIBEDECKX_PUBLIC_URL?.trim() || null,
+      }));
+    });
+  }
   server.register(crossRemoteMcpRoutes);
   server.register(sessionMcpRoutes);
 

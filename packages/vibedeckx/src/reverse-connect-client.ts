@@ -455,24 +455,40 @@ export class ReverseConnectClient {
       // base64 set only for binary responses (e.g. file-download) so the bytes
       // survive the JSON control channel; text/JSON responses stay as-is.
       let encoding: "base64" | undefined;
+      // Set-Cookie cannot ride the flat header map (several would be folded
+      // into one value); the `port` branch hands them over separately.
+      let setCookies: string[] | undefined;
 
       if (frame.port) {
-        // Direct fetch to localhost:{port} — used by browser proxy to reach dev servers
+        // Direct fetch to localhost:{port} — the preview proxy reaching a dev
+        // server on this machine. Redirects are NOT followed: the browser at
+        // the other end of the tunnel must see the 3xx and resolve it against
+        // the preview origin itself (an SPA's /login redirect, a trailing-slash
+        // redirect), otherwise its address bar and the served page disagree.
         const url = `http://localhost:${frame.port}${frame.path}`;
         const fetchInit: RequestInit = {
           method: frame.method,
           headers: frame.headers,
-          redirect: "follow",
+          redirect: "manual",
         };
         if (frame.body && frame.method !== "GET" && frame.method !== "HEAD") {
-          fetchInit.body = frame.body;
+          fetchInit.body = frame.encoding === "base64" ? Buffer.from(frame.body, "base64") : frame.body;
         }
         const response = await fetch(url, fetchInit);
         status = response.status;
         response.headers.forEach((val, key) => {
-          responseHeaders[key] = val;
+          if (key !== "set-cookie") responseHeaders[key] = val;
         });
-        body = await response.text();
+        const cookies = response.headers.getSetCookie();
+        if (cookies.length > 0) setCookies = cookies;
+        // Dev servers serve images, fonts and wasm too: anything non-textual
+        // rides as base64 so the bytes survive the JSON control channel.
+        if (isTextualContentType(responseHeaders["content-type"] ?? "")) {
+          body = await response.text();
+        } else {
+          body = Buffer.from(await response.arrayBuffer()).toString("base64");
+          encoding = "base64";
+        }
       } else {
         // Route through Fastify server — used for API proxy. The tunnel is
         // already token-authenticated at the hub, and the worker's own
@@ -512,6 +528,7 @@ export class ReverseConnectClient {
         headers: responseHeaders,
         body,
         ...(encoding ? { encoding } : {}),
+        ...(setCookies ? { setCookies } : {}),
       };
 
       this.sendFrame(responseFrame);
@@ -529,10 +546,18 @@ export class ReverseConnectClient {
   }
 
   private handleWsOpen(frame: WsOpenFrame): void {
-    const wsUrl = `ws://127.0.0.1:${this.localPort}${frame.path}${frame.query ? `?${frame.query}` : ""}`;
-    console.log(`[ReverseClient] Opening local WS channel ${frame.channelId} → ${frame.path}`);
+    // A `port` targets a dev server on this machine (preview proxy HMR) rather
+    // than our own Fastify. Dev servers check the Origin of a WebSocket
+    // handshake against their host allowlist (Vite `server.allowedHosts`, Next
+    // `allowedDevOrigins`), so present the request as the local one it is.
+    const port = frame.port ?? this.localPort;
+    const wsUrl = `ws://127.0.0.1:${port}${frame.path}${frame.query ? `?${frame.query}` : ""}`;
+    console.log(`[ReverseClient] Opening local WS channel ${frame.channelId} → ${frame.port ? `:${frame.port}` : ""}${frame.path}`);
 
-    const localWs = new WebSocket(wsUrl);
+    const protocols = frame.protocols ? frame.protocols.split(",").map((p) => p.trim()).filter(Boolean) : [];
+    const localWs = frame.port
+      ? new WebSocket(wsUrl, protocols, { headers: { origin: `http://localhost:${frame.port}` } })
+      : new WebSocket(wsUrl);
 
     localWs.on("open", () => {
       this.localChannels.set(frame.channelId, localWs);

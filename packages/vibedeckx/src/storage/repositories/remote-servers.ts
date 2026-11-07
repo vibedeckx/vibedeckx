@@ -280,7 +280,11 @@ export const createRemoteServerRepos = (
       let query = kdb.deleteFrom("remote_servers").where("id", "=", id);
       if (userId !== undefined) query = query.where("user_id", "=", userId);
       const result = await query.executeTakeFirst();
-      return (result?.numDeletedRows ?? 0n) > 0n;
+      const deleted = (result?.numDeletedRows ?? 0n) > 0n;
+      // Preview links point at the machine by id without an FK (the "local"
+      // sentinel shares the column), so they leave with it here.
+      if (deleted) await kdb.deleteFrom("preview_links").where("target_id", "=", id).execute();
+      return deleted;
     },
   },
 

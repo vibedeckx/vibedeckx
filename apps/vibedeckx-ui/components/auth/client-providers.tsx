@@ -2,7 +2,7 @@
 
 import { useEffect } from "react";
 import { AuthWrapper } from "./auth-wrapper";
-import { BrowserFramesProvider } from "@/components/preview/browser-frames-provider";
+import { PreviewLinkBounce } from "@/components/preview/preview-link-bounce";
 import { TerminalSettingsProvider } from "@/hooks/use-terminal-settings";
 import { ConversationSettingsProvider } from "@/hooks/use-conversation-settings";
 import { GlobalEventStreamProvider } from "@/hooks/global-event-stream";
@@ -20,9 +20,8 @@ export function ClientProviders({ children }: { children: React.ReactNode }) {
       <AuthWrapper>
         <TerminalSettingsProvider>
           <ConversationSettingsProvider>
-            <BrowserFramesProvider>
-              <GlobalEventStreamProvider>{children}</GlobalEventStreamProvider>
-            </BrowserFramesProvider>
+            <PreviewLinkBounce />
+            <GlobalEventStreamProvider>{children}</GlobalEventStreamProvider>
           </ConversationSettingsProvider>
         </TerminalSettingsProvider>
       </AuthWrapper>

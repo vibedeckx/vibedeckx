@@ -22,6 +22,7 @@ import { createWorkspaceRepos } from "./repositories/workspace.js";
 import { createCrossRemoteAuditRepo } from "./repositories/cross-remote-audit.js";
 import { createLlmUsageRepo } from "./repositories/llm-usage.js";
 import { createSessionRemoteGrantRepo } from "./repositories/session-remote-grants.js";
+import { createPreviewLinkRepo } from "./repositories/preview-links.js";
 import { createSessionRemoteTouchRepo } from "./repositories/session-remote-touches.js";
 import { createSessionRetentionHoldRepo } from "./repositories/session-retention-holds.js";
 import { createMergeTargetsRepo } from "./repositories/merge-targets.js";
@@ -590,6 +591,21 @@ const initializeSchema = (db: BetterSqlite3Database): void => {
 
     CREATE INDEX IF NOT EXISTS idx_session_remote_grants_session
       ON agent_session_remote_grants(session_id);
+
+    -- Preview links (docs/preview-links-design.md): the slug is the hostname
+    -- label that serves localhost:<port> of target_id ("local" or a remote
+    -- server id; no FK so the local sentinel fits — remoteServers.delete
+    -- removes a machine's rows in repository code).
+    CREATE TABLE IF NOT EXISTS preview_links (
+      slug TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      target_id TEXT NOT NULL,
+      port INTEGER NOT NULL,
+      user_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_used_at TEXT,
+      UNIQUE (project_id, target_id, port)
+    );
 
     CREATE TABLE IF NOT EXISTS remote_reviewer_creation_intents (
       local_reviewer_session_id TEXT PRIMARY KEY,
@@ -2460,6 +2476,7 @@ export const createSqliteStorage = async (dbPath: string): Promise<Storage> => {
     ...createCrossRemoteAuditRepo(kdb),
     ...createLlmUsageRepo(kdb),
     ...createSessionRemoteGrantRepo(kdb),
+    ...createPreviewLinkRepo(kdb),
     ...createSessionRemoteTouchRepo(kdb),
     ...createSessionRetentionHoldRepo(kdb),
     ...createMergeTargetsRepo(kdb),

@@ -8,7 +8,7 @@ import { VIBEDECKX_HOME } from "./constants.js";
 // This MUST run before any other module is imported: several modules capture
 // environment variables at module-evaluation time (e.g. server.ts's top-level
 // `const API_KEY = process.env.VIBEDECKX_API_KEY`, instrumentation.ts's
-// LANGFUSE_* check, browser-proxy-routes.ts's VIBEDECKX_UI_ORIGIN). Loading the
+// LANGFUSE_* check). Loading the
 // file later — e.g. inside the CLI command handler — would be too late for those
 // captures. Because it runs before stricli parses flags, the env-file path is
 // resolved by scanning argv directly rather than via the parsed flags.

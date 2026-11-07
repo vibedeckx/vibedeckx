@@ -56,9 +56,6 @@
     "ws": "^8.19.0",
     "zod": "^4.3.6"
   },
-  "optionalDependencies": {
-    "playwright-core": "^1.59.1"
-  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",

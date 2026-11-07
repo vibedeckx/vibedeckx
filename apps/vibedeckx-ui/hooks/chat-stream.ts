@@ -4,7 +4,6 @@ import {
   getWebSocketUrl, getFreshToken, authFetch, api, type WorkflowRun,
   hasUsableStreamToken, isStreamAuthError, STREAM_AUTH_FAILED_MESSAGE, STREAM_AUTH_REJECTS_BEFORE_ERROR,
 } from "@/lib/api";
-import { sendCommandToIframe, openPreviewFrame } from "@/components/preview/browser-frames-provider";
 
 /**
  * Main Chat stream for ONE workspace (project + branch), framework-free.
@@ -106,21 +105,11 @@ type PatchValue =
   | { type: "READY"; content: true }
   | { type: "FINISHED"; content: true };
 
-interface BrowserCommand {
-  id: string;
-  action: string;
-  selector?: string;
-  value?: string;
-  key?: string;
-}
-
 type AgentWsMessage =
   | { JsonPatch: Patch }
   | { Ready: true }
   | { finished: true }
   | { error: string }
-  | { browserCommand: BrowserCommand }
-  | { openPreviewFrame: { projectId: string; url: string } }
   | { WorkflowRunUpdated: WorkflowRun }
   | { TurnState: ChatTurnState }
   // Liveness-only frame from the server heartbeat — carries no state, exists to
@@ -641,11 +630,6 @@ export class ChatStream {
       return;
     }
 
-    if ("openPreviewFrame" in msg) {
-      openPreviewFrame(msg.openPreviewFrame.projectId, msg.openPreviewFrame.url);
-      return;
-    }
-
     if ("WorkflowRunUpdated" in msg) {
       this.set({ workflowRunUpdate: msg.WorkflowRunUpdated });
       return;
@@ -653,28 +637,6 @@ export class ChatStream {
 
     if ("TurnState" in msg) {
       this.set({ turnState: msg.TurnState });
-      return;
-    }
-
-    if ("browserCommand" in msg) {
-      // Forward command to iframe, send result back via WS
-      const cmd = msg.browserCommand;
-      void sendCommandToIframe(this.projectId, { type: "vibedeckx-command", ...cmd }).then((result) => {
-        if (result && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: "browser_result",
-            result: {
-              id: cmd.id,
-              success: result.success ?? false,
-              error: result.error,
-              content: result.content,
-              found: result.found,
-              tag: result.tag,
-              text: result.text,
-            },
-          }));
-        }
-      });
       return;
     }
 

@@ -1,7 +1,6 @@
 # Browser Preview SSRF Egress Filtering (Design + Implementation)
 
-Status: **Implemented** for hosted (`--auth`) mode. Orthogonal to, and required
-alongside, [browser-preview-origin-isolation.md](browser-preview-origin-isolation.md).
+Status: **Retired.** The direct-fetch branch this guarded no longer exists: preview links ([preview-links-design.md](preview-links-design.md)) reach only a linked machine over the reverse-connect tunnel or `127.0.0.1:<port>` of the hub itself in solo mode, and `utils/ssrf-guard.ts` was removed with it. Kept for the analysis.
 
 ## Background
 

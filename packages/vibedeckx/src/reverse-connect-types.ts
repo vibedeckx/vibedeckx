@@ -16,6 +16,14 @@ export interface HttpRequestFrame {
   path: string;
   headers: Record<string, string>;
   body?: string;
+  /**
+   * Encoding of `body`. Omitted means `body` is the raw text payload; "base64"
+   * means `body` is base64-encoded raw bytes (a binary upload the preview proxy
+   * forwards to a dev server). Additive: a worker that predates it reads the
+   * string as text, which only matters for the preview proxy, and that is
+   * capability-gated (`passthrough:preview-proxy`).
+   */
+  encoding?: "base64";
   /** When set, request targets localhost:{port} directly instead of the Fastify server */
   port?: number;
 }
@@ -25,6 +33,15 @@ export interface WsOpenFrame {
   channelId: string;
   path: string;
   query?: string;
+  /**
+   * When set, the worker opens the local WebSocket against localhost:{port}
+   * (a dev server's HMR endpoint) instead of its own Fastify server. Additive;
+   * ignored by workers that predate it, so callers gate on
+   * `passthrough:preview-proxy`.
+   */
+  port?: number;
+  /** `Sec-WebSocket-Protocol` to offer the local server (Vite's HMR insists on "vite-hmr"). */
+  protocols?: string;
 }
 
 export interface PingFrame {
@@ -60,6 +77,12 @@ export interface HttpResponseFrame {
    * file-download) through the JSON control channel without corruption.
    */
   encoding?: "base64";
+  /**
+   * Each `Set-Cookie` header on its own. `headers` is a flat string map, so
+   * several cookies would otherwise be folded into one comma-joined value the
+   * browser cannot parse. Set by the `port` branch (preview proxy); additive.
+   */
+  setCookies?: string[];
 }
 
 export interface PongFrame {

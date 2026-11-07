@@ -186,10 +186,16 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:POST /api/path/cross-remote/mcp/close": { since: "0.3.26", summary: "跨远程网关:关闭 MCP 会话" },
 
   // --- Raw passthrough ---
-  // Browser preview proxies caller-supplied paths (and localhost ports) through
-  // the tunnel; the path set is unbounded by design, so it registers as one
-  // passthrough capability instead of per-route entries.
-  "passthrough:browser-proxy": { since: "0.2.0", summary: "浏览器预览透传(任意 path+port)" },
+  // Preview links (docs/preview-links-design.md) forward caller-supplied
+  // paths and ports through the tunnel; the path set is unbounded by design,
+  // so it registers as one passthrough capability instead of per-route
+  // entries. Workers serving it honour `encoding: "base64"` request bodies,
+  // answer binary bodies as base64 on the `port` branch, leave redirects to
+  // the browser, and open `ws_open{port}` channels against a local dev
+  // server. The mint route refuses a worker without it (no same-origin
+  // fallback exists any more); `passthrough:browser-proxy` was removed with
+  // its only call site.
+  "passthrough:preview-proxy": { since: "0.3.57", summary: "预览链接透传(任意 path+port，二进制体，WS 指定端口)" },
 };
 
 /**

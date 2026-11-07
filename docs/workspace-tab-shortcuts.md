@@ -96,7 +96,11 @@ GitHub-style cheat sheet listing every global shortcut, in
 - Deliberately omitted at this scale (~11 shortcuts): search box, tabs,
   Figma-style used-key highlighting, any training mechanics.
 
-## 5. Follow-up: Browser-preview iframe key bridge (not built)
+## 5. Follow-up: Browser-preview iframe key bridge (obsolete)
+
+The Browser tab no longer embeds an iframe — previews open in their own tab ([preview-links-design.md](preview-links-design.md)) — so the bridge below is no longer needed. Kept for the record.
+
+### Original note
 
 While focus is inside the Browser tab's preview iframe, **no** global
 shortcut fires — keyboard events don't cross document boundaries. This

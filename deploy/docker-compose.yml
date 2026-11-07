@@ -59,6 +59,8 @@ services:
       # Community/support Discord invite (VIBEDECKX_DISCORD_URL) is likewise
       # optional and deployment-specific — set it in docker.env, not here.
       # Unset ⇒ the "Join our Discord" header button stays hidden.
+      # Preview links (VIBEDECKX_PREVIEW_HOST) are deployment-specific too:
+      # set the wildcard preview domain in docker.env. Unset ⇒ Browser tab off.
 
     # Clerk secrets. Lives next to this file in the runtime dir.
     env_file:

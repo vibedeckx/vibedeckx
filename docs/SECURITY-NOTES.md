@@ -33,20 +33,13 @@ if (worktreePath && worktreePath !== ".") {
 
 Note: We check `projectParent` rather than `project.path` because git worktrees are typically created in sibling directories (e.g., `../.worktrees/feature-x`).
 
-## Browser Preview Runs Proxied Pages as App-Origin Script
+## Preview Links (formerly the same-origin browser preview)
 
-**Location:** `packages/vibedeckx/src/routes/browser-proxy-routes.ts`, preview iframe sandbox in `apps/vibedeckx-ui/components/preview/browser-frames-provider.tsx`.
+**Location:** `packages/vibedeckx/src/preview/`, `routes/preview-link-routes.ts`.
 
-**Current Behavior:** Previewed dev-server URLs are served through a same-origin proxy into an iframe sandboxed with `allow-scripts allow-same-origin`, so proxied content executes with the Vibedeckx origin.
+**History:** The Browser tab used to proxy dev servers same-origin into an `allow-scripts allow-same-origin` iframe (app-origin script execution), fetch arbitrary URLs from the control plane (full-read SSRF, mitigated by `ssrf-guard.ts`), and feed page-controlled events to the Main Chat as prompts. All three surfaces were removed.
 
-**Risk Level:** Low for current use case (solo, self-hosted, no-auth; users preview only their own trusted dev servers). `allow-same-origin` is required for preview functionality (storage/cookies/HMR/login state).
+**Current design:** Each preview is `<slug>.<preview-host>`, a per-link origin foreign to the app and to every other preview, opened top-level in a new tab. The hub forwards only to a machine linked to the project over the reverse-connect tunnel (or `127.0.0.1:<port>` in solo mode); there is no direct fetch of caller-supplied hosts. Auth is a one-time ticket exchanged for a signed `HttpOnly` cookie scoped to that one host; the cookie authorizes one slug's proxy and nothing else. Under `--auth` with no preview host the feature is off (fail closed). Preview hosts are dispatched before Fastify, so no app route, hook or Clerk credential is evaluated on them. The preview domain must not be a subdomain of the app domain (Clerk parent-domain cookies). Design: [preview-links-design.md](preview-links-design.md).
 
-**Future Hardening (before hosted multi-tenant `--auth`):** Serve the proxy from a separate origin so `allow-same-origin` can stay without exposing the main app origin/token. Full design and implementation checklist: [browser-preview-origin-isolation.md](browser-preview-origin-isolation.md).
+**Residual:** a user previewing a hostile dev server exposes only that preview's origin. Bodies are buffered in memory (16 MB cap).
 
-## Browser Preview Proxy SSRF (Server-Side Egress)
-
-**Location:** `packages/vibedeckx/src/routes/browser-proxy-routes.ts` (direct-fetch branch of the HTTP/WS proxy), guard in `packages/vibedeckx/src/utils/ssrf-guard.ts`.
-
-**Issue:** The proxy's direct branch makes the control-plane server connect to the target URL and returns the body (full-read SSRF) — reaching cloud metadata (`169.254.169.254`), internal services, and loopback. Distinct from, and not addressed by, the origin-isolation fix above (that is browser-side; this is server-side egress).
-
-**Status:** **Fixed** for hosted (`--auth`) mode — outbound requests on the direct branch are filtered (scheme allowlist + private/loopback/link-local/metadata IP block + DNS-rebinding pinning + per-redirect re-validation). Off in solo so `localhost`/LAN preview keeps working. Reverse-connect previews are unaffected (they tunnel to the user's own machine). Design + impact: [browser-preview-ssrf.md](browser-preview-ssrf.md).

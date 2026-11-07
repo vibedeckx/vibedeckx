@@ -8,7 +8,8 @@ import type { EventBus } from "./event-bus.js";
 import type { ProxyManager } from "./utils/proxy-manager.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { ReverseConnectManager } from "./reverse-connect-manager.js";
-import type { BrowserManager } from "./browser-manager.js";
+import type { PreviewHostConfig } from "./preview/preview-host.js";
+import type { PreviewAuth } from "./preview/preview-auth.js";
 import type { RemoteExecutorStarts } from "./remote-executor-starts.js";
 import type { RemoteExecutorMonitor } from "./remote-executor-monitor.js";
 import type { SchedulerService } from "./scheduler.js";
@@ -36,6 +37,12 @@ export interface RemoteSessionInfo {
   branch?: string | null;
 }
 
+/** Preview links (docs/preview-links-design.md): host config + ticket/cookie authority. */
+export interface PreviewLinkService {
+  config: PreviewHostConfig;
+  auth: PreviewAuth;
+}
+
 declare module "fastify" {
   interface FastifyInstance {
     storage: Storage;
@@ -60,7 +67,8 @@ declare module "fastify" {
     isReverseConnectWorker: boolean;
     /** Build fingerprint of the UI assets this server serves; undefined = API-only or pre-build-id bundle. */
     uiBuildId: string | undefined;
-    browserManager: BrowserManager;
+    /** Null when no preview host is configured (feature off). */
+    previewLinks: PreviewLinkService | null;
     scheduler: SchedulerService;
     notificationService: NotificationService;
     remoteNotificationSync: RemoteNotificationSync;

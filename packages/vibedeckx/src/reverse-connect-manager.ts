@@ -18,6 +18,10 @@ export interface RawHttpResponse {
   status: number;
   headers: Record<string, string>;
   body: string;
+  /** "base64" when `body` carries raw bytes; absent for text. */
+  encoding?: "base64";
+  /** Each Set-Cookie header separately (see HttpResponseFrame.setCookies). */
+  setCookies?: string[];
 }
 
 interface PendingRawRequest {
@@ -188,8 +192,9 @@ export class ReverseConnectManager {
   }
 
   /**
-   * Send an HTTP request and return the raw response (body as string, headers intact).
-   * Used by the browser proxy to forward HTML/CSS/JS without JSON parsing.
+   * Send an HTTP request and return the raw response (headers intact, body as
+   * the worker sent it — `encoding: "base64"` when it carried bytes). Used by
+   * the preview proxy to forward dev-server traffic without JSON parsing.
    */
   async sendRawHttpRequest(
     remoteServerId: string,
@@ -199,6 +204,7 @@ export class ReverseConnectManager {
     body?: string,
     timeoutMs = DEFAULT_HTTP_TIMEOUT_MS,
     port?: number,
+    bodyEncoding?: "base64",
   ): Promise<RawHttpResponse> {
     const conn = this.connections.get(this.resolveId(remoteServerId));
     if (!conn || conn.ws.readyState !== 1) {
@@ -213,6 +219,7 @@ export class ReverseConnectManager {
       path,
       headers: headers ?? {},
       body,
+      ...(bodyEncoding ? { encoding: bodyEncoding } : {}),
       port,
     };
 
@@ -227,11 +234,18 @@ export class ReverseConnectManager {
     });
   }
 
-  openVirtualChannel(remoteServerId: string, channelId: string, path: string, query?: string): void {
+  openVirtualChannel(remoteServerId: string, channelId: string, path: string, query?: string, port?: number, protocols?: string): void {
     const conn = this.connections.get(this.resolveId(remoteServerId));
     if (!conn || conn.ws.readyState !== 1) return;
 
-    const frame: WsOpenFrame = { type: "ws_open", channelId, path, query };
+    const frame: WsOpenFrame = {
+      type: "ws_open",
+      channelId,
+      path,
+      query,
+      ...(port ? { port } : {}),
+      ...(protocols ? { protocols } : {}),
+    };
     conn.ws.send(JSON.stringify(frame));
   }
 
@@ -273,7 +287,7 @@ export class ReverseConnectManager {
 
     switch (frame.type) {
       case "http_response": {
-        // Check raw requests first (browser proxy)
+        // Check raw requests first (preview proxy)
         const pendingRaw = conn.pendingRawRequests.get(frame.requestId);
         if (pendingRaw) {
           clearTimeout(pendingRaw.timer);
@@ -283,6 +297,8 @@ export class ReverseConnectManager {
             status: frame.status,
             headers: frame.headers ?? {},
             body: frame.body ?? "",
+            ...(frame.encoding ? { encoding: frame.encoding } : {}),
+            ...(frame.setCookies ? { setCookies: frame.setCookies } : {}),
           });
           break;
         }

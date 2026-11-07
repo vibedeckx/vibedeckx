@@ -50,8 +50,6 @@ export type AgentWsMessage =
   | { taskCompleted: { duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number; summaryText?: string; turnEndEntryIndex?: number; workflowSuppressed?: boolean } }
   | { processAlive: { alive: boolean } }
   | { branchActivity: { activity: "idle" | "working" | "completed" | "stopped"; since: number } }
-  | { browserCommand: BrowserCommand }
-  | { openPreviewFrame: { projectId: string; url: string } }
   | { titleUpdated: { title: string } }
   // Live background-task set (Claude Code `background_tasks_changed`). Sent on
   // every change AND once at subscribe time — the harness only pushes on
@@ -75,31 +73,6 @@ export type AgentWsMessage =
   // which is also the truth: it has no stop route either.
   | { backgroundTasks: { tasks: BackgroundTask[]; turnParked: boolean; parkDeadlineAt: number | null; canStopTasks: boolean } }
   | { workflowRunUpdated: WorkflowRun };
-
-/**
- * Browser command sent from backend to frontend via WebSocket.
- * Frontend forwards to iframe's injected script via postMessage.
- */
-export interface BrowserCommand {
-  id: string;
-  action: "click" | "fill" | "select" | "pressKey" | "getText" | "getHTML" | "querySelector";
-  selector?: string;
-  value?: string;
-  key?: string;
-}
-
-/**
- * Browser command result sent from frontend back to backend via WebSocket.
- */
-export interface BrowserCommandResult {
-  id: string;
-  success: boolean;
-  error?: string;
-  content?: string;
-  found?: boolean;
-  tag?: string;
-  text?: string;
-}
 
 // ============ Conversation Patch Builder ============
 

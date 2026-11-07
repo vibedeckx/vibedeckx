@@ -407,6 +407,21 @@ export interface AgentSessionRemoteGrantsTable {
   granted_at: string;
 }
 
+/**
+ * Preview links (docs/preview-links-design.md): `<slug>.<preview-host>` serves
+ * localhost:<port> of `target_id` ("local" or a remote_servers.id — no FK, the
+ * local sentinel has no row; remoteServers.delete removes a machine's rows).
+ */
+export interface PreviewLinksTable {
+  slug: string;
+  project_id: string;
+  target_id: string;
+  port: number;
+  user_id: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
 export interface AgentSessionRemoteTouchesTable {
   session_id: string;
   remote_server_id: string;
@@ -737,6 +752,7 @@ export interface DB {
   remote_session_mappings: RemoteSessionMappingsTable;
   remote_session_creation_intents: RemoteSessionCreationIntentsTable;
   agent_session_remote_grants: AgentSessionRemoteGrantsTable;
+  preview_links: PreviewLinksTable;
   agent_session_remote_touches: AgentSessionRemoteTouchesTable;
   agent_session_retention_holds: AgentSessionRetentionHoldsTable;
   remote_reviewer_creation_intents: RemoteReviewerCreationIntentsTable;

@@ -1,6 +1,6 @@
 # Browser Preview Origin Isolation (Design)
 
-Status: **Planned** — not needed for current deployment, required before hosted multi-tenant `--auth`.
+Status: **Superseded** by [preview-links-design.md](preview-links-design.md). The same-origin proxy and the iframe this document hardens were removed; previews now open top-level on a per-link origin. Kept for the threat analysis.
 
 ## Background
 

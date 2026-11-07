@@ -230,6 +230,38 @@ export interface AppConfig {
    * than granting something nothing will honour.
    */
   crossRemoteSessionGrants?: boolean;
+  /**
+   * Whether the server serves preview links (a `--preview-host` is set). False
+   * or absent: the Browser tab explains how to enable them instead.
+   */
+  previewLinks?: boolean;
+}
+
+// ============ Preview links ============
+
+/** One `<slug>.<preview-host>` origin serving `localhost:<port>` of a machine. */
+export interface PreviewLink {
+  slug: string;
+  /** "local" for this server's machine, else a remote server id. */
+  targetId: string;
+  targetName: string;
+  port: number;
+  url: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+}
+
+export interface PreviewOpenResult {
+  link: PreviewLink;
+  /** One-time sign-in URL: open this (top-level), it sets the preview cookie and lands on the page. */
+  authUrl: string;
+}
+
+export class PreviewLinkError extends Error {
+  constructor(message: string, readonly errorCode?: string) {
+    super(message);
+    this.name = "PreviewLinkError";
+  }
 }
 
 let _cachedConfig: AppConfig | null = null;
@@ -3667,75 +3699,49 @@ export const api = {
     }
   },
 
-  // ---- Browser Preview ----
+  // ---- Preview links (docs/preview-links-design.md) ----
 
-  async startBrowser(projectId: string, branch?: string): Promise<{ id: string; status: string; url: string }> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/browser`, {
+  async getPreviewLinks(projectId: string): Promise<{ enabled: boolean; links: PreviewLink[] }> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/preview-links`);
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ error: "Failed to load preview links" }));
+      throw new Error(error.error || "Failed to load preview links");
+    }
+    return res.json();
+  },
+
+  /** Create (or reuse) the link for a machine+port; the result carries a one-time sign-in URL to open. */
+  async createPreviewLink(projectId: string, targetId: string, port: number): Promise<PreviewOpenResult> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/preview-links`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ branch }),
+      body: JSON.stringify({ targetId, port }),
     });
     if (!res.ok) {
-      const error = await res.json().catch(() => ({ error: "Failed to start browser" }));
-      throw new Error(error.error || "Failed to start browser");
+      const error = await res.json().catch(() => ({ error: "Failed to create preview link" })) as { error?: string; errorCode?: string };
+      throw new PreviewLinkError(error.error || "Failed to create preview link", error.errorCode);
     }
     return res.json();
   },
 
-  async getBrowserStatus(projectId: string): Promise<{ id: string; status: string; url: string } | null> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/browser`);
-    if (res.status === 404) return null;
+  /** A fresh one-time sign-in URL for an existing link. */
+  async openPreviewLink(slug: string): Promise<PreviewOpenResult> {
+    const res = await authFetch(`${getApiBase()}/api/preview-links/${encodeURIComponent(slug)}/open`, { method: "POST" });
     if (!res.ok) {
-      throw new Error("Failed to get browser status");
+      const error = await res.json().catch(() => ({ error: "Failed to open preview link" })) as { error?: string; errorCode?: string };
+      throw new PreviewLinkError(error.error || "Failed to open preview link", error.errorCode);
     }
     return res.json();
   },
 
-  async stopBrowser(projectId: string): Promise<void> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/browser`, {
+  async deletePreviewLink(projectId: string, slug: string): Promise<void> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/preview-links/${encodeURIComponent(slug)}`, {
       method: "DELETE",
     });
     if (!res.ok && res.status !== 404) {
-      const error = await res.json().catch(() => ({ error: "Failed to stop browser" }));
-      throw new Error(error.error || "Failed to stop browser");
+      const error = await res.json().catch(() => ({ error: "Failed to delete preview link" }));
+      throw new Error(error.error || "Failed to delete preview link");
     }
-  },
-
-  async navigateBrowser(projectId: string, url: string): Promise<{ title: string; url: string }> {
-    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/browser/navigate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ error: "Navigation failed" }));
-      throw new Error(error.error || "Navigation failed");
-    }
-    return res.json();
-  },
-
-  async reportBrowserError(projectId: string, error: { type: string; data: Record<string, unknown> }): Promise<void> {
-    await authFetch(`${getApiBase()}/api/projects/${projectId}/browser/error`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(error),
-    }).catch(() => { /* best effort */ });
-  },
-
-  getBrowserProxyUrl(projectId: string, targetUrl: string): string {
-    return `${getApiBase()}/api/projects/${projectId}/browser/proxy/${encodeURIComponent(targetUrl)}`;
-  },
-
-  /**
-   * Origin that serves the browser-proxy iframes. Used to scope the postMessage
-   * command channel so commands target — and results are accepted from — only the
-   * proxy origin (never "*"). Dev serves the proxy from :5173; production bundles
-   * it same-origin.
-   */
-  getBrowserProxyOrigin(): string {
-    const base = getApiBase();
-    if (base) return new URL(base).origin;
-    return typeof window !== "undefined" ? window.location.origin : "";
   },
 
   // ---- Workflow Runs ----

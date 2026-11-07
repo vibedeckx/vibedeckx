@@ -128,13 +128,12 @@ export type TurnOpenedBy = "user" | "listened_event";
 
 /**
  * Something entering the conversation. `result`: the outcome of work this chat
- * started. `notice`: an event the user chose to listen to. `browser`: a
- * page-controlled event, summarized in a turn of its own without tools.
- * `nudge`: the turn contract re-driving the model. `wait_timeout`: a `wait`
- * call ran out with work still running.
+ * started. `notice`: an event the user chose to listen to. `nudge`: the turn
+ * contract re-driving the model. `wait_timeout`: a `wait` call ran out with
+ * work still running.
  */
 export interface TurnArrival {
-  source: "user" | "result" | "notice" | "browser" | "nudge" | "wait_timeout";
+  source: "user" | "result" | "notice" | "nudge" | "wait_timeout";
   content: string;
   /** Provenance of an agent-task completion, carried onto the user entry. */
   eventMeta?: { kind: "agent_task_completed"; sessionId: string; turnEndEntryIndex: number };
@@ -158,8 +157,6 @@ export interface CommanderTurn {
    * watched, so outbound agent actions in it need approval.
    */
   userPresent: boolean;
-  /** A turn summarizing untrusted browser events: no tools, and nothing else joins it. */
-  toolless: boolean;
   /** Arrivals not yet shown to the model; the next stream starts with them. */
   inbox: TurnArrival[];
   streams: number;
@@ -181,7 +178,6 @@ export function openTurn(first: TurnArrival, id: string, now = Date.now()): Comm
     startedAt: now,
     status: "running",
     userPresent: false,
-    toolless: first.source === "browser",
     inbox: [first],
     streams: 0,
     startedWork: false,
@@ -190,9 +186,13 @@ export function openTurn(first: TurnArrival, id: string, now = Date.now()): Comm
   };
 }
 
-/** Whether an arrival may join the turn, or has to wait for the next one. */
-export function turnAccepts(turn: CommanderTurn, arrival: TurnArrival): boolean {
-  return !turn.toolless && arrival.source !== "browser";
+/**
+ * Whether an arrival may join the turn, or has to wait for the next one. Every
+ * source joins today; the hook stays so a future untrusted source (the old
+ * page-controlled browser events were one) can be kept out of a turn again.
+ */
+export function turnAccepts(_turn: CommanderTurn, _arrival: TurnArrival): boolean {
+  return true;
 }
 
 /**

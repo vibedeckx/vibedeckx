@@ -668,8 +668,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
               // Chat sessions only accept string content
               const chatContent = typeof message.content === "string" ? message.content : message.content.filter((p: { type: string; text: string }) => p.type === "text").map((p: { text: string }) => p.text).join("\n");
               fastify.chatSessionManager.sendMessage(sessionId, chatContent);
-            } else if (message.type === "browser_result") {
-              fastify.chatSessionManager.handleBrowserResult(message.result);
             }
           } catch (error) {
             console.error("[ChatWS] Failed to parse message:", error);

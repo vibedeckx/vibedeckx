@@ -122,6 +122,21 @@ export type ProjectRemoteRemoveOutcome =
   | { outcome: "not-found" }
   | { outcome: "in-use"; usage: RemoteUsage };
 
+/**
+ * A preview link (docs/preview-links-design.md): `<slug>.<preview-host>`
+ * serves `localhost:<port>` of `target_id` — "local" for the hub's own machine
+ * or a remote server id — for the project's owner.
+ */
+export interface PreviewLink {
+  slug: string;
+  project_id: string;
+  target_id: string;
+  port: number;
+  user_id: string;
+  created_at: string;
+  last_used_at: string | null;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -1138,6 +1153,21 @@ export interface Storage {
     /** Whole-list replacement in one transaction; `[]` clears every grant. */
     replace(sessionId: string, userId: string, remoteServerIds: string[]): Promise<void>;
     deleteBySession(sessionId: string): Promise<void>;
+  };
+  /**
+   * Preview links (docs/preview-links-design.md). `getBySlug` is unscoped on
+   * purpose: the preview proxy has only a hostname and compares the row's
+   * `user_id` with its cookie itself. Everything user-facing scopes by user.
+   */
+  previewLinks: {
+    getBySlug(slug: string): Promise<PreviewLink | undefined>;
+    listByProject(projectId: string, userId?: string): Promise<PreviewLink[]>;
+    /** One row per (project, target, port): returns the existing link or a new slug. */
+    upsert(opts: { projectId: string; targetId: string; port: number; userId: string }): Promise<PreviewLink>;
+    touch(slug: string): Promise<void>;
+    delete(slug: string, userId?: string): Promise<boolean>;
+    /** Every link of one machine — called when a remote server is deleted. */
+    deleteByTarget(targetId: string): Promise<void>;
   };
   /**
    * Machines a session's gateway calls actually ran on — the counterpart of
