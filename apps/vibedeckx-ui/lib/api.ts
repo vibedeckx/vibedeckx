@@ -232,7 +232,7 @@ export interface AppConfig {
   crossRemoteSessionGrants?: boolean;
   /**
    * Whether the server serves preview links (a `--preview-host` is set). False
-   * or absent: the Browser tab explains how to enable them instead.
+   * or absent: the Preview tab explains how to enable them instead.
    */
   previewLinks?: boolean;
 }

@@ -23,7 +23,7 @@ vi.mock("@/components/terminal", () => ({
 }));
 
 vi.mock("@/components/preview", () => ({
-  PreviewPanel: () => <div>Browser panel</div>,
+  PreviewPanel: () => <div>Preview panel</div>,
 }));
 
 const filesNav = vi.hoisted(() => ({ requests: [] as Array<{ path: string; line: number | null; nonce: number } | null | undefined> }));
@@ -219,12 +219,12 @@ describe("RightPanel", () => {
       setPlatform("MacIntel");
       mountPanel();
 
-      pressKey({ code: "KeyB", ctrlKey: true, shiftKey: true });
-      expect(activeTabLabel()).toBe("Browser");
+      pressKey({ code: "KeyP", ctrlKey: true, shiftKey: true });
+      expect(activeTabLabel()).toBe("Preview");
 
       // The Windows combo must not fire on mac.
       pressKey({ code: "KeyD", ctrlKey: true, altKey: true });
-      expect(activeTabLabel()).toBe("Browser");
+      expect(activeTabLabel()).toBe("Preview");
     });
 
     it("ignores shortcuts when extra modifiers are held or the panel is inactive", () => {

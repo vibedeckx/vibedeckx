@@ -23,7 +23,7 @@ Each tab is addressed by its label's first letter:
 | Executors | ⌃⇧E | Ctrl+Alt+E |
 | Diff | ⌃⇧D | Ctrl+Alt+D |
 | Terminal | ⌃⇧T | Ctrl+Alt+T |
-| Browser | ⌃⇧B | Ctrl+Alt+B |
+| Preview | ⌃⇧P | Ctrl+Alt+P |
 | Files | ⌃⇧F | Ctrl+Alt+F |
 
 Matching uses `event.code` (physical key), so IMEs and non-latin layouts

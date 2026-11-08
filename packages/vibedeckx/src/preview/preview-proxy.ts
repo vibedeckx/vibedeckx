@@ -155,7 +155,7 @@ export function createPreviewProxy(deps: PreviewProxyDeps): PreviewProxy {
     const resolved = await resolve(req);
     if (resolved.kind === "no-slug") return sendPage(res, 404, "Not found", "This is not a preview host.");
     if (resolved.kind === "not-found") {
-      return sendPage(res, 404, "Preview link not found", "This preview link no longer exists. Create a new one from the project's Browser tab.");
+      return sendPage(res, 404, "Preview link not found", "This preview link no longer exists. Create a new one from the project's Preview tab.");
     }
     if (resolved.kind === "unauthorized") {
       return sendPage(res, 401, "Sign in to open this preview", "This preview belongs to a Vibedeckx project. Open it from Vibedeckx so your browser can prove who you are.", signInUrl(resolved.slug));

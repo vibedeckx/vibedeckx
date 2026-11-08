@@ -29,7 +29,7 @@ describe("matchTabShortcut", () => {
     setPlatform("Win32");
     expect(matchTabShortcut(key("KeyA", { ctrlKey: true, altKey: true }))).toBe("agent");
     expect(matchTabShortcut(key("KeyD", { ctrlKey: true, altKey: true }))).toBe("diff");
-    expect(matchTabShortcut(key("KeyB", { ctrlKey: true, altKey: true }))).toBe("preview");
+    expect(matchTabShortcut(key("KeyP", { ctrlKey: true, altKey: true }))).toBe("preview");
     expect(matchTabShortcut(key("KeyZ", { ctrlKey: true, altKey: true }))).toBeNull();
     // Mac combo and extra modifiers must not match
     expect(matchTabShortcut(key("KeyA", { ctrlKey: true, shiftKey: true }))).toBeNull();

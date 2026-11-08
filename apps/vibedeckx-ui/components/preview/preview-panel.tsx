@@ -72,7 +72,7 @@ function openPreviewTab(mint: () => Promise<string>): Promise<void> {
 }
 
 /**
- * The Browser tab (docs/preview-links-design.md): a dev server running on one
+ * The Preview tab (docs/preview-links-design.md): a dev server running on one
  * of the project's machines, opened at its own origin in a new tab. Nothing is
  * embedded here — the preview origin and the app origin are deliberately
  * foreign to each other.

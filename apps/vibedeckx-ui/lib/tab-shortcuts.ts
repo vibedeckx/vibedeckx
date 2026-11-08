@@ -15,7 +15,7 @@
 // terminal on many Linux desktops, AltGr (= Ctrl+Alt) types symbols on some
 // European layouts, some IMEs bind ⌃⇧<letter> (e.g. Sogou's ⌃⇧F), and macOS
 // text fields lose the ⌃⇧A/E select-to-paragraph chords. Also: none of these
-// fire while focus is inside the Browser preview iframe (keyboard events
+// fire while focus is inside a preview page (keyboard events
 // don't cross document boundaries) — same pre-existing limitation as ⌘K/⌘J.
 
 export type TabShortcutTarget = 'agent' | 'executors' | 'diff' | 'terminal' | 'preview' | 'files';
@@ -30,7 +30,7 @@ export const TAB_SHORTCUTS = [
   { id: 'executors', label: 'Executors', code: 'KeyE' },
   { id: 'diff', label: 'Diff', code: 'KeyD' },
   { id: 'terminal', label: 'Terminal', code: 'KeyT' },
-  { id: 'preview', label: 'Browser', code: 'KeyB' },
+  { id: 'preview', label: 'Preview', code: 'KeyP' },
   { id: 'files', label: 'Files', code: 'KeyF' },
 ] as const satisfies ReadonlyArray<{ id: TabShortcutTarget; label: string; code: string }>;
 

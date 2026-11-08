@@ -190,7 +190,7 @@ const startCommand = buildCommand({
       process.exit(1);
     }
     if (authEnabled && !previewHost) {
-      console.log("Preview links are off: set --preview-host (or VIBEDECKX_PREVIEW_HOST) to a wildcard domain pointing at this server to enable the Browser tab.");
+      console.log("Preview links are off: set --preview-host (or VIBEDECKX_PREVIEW_HOST) to a wildcard domain pointing at this server to enable the Preview tab.");
     }
 
     // Binding beyond loopback puts the (per-route-unauthenticated) executor API

@@ -3,11 +3,11 @@ title: Preview a dev server
 description: Open a dev server running on any of your connected machines, from any browser.
 ---
 
-An agent often leaves a dev server running on the machine it works on. The **Browser** tab in a workspace lets you open that server in your own browser, even when the machine is a box in another room or a VM in the cloud, and even from your phone.
+An agent often leaves a dev server running on the machine it works on. The **Preview** tab in a workspace lets you open that server in your own browser, even when the machine is a box in another room or a VM in the cloud, and even from your phone.
 
 ## Open a preview
 
-1. In a workspace, open the **Browser** tab.
+1. In a workspace, open the **Preview** tab.
 2. Pick the machine the server runs on and type its port (for example `3000`).
 3. Click **Open**.
 
@@ -40,4 +40,4 @@ Previews need a domain of their own, separate from the one the app runs on, with
 vibedeckx --auth --preview-host vdxpreview.example.com
 ```
 
-or set `VIBEDECKX_PREVIEW_HOST`. Without it, the Browser tab explains that previews are off. Running without `--auth` on your own computer needs no setup: previews use `preview.localhost`, which browsers resolve to your machine.
+or set `VIBEDECKX_PREVIEW_HOST`. Without it, the Preview tab explains that previews are off. Running without `--auth` on your own computer needs no setup: previews use `preview.localhost`, which browsers resolve to your machine.

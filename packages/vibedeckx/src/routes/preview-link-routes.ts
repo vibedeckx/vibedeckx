@@ -28,7 +28,7 @@ export interface PreviewLinkView {
   lastUsedAt: string | null;
 }
 
-/** What the Browser tab needs to open a link: the origin and the one-time sign-in URL. */
+/** What the Preview tab needs to open a link: the origin and the one-time sign-in URL. */
 export interface PreviewOpenResult {
   link: PreviewLinkView;
   authUrl: string;
@@ -144,7 +144,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  // A fresh sign-in ticket for an existing link: the Browser tab's Open button
+  // A fresh sign-in ticket for an existing link: the Preview tab's Open button
   // and the `?preview=<slug>` bounce a bookmarked preview URL lands on.
   fastify.post<{ Params: { slug: string } }>("/api/preview-links/:slug/open", async (req, reply) => {
     const userId = requireAuth(req, reply);

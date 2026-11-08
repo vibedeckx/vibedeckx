@@ -379,7 +379,7 @@ export const createServer = async (opts: {
     // solo/no-auth mode (the mint refuses an unscoped token), so the UI hides
     // the entry rather than offering a control that cannot do anything.
     crossRemoteSessionGrants: crossRemoteMcpEnabled() && authEnabled,
-    // Preview links (the Browser tab). Off when no preview host is configured
+    // Preview links (the Preview tab). Off when no preview host is configured
     // — the UI then explains how to enable it instead of offering dead controls.
     previewLinks: previewHost !== null,
   }));
