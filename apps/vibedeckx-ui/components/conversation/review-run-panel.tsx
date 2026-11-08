@@ -8,8 +8,9 @@ import { useNotificationInbox } from "@/hooks/notification-inbox-context";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MessageResponse } from "@/components/ai-elements/message";
+import { Shimmer } from "@/components/ai-elements/shimmer";
 import { Hint } from "@/components/ui/hint";
-import { AlarmClock, AlertTriangle, Check, ChevronDown, ChevronRight, Eye, FileCheck, FileText, Loader2, Pause, Pencil, Play, X } from "lucide-react";
+import { AlarmClock, AlertTriangle, Check, ChevronDown, ChevronRight, Eye, FileCheck, FileText, Pause, Pencil, Play, X } from "lucide-react";
 
 /** `schedule` = set or clear a loop gate's scheduled resume (not a gate action server-side). */
 type GateAction = "approve" | "finalize" | "cancel" | "accept" | "rereview" | "pause" | "resume" | "schedule" | "dismiss";
@@ -357,13 +358,19 @@ export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, on
               <span className={`relative inline-flex h-2 w-2 rounded-full ${tone}`} />
             </span>
             <span className="shrink-0 rounded-sm bg-muted px-1.5 py-px font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Review</span>
-            <span className="min-w-0 truncate font-medium" title={run.review_focus ?? undefined}>
-              {run.review_focus || "Code review"}
-            </span>
+          </div>
+          {/* The focus sits under the tag rather than beside it, so it shares
+              the status line's indent instead of starting after the tag. */}
+          <div className="truncate pl-4 font-medium" title={run.review_focus ?? undefined}>
+            {run.review_focus || "Code review"}
           </div>
           <div className="flex min-w-0 items-center gap-1.5 pl-4 text-muted-foreground" style={meta}>
-            {working && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
-            {statusText && <span className={`min-w-0 truncate ${waitingOnYou ? "text-amber-700 dark:text-amber-400" : ""}`}>{statusText}</span>}
+            {/* Working states shimmer instead of carrying a spinner: the pulsing
+                dot already says "in progress", and a leading icon would push the
+                text off the focus line's indent. */}
+            {statusText && (working
+              ? <Shimmer as="span" className="min-w-0 truncate">{statusText}</Shimmer>
+              : <span className={`min-w-0 truncate ${waitingOnYou ? "text-amber-700 dark:text-amber-400" : ""}`}>{statusText}</span>)}
             {round && (
               <>
                 <span aria-hidden>·</span>
@@ -388,11 +395,6 @@ export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, on
       {run.status === "preparing" && (
         <div className="rounded-md bg-muted/50 px-2.5 py-1.5 text-muted-foreground" style={meta}>
           Distilling context and starting the reviewer
-        </div>
-      )}
-      {run.status === "waiting_reviewer" && (
-        <div className="rounded-md bg-muted/50 px-2.5 py-1.5 text-muted-foreground" style={meta}>
-          The reviewer session is working
         </div>
       )}
       {run.status === "discussing" && (
@@ -636,8 +638,10 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
             <span className="min-w-0 truncate font-medium" title={name}>{name}</span>
           </div>
           <div className="flex min-w-0 items-center gap-1.5 pl-4 text-muted-foreground" style={meta}>
-            {working && <Loader2 className="h-3 w-3 shrink-0 animate-spin" />}
-            {statusText && <span className={`min-w-0 truncate ${gate ? "text-amber-700 dark:text-amber-400" : ""}`}>{statusText}</span>}
+            {/* Shimmer, not a spinner — same reasoning as ReviewCard. */}
+            {statusText && (working
+              ? <Shimmer as="span" className="min-w-0 truncate">{statusText}</Shimmer>
+              : <span className={`min-w-0 truncate ${gate ? "text-amber-700 dark:text-amber-400" : ""}`}>{statusText}</span>)}
             {capNote && (
               <>
                 <span aria-hidden>·</span>
