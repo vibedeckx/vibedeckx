@@ -15,9 +15,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { api, type Task, type TaskPriority } from "@/lib/api";
+import { api, TaskBatchRejectedError, type Task, type TaskPriority } from "@/lib/api";
 import { cn } from "@/lib/utils";
-import { noteTaskCreated, useProposedTasks } from "@/hooks/use-proposed-tasks";
+import { noteTaskCreated, noteTasksCreated, useProposedTasks } from "@/hooks/use-proposed-tasks";
 import { takeProposalCardFocus } from "@/lib/proposal-card-focus";
 import { priorityConfig, priorityOptions } from "@/components/task/task-utils";
 import { TaskParentSelect } from "@/components/task/task-parent-select";
@@ -147,8 +147,13 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
   /** Rows showing the editor. */
   const [editing, setEditing] = useState<Set<number>>(() => new Set());
   const [submitting, setSubmitting] = useState<Set<number>>(() => new Set());
-  /** "Create all" is working through the rows, one at a time. */
+  /** "Create all" is in flight: one request for every pending row. */
   const [creatingAll, setCreatingAll] = useState(false);
+  /**
+   * Why the last "Create all" failed: refused by the hub (nothing created), or
+   * unconfirmed (no answer — it may have committed).
+   */
+  const [createAllError, setCreateAllError] = useState<{ message: string; rejected: boolean } | null>(null);
   const [errors, setErrors] = useState<Map<number, string>>(() => new Map());
   const { byItem, tasks, loading, loadError, retry } = useProposedTasks(projectId, sessionId, toolUseId);
   const sharedParentId = sharedChoice !== undefined
@@ -227,12 +232,39 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
   };
 
   const pendingIndices = fields.map((_, i) => i).filter((i) => !byItem.has(i));
-  // One at a time: a task's position is taken when its insert lands, so
-  // concurrent creates would file the rows in whatever order they arrive.
+  // One request, so the rows are filed in card order and either all of them
+  // appear or none do.
   const createAll = async () => {
+    if (!canCreate || creatingAll) return;
+    const indices = pendingIndices;
+    const missing = indices.filter((i) => !fields[i].description.trim());
+    if (missing.length > 0) {
+      setErrors((prev) => {
+        const next = new Map(prev);
+        for (const i of missing) next.set(i, "Description is required");
+        return next;
+      });
+      setEditing((prev) => new Set([...prev, ...missing]));
+      return;
+    }
     setCreatingAll(true);
+    setCreateAllError(null);
     try {
-      for (const index of pendingIndices) await create(index);
+      const tasks = await api.createTasks(projectId, indices.map((index) => ({
+        title: fields[index].title.trim() || undefined,
+        description: fields[index].description,
+        priority: fields[index].priority,
+        source: { session_id: sessionId, tool_use_id: toolUseId, item_index: index },
+        parent_id: parentFor(index),
+      })));
+      noteTasksCreated(projectId, tasks);
+      setErrors(new Map());
+      setEditing(new Set());
+    } catch (err) {
+      const rejected = err instanceof TaskBatchRejectedError;
+      setCreateAllError({ message: err instanceof Error ? err.message : "Failed to create tasks", rejected });
+      // Rows that did get created flip once the list says so.
+      if (!rejected) retry();
     } finally {
       setCreatingAll(false);
     }
@@ -306,7 +338,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
                 setParentChoices(new Map());
               }}
               sessionId={sessionId}
-              disabled={submitting.size > 0}
+              disabled={submitting.size > 0 || creatingAll}
               align="end"
               className="h-[26px] max-w-[230px] bg-card text-[11.5px]"
             />
@@ -322,6 +354,8 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
             );
           }
           const busy = submitting.has(index);
+          /** Locked while "Create all" runs; only the footer button spins. */
+          const locked = busy || creatingAll;
           const error = errors.get(index);
           const missing = !item.description.trim();
           const ownParent = parentFor(index);
@@ -332,7 +366,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
               className={cn("h-6 gap-1 rounded-[7px] px-2.5 text-[11.5px]", accent && ACCENT_BUTTON, inRowWidth && CREATE_WIDTH)}
               aria-label="Create task"
               onClick={() => void create(index)}
-              disabled={!canCreate || busy || loading || (editing.has(index) && missing)}
+              disabled={!canCreate || locked || loading || (editing.has(index) && missing)}
             >
               {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
               {busy ? "Creating…" : error && !missing ? "Retry" : "Create"}
@@ -342,7 +376,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
             <PrioritySelect
               value={item.priority}
               onChange={(p) => updateField(index, { priority: p })}
-              disabled={busy}
+              disabled={locked}
             />
           );
           const errorLine = error && (
@@ -354,7 +388,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
 
           if (editing.has(index)) {
             return (
-              <div key={index} className={cn(ROW_GRID, "bg-muted/40 pt-[11px] pb-3", busy && "opacity-70")}>
+              <div key={index} className={cn(ROW_GRID, "bg-muted/40 pt-[11px] pb-3", locked && "opacity-70")}>
                 <span className="pt-[7px] font-mono text-[10.5px] text-muted-foreground/70">{rowNumber(index)}</span>
                 <Input
                   value={item.title}
@@ -363,7 +397,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
                   className="h-[30px] rounded-lg bg-card text-[13px] font-medium"
                   aria-label="Task title"
                   ref={focusIfClicked(index, "title")}
-                  disabled={busy}
+                  disabled={locked}
                 />
                 <span className="flex items-center gap-1.5 self-start pt-[3px]">
                   {priority}
@@ -381,7 +415,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
                   aria-label="Task description"
                   aria-invalid={missing || undefined}
                   ref={focusIfClicked(index, "description")}
-                  disabled={busy}
+                  disabled={locked}
                 />
                 {errorLine ?? (missing && (
                   <p className="col-span-2 col-start-2 flex items-center gap-1.5 text-[11.5px] text-red-500">
@@ -398,7 +432,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
                         value={ownParent}
                         onChange={(parentId) => setParentChoices((prev) => new Map(prev).set(index, parentId))}
                         sessionId={sessionId}
-                        disabled={busy}
+                        disabled={locked}
                         className="h-6 max-w-56 bg-card text-[11px]"
                       />
                     </>
@@ -409,7 +443,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
                     size="sm"
                     className="h-6 px-2.5 text-[11.5px] text-muted-foreground"
                     onClick={() => setEditingRow(index, false)}
-                    disabled={busy}
+                    disabled={locked}
                   >
                     Collapse
                   </Button>
@@ -420,7 +454,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
           }
 
           return (
-            <div key={index} className={cn(ROW_GRID, "pt-[11px] pb-3", busy && "opacity-70")}>
+            <div key={index} className={cn(ROW_GRID, "pt-[11px] pb-3", locked && "opacity-70")}>
               <span className="pt-0.5 font-mono text-[10.5px] text-muted-foreground/70">{rowNumber(index)}</span>
               <button
                 type="button"
@@ -428,7 +462,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
                 title="Click to edit"
                 className="-mx-1 -my-px cursor-text rounded px-1 py-px text-left text-[13px] font-medium break-words text-foreground hover:bg-muted disabled:cursor-default"
                 onClick={() => startEditing(index, "title")}
-                disabled={busy}
+                disabled={locked}
               >
                 {item.title || <span className="text-muted-foreground">Untitled</span>}
               </button>
@@ -444,7 +478,7 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
                   TASK_MARKDOWN_CLASS,
                 )}
                 onClick={(e) => {
-                  if (busy || (e.target as Element).closest("a, button")) return;
+                  if (locked || (e.target as Element).closest("a, button")) return;
                   if (!window.getSelection()?.isCollapsed) return;
                   startEditing(index, "description");
                 }}
@@ -468,6 +502,17 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
           );
         })}
       </div>
+      {createAllError && !allFiled && (
+        <div className="flex items-start gap-1.5 border-t border-red-500/20 bg-red-500/5 px-3 py-2 text-[11.5px] break-words text-red-700 dark:text-red-400">
+          <TriangleAlert className="mt-px h-3 w-3 shrink-0" />
+          <span className="min-w-0">
+            {createAllError.rejected
+              ? `Couldn't create the tasks — none were created. ${createAllError.message}`
+              : `Couldn't confirm whether the tasks were created (${createAllError.message}). `
+                + "Any that were will show as created; trying again won't duplicate them."}
+          </span>
+        </div>
+      )}
       {fields.length > 1 && !allFiled && (
         <div className="flex items-center gap-2.5 border-t border-border/60 bg-muted/40 px-3 py-[9px]">
           <span className="flex items-center gap-2 text-[11px] text-muted-foreground">
@@ -492,8 +537,8 @@ export function TaskProposalUI({ input, toolUseId }: TaskProposalUIProps) {
               onClick={() => void createAll()}
               disabled={!canCreate || loading || creatingAll || creatingCount > 0}
             >
-              <ListPlus className="h-3 w-3" />
-              Create all {pendingIndices.length}
+              {creatingAll ? <Loader2 className="h-3 w-3 animate-spin" /> : <ListPlus className="h-3 w-3" />}
+              {creatingAll ? "Creating…" : `Create all ${pendingIndices.length}`}
             </Button>
           )}
         </div>

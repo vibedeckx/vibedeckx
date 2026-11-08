@@ -2228,6 +2228,11 @@ export interface Storage {
      * returns that task (a different id than `id` tells the caller so).
      */
     create: (opts: { id: string; project_id: string; title: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; source?: TaskSource | null; parent_id?: string | null }) => Promise<Task>;
+    /**
+     * `create` for each item, in order, in one transaction: positions follow
+     * the list, and a failure creates none of them. Results are in input order.
+     */
+    createMany: (items: Parameters<Storage["tasks"]["create"]>[0][]) => Promise<Task[]>;
     /** Tasks proposed from `sessionId` whose ids its agent hasn't been told yet, oldest first. */
     listUnreportedBySourceSession: (sessionId: string) => Promise<Task[]>;
     markSourceReported: (ids: string[]) => Promise<void>;

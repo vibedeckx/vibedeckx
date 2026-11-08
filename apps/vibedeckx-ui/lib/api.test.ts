@@ -12,6 +12,7 @@ import {
   startAgentSession,
   LIFECYCLE_RETRY_DELAYS_MS,
   SERVER_UNREACHABLE_MESSAGE,
+  TaskBatchRejectedError,
 } from "@/lib/api";
 
 // Build a JWT whose `exp` is `secondsFromNow` away (negative = already expired).
@@ -307,6 +308,39 @@ describe("removeProjectRemote", () => {
         message: "Project remote not found",
       });
     });
+  });
+});
+
+describe("createTasks", () => {
+  const failWith = async (status: number, body: unknown) => {
+    const originalFetch = global.fetch;
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status,
+      json: async () => {
+        if (body === undefined) throw new SyntaxError("Unexpected token <");
+        return body;
+      },
+    } as unknown as Response);
+    try {
+      return await api.createTasks("p1", [{ description: "x" }]).catch((err: unknown) => err);
+    } finally {
+      global.fetch = originalFetch;
+    }
+  };
+
+  it("reports a 4xx refusal as rejected: nothing was inserted", async () => {
+    const err = await failWith(400, { error: "Task 2: Parent task not found" });
+    expect(err).toBeInstanceOf(TaskBatchRejectedError);
+    expect((err as Error).message).toBe("Task 2: Parent task not found");
+  });
+
+  it("never reports a 5xx as rejected, even with a JSON error body — a gateway may answer after the commit", async () => {
+    for (const [status, body] of [[504, { error: "Gateway timeout" }], [502, { error: "x" }], [502, undefined]] as const) {
+      const err = await failWith(status, body);
+      expect(err, String(status)).toBeInstanceOf(Error);
+      expect(err, String(status)).not.toBeInstanceOf(TaskBatchRejectedError);
+    }
   });
 });
 

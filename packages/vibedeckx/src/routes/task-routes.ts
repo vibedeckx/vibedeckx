@@ -15,6 +15,9 @@ const SOURCE_ITEM_INDEX_MAX = 100;
 
 interface SourceBody { session_id?: unknown; tool_use_id?: unknown; item_index?: unknown }
 
+/** Most tasks one batch create may file; above PROPOSE_TASK_MAX_ITEMS. */
+const BATCH_CREATE_MAX = 20;
+
 /** Bounds the ancestor walk; far deeper than any tree a person keeps. */
 const PARENT_DEPTH_MAX = 64;
 
@@ -89,42 +92,36 @@ const routes: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  // Create task
-  fastify.post<{
-    Params: { projectId: string };
-    Body: {
-      title?: string; description: string; status?: string; priority?: string; assigned_branch?: string | null;
-      parent_id?: string | null;
-      /** Provenance of an agent proposal (propose_task); makes create idempotent. */
-      source?: SourceBody | null;
-    };
-  }>("/api/projects/:projectId/tasks", async (req, reply) => {
-    const userId = requireAuth(req, reply);
-    if (userId === null) return;
-    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
-    if (!project) {
-      return reply.code(404).send({ error: "Project not found" });
-    }
+  type CreateBody = {
+    title?: string; description: string; status?: string; priority?: string; assigned_branch?: string | null;
+    parent_id?: string | null;
+    /** Provenance of an agent proposal (propose_task); makes create idempotent. */
+    source?: SourceBody | null;
+  };
+  type CreateOpts = Parameters<typeof fastify.storage.tasks.create>[0];
 
-    const { title: providedTitle, description, status, priority } = req.body;
-    let { assigned_branch } = req.body;
-    if (!description) {
-      return reply.code(400).send({ error: "description is required" });
-    }
-    const parent_id = req.body.parent_id ?? null;
-    const invalidParent = await parentError(req.params.projectId, null, parent_id);
-    if (invalidParent) return reply.code(400).send({ error: invalidParent });
+  /** Validated insert options for one create body (title still possibly empty), or why it's rejected. */
+  const readCreateBody = async (
+    projectId: string,
+    body: CreateBody,
+  ): Promise<{ error: string } | { opts: Omit<CreateOpts, "title">; title: string | undefined }> => {
+    const { title, description, status, priority } = body ?? {};
+    let assigned_branch = body?.assigned_branch;
+    if (!description) return { error: "description is required" };
+    const parent_id = body.parent_id ?? null;
+    const invalidParent = await parentError(projectId, null, parent_id);
+    if (invalidParent) return { error: invalidParent };
 
     let source: TaskSource | null = null;
-    if (req.body.source) {
-      const { session_id, tool_use_id, item_index } = req.body.source;
+    if (body.source) {
+      const { session_id, tool_use_id, item_index } = body.source;
       if (!validSourceId(session_id) || !validSourceId(tool_use_id)
         || typeof item_index !== "number" || !Number.isInteger(item_index)
         || item_index < 0 || item_index > SOURCE_ITEM_INDEX_MAX) {
-        return reply.code(400).send({ error: "Invalid source" });
+        return { error: "Invalid source" };
       }
-      if (!(await isProjectSourceSession(fastify.storage, session_id, req.params.projectId))) {
-        return reply.code(400).send({ error: "Invalid source" });
+      if (!(await isProjectSourceSession(fastify.storage, session_id, projectId))) {
+        return { error: "Invalid source" };
       }
       source = { session_id, tool_use_id, item_index };
       // Never pre-assigned: turn-end auto-complete closes the first task
@@ -133,77 +130,146 @@ const routes: FastifyPluginAsync = async (fastify) => {
       // user assigns a branch when they actually start on it.
       assigned_branch = null;
     }
+    return {
+      title,
+      opts: {
+        id: randomUUID(),
+        project_id: projectId,
+        description,
+        status: status as 'todo' | 'in_progress' | 'done' | 'cancelled' | undefined,
+        priority: priority as 'low' | 'medium' | 'high' | 'urgent' | undefined,
+        assigned_branch,
+        source,
+        parent_id,
+      },
+    };
+  };
 
-    let title = providedTitle;
-    if (!title) {
-      try {
-        const { text } = await generateText({
-          model: await resolveFastChatModel(fastify.storage, resolveUserId(userId), "task-suggest"),
-          prompt: `Generate a concise task title (under 10 words) that captures the essence of this task description. Write the title in the same language as the description. Return only the title text, nothing else.\n\nDescription: ${description}`,
-          experimental_telemetry: {
-            isEnabled: true,
-            functionId: "task-suggest",
-            metadata: {
-              userId: resolveUserId(userId),
-              tags: ["vibedeckx", "task-suggest"],
-              projectId: req.params.projectId,
-            },
+  const generateTitle = async (userId: string, projectId: string, description: string): Promise<string> => {
+    try {
+      const { text } = await generateText({
+        model: await resolveFastChatModel(fastify.storage, resolveUserId(userId), "task-suggest"),
+        prompt: `Generate a concise task title (under 10 words) that captures the essence of this task description. Write the title in the same language as the description. Return only the title text, nothing else.\n\nDescription: ${description}`,
+        experimental_telemetry: {
+          isEnabled: true,
+          functionId: "task-suggest",
+          metadata: {
+            userId: resolveUserId(userId),
+            tags: ["vibedeckx", "task-suggest"],
+            projectId,
           },
-        });
-        title = text.trim();
-      } catch {
-        title = description.length > 50 ? description.slice(0, 50) + "..." : description;
-      }
+        },
+      });
+      return text.trim();
+    } catch {
+      return description.length > 50 ? description.slice(0, 50) + "..." : description;
     }
+  };
 
-    const id = randomUUID();
-    const insert = () => fastify.storage.tasks.create({
-      id,
-      project_id: req.params.projectId,
-      title: title!,
-      description,
-      status: status as 'todo' | 'in_progress' | 'done' | 'cancelled' | undefined,
-      priority: priority as 'low' | 'medium' | 'high' | 'urgent' | undefined,
-      assigned_branch,
-      source,
-      parent_id,
-    });
-
-    // Same shape as the schedule proposal create: the source session must be
-    // held out of retention before the task counts as created, so insert +
-    // hold sync (+ rollback of a row THIS request inserted) share the
-    // session's slot. A different id back is a replayed confirmation — 200,
-    // first confirmation's fields win.
-    let task: Task;
-    if (source) {
-      const sourceSessionId = source.session_id;
+  /**
+   * Same shape as the schedule proposal create: the source session must be
+   * held out of retention before its tasks count as created, so insert + hold
+   * sync (+ rollback of rows THIS request inserted) share the session's slot.
+   * A row with a different id than asked for is a replayed confirmation — the
+   * first confirmation's fields win.
+   */
+  const insertHeld = async (
+    sourceSessionId: string | null,
+    ids: string[],
+    insert: () => Promise<Task[]>,
+  ): Promise<Task[]> => {
+    if (!sourceSessionId) return insert();
+    return fastify.retentionHolds.exclusive(sourceSessionId, async (syncNow) => {
+      const rows = await insert();
       try {
-        task = await fastify.retentionHolds.exclusive(sourceSessionId, async (syncNow) => {
-          const row = await insert();
-          try {
-            await syncNow();
-            return row;
-          } catch (error) {
-            if (row.id === id) {
-              await fastify.storage.tasks.delete(row.id);
-              await syncNow().catch(() => undefined);
-            }
-            throw error;
-          }
-        });
+        await syncNow();
+        return rows;
       } catch (error) {
-        return reply.code(502).send({ error: holdFailed(error) });
+        const inserted = rows.filter((row, i) => row.id === ids[i]);
+        for (const row of inserted) await fastify.storage.tasks.delete(row.id);
+        if (inserted.length > 0) await syncNow().catch(() => undefined);
+        throw error;
       }
-    } else {
-      task = await insert();
+    });
+  };
+
+  // Create task
+  fastify.post<{ Params: { projectId: string }; Body: CreateBody }>("/api/projects/:projectId/tasks", async (req, reply) => {
+    const userId = requireAuth(req, reply);
+    if (userId === null) return;
+    const project = await fastify.storage.projects.getById(req.params.projectId, userId);
+    if (!project) {
+      return reply.code(404).send({ error: "Project not found" });
     }
 
-    const created = task.id === id;
+    const read = await readCreateBody(req.params.projectId, req.body);
+    if ("error" in read) return reply.code(400).send({ error: read.error });
+    const { opts } = read;
+    const title = read.title || await generateTitle(userId, req.params.projectId, opts.description!);
+
+    let task: Task;
+    try {
+      [task] = await insertHeld(opts.source?.session_id ?? null, [opts.id], async () =>
+        [await fastify.storage.tasks.create({ ...opts, title })]);
+    } catch (error) {
+      return reply.code(502).send({ error: holdFailed(error) });
+    }
+
+    const created = task.id === opts.id;
     if (created) {
       fastify.eventBus.emit({ type: "task:created", projectId: req.params.projectId, task: { ...task } });
     }
     return reply.code(created ? 201 : 200).send({ task });
   });
+
+  // Create several tasks at once — "Create all" on a propose_task card. All
+  // or nothing, filed in list order; per item the same rules as a single
+  // create, including idempotency on `source`.
+  fastify.post<{ Params: { projectId: string }; Body: { tasks?: unknown } }>(
+    "/api/projects/:projectId/tasks/batch",
+    async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
+      if (!project) {
+        return reply.code(404).send({ error: "Project not found" });
+      }
+
+      const bodies = req.body?.tasks;
+      if (!Array.isArray(bodies) || bodies.length === 0 || bodies.length > BATCH_CREATE_MAX) {
+        return reply.code(400).send({ error: `tasks must list 1 to ${BATCH_CREATE_MAX} tasks` });
+      }
+      const reads = [];
+      for (const [i, body] of bodies.entries()) {
+        const read = await readCreateBody(req.params.projectId, body as CreateBody);
+        if ("error" in read) return reply.code(400).send({ error: `Task ${i + 1}: ${read.error}` });
+        reads.push(read);
+      }
+      // One retention slot per request: a card's items share their session.
+      const sessions = new Set(reads.flatMap((r) => (r.opts.source ? [r.opts.source.session_id] : [])));
+      if (sessions.size > 1) {
+        return reply.code(400).send({ error: "All tasks in a batch must come from the same source session" });
+      }
+
+      const items = await Promise.all(reads.map(async (r) => ({
+        ...r.opts,
+        title: r.title || await generateTitle(userId, req.params.projectId, r.opts.description!),
+      })));
+      const ids = items.map((item) => item.id);
+      let tasks: Task[];
+      try {
+        tasks = await insertHeld([...sessions][0] ?? null, ids, () => fastify.storage.tasks.createMany(items));
+      } catch (error) {
+        return reply.code(502).send({ error: holdFailed(error) });
+      }
+
+      const created = tasks.filter((task, i) => task.id === ids[i]);
+      for (const task of created) {
+        fastify.eventBus.emit({ type: "task:created", projectId: req.params.projectId, task: { ...task } });
+      }
+      return reply.code(created.length > 0 ? 201 : 200).send({ tasks });
+    },
+  );
 
   // Update task
   fastify.put<{

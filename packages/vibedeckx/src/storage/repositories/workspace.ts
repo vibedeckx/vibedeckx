@@ -3,6 +3,8 @@ import type { DB, TasksTable, RulesTable } from "../schema.js";
 import type { DialectHelpers } from "../dialect.js";
 import type { Storage, Task, TaskStatus, TaskPriority, Rule } from "../types.js";
 
+type TaskCreateOpts = Parameters<Storage["tasks"]["create"]>[0];
+
 const mapTask = (row: Selectable<TasksTable>): Task => ({
   ...row,
   status: row.status as TaskStatus,
@@ -20,52 +22,64 @@ const mapRule = (row: Selectable<RulesTable>): Rule => ({
   enabled: row.enabled as number,
 });
 
+async function insertTask(
+  kdb: Kysely<DB>,
+  { id, project_id, title, description, status, priority, assigned_branch, source, parent_id }: TaskCreateOpts,
+): Promise<Task> {
+  // Position assignment pushed into the INSERT itself (a
+  // `coalesce(max(position), -1) + 1` subquery scoped to the project)
+  // instead of a JS-side "read max, then write" — same technique as
+  // executors.create (Task 6): keeps the whole operation a single
+  // atomic SQL statement, so no transaction is needed here even though
+  // Kysely's awaits are real microtask yield points.
+  await kdb.insertInto("tasks").values((eb) => ({
+    id,
+    project_id,
+    title,
+    description: description ?? null,
+    status: status ?? "todo",
+    priority: priority ?? "medium",
+    assigned_branch: assigned_branch ?? null,
+    position: eb.selectFrom("tasks")
+      .select(sql<number>`coalesce(max(position), -1) + 1`.as("next_position"))
+      .where("project_id", "=", project_id),
+    source_session_id: source?.session_id ?? null,
+    source_tool_use_id: source?.tool_use_id ?? null,
+    source_item_index: source?.item_index ?? null,
+    parent_id: parent_id ?? null,
+  // DO NOTHING only for a proposal, so a concurrent replay races into
+  // idx_tasks_source and is resolved below (same argument as
+  // scheduledTasks.create); a plain insert keeps failing loudly.
+  })).$if(!!source, (qb) => qb.onConflict((oc) => oc.doNothing())).execute();
+
+  const row = await kdb.selectFrom("tasks").selectAll().where("id", "=", id).executeTakeFirst();
+  if (row) return mapTask(row);
+
+  if (source) {
+    const existing = await kdb.selectFrom("tasks").selectAll()
+      .where("project_id", "=", project_id)
+      .where("source_session_id", "=", source.session_id)
+      .where("source_tool_use_id", "=", source.tool_use_id)
+      .where("source_item_index", "=", source.item_index)
+      .executeTakeFirst();
+    if (existing) return mapTask(existing);
+  }
+  throw new Error(`Failed to create task ${id}`);
+}
+
 export const createWorkspaceRepos = (
   kdb: Kysely<DB>,
   h: DialectHelpers,
 ): Pick<Storage, "tasks" | "rules" | "commands"> => ({
   tasks: {
-    create: async ({ id, project_id, title, description, status, priority, assigned_branch, source, parent_id }) => {
-      // Position assignment pushed into the INSERT itself (a
-      // `coalesce(max(position), -1) + 1` subquery scoped to the project)
-      // instead of a JS-side "read max, then write" — same technique as
-      // executors.create (Task 6): keeps the whole operation a single
-      // atomic SQL statement, so no transaction is needed here even though
-      // Kysely's awaits are real microtask yield points.
-      await kdb.insertInto("tasks").values((eb) => ({
-        id,
-        project_id,
-        title,
-        description: description ?? null,
-        status: status ?? "todo",
-        priority: priority ?? "medium",
-        assigned_branch: assigned_branch ?? null,
-        position: eb.selectFrom("tasks")
-          .select(sql<number>`coalesce(max(position), -1) + 1`.as("next_position"))
-          .where("project_id", "=", project_id),
-        source_session_id: source?.session_id ?? null,
-        source_tool_use_id: source?.tool_use_id ?? null,
-        source_item_index: source?.item_index ?? null,
-        parent_id: parent_id ?? null,
-      // DO NOTHING only for a proposal, so a concurrent replay races into
-      // idx_tasks_source and is resolved below (same argument as
-      // scheduledTasks.create); a plain insert keeps failing loudly.
-      })).$if(!!source, (qb) => qb.onConflict((oc) => oc.doNothing())).execute();
+    create: (opts) => insertTask(kdb, opts),
 
-      const row = await kdb.selectFrom("tasks").selectAll().where("id", "=", id).executeTakeFirst();
-      if (row) return mapTask(row);
-
-      if (source) {
-        const existing = await kdb.selectFrom("tasks").selectAll()
-          .where("project_id", "=", project_id)
-          .where("source_session_id", "=", source.session_id)
-          .where("source_tool_use_id", "=", source.tool_use_id)
-          .where("source_item_index", "=", source.item_index)
-          .executeTakeFirst();
-        if (existing) return mapTask(existing);
-      }
-      throw new Error(`Failed to create task ${id}`);
-    },
+    createMany: (items) => kdb.transaction().execute(async (trx) => {
+      const tasks: Task[] = [];
+      // Sequential on purpose: each insert takes the next position.
+      for (const item of items) tasks.push(await insertTask(trx, item));
+      return tasks;
+    }),
 
     listUnreportedBySourceSession: async (sessionId) => {
       const rows = await kdb.selectFrom("tasks").selectAll()

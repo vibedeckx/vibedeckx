@@ -2108,6 +2108,14 @@ export interface RepeatLoopParams {
   resumeAt?: number | null;
 }
 
+/** The hub refused a batch task create — none of its tasks were created. */
+export class TaskBatchRejectedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TaskBatchRejectedError";
+  }
+}
+
 /** A refused workflow request; `code` is the server's machine-readable reason (e.g. "worker_unsupported"). */
 export class WorkflowRequestError extends Error {
   constructor(
@@ -2670,6 +2678,32 @@ export const api = {
     }
     const data = await res.json();
     return data.task;
+  },
+
+  /**
+   * Several tasks in one go, filed in list order; all or nothing. Results are
+   * in input order. Throws TaskBatchRejectedError only when the hub itself
+   * refused the batch; any other error leaves the outcome unknown.
+   */
+  async createTasks(
+    projectId: string,
+    tasks: Array<{ title?: string; description: string; priority?: TaskPriority; source?: TaskSourceInput; parent_id?: string | null }>
+  ): Promise<Task[]> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/tasks/batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tasks }),
+    });
+    if (!res.ok) {
+      // Only a 4xx is a refusal before anything was inserted. A 5xx may come
+      // from a gateway after the hub committed — whatever its body says.
+      const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+      const message = typeof body?.error === "string" ? body.error : `Request failed (${res.status})`;
+      if (res.status < 500) throw new TaskBatchRejectedError(message);
+      throw new Error(message);
+    }
+    const data = await res.json();
+    return data.tasks;
   },
 
   async updateTask(

@@ -167,6 +167,81 @@ describe("task create from an agent proposal", () => {
     expect(res.json().task).toMatchObject({ source_tool_use_id: null, assigned_branch: "feature-x" });
   });
 
+  describe("batch create (Create all)", () => {
+    const batch = (tasks: unknown, projectId = "project-1") =>
+      app.inject({ method: "POST", url: `/api/projects/${projectId}/tasks/batch`, payload: { tasks } as object });
+    const item = (index: number, over: Record<string, unknown> = {}) =>
+      body({ title: `Item ${index}`, source: { session_id: "sess-1", tool_use_id: "toolu_1", item_index: index }, ...over });
+
+    it("files every item in list order, holds the session for all, and announces each", async () => {
+      const res = await batch([item(0), item(1), item(2)]);
+      expect(res.statusCode, res.body).toBe(201);
+      const tasks = res.json().tasks as Array<{ id: string; title: string; source_item_index: number }>;
+      expect(tasks.map((t) => t.source_item_index)).toEqual([0, 1, 2]);
+      const listed = await storage.tasks.getByProjectId("project-1");
+      expect(listed.map((t) => t.title)).toEqual(["Item 0", "Item 1", "Item 2"]);
+      expect(emitted.filter((e) => e.type === "task:created")).toHaveLength(3);
+      expect((await storage.sessionRetentionHolds.list("sess-1")).map((h) => h.id).sort())
+        .toEqual(tasks.map((t) => t.id).sort());
+    });
+
+    it("returns already-confirmed items as they are and only announces the new ones", async () => {
+      const first = (await create(item(0))).json().task;
+      emitted = [];
+      const res = await batch([item(0, { title: "Edited later" }), item(1)]);
+      expect(res.statusCode).toBe(201);
+      expect(res.json().tasks[0]).toMatchObject({ id: first.id, title: "Item 0" });
+      expect(emitted.filter((e) => e.type === "task:created")).toHaveLength(1);
+
+      const replay = await batch([item(0), item(1)]);
+      expect(replay.statusCode).toBe(200);
+      expect((await storage.tasks.getByProjectId("project-1")).length).toBe(2);
+    });
+
+    it("rejects the whole batch when any item is invalid, creating nothing", async () => {
+      const res = await batch([item(0), item(1, { description: "" })]);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain("Task 2");
+      expect(await storage.tasks.getByProjectId("project-1")).toEqual([]);
+    });
+
+    it("rejects an empty list, an oversized one, and items from different sessions", async () => {
+      expect((await batch([])).statusCode).toBe(400);
+      expect((await batch(Array.from({ length: 21 }, (_, i) => item(i)))).statusCode).toBe(400);
+      const mixed = await batch([
+        item(0),
+        item(1, { source: { session_id: REMOTE_SESSION, tool_use_id: "toolu_r", item_index: 1 } }),
+      ]);
+      expect(mixed.statusCode).toBe(400);
+      expect(await storage.tasks.getByProjectId("project-1")).toEqual([]);
+    });
+
+    it("rolls back earlier inserts when a later one in the transaction fails", async () => {
+      await storage.tasks.create({ id: "taken", project_id: "project-1", title: "Existing", description: "x" });
+      await expect(storage.tasks.createMany([
+        { id: "new-1", project_id: "project-1", title: "A", description: "x" },
+        { id: "taken", project_id: "project-1", title: "B", description: "x" },
+      ])).rejects.toThrow();
+      expect((await storage.tasks.getByProjectId("project-1")).map((t) => t.id)).toEqual(["taken"]);
+    });
+
+    it("keeps an already-confirmed task when a failed hold push rolls back the new ones", async () => {
+      const remote = (i: number) => item(i, { source: { session_id: REMOTE_SESSION, tool_use_id: "toolu_r", item_index: i } });
+      const existing = (await create(remote(0))).json().task;
+      workerAnswer = () => ({ ok: false, status: 0, data: {} });
+      expect((await batch([remote(0), remote(1)])).statusCode).toBe(502);
+      expect((await storage.tasks.getByProjectId("project-1")).map((t) => t.id)).toEqual([existing.id]);
+    });
+
+    it("creates none of them when the remote session's hold can't be pushed", async () => {
+      const remote = (i: number) => item(i, { source: { session_id: REMOTE_SESSION, tool_use_id: "toolu_r", item_index: i } });
+      workerAnswer = () => ({ ok: false, status: 0, data: {} });
+      expect((await batch([remote(0), remote(1)])).statusCode).toBe(502);
+      expect(await storage.tasks.getByProjectId("project-1")).toEqual([]);
+      expect(emitted.filter((e) => e.type === "task:created")).toHaveLength(0);
+    });
+  });
+
   describe("retention hold on the source session", () => {
     it("holds the session while the task is open and releases it when done", async () => {
       const task = (await create(body())).json().task;

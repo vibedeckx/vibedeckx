@@ -96,8 +96,14 @@ export function __resetProposedTaskCache(): void {
 
 /** Publish a just-created task so its card row flips without waiting for a refetch. */
 export function noteTaskCreated(projectId: string, task: Task): void {
+  noteTasksCreated(projectId, [task]);
+}
+
+/** The same for several at once — one update, so their rows flip together. */
+export function noteTasksCreated(projectId: string, tasks: Task[]): void {
+  const ids = new Set(tasks.map((t) => t.id));
   const current = cache.get(projectId) ?? [];
-  cache.set(projectId, [...current.filter((t) => t.id !== task.id), task]);
+  cache.set(projectId, [...current.filter((t) => !ids.has(t.id)), ...tasks]);
   // A list fetched before this create would drop the task again.
   if (inFlight.has(projectId)) dirty.add(projectId);
   emit(projectId);

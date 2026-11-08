@@ -18,8 +18,26 @@ vi.mock("./agent-conversation", () => ({
 const apiMock = vi.hoisted(() => ({
   getTasks: vi.fn(async () => [] as Task[]),
   createTask: vi.fn(async (_projectId: string, _opts: { source: { item_index: number } }) => ({}) as Task),
+  createTasks: vi.fn(async (_projectId: string, items: Array<{ title?: string; source: { item_index: number } }>) =>
+    items.map((item) => ({
+      id: `task-${item.source.item_index}`,
+      project_id: "proj-1",
+      title: item.title ?? "",
+      description: "",
+      status: "todo",
+      priority: "medium",
+      assigned_branch: null,
+      position: item.source.item_index,
+      archived_at: null,
+      source_session_id: "sess-1",
+      source_tool_use_id: "toolu_1",
+      source_item_index: item.source.item_index,
+      created_at: "",
+      updated_at: "",
+    }) as Task)),
 }));
-vi.mock("@/lib/api", () => ({ api: apiMock }));
+const TaskBatchRejectedError = vi.hoisted(() => class TaskBatchRejectedError extends Error {});
+vi.mock("@/lib/api", () => ({ api: apiMock, TaskBatchRejectedError }));
 
 /** Every mounted card's task:* listener, so a test can deliver an event. */
 const events = vi.hoisted(() => ({ listeners: new Set<(event: unknown) => void>() }));
@@ -125,6 +143,7 @@ describe("TaskProposalUI", () => {
     __resetProposedTaskCache();
     apiMock.getTasks.mockReset().mockResolvedValue([]);
     apiMock.createTask.mockReset().mockResolvedValue(taskRow());
+    apiMock.createTasks.mockClear();
     conversation.value.openTask.mockReset();
     conversation.value.sessionId = "sess-1";
     conversation.value.projectId = "proj-1";
@@ -267,36 +286,82 @@ describe("TaskProposalUI", () => {
     act(() => buttons("Collapse")[0].click());
     expect(container.textContent).toContain("No parent");
     await act(async () => { buttons("Create all")[0].click(); });
-    expect(apiMock.createTask.mock.calls.map((call) => call[1])).toEqual([
+    expect(apiMock.createTasks.mock.calls[0][1]).toEqual([
       expect.objectContaining({ parent_id: "goal", source: expect.objectContaining({ item_index: 0 }) }),
       expect.objectContaining({ parent_id: null, source: expect.objectContaining({ item_index: 1 }) }),
     ]);
     Element.prototype.scrollIntoView = previousScrollIntoView;
   });
 
-  it("creates all pending items at once", async () => {
-    apiMock.createTask.mockImplementation(async (_p: string, opts: { source: { item_index: number } }) =>
-      taskRow({ id: `task-${opts.source.item_index}`, source_item_index: opts.source.item_index }));
+  it("creates all pending items in one request, in card order", async () => {
     await render({ input: PROPOSAL, toolUseId: "toolu_1" });
     await act(async () => { buttons("Create all")[0].click(); });
 
-    expect(apiMock.createTask).toHaveBeenCalledTimes(2);
+    expect(apiMock.createTask).not.toHaveBeenCalled();
+    expect(apiMock.createTasks).toHaveBeenCalledTimes(1);
+    expect(apiMock.createTasks.mock.calls[0][1].map((item) => item.source.item_index)).toEqual([0, 1]);
     expect(titles()).toEqual([]);
   });
 
-  it("creates all in card order, each after the previous one lands", async () => {
-    // A task's position is taken when its insert lands; concurrent creates
-    // would file sibling sub-tasks in arrival order.
-    const first = deferred<Task>();
-    apiMock.createTask.mockImplementation(async (_p: string, opts: { source: { item_index: number } }) =>
-      opts.source.item_index === 0 ? first.promise : taskRow({ id: "task-1", source_item_index: 1 }));
+  it("spins only the Create all button while it runs, then flips every row together", async () => {
+    const pending = deferred<Task[]>();
+    apiMock.createTasks.mockImplementationOnce(() => pending.promise);
     await render({ input: PROPOSAL, toolUseId: "toolu_1" });
     await act(async () => { buttons("Create all")[0].click(); });
-    expect(apiMock.createTask).toHaveBeenCalledTimes(1);
-    expect(buttons("Create all")[0].disabled).toBe(true);
 
-    await act(async () => { first.resolve(taskRow({ id: "task-0", source_item_index: 0 })); });
-    expect(apiMock.createTask.mock.calls.map((call) => call[1].source.item_index)).toEqual([0, 1]);
+    expect(buttons("Creating…")).toHaveLength(1);
+    expect(buttons("Creating…")[0].disabled).toBe(true);
+    expect(buttons("Create task").every((b) => b.disabled)).toBe(true);
+    expect(container.querySelectorAll("[data-created-task]")).toHaveLength(0);
+
+    await act(async () => {
+      pending.resolve([0, 1].map((i) => taskRow({ id: `task-${i}`, source_item_index: i })));
+    });
+    expect(container.querySelectorAll("[data-created-task]")).toHaveLength(2);
+  });
+
+  it("shows a refused Create all on the card and leaves every row as it was", async () => {
+    apiMock.createTasks.mockRejectedValueOnce(new TaskBatchRejectedError("Task 2: Parent task not found"));
+    await render({ input: PROPOSAL, toolUseId: "toolu_1" });
+    await act(async () => { buttons("Create all")[0].click(); });
+
+    expect(container.textContent).toContain("none were created. Task 2: Parent task not found");
+    expect(container.querySelectorAll("[data-created-task]")).toHaveLength(0);
+    expect(buttons("Create task").every((b) => !b.disabled)).toBe(true);
+    expect(buttons("Create all 2")[0].disabled).toBe(false);
+  });
+
+  it("never claims nothing was created when the answer was lost, and rechecks the list", async () => {
+    // The hub committed, but the response never arrived.
+    apiMock.createTasks.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await render({ input: PROPOSAL, toolUseId: "toolu_1" });
+    apiMock.getTasks.mockResolvedValue([0, 1].map((i) => taskRow({ id: `task-${i}`, source_item_index: i })));
+    await act(async () => { buttons("Create all")[0].click(); });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(container.textContent).not.toContain("none were created");
+    expect(container.querySelectorAll("[data-created-task]")).toHaveLength(2);
+  });
+
+  it("says the outcome is unknown while the recheck hasn't shown the tasks", async () => {
+    apiMock.createTasks.mockRejectedValueOnce(new Error("Request failed (504)"));
+    await render({ input: PROPOSAL, toolUseId: "toolu_1" });
+    await act(async () => { buttons("Create all")[0].click(); });
+
+    expect(container.textContent).toContain("Couldn't confirm whether the tasks were created (Request failed (504))");
+    expect(container.textContent).not.toContain("none were created");
+    expect(apiMock.getTasks).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks for missing descriptions before sending Create all", async () => {
+    await render({ input: PROPOSAL, toolUseId: "toolu_1" });
+    act(() => container.querySelectorAll<HTMLElement>("[data-proposed-title]")[1].click());
+    typeInto(descriptionEditor()!, "");
+    act(() => buttons("Collapse")[0].click());
+    await act(async () => { buttons("Create all")[0].click(); });
+
+    expect(apiMock.createTasks).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Description is required");
   });
 
   it("counts progress in the footer and sums up closed tasks once all are filed", async () => {
