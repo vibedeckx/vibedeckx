@@ -29,7 +29,7 @@ import { mintRemoteSessionToolsMcpConfig, parseSessionToolsMcpConfig } from "../
 import { randomUUID } from "crypto";
 import { MODEL_SUGGESTIONS } from "../protocol/model-suggestions.js";
 import { WorkspaceCheckoutUnavailableError } from "../agent-session-manager.js";
-import { forgetRemoteSession } from "../remote-session-cleanup.js";
+import { forgetRemoteSession, settleRemoteSessionDelete } from "../remote-session-cleanup.js";
 import { buildHistoryWindow } from "../session-history-window.js";
 import { deliverInstruction, serializeSessionMutation } from "../instruction-delivery.js";
 
@@ -2666,12 +2666,19 @@ const routes: FastifyPluginAsync = async (fastify) => {
           "DELETE",
           `/api/agent-sessions/${remoteInfo.remoteSessionId}`
         );
-        // One idempotent cleanup shared with reconciliation and the dead-handle
-        // belt (remote-session-cleanup.ts) — three call sites each clearing a
-        // different subset is exactly the drift that leaves ghost handles.
-        // Done unconditionally: if the worker-side delete actually failed, the
-        // next catalog snapshot resurrects the row.
-        await forgetRemoteSession(fastify, req.params.sessionId);
+        // Forgets the handle (the cleanup shared with reconciliation and the
+        // dead-handle belt) and drops the sidebar row — but only on a definite
+        // worker answer. A failed delete keeps the mapping: nothing re-creates
+        // it, so forgetting here would strand a session still on the worker.
+        const forgotten = await settleRemoteSessionDelete(
+          fastify,
+          req.params.sessionId,
+          { projectId: remoteInfo.projectId, branch: remoteInfo.branch ?? null },
+          result,
+        );
+        // A worker 404 is a completed delete from the user's side (typically a
+        // retry after a lost response) — don't surface it as a failure.
+        if (forgotten && !result.ok) return reply.code(200).send({ success: true });
         return reply.code(proxyStatus(result)).send(result.data);
       }
 

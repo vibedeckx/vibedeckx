@@ -1,6 +1,8 @@
 import type { Storage } from "./storage/types.js";
 import type { RemotePatchCache } from "./remote-patch-cache.js";
 import type { RemoteSessionInfo } from "./server-types.js";
+import type { EventBus } from "./event-bus.js";
+import type { ProxyResult } from "./utils/remote-proxy.js";
 
 export interface RemoteSessionCleanupDeps {
   storage: Storage;
@@ -64,5 +66,40 @@ export async function forgetRemoteSession(
   deps.remotePatchCache.delete(localSessionId);
   await deps.storage.searchCache.noteSessionDeleted(localSessionId)
     .catch((err) => console.error("[RemoteSessionCleanup] search-cache write-through failed:", err));
+  return true;
+}
+
+/**
+ * Settle a user-initiated delete of a remote session from the worker's answer.
+ *
+ * Only a definite answer forgets the handle: 2xx, or 404 — the worker no longer
+ * holds the session, which is also how a retry completes after a timeout ate
+ * the response to a delete that did succeed. Anything else (network_error,
+ * timeout, 5xx) may have left the session alive on the worker, and the hub
+ * mapping is the only way back to it — reconciliation forgets mappings but
+ * never re-creates one — so it is kept for the user to retry.
+ *
+ * A forgotten session is also announced as `session:process` `alive: false`:
+ * the worker announces the death on the session's own stream, which the hub
+ * carries only while someone is viewing that session, so deleting any other
+ * session from the history dropdown would otherwise leave its sidebar row up.
+ *
+ * Returns true when the handle was forgotten.
+ */
+export async function settleRemoteSessionDelete(
+  deps: RemoteSessionCleanupDeps & { eventBus?: EventBus | null },
+  localSessionId: string,
+  scope: { projectId: string; branch: string | null },
+  workerResult: Pick<ProxyResult, "ok" | "status">,
+): Promise<boolean> {
+  if (!workerResult.ok && workerResult.status !== 404) return false;
+  await forgetRemoteSession(deps, localSessionId);
+  deps.eventBus?.emit({
+    type: "session:process",
+    projectId: scope.projectId,
+    branch: scope.branch,
+    sessionId: localSessionId,
+    alive: false,
+  });
   return true;
 }
