@@ -369,7 +369,9 @@ export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, on
           <Hint label="End this review">
             <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
               className="shrink-0 text-muted-foreground hover:text-destructive">
-              <X className="h-3 w-3" />End
+              {/* "End" has no descenders, so its ink sits above the line box's
+                  centre; lift the icon to match the visible text. */}
+              <X className="h-3 w-3 -translate-y-px" />End
             </Button>
           </Hint>
         </div>
@@ -668,7 +670,7 @@ function LoopCard({ run, busy, error, onAction, onScheduleResume }: {
             <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
               className="text-muted-foreground hover:text-destructive"
               title="End the loop now and stop the running session">
-              <X className="h-3 w-3" />End
+              <X className="h-3 w-3 -translate-y-px" />End
             </Button>
           )}
         </div>
