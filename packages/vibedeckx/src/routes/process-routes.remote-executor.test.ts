@@ -344,6 +344,17 @@ describe("remote executor start/stop over an unreliable tunnel", () => {
       body: { path: "/repo", command: "./dev.sh", executor_type: "command", prompt_provider: null, pty: true },
     });
 
+    it("names the chat that made a start in its delivery, and none for the user's own", async () => {
+      proxy.handler = async () => lost;
+      const starts = createRemoteExecutorStarts(app);
+      await starts.start({ ...request("chat-proc"), chatSessionId: "chat-1" });
+      await starts.start({ ...request("user-proc"), executorId: "e2" });
+      expect(starts.list("project-1")).toEqual(expect.arrayContaining([
+        expect.objectContaining({ processId: "remote-e1-chat-proc", chatSessionId: "chat-1" }),
+        expect.objectContaining({ processId: "remote-e2-user-proc", chatSessionId: null }),
+      ]));
+    });
+
     it("starts under the caller's id", async () => {
       proxy.handler = async (_s, _m, _p, body) => ok({ processId: (body as ExecuteBody).processId });
       const outcome = await createRemoteExecutorStarts(app).start(request("op-proc"));

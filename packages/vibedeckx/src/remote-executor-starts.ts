@@ -26,6 +26,8 @@ export interface RemoteStartRequest {
   executorId: string;
   /** Shown to the user while the start is being re-delivered. */
   executorName?: string;
+  /** The Main Chat session whose runExecutor call made this start; absent for the user's own starts. */
+  chatSessionId?: string;
   projectId: string;
   remoteServerId: string;
   branch: string | null;
@@ -93,6 +95,8 @@ export interface ExecutorDelivery {
   processId: string;
   executorId: string;
   executorName: string | null;
+  /** Main Chat session that started it, so only that chat shows it; null for the user's own starts. */
+  chatSessionId: string | null;
   projectId: string;
   remoteServerId: string;
   branch: string | null;
@@ -215,6 +219,7 @@ export function createRemoteExecutorStarts(fastify: FastifyInstance) {
     processId: localIdOf(entry),
     executorId: entry.executorId,
     executorName: entry.executorName ?? null,
+    chatSessionId: entry.chatSessionId ?? null,
     projectId: entry.projectId,
     remoteServerId: entry.remoteServerId,
     branch: entry.branch,

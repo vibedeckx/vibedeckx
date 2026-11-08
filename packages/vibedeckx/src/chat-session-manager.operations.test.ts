@@ -256,13 +256,15 @@ describe("commander executor operations", () => {
 
   describe("remote", () => {
     it("asks the worker for the identity it registered, and correlates by it", async () => {
-      const { run, remoteStart, stop, settle, delivered } = setup({
+      const { chatId, run, remoteStart, stop, settle, delivered } = setup({
         remote: true,
         remoteStart: async (request) => ({ kind: "started", processId: `remote-e1-${request.processId}` }),
       });
       const result = await run("call-1");
       const requested = remoteStart.mock.calls[0][0].processId;
       expect(requested).toBeTruthy();
+      // Tags the start with this chat, so only this chat shows its delivery notice.
+      expect(remoteStart.mock.calls[0][0].chatSessionId).toBe(chatId);
       expect(result).toMatchObject({ success: true, processId: `remote-e1-${requested}` });
       stop(`remote-e1-${requested}`);
       await settle();

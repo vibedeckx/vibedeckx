@@ -176,13 +176,15 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
         : ["Type a message, / for commands...", "Type a message..."];
   const fitsFullPlaceholder = useFitsOnOneLine(textareaRef, fullPlaceholder);
 
-  // Remote starts of this workspace whose request was lost: the hub is
-  // re-delivering them (or gave up). Shown here because a Main Chat run is
+  // Remote starts this chat's runExecutor made whose request was lost: the hub
+  // is re-delivering them (or gave up). Shown here because a Main Chat run is
   // otherwise just "waiting", with no word on why or what the user can do.
+  // The user's own starts stay in the Executor tab.
   const deliveries = useExecutorDeliveries(projectId);
-  const branchDeliveries = useMemo(
-    () => [...deliveries.values()].filter((delivery) => (delivery.branch ?? null) === (branch ?? null)),
-    [deliveries, branch],
+  const sessionId = session?.id ?? null;
+  const chatDeliveries = useMemo(
+    () => sessionId ? [...deliveries.values()].filter((delivery) => delivery.chatSessionId === sessionId) : [],
+    [deliveries, sessionId],
   );
   const retryDelivery = useCallback(async (delivery: ExecutorDelivery) => {
     try {
@@ -520,7 +522,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
           not overridable from a class) reserving 6px per side, plus the
           content's own p-4 — 22px per side. */}
       <div className="flex-shrink-0 py-3 px-[22px]">
-        {branchDeliveries.map((delivery) => (
+        {chatDeliveries.map((delivery) => (
           <ExecutorDeliveryNotice
             key={delivery.processId}
             delivery={delivery}

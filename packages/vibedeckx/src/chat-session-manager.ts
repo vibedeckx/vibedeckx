@@ -2965,6 +2965,7 @@ export class ChatSessionManager {
               const outcome = await this.remoteExecutorStarts.start({
                 executorId: executor.id,
                 executorName: executor.name,
+                ...(sessionId ? { chatSessionId: sessionId } : {}),
                 projectId,
                 remoteServerId: resolvedRemote,
                 branch,

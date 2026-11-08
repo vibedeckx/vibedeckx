@@ -21,7 +21,7 @@ import { useExecutorDeliveries } from "./use-executor-deliveries";
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const retrying: ExecutorDelivery = {
-  processId: "remote-e1-p1", executorId: "e1", executorName: "git pull", projectId: "p1",
+  processId: "remote-e1-p1", executorId: "e1", executorName: "git pull", chatSessionId: null, projectId: "p1",
   remoteServerId: "srv", branch: "main", state: "retrying", attempts: 2, reason: "timeout",
   error: "Request timed out after 30000ms", nextAttemptAt: 1, firstSentAt: 0, deadlineAt: 1_200_000,
   mayHaveRun: true,

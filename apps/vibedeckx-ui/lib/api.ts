@@ -490,6 +490,8 @@ export interface ExecutorDelivery {
   processId: string;
   executorId: string;
   executorName: string | null;
+  /** Main Chat session whose runExecutor call made this start; null for the user's own starts. */
+  chatSessionId: string | null;
   projectId: string;
   remoteServerId: string;
   branch: string | null;

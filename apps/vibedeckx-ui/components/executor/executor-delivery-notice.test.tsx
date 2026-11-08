@@ -19,7 +19,7 @@ const NOW = new Date("2026-10-30T13:30:00Z").getTime();
 
 function makeDelivery(overrides: Partial<ExecutorDelivery> = {}): ExecutorDelivery {
   return {
-    processId: "remote-e1-p1", executorId: "e1", executorName: "git pull", projectId: "p1",
+    processId: "remote-e1-p1", executorId: "e1", executorName: "git pull", chatSessionId: null, projectId: "p1",
     remoteServerId: "srv", branch: "main", state: "retrying", attempts: 2, reason: "timeout",
     error: "Request timed out after 30000ms", nextAttemptAt: NOW + 25_000,
     firstSentAt: NOW - 60_000, deadlineAt: NOW - 60_000 + 20 * 60_000,
