@@ -42,7 +42,7 @@ import {
 import { runConnectWorker } from "./connect-worker.js";
 import { runSupervise } from "./connect-windows-supervise.js";
 import { readPackageVersion } from "./utils/package-version.js";
-import open from "open";
+import { maybeOpenBrowser } from "./open-browser.js";
 
 function loadTLSOptions(flags: {
   cert: string | undefined;
@@ -234,12 +234,7 @@ const startCommand = buildCommand({
       console.log(`Preview links served at ${previewOrigin("<slug>", previewHost)}`);
     }
 
-    // Skip auto-open when TLS is on: the cert is for the public domain,
-    // so https://localhost would just show a cert warning. API-only mode has
-    // nothing to show in a browser either.
-    if (!tls && uiRoot) {
-      await open(url);
-    }
+    await maybeOpenBrowser({ url, tls: !!tls, hasUi: !!uiRoot, authEnabled });
 
     // Graceful shutdown with re-entrancy guard and force-exit timeout
     let shuttingDown = false;
