@@ -206,7 +206,7 @@ export function PreviewPanel({ projectId, project }: PreviewPanelProps) {
     <div className="h-full flex flex-col">
       <form onSubmit={handleCreate} className="flex items-center gap-1.5 border-b px-2 h-10 shrink-0">
         <Select value={targetId} onValueChange={setTargetId} disabled={targets.length === 0}>
-          <SelectTrigger className="h-7 w-[11rem] text-xs" aria-label="Machine">
+          <SelectTrigger size="sm" className="w-[11rem] text-xs" aria-label="Machine">
             <SelectValue placeholder={targets.length === 0 ? "No machines" : "Machine"} />
           </SelectTrigger>
           <SelectContent>
@@ -226,11 +226,11 @@ export function PreviewPanel({ projectId, project }: PreviewPanelProps) {
           value={port}
           onChange={(e) => setPort(e.target.value.replace(/[^\d]/g, ""))}
           inputMode="numeric"
-          className="h-7 w-20 text-xs"
+          className="h-8 w-20 text-xs"
           aria-label="Port"
           placeholder="3000"
         />
-        <Button type="submit" size="sm" className="h-7 text-xs" disabled={busy || !targetId}>
+        <Button type="submit" size="sm" className="text-xs" disabled={busy || !targetId}>
           <ExternalLink className="h-3.5 w-3.5" />
           Open
         </Button>
