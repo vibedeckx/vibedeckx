@@ -24,6 +24,8 @@ interface PreviewPanelProps {
 }
 
 const LOCAL_TARGET = "local";
+// Up to this many links, a usage hint fills the space below the list.
+const FEW_LINKS = 3;
 
 /**
  * Open a preview in a new tab with a fresh one-time sign-in URL.
@@ -243,37 +245,50 @@ export function PreviewPanel({ projectId, project }: PreviewPanelProps) {
             detail="Pick the machine the server runs on and its port. The page opens in a new tab at its own address, which you can keep and reopen later, also from your phone."
           />
         ) : (
-          <ul className="divide-y">
-            {links.map((link) => {
-              const target = targets.find((t) => t.id === link.targetId);
-              const offline = target?.online === false;
-              return (
-                <li key={link.slug} className="flex items-center gap-2 px-3 py-2 text-sm">
-                  {link.targetId === LOCAL_TARGET
-                    ? <Monitor className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-                    : <Cloud className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate">
-                      <span className="font-medium">{link.targetName}</span>
-                      <span className="text-muted-foreground"> · localhost:{link.port}</span>
-                      {offline && <span className="ml-1.5 text-xs text-muted-foreground">offline</span>}
+          <>
+            <ul className="divide-y border-b">
+              {links.map((link) => {
+                const target = targets.find((t) => t.id === link.targetId);
+                const offline = target?.online === false;
+                return (
+                  <li key={link.slug} className="flex items-center gap-2 px-3 py-2 text-sm">
+                    {link.targetId === LOCAL_TARGET
+                      ? <Monitor className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                      : <Cloud className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate">
+                        <span className="font-medium">{link.targetName}</span>
+                        <span className="text-muted-foreground"> · localhost:{link.port}</span>
+                        {offline && <span className="ml-1.5 text-xs text-muted-foreground">offline</span>}
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">{link.url}</div>
                     </div>
-                    <div className="truncate text-xs text-muted-foreground">{link.url}</div>
-                  </div>
-                  <Hint label="Open in a new tab">
-                    <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Open preview" onClick={() => void handleOpen(link)}>
-                      <ExternalLink className="h-3.5 w-3.5" />
-                    </Button>
-                  </Hint>
-                  <Hint label="Remove this preview link">
-                    <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Remove preview link" onClick={() => void handleDelete(link)}>
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  </Hint>
-                </li>
-              );
-            })}
-          </ul>
+                    <Hint label="Open in a new tab">
+                      <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Open preview" onClick={() => void handleOpen(link)}>
+                        <ExternalLink className="h-3.5 w-3.5" />
+                      </Button>
+                    </Hint>
+                    <Hint label="Remove this preview link">
+                      <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Remove preview link" onClick={() => void handleDelete(link)}>
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </Hint>
+                  </li>
+                );
+              })}
+            </ul>
+            {/* A short list leaves the panel mostly empty: spend that space on
+                how links behave, until the list is long enough to fill it. */}
+            {links.length <= FEW_LINKS && (
+              <div className="flex flex-col items-center gap-2 px-6 py-10 text-center text-muted-foreground">
+                <Globe className="h-6 w-6 opacity-40" />
+                <p className="max-w-sm text-xs leading-relaxed">
+                  Each link keeps its address: bookmark it, or open it on another device and sign in to Vibedeckx there.
+                  Pick a machine and port above to add another.
+                </p>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
