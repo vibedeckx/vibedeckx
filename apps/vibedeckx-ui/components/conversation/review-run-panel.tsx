@@ -350,41 +350,41 @@ export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, on
   const statusText = REVIEW_STATUS_TEXT[run.status];
   return (
     <div className="space-y-2.5 rounded-lg border bg-background/70 p-3 shadow-xs" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 space-y-0.5">
-          <div className="flex min-w-0 items-center gap-2">
-            <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
-              {working && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${tone}`} />}
-              <span className={`relative inline-flex h-2 w-2 rounded-full ${tone}`} />
-            </span>
-            <span className="shrink-0 rounded-sm bg-muted px-1.5 py-px font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Review</span>
+      <div className="space-y-0.5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 space-y-0.5">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="relative flex h-2 w-2 shrink-0" aria-hidden>
+                {working && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${tone}`} />}
+                <span className={`relative inline-flex h-2 w-2 rounded-full ${tone}`} />
+              </span>
+              <span className="shrink-0 rounded-sm bg-muted px-1.5 py-px font-mono text-[10px] uppercase tracking-wider text-muted-foreground">Review</span>
+            </div>
+            {/* The focus sits under the tag rather than beside it, so it shares
+                the status line's indent instead of starting after the tag. */}
+            <div className="truncate pl-4 font-medium" title={run.review_focus ?? undefined}>
+              {run.review_focus || "Code review"}
+            </div>
           </div>
-          {/* The focus sits under the tag rather than beside it, so it shares
-              the status line's indent instead of starting after the tag. */}
-          <div className="truncate pl-4 font-medium" title={run.review_focus ?? undefined}>
-            {run.review_focus || "Code review"}
-          </div>
-          <div className="flex min-w-0 items-center gap-1.5 pl-4 text-muted-foreground" style={meta}>
-            {/* Working states shimmer instead of carrying a spinner: the pulsing
-                dot already says "in progress", and a leading icon would push the
-                text off the focus line's indent. */}
-            {statusText && (working
-              ? <Shimmer as="span" className="min-w-0 truncate">{statusText}</Shimmer>
-              : <span className={`min-w-0 truncate ${waitingOnYou ? "text-amber-700 dark:text-amber-400" : ""}`}>{statusText}</span>)}
-            {round && (
-              <>
-                <span aria-hidden>·</span>
-                <span className="shrink-0 tabular-nums">{round}</span>
-              </>
-            )}
-          </div>
+          <Hint label="End this review">
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
+              className="shrink-0 text-muted-foreground hover:text-destructive">
+              <X className="h-3 w-3" />End
+            </Button>
+          </Hint>
         </div>
-        <Hint label="End this review">
-          <Button variant="ghost" size="sm" disabled={busy} onClick={() => onAction("cancel")}
-            className="shrink-0 text-muted-foreground hover:text-destructive">
-            <X className="h-3 w-3" />End
-          </Button>
-        </Hint>
+        {/* The status line spans the full card width (below the End button) so
+            the round count can sit under the End button; pr-2.5 matches that
+            ghost button's own padding so it lines up with the "End" text. */}
+        <div className="flex min-w-0 items-center gap-1.5 pl-4 pr-2.5 text-muted-foreground" style={meta}>
+          {/* Working states shimmer instead of carrying a spinner: the pulsing
+              dot already says "in progress", and a leading icon would push the
+              text off the focus line's indent. */}
+          {statusText && (working
+            ? <Shimmer as="span" className="min-w-0 truncate">{statusText}</Shimmer>
+            : <span className={`min-w-0 truncate ${waitingOnYou ? "text-amber-700 dark:text-amber-400" : ""}`}>{statusText}</span>)}
+          {round && <span className="ml-auto shrink-0 pl-2 tabular-nums">{round}</span>}
+        </div>
       </div>
       {run.error && (
         <div className="flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-amber-700 dark:text-amber-400" style={meta}>
