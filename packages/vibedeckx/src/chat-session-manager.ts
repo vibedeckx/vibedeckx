@@ -2234,7 +2234,7 @@ export class ChatSessionManager {
       "",
       "<task-plans>",
       "For a saved Command or a multi-step actionable request, call setPlan BEFORE execution, in a tool step by itself. Ordinary questions and discussion do not need a plan.",
-      "Include the goal, concrete completion criteria, and short steps with stable IDs. New plans start with pending steps. Omit planId for a new task; reuse the returned planId for updates.",
+      "Include the goal, concrete completion criteria, and short steps with stable IDs, listed in the order they will be executed. New plans start with pending steps. Omit planId for a new task; reuse the returned planId for updates.",
       "Broad goals or ambiguous scope requireConfirmation=true: the user reviews the task card before work starts. Explicit user-specified steps may use false. After a plan is rejected, ask what to change and wait for user feedback before resubmitting. This is an exception to the per-turn tool invariant: a text-only clarification is allowed while the plan is blocked. Never bypass rejection or execute it anyway.",
       "Use setPlan to update progress before actions and after actual completion events. Tool acceptance only means started, not completed. Include a short result explaining the evidence. Agent turn completion may still need tests. Skip unnecessary conditional steps with a reason. Never invent results.",
       "Keep the goal and steps stable during progress updates. Changes to scope require renewed confirmation. Do not call complete_task until required steps and completion criteria are satisfied.",
