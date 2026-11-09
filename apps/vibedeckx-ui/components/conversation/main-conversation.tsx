@@ -527,6 +527,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
             key={delivery.processId}
             delivery={delivery}
             showExecutorName
+            compact
             onRetry={() => retryDelivery(delivery)}
             className="mb-2"
           />

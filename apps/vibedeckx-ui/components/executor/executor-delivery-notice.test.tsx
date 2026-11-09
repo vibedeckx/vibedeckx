@@ -62,6 +62,13 @@ describe("ExecutorDeliveryNotice", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
+  it("drops the retry fine print when compact", () => {
+    act(() => root.render(<ExecutorDeliveryNotice delivery={makeDelivery()} onRetry={vi.fn()} showExecutorName compact />));
+    expect(container.textContent).toContain("attempt 2, trying again about every 30s");
+    expect(container.textContent).not.toContain("won't run twice");
+    expect(container.textContent).not.toContain("Gives up at");
+  });
+
   it("says it is waiting for the remote when it is offline", () => {
     act(() => root.render(
       <ExecutorDeliveryNotice delivery={makeDelivery({ reason: "offline", nextAttemptAt: null })} onRetry={vi.fn()} />,

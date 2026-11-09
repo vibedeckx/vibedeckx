@@ -29,12 +29,15 @@ export function ExecutorDeliveryNotice({
   delivery,
   onRetry,
   showExecutorName = false,
+  compact = false,
   className,
 }: {
   delivery: ExecutorDelivery;
   onRetry: () => Promise<unknown>;
   /** Name the executor, for surfaces that are not its own row. */
   showExecutorName?: boolean;
+  /** Headline only while retrying — the dedupe/deadline fine print is left to the executor's own row. */
+  compact?: boolean;
   className?: string;
 }) {
   const remotes = useOptionalProjectRemotesContext();
@@ -47,11 +50,11 @@ export function ExecutorDeliveryNotice({
   const failure = failureText(delivery, remote);
 
   let headline: string;
-  let detail: string;
+  let detail: string | null;
   if (retrying) {
     const next = delivery.nextAttemptAt === null ? `waiting for ${remote} to reconnect` : "trying again about every 30s";
     headline = `${subject} couldn't reach ${remote} (${failure}). Retrying automatically — attempt ${delivery.attempts}, ${next}.`;
-    detail = `Retries reuse the same start, so it won't run twice (unless ${remote}'s worker restarts meanwhile). Gives up at ${clock(delivery.deadlineAt)}.`;
+    detail = compact ? null : `Retries reuse the same start, so it won't run twice (unless ${remote}'s worker restarts meanwhile). Gives up at ${clock(delivery.deadlineAt)}.`;
   } else if (!delivery.mayHaveRun) {
     const minutes = Math.round((delivery.deadlineAt - delivery.firstSentAt) / 60_000);
     headline = `${subject} couldn't reach ${remote} for ${minutes} minutes (${failure}).`;
@@ -87,7 +90,7 @@ export function ExecutorDeliveryNotice({
         : <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />}
       <div className="min-w-0 flex-1">
         <div className="text-foreground">{headline}</div>
-        <div className="mt-0.5 text-muted-foreground">{detail}</div>
+        {detail && <div className="mt-0.5 text-muted-foreground">{detail}</div>}
       </div>
       <Button size="sm" variant="outline" className="h-7 shrink-0 text-xs" onClick={handleRetry} disabled={busy}>
         {busy && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
