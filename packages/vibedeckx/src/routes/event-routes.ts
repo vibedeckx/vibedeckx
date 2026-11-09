@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import type { GlobalEvent } from "../event-bus.js";
+import { EventFanout } from "../event-fanout.js";
 import { CLERK_CLOCK_SKEW_MS } from "./ws-authz.js";
 import "../server-types.js";
 
@@ -16,6 +17,19 @@ function toWireEvent(event: GlobalEvent): GlobalEvent {
 }
 
 const routes: FastifyPluginAsync = async (fastify) => {
+  // One bus subscription for all SSE connections; the fanout resolves each
+  // project's owner once and writes only to that owner's connections.
+  const fanout = new EventFanout({
+    getOwnerId: (projectId) => fastify.storage.projects.getOwnerId(projectId),
+    onError: (err) => {
+      console.error(`[EventsSSE] Failed to route/write event:`, err);
+    },
+  });
+  const unsubscribeBus = fastify.eventBus.subscribe((event) => fanout.dispatch(event));
+  fastify.addHook("onClose", async () => {
+    unsubscribeBus();
+  });
+
   fastify.get<{ Querystring: { token?: string } }>("/api/events", async (req, reply) => {
     // Tenant scope for event filtering: null means no-auth solo mode, which sees
     // all events; a Clerk userId only receives events for projects it owns.
@@ -67,18 +81,10 @@ const routes: FastifyPluginAsync = async (fastify) => {
       `data: ${JSON.stringify({ type: "hello", ...(fastify.uiBuildId ? { uiBuildId: fastify.uiBuildId } : {}) })}\n\n`,
     );
 
-    // Subscribe to all events, filtered to the subscriber's tenant
-    const unsubscribe = fastify.eventBus.subscribe((event) => {
-      void (async () => {
-        // Every GlobalEvent carries a projectId; Clerk users only see events for
-        // projects they own. Trusted principals (userId === null) see everything.
-        if (userId !== null && !(await fastify.storage.projects.getById(event.projectId, userId))) {
-          return;
-        }
-        reply.raw.write(`data: ${JSON.stringify(toWireEvent(event))}\n\n`);
-      })().catch((err) => {
-        console.error(`[EventsSSE] Failed to filter/write event:`, err);
-      });
+    // Every GlobalEvent carries a projectId; Clerk users only see events for
+    // projects they own. Trusted principals (userId === null) see everything.
+    const unsubscribe = fanout.add(userId, (event) => {
+      reply.raw.write(`data: ${JSON.stringify(toWireEvent(event))}\n\n`);
     });
 
     // Heartbeat every 15 seconds. A real `data:` event (not an SSE comment) so
