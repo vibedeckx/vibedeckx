@@ -326,7 +326,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
               </div>
               <h3 className="text-sm font-semibold mb-1 text-foreground">Start a conversation</h3>
               <p className="text-xs text-muted-foreground leading-relaxed">
-                Chat with the AI assistant about your project
+                Give it a goal — it plans the work and dispatches agents to carry it out
               </p>
             </div>
           )}
