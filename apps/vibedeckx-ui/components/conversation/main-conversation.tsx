@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, useMemo, forwardRef, useImperativeHandle, type RefObject } from "react";
 import { useStickToBottomContext } from "use-stick-to-bottom";
+import { cn } from "@/lib/utils";
 import {
   Conversation,
   ConversationContent,
@@ -147,6 +148,7 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [activeRuns, setActiveRuns] = useState<WorkflowRun[]>([]);
   const taskPlans = useMemo(() => collectTaskPlans(messages), [messages]);
+  const showEmptyPlaceholder = !isLoading && isInitialized && messages.length === 0;
 
   useImperativeHandle(ref, () => ({
     sendMessage: async (text: string) => {
@@ -307,15 +309,18 @@ export const MainConversation = forwardRef<MainConversationHandle, MainConversat
       {/* Messages area */}
       <Conversation className="flex-1 min-h-0" initial="instant">
         <ExecutorEventReStick messages={messages} />
-        <ConversationContent className="gap-4 p-4">
+        <ConversationContent className={cn("gap-4 p-4", showEmptyPlaceholder && "min-h-full")}>
           {isLoading && messages.length === 0 && (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
             </div>
           )}
 
-          {!isLoading && isInitialized && messages.length === 0 && (
-            <div className="text-center py-16">
+          {showEmptyPlaceholder && (
+            // Golden-section placement: the free space above and below splits
+            // 0.382 : 0.618 (flex-grown ::before/::after), so the block sits
+            // at the panel's optical centre at any height.
+            <div className="flex flex-1 flex-col items-center text-center before:grow-[382] before:content-[''] after:grow-[618] after:content-['']">
               <div className="mx-auto w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
                 <MessageSquare className="h-6 w-6 text-primary/60" />
               </div>

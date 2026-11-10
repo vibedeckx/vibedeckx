@@ -815,6 +815,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const showFailedReview = Boolean(
     session && failedReviewerRun && onlyStartupDiagnostics,
   );
+  const showEmptyPlaceholder =
+    !showPreparingReview && !showFailedReview && !session && messages.length === 0;
   // Source side of a review still preparing (banner above the messages).
   const sourcePreparingReview = session
     ? preparingReviews?.find(
@@ -1730,7 +1732,15 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               layer for the scroll contents. */}
           {/* Capped at the Project page's 1200px column and centred, so a wide
               panel (Main Chat collapsed) doesn't stretch lines edge to edge. */}
-          <ConversationContent className="gap-1 p-4 mx-auto w-full max-w-[1200px]" scrollClassName="edge-scrollbar will-change-transform">
+          <ConversationContent
+            className={cn(
+              "gap-1 p-4 mx-auto w-full max-w-[1200px]",
+              // Empty placeholder: let the content fill the scroller so the
+              // placeholder can sit at the panel's optical centre.
+              showEmptyPlaceholder && "min-h-full",
+            )}
+            scrollClassName="edge-scrollbar will-change-transform"
+          >
             {showPreparingReview ? (
               // This session is the placeholder reviewer of a run still
               // distilling its intent brief (two-phase review start). The
@@ -1741,8 +1751,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               <ReviewFailedPlaceholder error={failedReviewerRun?.error}>
                 {startupDiagnosticsView}
               </ReviewFailedPlaceholder>
-            ) : !session && messages.length === 0 ? (
-              <div className="text-center py-16">
+            ) : showEmptyPlaceholder ? (
+              // Golden-section placement: the free space above and below splits
+              // 0.382 : 0.618 (flex-grown ::before/::after), so the block sits
+              // at the panel's optical centre at any height.
+              <div className="flex flex-1 flex-col items-center text-center before:grow-[382] before:content-[''] after:grow-[618] after:content-['']">
                 {isLoading || (projectId && !isInitialized) ? (
                   <>
                     <Loader className="h-6 w-6 mx-auto mb-4" />
