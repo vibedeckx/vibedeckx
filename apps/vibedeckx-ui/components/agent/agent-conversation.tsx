@@ -1758,7 +1758,11 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
               <div className="flex flex-1 flex-col items-center text-center before:grow-[382] before:content-[''] after:grow-[618] after:content-['']">
                 {isLoading || (projectId && !isInitialized) ? (
                   <>
-                    <Loader className="h-6 w-6 mx-auto mb-4" />
+                    {/* Same 48px tile as the idle state below, so the text
+                        doesn't jump when connecting finishes. */}
+                    <div className="mx-auto w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-4">
+                      <Loader size={24} className="text-primary/60" />
+                    </div>
                     <h3 className="text-sm font-semibold mb-1 text-foreground">Connecting to agent...</h3>
                     <p className="text-xs text-muted-foreground leading-relaxed">
                       Setting up the session for this worktree
