@@ -86,7 +86,7 @@ export function ExecutorDeliveryNotice({
       )}
     >
       {retrying
-        ? <RefreshCw className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin text-primary/70" />
+        ? <RefreshCw className="h-3.5 w-3.5 shrink-0 self-center animate-spin text-primary/70" />
         : <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />}
       <div className="min-w-0 flex-1">
         <div className="text-foreground">{headline}</div>
