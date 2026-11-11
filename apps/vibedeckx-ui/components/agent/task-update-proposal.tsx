@@ -3,10 +3,10 @@
 import { useMemo, useState } from "react";
 import { ArrowRight, ArrowUpRight, Check, Loader2, PencilLine, TriangleAlert, XCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { api, type Task, type TaskPriority, type TaskStatus } from "@/lib/api";
+import { api, TaskBatchRejectedError, type Task, type TaskPriority, type TaskStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { diffLines, foldUnchanged } from "@/lib/line-diff";
-import { noteTaskChanged, useProposedTasks } from "@/hooks/use-proposed-tasks";
+import { noteTaskChanged, noteTasksChanged, useProposedTasks } from "@/hooks/use-proposed-tasks";
 import { priorityConfig, priorityOptions, statusConfig, statusOptions } from "@/components/task/task-utils";
 import { ACCENT_BUTTON, PRIORITY_DOT } from "./task-proposal";
 import { useAgentConversation } from "./agent-conversation";
@@ -145,6 +145,28 @@ export function pendingFields(update: ProposedUpdate, task: Task, tasks: readonl
   });
 }
 
+/**
+ * The tasks whose proposed parent move the server accepts when the card's
+ * moves are applied together (Apply all): the batch route checks each move
+ * against the tree as it will be once the whole batch lands, so "B to the top
+ * level, A under B" works together even though A under B alone would be a
+ * cycle. Moves that are invalid even then are dropped until the rest agree.
+ */
+export function batchParentMoves(updates: readonly ProposedUpdate[], tasks: readonly Task[]): Set<string> {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const moves = new Map<string, string | null>();
+  for (const u of updates) {
+    const task = byId.get(u.taskId);
+    if (task && u.parent !== undefined && u.parent !== (task.parent_id ?? null)) moves.set(u.taskId, u.parent);
+  }
+  for (;;) {
+    const projected = tasks.map((t) => (moves.has(t.id) ? { ...t, parent_id: moves.get(t.id)! } : t));
+    const blocked = [...moves].filter(([id, parent]) => reparentProblem(projected, id, parent) !== null);
+    if (blocked.length === 0) return new Set(moves.keys());
+    for (const [id] of blocked) moves.delete(id);
+  }
+}
+
 /** The parent move this row can't offer, or null. */
 function blockedParent(update: ProposedUpdate, task: Task, tasks: readonly Task[]): string | null {
   if (update.parent === undefined || update.parent === (task.parent_id ?? null)) return null;
@@ -156,9 +178,9 @@ const ROW = "border-t border-border/60 px-3 py-2.5 first:border-t-0";
 /**
  * Confirmation card for an agent's `propose_task_update` call: one row per
  * task, each showing the proposed changes against the task's CURRENT values
- * (from the shared project task list) and applied on its own or all at once.
- * Nothing changes until the user applies; the apply goes through the ordinary
- * task update route.
+ * (from the shared project task list) and applied on its own (the ordinary
+ * task update route) or all at once (one all-or-nothing batch request).
+ * Nothing changes until the user applies.
  */
 export function TaskUpdateProposalUI({ input }: { input: unknown }) {
   const { sessionId, projectId, openTask } = useAgentConversation();
@@ -168,20 +190,35 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
   const [submitting, setSubmitting] = useState<Set<number>>(() => new Set());
   const [applyingAll, setApplyingAll] = useState(false);
   const [errors, setErrors] = useState<Map<number, string>>(() => new Map());
+  const [applyAllError, setApplyAllError] = useState<{ message: string; rejected: boolean } | null>(null);
 
+  const batchMoves = useMemo(() => (tasks ? batchParentMoves(updates, tasks) : new Set<string>()), [updates, tasks]);
   const rows = updates.map((update) => {
     const task = tasks?.find((t) => t.id === update.taskId) ?? null;
+    /** Pending on its own (the row's Apply). */
+    const changes = task && tasks ? pendingFields(update, task, tasks) : [];
+    const batchMove = !!task && batchMoves.has(task.id);
+    /** Pending as part of Apply all: adds a move valid only alongside the others. */
+    const batchChanges = FIELDS.filter((f) => changes.includes(f) || (f === "parent" && batchMove));
     return {
       update,
       task,
-      changes: task && tasks ? pendingFields(update, task, tasks) : [],
-      parentProblem: task && tasks ? blockedParent(update, task, tasks) : null,
+      changes,
+      batchChanges,
+      parentProblem: task && tasks && !batchMove ? blockedParent(update, task, tasks) : null,
     };
   });
-  const pendingIndices = rows.flatMap((row, i) => (row.changes.length > 0 ? [i] : []));
+  const pendingIndices = rows.flatMap((row, i) => (row.batchChanges.length > 0 ? [i] : []));
+
+  /** The task-route patch for a row: only the fields still pending, alone or in the batch. */
+  const patchFor = (index: number, batch: boolean) => {
+    const { update, changes, batchChanges } = rows[index];
+    return Object.fromEntries((batch ? batchChanges : changes)
+      .map((f) => (f === "parent" ? ["parent_id", update.parent] : [f, update[f]])));
+  };
 
   const apply = async (index: number) => {
-    const { update, task, changes } = rows[index];
+    const { task, changes } = rows[index];
     if (!projectId || !task || changes.length === 0 || submitting.has(index)) return;
     setSubmitting((prev) => new Set(prev).add(index));
     setErrors((prev) => {
@@ -190,8 +227,7 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
       return next;
     });
     try {
-      const patch = Object.fromEntries(changes.map((f) => (f === "parent" ? ["parent_id", update.parent] : [f, update[f]])));
-      noteTaskChanged(projectId, await api.updateTask(task.id, patch));
+      noteTaskChanged(projectId, await api.updateTask(task.id, patchFor(index, false)));
     } catch (err) {
       setErrors((prev) => new Map(prev).set(index, err instanceof Error ? err.message : "Failed to update task"));
     } finally {
@@ -203,10 +239,24 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
     }
   };
 
+  // One request: either every pending row changes or none does. Re-applying
+  // is harmless — rows re-derive what's still pending from the tasks.
   const applyAll = async () => {
+    if (!projectId || applyingAll || pendingIndices.length === 0) return;
     setApplyingAll(true);
+    setApplyAllError(null);
     try {
-      for (const index of pendingIndices) await apply(index);
+      const changed = await api.updateTasks(projectId, pendingIndices.map((index) => ({
+        id: rows[index].task!.id,
+        ...patchFor(index, true),
+      })));
+      noteTasksChanged(projectId, changed);
+      setErrors(new Map());
+    } catch (err) {
+      const rejected = err instanceof TaskBatchRejectedError;
+      setApplyAllError({ message: err instanceof Error ? err.message : "Failed to update tasks", rejected });
+      // Rows that did change flip once the list says so.
+      if (!rejected) retry();
     } finally {
       setApplyingAll(false);
     }
@@ -272,13 +322,13 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
             onClick={() => void applyAll()}
             disabled={loading || applyingAll || submitting.size > 0}
           >
-            <Check className="h-3 w-3" />
-            Apply all {pendingIndices.length}
+            {applyingAll ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+            {applyingAll ? "Applying…" : `Apply all ${pendingIndices.length}`}
           </Button>
         )}
       </div>
       <div className="flex flex-col">
-        {rows.map(({ update, task, changes, parentProblem }, index) => {
+        {rows.map(({ update, task, changes, batchChanges, parentProblem }, index) => {
           if (tasks === null) {
             return (
               <div key={index} className={cn(ROW, "text-[12px] text-muted-foreground")}>
@@ -295,9 +345,11 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
               </div>
             );
           }
-          const busy = submitting.has(index);
+          const busy = submitting.has(index) || (applyingAll && batchChanges.length > 0);
           const error = errors.get(index);
-          const applied = changes.length === 0;
+          const applied = batchChanges.length === 0;
+          /** Only a move that needs the others' moves first: nothing to apply on its own. */
+          const batchOnly = !applied && changes.length === 0;
           return (
             <div key={index} data-update-row={applied ? "applied" : "pending"} className={cn(ROW, busy && "opacity-70")}>
               <div className="flex items-center gap-2">
@@ -325,19 +377,24 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
                     className={cn("h-6 gap-1 rounded-[7px] px-2.5 text-[11.5px]", pendingIndices.length === 1 && ACCENT_BUTTON)}
                     aria-label="Apply update"
                     onClick={() => void apply(index)}
-                    disabled={busy || applyingAll}
+                    disabled={busy || applyingAll || batchOnly}
                   >
-                    {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
-                    {busy ? "Applying…" : error ? "Retry" : "Apply"}
+                    {submitting.has(index) ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+                    {submitting.has(index) ? "Applying…" : error ? "Retry" : "Apply"}
                   </Button>
                 )}
               </div>
               {!applied && (
                 <dl className="mt-2 grid grid-cols-[72px_minmax(0,1fr)] items-start gap-x-2 gap-y-1.5 text-[12px]">
-                  {changes.map((field) => (
+                  {batchChanges.map((field) => (
                     <FieldChange key={field} field={field} task={task} update={update} tasks={tasks} />
                   ))}
                 </dl>
+              )}
+              {batchOnly && (
+                <p className="mt-1.5 text-[11.5px] break-words text-muted-foreground">
+                  This move depends on the others — apply all to make it.
+                </p>
               )}
               {parentProblem && (
                 <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] break-words text-muted-foreground">
@@ -355,6 +412,17 @@ export function TaskUpdateProposalUI({ input }: { input: unknown }) {
           );
         })}
       </div>
+      {applyAllError && !settled && (
+        <div className="flex items-start gap-1.5 border-t border-red-500/20 bg-red-500/5 px-3 py-2 text-[11.5px] break-words text-red-700 dark:text-red-400">
+          <TriangleAlert className="mt-px h-3 w-3 shrink-0" />
+          <span className="min-w-0">
+            {applyAllError.rejected
+              ? `Couldn't apply the updates — none were applied. ${applyAllError.message}`
+              : `Couldn't confirm whether the updates were applied (${applyAllError.message}). `
+                + "Any that were will show as up to date; applying again is safe."}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

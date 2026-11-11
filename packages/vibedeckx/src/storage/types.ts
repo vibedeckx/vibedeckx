@@ -307,6 +307,8 @@ export interface MachineIdentityRow {
 export type TaskStatus = 'todo' | 'in_progress' | 'done' | 'cancelled';
 export type TaskPriority = 'low' | 'medium' | 'high' | 'urgent';
 
+export type TaskRevertField = "title" | "description" | "status" | "priority" | "assigned_branch" | "position" | "parent_id";
+
 export interface Task {
   id: string;
   project_id: string;
@@ -2245,6 +2247,19 @@ export interface Storage {
     listPriorityByProject: (projectId: string, limit: number) => Promise<Task[]>;
     getById: (id: string) => Promise<Task | undefined>;
     update: (id: string, opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number; parent_id?: string | null }) => Promise<Task | undefined>;
+    /**
+     * `update` for each patch, in order, in one transaction: a missing task or
+     * any failure changes none of them. Results are in input order.
+     */
+    updateMany: (patches: Array<{ id: string; opts: Parameters<Storage["tasks"]["update"]>[1] }>) => Promise<Task[]>;
+    /**
+     * Undo an update field by field, but only where the field still holds
+     * what that update wrote — a later edit wins over the undo. A task that
+     * no longer exists is skipped. Parent restores are judged together against
+     * the tree they produce; one that would point at a missing task or form a
+     * cycle is skipped. One transaction.
+     */
+    revertIfUnchanged: (reverts: Array<{ id: string; fields: Array<{ field: TaskRevertField; written: unknown; restore: unknown }> }>) => Promise<void>;
     archive: (id: string) => Promise<Task | undefined>;
     unarchive: (id: string) => Promise<Task | undefined>;
     /** Its sub-tasks become top-level rather than going with it. */

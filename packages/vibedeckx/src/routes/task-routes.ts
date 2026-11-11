@@ -6,8 +6,8 @@ import { resolveFastChatModel } from "../utils/chat-model.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import { resolveUserId } from "../utils/resolve-user-id.js";
 import { isProjectSourceSession, resolveSourceSessions, validSourceId } from "./source-sessions.js";
-import type { Task, TaskSource } from "../storage/types.js";
-import { applyTaskChange, revertTaskPatch } from "../retention-holds.js";
+import type { Task, TaskRevertField, TaskSource } from "../storage/types.js";
+import { applyTaskChange, applyTaskChanges, revertTaskPatch } from "../retention-holds.js";
 import "../server-types.js";
 
 /** Far above PROPOSE_TASK_MAX_ITEMS; only bounds what a caller can claim. */
@@ -17,6 +17,12 @@ interface SourceBody { session_id?: unknown; tool_use_id?: unknown; item_index?:
 
 /** Most tasks one batch create may file; above PROPOSE_TASK_MAX_ITEMS. */
 const BATCH_CREATE_MAX = 20;
+
+/** Most tasks one batch update may change; above the propose_task_update item limit. */
+const BATCH_UPDATE_MAX = 20;
+
+const TASK_STATUSES: readonly string[] = ["todo", "in_progress", "done", "cancelled"];
+const TASK_PRIORITIES: readonly string[] = ["low", "medium", "high", "urgent"];
 
 /** Bounds the ancestor walk; far deeper than any tree a person keeps. */
 const PARENT_DEPTH_MAX = 64;
@@ -314,6 +320,101 @@ const routes: FastifyPluginAsync = async (fastify) => {
     if (task) fastify.eventBus.emit({ type: "task:updated", projectId: existing.project_id, task: { ...task } });
     return reply.code(200).send({ task });
   });
+
+  // Update several tasks at once — "Apply all" on a propose_task_update card.
+  // All or nothing, in one transaction. Parent moves are checked against the
+  // tree as it will be once the whole batch lands, so two moves that only
+  // form a cycle together are refused too.
+  type UpdatePatch = Parameters<typeof fastify.storage.tasks.update>[1];
+  fastify.put<{ Params: { projectId: string }; Body: { updates?: unknown } }>(
+    "/api/projects/:projectId/tasks/batch",
+    async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const { projectId } = req.params;
+      const project = await fastify.storage.projects.getById(projectId, userId);
+      if (!project) {
+        return reply.code(404).send({ error: "Project not found" });
+      }
+
+      const bodies = req.body?.updates;
+      if (!Array.isArray(bodies) || bodies.length === 0 || bodies.length > BATCH_UPDATE_MAX) {
+        return reply.code(400).send({ error: `updates must list 1 to ${BATCH_UPDATE_MAX} tasks` });
+      }
+      const projectTasks = await fastify.storage.tasks.getByProjectId(projectId, { includeArchived: true });
+      const byId = new Map(projectTasks.map((t) => [t.id, t]));
+      const patches: Array<{ id: string; opts: UpdatePatch }> = [];
+      for (const [i, raw] of bodies.entries()) {
+        const fail = (error: string) => reply.code(400).send({ error: `Update ${i + 1}: ${error}` });
+        const body = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+        const { id, title, description, status, priority, assigned_branch, parent_id } = body;
+        if (!validSourceId(id) || !byId.has(id)) return fail("Task not found");
+        if (patches.some((p) => p.id === id)) return fail("Task listed more than once");
+        if (title !== undefined && (typeof title !== "string" || !title.trim())) return fail("Invalid title");
+        if (description !== undefined && description !== null && typeof description !== "string") {
+          return fail("Invalid description");
+        }
+        if (status !== undefined && !TASK_STATUSES.includes(status as string)) return fail("Invalid status");
+        if (priority !== undefined && !TASK_PRIORITIES.includes(priority as string)) return fail("Invalid priority");
+        if (assigned_branch !== undefined && assigned_branch !== null && typeof assigned_branch !== "string") {
+          return fail("Invalid assigned_branch");
+        }
+        if (parent_id !== undefined && parent_id !== null && !validSourceId(parent_id)) return fail("Invalid parent_id");
+        patches.push({
+          id,
+          opts: {
+            title: title as string | undefined,
+            description: description as string | null | undefined,
+            status: status as UpdatePatch["status"],
+            priority: priority as UpdatePatch["priority"],
+            assigned_branch: assigned_branch as string | null | undefined,
+            parent_id: parent_id as string | null | undefined,
+          },
+        });
+      }
+
+      const parentOf = new Map(projectTasks.map((t) => [t.id, t.parent_id]));
+      for (const { id, opts } of patches) if (opts.parent_id !== undefined) parentOf.set(id, opts.parent_id);
+      for (const [i, { id, opts }] of patches.entries()) {
+        if (opts.parent_id === undefined || opts.parent_id === null) continue;
+        let current: string | null = opts.parent_id;
+        for (let depth = 0; current !== null; depth++) {
+          const error = current === id
+            ? "A task can't be nested under itself or its own sub-task"
+            : depth >= PARENT_DEPTH_MAX ? "Task nesting is too deep"
+            : !byId.has(current) ? "Parent task not found"
+            : null;
+          if (error) return reply.code(400).send({ error: `Update ${i + 1}: ${error}` });
+          current = parentOf.get(current) ?? null;
+        }
+      }
+
+      const ids = patches.map((p) => p.id);
+      let tasks: Task[] | undefined;
+      try {
+        tasks = await applyTaskChanges(
+          fastify,
+          ids,
+          () => fastify.storage.tasks.updateMany(patches),
+          // Field by field, and only what still holds this batch's value: an
+          // edit or delete that landed during the hold sync is kept.
+          (before, after) => fastify.storage.tasks.revertIfUnchanged(patches.map(({ id, opts }, i) => ({
+            id,
+            fields: (Object.keys(opts) as TaskRevertField[])
+              .filter((field) => opts[field] !== undefined)
+              .map((field) => ({ field, written: after[i][field], restore: before[i][field] })),
+          }))),
+        );
+      } catch (error) {
+        return reply.code(502).send({ error: holdFailed(error) });
+      }
+      // Deleted between validation and the slots being held: nothing changed.
+      if (!tasks) return reply.code(409).send({ error: "A task changed while updating; none were updated" });
+      // Also re-derives each proposed task's retention hold (shared-services listener).
+      for (const task of tasks) fastify.eventBus.emit({ type: "task:updated", projectId, task: { ...task } });
+      return reply.code(200).send({ tasks });
+    },
+  );
 
   // Delete task
   fastify.delete<{ Params: { id: string } }>("/api/tasks/:id", async (req, reply) => {

@@ -242,6 +242,191 @@ describe("task create from an agent proposal", () => {
     });
   });
 
+  describe("batch update (Apply all)", () => {
+    const batchUpdate = (updates: unknown, projectId = "project-1") =>
+      app.inject({ method: "PUT", url: `/api/projects/${projectId}/tasks/batch`, payload: { updates } as object });
+    const plain = async (id: string, title = id) => {
+      await storage.tasks.create({ id, project_id: "project-1", title, description: "x" });
+    };
+
+    it("applies every patch in one go and announces each task", async () => {
+      await plain("a");
+      await plain("b");
+      const res = await batchUpdate([
+        { id: "a", status: "done", title: "A done" },
+        { id: "b", priority: "urgent", parent_id: "a" },
+      ]);
+      expect(res.statusCode, res.body).toBe(200);
+      expect(res.json().tasks.map((t: { id: string }) => t.id)).toEqual(["a", "b"]);
+      expect(await storage.tasks.getById("a")).toMatchObject({ status: "done", title: "A done" });
+      expect(await storage.tasks.getById("b")).toMatchObject({ priority: "urgent", parent_id: "a" });
+      expect(emitted.filter((e) => e.type === "task:updated")).toHaveLength(2);
+    });
+
+    it("rejects the whole batch when any patch is invalid, changing nothing", async () => {
+      await plain("a");
+      await plain("b");
+      for (const bad of [
+        [{ id: "a", status: "done" }, { id: "b", status: "bogus" }],
+        [{ id: "a", status: "done" }, { id: "missing" }],
+        [{ id: "a", status: "done" }, { id: "a", title: "twice" }],
+        [{ id: "a", status: "done" }, { id: "b", title: "  " }],
+        [{ id: "a", status: "done" }, { id: "b", parent_id: "missing" }],
+        [],
+        Array.from({ length: 21 }, () => ({ id: "a" })),
+      ]) {
+        expect((await batchUpdate(bad)).statusCode, JSON.stringify(bad)).toBe(400);
+      }
+      expect(await storage.tasks.getById("a")).toMatchObject({ status: "todo" });
+      expect(emitted.filter((e) => e.type === "task:updated")).toHaveLength(0);
+    });
+
+    it("refuses tasks from another project", async () => {
+      await storage.tasks.create({ id: "elsewhere", project_id: "project-2", title: "E", description: "x" });
+      expect((await batchUpdate([{ id: "elsewhere", status: "done" }])).statusCode).toBe(400);
+      expect((await batchUpdate([{ id: "elsewhere", status: "done" }], "project-2")).statusCode).toBe(200);
+      auth.currentUserId = "user-2";
+      expect((await batchUpdate([{ id: "elsewhere", status: "todo" }], "project-2")).statusCode).toBe(404);
+    });
+
+    it("refuses moves that only form a cycle together", async () => {
+      await plain("a");
+      await plain("b");
+      const res = await batchUpdate([{ id: "a", parent_id: "b" }, { id: "b", parent_id: "a" }]);
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toContain("nested under itself");
+      // Swapping the order of a valid move inside the batch is fine.
+      await plain("c");
+      await storage.tasks.update("b", { parent_id: "a" });
+      const swap = await batchUpdate([{ id: "b", parent_id: null }, { id: "a", parent_id: "b" }]);
+      expect(swap.statusCode, swap.body).toBe(200);
+    });
+
+    it("rolls back every patch when one fails inside the transaction", async () => {
+      await plain("a");
+      await expect(storage.tasks.updateMany([
+        { id: "a", opts: { title: "changed" } },
+        { id: "missing", opts: { title: "x" } },
+      ])).rejects.toThrow();
+      expect((await storage.tasks.getById("a"))?.title).toBe("a");
+    });
+
+    it("reverts the whole batch when a reopen's remote hold can't be pushed", async () => {
+      const remote = (i: number) => body({ source: { session_id: REMOTE_SESSION, tool_use_id: "toolu_r", item_index: i } });
+      const task = (await create(remote(0))).json().task;
+      await put(task.id, { status: "done" });
+      await settle();
+      await plain("local");
+
+      workerAnswer = () => ({ ok: false, status: 0, data: {} });
+      const res = await batchUpdate([{ id: "local", title: "Renamed" }, { id: task.id, status: "todo" }]);
+      expect(res.statusCode).toBe(502);
+      expect((await storage.tasks.getById("local"))?.title).toBe("local");
+      expect((await storage.tasks.getById(task.id))?.status).toBe("done");
+
+      workerAnswer = () => ({ ok: true, status: 200, data: {} });
+      expect((await batchUpdate([{ id: "local", title: "Renamed" }, { id: task.id, status: "todo" }])).statusCode).toBe(200);
+      expect(pushed.at(-1)?.body).toEqual({ holds: [{ kind: "task", id: task.id }] });
+    });
+
+    /** A reopened remote task + a plain task, batched while the hold push hangs and then fails. */
+    const hangingReopen = async () => {
+      const remote = body({ source: { session_id: REMOTE_SESSION, tool_use_id: "toolu_r", item_index: 0 } });
+      const task = (await create(remote)).json().task;
+      await put(task.id, { status: "done" });
+      await settle();
+      await plain("local");
+      await plain("other");
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      workerAnswer = () => gate.then(() => ({ ok: false, status: 0, data: {} }));
+      const res = batchUpdate([
+        { id: "local", title: "Batch title", priority: "high" },
+        { id: "other", title: "Batch other" },
+        { id: task.id, status: "todo" },
+      ]);
+      await settle();
+      return { task, res, release };
+    };
+
+    it("keeps an edit that landed on a batch member while the failed hold sync was pending", async () => {
+      const { task, res, release } = await hangingReopen();
+      expect((await put("local", { title: "Edited in another tab" })).statusCode).toBe(200);
+      release();
+      expect((await res).statusCode).toBe(502);
+      // The newer title stays; the batch's untouched-since priority is undone.
+      expect(await storage.tasks.getById("local")).toMatchObject({ title: "Edited in another tab", priority: "medium" });
+      expect((await storage.tasks.getById("other"))?.title).toBe("other");
+      expect((await storage.tasks.getById(task.id))?.status).toBe("done");
+    });
+
+    /** A starts under B; the batch moves A to the top level while reopening a remote task. */
+    const hangingMoveToRoot = async () => {
+      const remote = body({ source: { session_id: REMOTE_SESSION, tool_use_id: "toolu_r", item_index: 0 } });
+      const task = (await create(remote)).json().task;
+      await put(task.id, { status: "done" });
+      await settle();
+      await plain("B");
+      await storage.tasks.create({ id: "A", project_id: "project-1", title: "A", description: "x", parent_id: "B" });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      workerAnswer = () => gate.then(() => ({ ok: false, status: 0, data: {} }));
+      const res = batchUpdate([{ id: "A", parent_id: null, title: "Batch A" }, { id: task.id, status: "todo" }]);
+      await settle();
+      return { task, res, release };
+    };
+
+    it("doesn't restore a parent that was deleted during the pending hold sync", async () => {
+      const { task, res, release } = await hangingMoveToRoot();
+      expect((await app.inject({ method: "DELETE", url: "/api/tasks/B" })).statusCode).toBe(200);
+      release();
+      expect((await res).statusCode).toBe(502);
+      expect(await storage.tasks.getById("A")).toMatchObject({ parent_id: null, title: "A" });
+      expect((await storage.tasks.getById(task.id))?.status).toBe("done");
+    });
+
+    it("doesn't restore a parent that would now form a cycle", async () => {
+      const { task, res, release } = await hangingMoveToRoot();
+      // Valid at this moment: A is top-level.
+      expect((await put("B", { parent_id: "A" })).statusCode).toBe(200);
+      release();
+      expect((await res).statusCode).toBe(502);
+      expect(await storage.tasks.getById("A")).toMatchObject({ parent_id: null, title: "A" });
+      expect((await storage.tasks.getById("B"))?.parent_id).toBe("A");
+      expect((await storage.tasks.getById(task.id))?.status).toBe("done");
+    });
+
+    it("undoes a whole parent reversal when the hold can't be pushed, in either order", async () => {
+      const remote = body({ source: { session_id: REMOTE_SESSION, tool_use_id: "toolu_r", item_index: 0 } });
+      const task = (await create(remote)).json().task;
+      await put(task.id, { status: "done" });
+      await settle();
+      await plain("B");
+      await storage.tasks.create({ id: "A", project_id: "project-1", title: "A", description: "x", parent_id: "B" });
+      workerAnswer = () => ({ ok: false, status: 0, data: {} });
+      for (const moves of [
+        [{ id: "A", parent_id: null }, { id: "B", parent_id: "A" }],
+        [{ id: "B", parent_id: "A" }, { id: "A", parent_id: null }],
+      ]) {
+        const res = await batchUpdate([...moves, { id: task.id, status: "todo" }]);
+        expect(res.statusCode, JSON.stringify(moves)).toBe(502);
+        expect((await storage.tasks.getById("A"))?.parent_id, JSON.stringify(moves)).toBe("B");
+        expect((await storage.tasks.getById("B"))?.parent_id, JSON.stringify(moves)).toBeNull();
+        expect((await storage.tasks.getById(task.id))?.status).toBe("done");
+      }
+    });
+
+    it("still reverts the rest when a batch member was deleted during the pending hold sync", async () => {
+      const { task, res, release } = await hangingReopen();
+      expect((await app.inject({ method: "DELETE", url: "/api/tasks/local" })).statusCode).toBe(200);
+      release();
+      expect((await res).statusCode).toBe(502);
+      expect(await storage.tasks.getById("local")).toBeUndefined();
+      expect((await storage.tasks.getById("other"))?.title).toBe("other");
+      expect((await storage.tasks.getById(task.id))?.status).toBe("done");
+    });
+  });
+
   describe("retention hold on the source session", () => {
     it("holds the session while the task is open and releases it when done", async () => {
       const task = (await create(body())).json().task;

@@ -344,6 +344,38 @@ describe("createTasks", () => {
   });
 });
 
+describe("updateTasks", () => {
+  const respond = async (res: Partial<Response>) => {
+    const originalFetch = global.fetch;
+    const fetchMock = vi.fn().mockResolvedValue(res as Response);
+    global.fetch = fetchMock;
+    try {
+      const result = await api.updateTasks("p1", [{ id: "t1", status: "done" }]).catch((err: unknown) => err);
+      return { result, fetchMock };
+    } finally {
+      global.fetch = originalFetch;
+    }
+  };
+
+  it("sends every patch in one PUT and returns the tasks", async () => {
+    const { result, fetchMock } = await respond({ ok: true, status: 200, json: async () => ({ tasks: [{ id: "t1" }] }) });
+    expect(result).toEqual([{ id: "t1" }]);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(String(url)).toContain("/api/projects/p1/tasks/batch");
+    expect(init.method).toBe("PUT");
+    expect(JSON.parse(init.body)).toEqual({ updates: [{ id: "t1", status: "done" }] });
+  });
+
+  it("reports a 4xx as rejected and a 5xx as unknown", async () => {
+    const rejected = await respond({ ok: false, status: 400, json: async () => ({ error: "Update 2: Invalid status" }) });
+    expect(rejected.result).toBeInstanceOf(TaskBatchRejectedError);
+    expect((rejected.result as Error).message).toBe("Update 2: Invalid status");
+    const unknown = await respond({ ok: false, status: 502, json: async () => ({ error: "x" }) });
+    expect(unknown.result).toBeInstanceOf(Error);
+    expect(unknown.result).not.toBeInstanceOf(TaskBatchRejectedError);
+  });
+});
+
 describe("Project Chat create", () => {
   it("sends the caller's explicit create request id", async () => {
     const originalFetch = global.fetch;

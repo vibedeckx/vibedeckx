@@ -2706,6 +2706,31 @@ export const api = {
     return data.tasks;
   },
 
+  /**
+   * Several task patches in one go; all or nothing. Results are in input
+   * order. Throws TaskBatchRejectedError only when the hub itself refused the
+   * batch; any other error leaves the outcome unknown.
+   */
+  async updateTasks(
+    projectId: string,
+    updates: Array<{ id: string; title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; parent_id?: string | null }>
+  ): Promise<Task[]> {
+    const res = await authFetch(`${getApiBase()}/api/projects/${projectId}/tasks/batch`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ updates }),
+    });
+    if (!res.ok) {
+      // As in createTasks: only a 4xx is a refusal before anything changed.
+      const body = (await res.json().catch(() => null)) as { error?: unknown } | null;
+      const message = typeof body?.error === "string" ? body.error : `Request failed (${res.status})`;
+      if (res.status < 500) throw new TaskBatchRejectedError(message);
+      throw new Error(message);
+    }
+    const data = await res.json();
+    return data.tasks;
+  },
+
   async updateTask(
     id: string,
     opts: { title?: string; description?: string | null; status?: TaskStatus; priority?: TaskPriority; assigned_branch?: string | null; position?: number; parent_id?: string | null }

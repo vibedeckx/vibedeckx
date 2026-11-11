@@ -18,11 +18,13 @@ vi.mock("./agent-conversation", () => ({
 const apiMock = vi.hoisted(() => ({
   getTasks: vi.fn(async () => [] as Task[]),
   updateTask: vi.fn<(id: string, patch: Record<string, unknown>) => Promise<Task>>(),
+  updateTasks: vi.fn<(projectId: string, updates: Array<Record<string, unknown>>) => Promise<Task[]>>(),
 }));
-vi.mock("@/lib/api", () => ({ api: apiMock }));
+const BatchRejected = vi.hoisted(() => class TaskBatchRejectedError extends Error {});
+vi.mock("@/lib/api", () => ({ api: apiMock, TaskBatchRejectedError: BatchRejected }));
 vi.mock("@/hooks/global-event-stream", () => ({ useGlobalEventStream: () => {} }));
 
-import { pendingFields, TaskUpdateProposalUI, updateProposalRejection } from "./task-update-proposal";
+import { batchParentMoves, pendingFields, TaskUpdateProposalUI, updateProposalRejection } from "./task-update-proposal";
 import { __resetProposedTaskCache } from "@/hooks/use-proposed-tasks";
 
 const taskRow = (over: Partial<Task> = {}): Task => ({
@@ -74,6 +76,17 @@ describe("pendingFields", () => {
     expect(pendingFields({ taskId: "task-1", status: "done" }, task)).toEqual([]);
   });
 
+  it("accepts batch moves against the final tree, but never a cycle the batch itself forms", () => {
+    const a = taskRow({ id: "a" });
+    const b = taskRow({ id: "b", parent_id: "a" });
+    const c = taskRow({ id: "c" });
+    expect(batchParentMoves([{ taskId: "a", parent: "b" }, { taskId: "b", parent: null }], [a, b, c]))
+      .toEqual(new Set(["a", "b"]));
+    // c under a and a under c: both refused; an unrelated valid move survives.
+    expect(batchParentMoves([{ taskId: "c", parent: "a" }, { taskId: "a", parent: "c" }, { taskId: "b", parent: null }], [a, b, c]))
+      .toEqual(new Set(["b"]));
+  });
+
   it("offers a parent move only when the server would accept it", () => {
     const parent = taskRow({ id: "p" });
     const child = taskRow({ id: "c", parent_id: "task-1" });
@@ -105,6 +118,7 @@ describe("TaskUpdateProposalUI", () => {
     __resetProposedTaskCache();
     apiMock.getTasks.mockReset().mockResolvedValue([taskRow(), taskRow({ id: "task-2", title: "Second" })]);
     apiMock.updateTask.mockReset();
+    apiMock.updateTasks.mockReset();
     conversation.value.openTask.mockReset();
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -138,10 +152,11 @@ describe("TaskUpdateProposalUI", () => {
     expect(diff.textContent).toContain("+Line 2");
   });
 
-  it("marks a task that no longer exists and applies the rest in order", async () => {
-    apiMock.updateTask
-      .mockResolvedValueOnce(taskRow({ title: "Renamed" }))
-      .mockResolvedValueOnce(taskRow({ id: "task-2", title: "Second", status: "cancelled" }));
+  it("marks a task that no longer exists and applies the rest in one batch request", async () => {
+    apiMock.updateTasks.mockResolvedValue([
+      taskRow({ title: "Renamed" }),
+      taskRow({ id: "task-2", title: "Second", status: "cancelled" }),
+    ]);
     await render({
       updates: [
         { task_id: "task-1", title: "Renamed" },
@@ -151,8 +166,33 @@ describe("TaskUpdateProposalUI", () => {
     });
     expect(rowStates()).toEqual(["pending", "missing", "pending"]);
     await act(async () => { buttons("Apply all 2")[0].click(); });
-    expect(apiMock.updateTask.mock.calls.map((c) => c[0])).toEqual(["task-1", "task-2"]);
+    expect(apiMock.updateTask).not.toHaveBeenCalled();
+    expect(apiMock.updateTasks).toHaveBeenCalledTimes(1);
+    expect(apiMock.updateTasks).toHaveBeenCalledWith("proj-1", [
+      { id: "task-1", title: "Renamed" },
+      { id: "task-2", status: "cancelled" },
+    ]);
     expect(rowStates()).toEqual(["applied", "missing", "applied"]);
+  });
+
+  it("says none were applied when the hub refuses the batch", async () => {
+    apiMock.updateTasks.mockRejectedValue(new BatchRejected("Update 2: Parent task not found"));
+    await render({ updates: [{ task_id: "task-1", status: "done" }, { task_id: "task-2", status: "done" }] });
+    await act(async () => { buttons("Apply all 2")[0].click(); });
+    expect(rowStates()).toEqual(["pending", "pending"]);
+    expect(container.textContent).toContain("none were applied");
+    expect(container.textContent).toContain("Update 2: Parent task not found");
+    expect(apiMock.getTasks).toHaveBeenCalledTimes(1);
+  });
+
+  it("refetches when the batch outcome is unknown, flipping rows that did change", async () => {
+    apiMock.updateTasks.mockRejectedValue(new Error("Gateway timeout"));
+    await render({ updates: [{ task_id: "task-1", status: "done" }, { task_id: "task-2", status: "done" }] });
+    apiMock.getTasks.mockResolvedValue([taskRow({ status: "done" }), taskRow({ id: "task-2", title: "Second", status: "done" })]);
+    await act(async () => { buttons("Apply all 2")[0].click(); });
+    await act(async () => { await Promise.resolve(); });
+    expect(apiMock.getTasks).toHaveBeenCalledTimes(2);
+    expect(rowStates()).toEqual(["applied", "applied"]);
   });
 
   it("offers only the actionable rows of a mixed batch", async () => {
@@ -177,6 +217,27 @@ describe("TaskUpdateProposalUI", () => {
     expect(container.textContent).toContain("Second");
     await act(async () => { buttons("Apply update")[0].click(); });
     expect(apiMock.updateTask).toHaveBeenCalledWith("task-1", { parent_id: "task-2" });
+  });
+
+  it("makes a parent reversal in one Apply all, though one move is invalid on its own", async () => {
+    // B (task-2) is under A (task-1): "B to the top level, A under B".
+    apiMock.getTasks.mockResolvedValue([taskRow(), taskRow({ id: "task-2", title: "Second", parent_id: "task-1" })]);
+    apiMock.updateTasks.mockResolvedValue([
+      taskRow({ parent_id: "task-2" }),
+      taskRow({ id: "task-2", title: "Second", parent_id: null }),
+    ]);
+    await render({ updates: [{ task_id: "task-1", parent_task_id: "task-2" }, { task_id: "task-2", parent_task_id: null }] });
+    expect(rowStates()).toEqual(["pending", "pending"]);
+    expect(container.textContent).not.toContain("Parent not changed");
+    expect(container.textContent).toContain("apply all to make it");
+    // A's own Apply can't make it alone; B's can.
+    expect(buttons("Apply update").map((b) => b.disabled)).toEqual([true, false]);
+    await act(async () => { buttons("Apply all 2")[0].click(); });
+    expect(apiMock.updateTasks).toHaveBeenCalledWith("proj-1", [
+      { id: "task-1", parent_id: "task-2" },
+      { id: "task-2", parent_id: null },
+    ]);
+    expect(rowStates()).toEqual(["applied", "applied"]);
   });
 
   it("explains a parent move it can't offer", async () => {

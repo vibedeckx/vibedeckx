@@ -4,6 +4,7 @@ import type { DialectHelpers } from "../dialect.js";
 import type { Storage, Task, TaskStatus, TaskPriority, Rule } from "../types.js";
 
 type TaskCreateOpts = Parameters<Storage["tasks"]["create"]>[0];
+type TaskUpdateOpts = Parameters<Storage["tasks"]["update"]>[1];
 
 const mapTask = (row: Selectable<TasksTable>): Task => ({
   ...row,
@@ -65,6 +66,74 @@ async function insertTask(
     if (existing) return mapTask(existing);
   }
   throw new Error(`Failed to create task ${id}`);
+}
+
+/** Ancestor walks stop here; far deeper than any tree a person keeps. */
+const PARENT_DEPTH_MAX = 64;
+
+/**
+ * The parent restores of a revert that may land, as task id → parent. A
+ * restore lands only where the parent is still what the update wrote, and
+ * all of them are judged together against the tree they produce — so undoing
+ * a reversal puts both moves back — while one that would point at a task
+ * that's gone, in another project, or form a cycle with the tree as it now
+ * is, is dropped (that move is kept instead of undone) until the rest agree.
+ */
+async function validParentRestores(
+  kdb: Kysely<DB>,
+  restores: Array<{ id: string; written: unknown; restore: unknown }>,
+): Promise<Map<string, string | null>> {
+  const moves = new Map<string, string | null>();
+  if (restores.length === 0) return moves;
+  const rows = await kdb.selectFrom("tasks").select(["id", "project_id", "parent_id"])
+    .where("id", "in", restores.map((r) => r.id)).execute();
+  const current = new Map(rows.map((r) => [r.id, r]));
+  for (const { id, written, restore } of restores) {
+    const row = current.get(id);
+    if (row && row.parent_id === written) moves.set(id, restore as string | null);
+  }
+  if (moves.size === 0) return moves;
+  const projects = [...new Set(rows.map((r) => r.project_id))];
+  const tree = await kdb.selectFrom("tasks").select(["id", "project_id", "parent_id"])
+    .where("project_id", "in", projects).execute();
+  const byId = new Map(tree.map((t) => [t.id, t]));
+  for (;;) {
+    const parentOf = (taskId: string) => (moves.has(taskId) ? moves.get(taskId)! : byId.get(taskId)?.parent_id ?? null);
+    const blocked = [...moves].filter(([id, parent]) => {
+      let node: string | null = parent;
+      for (let depth = 0; node !== null; depth++) {
+        const ancestor = byId.get(node);
+        if (node === id || depth >= PARENT_DEPTH_MAX || !ancestor
+          || ancestor.project_id !== byId.get(id)?.project_id) return true;
+        node = parentOf(node);
+      }
+      return false;
+    });
+    if (blocked.length === 0) return moves;
+    for (const [id] of blocked) moves.delete(id);
+  }
+}
+
+async function updateTask(
+  kdb: Kysely<DB>,
+  id: string,
+  opts: TaskUpdateOpts,
+): Promise<Task | undefined> {
+  const sets: Record<string, unknown> = {};
+  if (opts.title !== undefined) sets.title = opts.title;
+  if (opts.description !== undefined) sets.description = opts.description;
+  if (opts.status !== undefined) sets.status = opts.status;
+  if (opts.priority !== undefined) sets.priority = opts.priority;
+  if (opts.assigned_branch !== undefined) sets.assigned_branch = opts.assigned_branch;
+  if (opts.position !== undefined) sets.position = opts.position;
+  if (opts.parent_id !== undefined) sets.parent_id = opts.parent_id;
+
+  if (Object.keys(sets).length > 0) {
+    sets.updated_at = sql`CURRENT_TIMESTAMP`;
+    await kdb.updateTable("tasks").set(sets).where("id", "=", id).execute();
+  }
+  const row = await kdb.selectFrom("tasks").selectAll().where("id", "=", id).executeTakeFirst();
+  return row ? mapTask(row) : undefined;
 }
 
 export const createWorkspaceRepos = (
@@ -166,23 +235,40 @@ export const createWorkspaceRepos = (
       return row ? mapTask(row) : undefined;
     },
 
-    update: async (id, opts) => {
-      const sets: Record<string, unknown> = {};
-      if (opts.title !== undefined) sets.title = opts.title;
-      if (opts.description !== undefined) sets.description = opts.description;
-      if (opts.status !== undefined) sets.status = opts.status;
-      if (opts.priority !== undefined) sets.priority = opts.priority;
-      if (opts.assigned_branch !== undefined) sets.assigned_branch = opts.assigned_branch;
-      if (opts.position !== undefined) sets.position = opts.position;
-      if (opts.parent_id !== undefined) sets.parent_id = opts.parent_id;
+    update: (id, opts) => updateTask(kdb, id, opts),
 
-      if (Object.keys(sets).length > 0) {
-        sets.updated_at = sql`CURRENT_TIMESTAMP`;
-        await kdb.updateTable("tasks").set(sets).where("id", "=", id).execute();
+    updateMany: (patches) => kdb.transaction().execute(async (trx) => {
+      const tasks: Task[] = [];
+      for (const { id, opts } of patches) {
+        const task = await updateTask(trx, id, opts);
+        if (!task) throw new Error(`Task ${id} not found`);
+        tasks.push(task);
       }
-      const row = await kdb.selectFrom("tasks").selectAll().where("id", "=", id).executeTakeFirst();
-      return row ? mapTask(row) : undefined;
-    },
+      return tasks;
+    }),
+
+    revertIfUnchanged: (reverts) => kdb.transaction().execute(async (trx) => {
+      const parentRestores: Array<{ id: string; written: unknown; restore: unknown }> = [];
+      for (const { id, fields } of reverts) {
+        for (const { field, written, restore } of fields) {
+          if (field === "parent_id") {
+            parentRestores.push({ id, written, restore });
+            continue;
+          }
+          await trx.updateTable("tasks")
+            .set({ [field]: restore, updated_at: sql`CURRENT_TIMESTAMP` })
+            .where("id", "=", id)
+            .where(field, written === null ? "is" : "=", written as never)
+            .execute();
+        }
+      }
+      for (const [id, parent] of await validParentRestores(trx, parentRestores)) {
+        await trx.updateTable("tasks")
+          .set({ parent_id: parent, updated_at: sql`CURRENT_TIMESTAMP` })
+          .where("id", "=", id)
+          .execute();
+      }
+    }),
 
     archive: async (id) => {
       await kdb.updateTable("tasks")

@@ -261,6 +261,56 @@ export async function applyTaskChange(
   });
 }
 
+/**
+ * applyTaskChange for several tasks changed together (one transaction in
+ * `apply`). Every source session involved has its slot held for the whole
+ * change — taken in sorted order, so two batches can't wait on each other —
+ * and if any session's newly acquired hold fails to sync, the whole batch is
+ * reverted and the error rethrown. Only the sessions' slots are held, so a
+ * task without a source session — or a delete, which takes no slot — can
+ * change underneath a pending sync: `revert` gets what was written (`after`)
+ * as well as `before`, so it can leave alone what changed since. Results are in `taskIds` order; undefined
+ * when a task vanished before the slots were held.
+ */
+export async function applyTaskChanges(
+  deps: { storage: Storage; retentionHolds: RetentionHoldSync },
+  taskIds: string[],
+  apply: () => Promise<Task[]>,
+  revert: (before: Task[], after: Task[]) => Promise<unknown>,
+): Promise<Task[] | undefined> {
+  const existing = await Promise.all(taskIds.map((id) => deps.storage.tasks.getById(id)));
+  const sessions = [...new Set(existing.flatMap((t) => (t?.source_session_id ? [t.source_session_id] : [])))].sort();
+  const syncs = new Map<string, () => Promise<void>>();
+
+  const run = async (): Promise<Task[] | undefined> => {
+    const before = await Promise.all(taskIds.map((id) => deps.storage.tasks.getById(id)));
+    if (before.some((t) => !t)) return undefined;
+    const befores = before as Task[];
+    const tasks = await apply();
+    const acquiring = new Set(tasks.flatMap((task, i) =>
+      task.source_session_id && !taskHoldsSource(befores[i]) && taskHoldsSource(task) ? [task.source_session_id] : []));
+    if (acquiring.size === 0) return tasks;
+    try {
+      for (const sessionId of acquiring) await syncs.get(sessionId)!();
+      return tasks;
+    } catch (error) {
+      await revert(befores, tasks);
+      for (const sessionId of acquiring) await syncs.get(sessionId)!().catch(() => undefined);
+      throw error;
+    }
+  };
+
+  // Nest one exclusive slot per session, outermost first.
+  const holding = sessions.reduceRight<() => Promise<Task[] | undefined>>(
+    (inner, sessionId) => () => deps.retentionHolds.exclusive(sessionId, (syncNow) => {
+      syncs.set(sessionId, syncNow);
+      return inner();
+    }),
+    run,
+  );
+  return holding();
+}
+
 /** Revert for a field patch: put back only the fields the patch set. */
 export function revertTaskPatch(
   storage: Storage,

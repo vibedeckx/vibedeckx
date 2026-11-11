@@ -111,6 +111,7 @@ export function noteTasksCreated(projectId: string, tasks: Task[]): void {
 
 /** The same upsert, for a task an applied update card just changed. */
 export const noteTaskChanged = noteTaskCreated;
+export const noteTasksChanged = noteTasksCreated;
 
 export interface ProposedTasksState {
   /** Created task per proposal item index; missing = not (or no longer) created. */
