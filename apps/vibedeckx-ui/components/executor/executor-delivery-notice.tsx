@@ -92,7 +92,7 @@ export function ExecutorDeliveryNotice({
         <div className="text-foreground">{headline}</div>
         {detail && <div className="mt-0.5 text-muted-foreground">{detail}</div>}
       </div>
-      <Button size="sm" variant="outline" className="h-7 shrink-0 text-xs" onClick={handleRetry} disabled={busy}>
+      <Button size="sm" variant="outline" className="h-7 shrink-0 self-center text-xs" onClick={handleRetry} disabled={busy}>
         {busy && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
         {retrying ? "Retry now" : "Run again"}
       </Button>
