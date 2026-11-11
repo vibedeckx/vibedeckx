@@ -272,10 +272,9 @@ export function ReviewRunPanel({
   if (activeRuns.length === 0 && awaitingDismissal.length === 0 && !orphanError) return null;
 
   return (
-    // shrink-0 + max-h: the panel sits above the flex-1 conversation; without a
-    // cap, the content-sized feedback textarea below would grow the panel past
-    // the viewport and push the rest of the chat off-screen with no way to
-    // scroll to it.
+    // Reserve space for the conversation. Review cards shrink their feedback
+    // first; panel scrolling remains a fallback for stacked cards or very
+    // short windows where even the controls cannot fit.
     <div className="shrink-0 border-b bg-muted/30 px-3 py-2.5 space-y-2 max-h-[50vh] overflow-y-auto">
       {orphanError && (
         <div className="flex items-start justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 py-1 pl-2.5 pr-1 text-destructive"
@@ -349,8 +348,9 @@ export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, on
   const meta = { fontSize: "var(--conv-font-size, 12px)" };
   const statusText = REVIEW_STATUS_TEXT[run.status];
   return (
-    <div className="space-y-2.5 rounded-lg border bg-background/70 p-3 shadow-xs" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
-      <div className="space-y-0.5">
+    // Match the panel cap, leaving room for its vertical padding and border.
+    <div className="flex max-h-[calc(50vh-1.375rem)] flex-col gap-2.5 rounded-lg border bg-background/70 p-3 shadow-xs" style={{ fontSize: "var(--conv-font-size, 14px)" }}>
+      <div className="shrink-0 space-y-0.5">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0 space-y-0.5">
             <div className="flex min-w-0 items-center gap-2">
@@ -389,18 +389,18 @@ export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, on
         </div>
       </div>
       {run.error && (
-        <div className="flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-amber-700 dark:text-amber-400" style={meta}>
+        <div className="flex shrink-0 items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-amber-700 dark:text-amber-400" style={meta}>
           <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
           <span className="min-w-0 break-words">{run.error}</span>
         </div>
       )}
       {run.status === "preparing" && (
-        <div className="rounded-md bg-muted/50 px-2.5 py-1.5 text-muted-foreground" style={meta}>
+        <div className="shrink-0 rounded-md bg-muted/50 px-2.5 py-1.5 text-muted-foreground" style={meta}>
           Distilling context and starting the reviewer
         </div>
       )}
       {run.status === "discussing" && (
-        <div className="flex items-center justify-between gap-2 rounded-md bg-muted/50 py-1 pl-2.5 pr-1">
+        <div className="flex shrink-0 items-center justify-between gap-2 rounded-md bg-muted/50 py-1 pl-2.5 pr-1">
           <span className="min-w-0 text-muted-foreground" style={meta}>
             Discuss with the reviewer, then finalize the review to send it
           </span>
@@ -423,12 +423,12 @@ export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, on
         // what is left — another verdict, the cap, a failed attempt, or a
         // loop the user stepped into.
         <>
-          <div className="rounded-md bg-muted/50 px-2.5 py-1.5 text-muted-foreground" style={meta}>
+          <div className="shrink-0 rounded-md bg-muted/50 px-2.5 py-1.5 text-muted-foreground" style={meta}>
             {overCap
               ? `The source session applied the feedback. It reached the ${run.max_rounds}-round limit — add another round?`
               : "The source session applied the feedback. Have the same reviewer re-review the changes?"}
           </div>
-          <div className="flex flex-wrap justify-end gap-2">
+          <div className="flex shrink-0 flex-wrap justify-end gap-2">
             <Button variant="outline" size="sm" disabled={busy} onClick={() => onAction("cancel")}>
               End loop
             </Button>
@@ -442,8 +442,8 @@ export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, on
         </>
       )}
       {run.status === "waiting_feedback" && (
-        <div className="overflow-hidden rounded-md border bg-background">
-          <div className="flex items-center justify-between gap-2 border-b bg-muted/40 py-1 pl-2.5 pr-1" style={meta}>
+        <div className="flex min-h-24 flex-col overflow-hidden rounded-md border bg-background">
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b bg-muted/40 py-1 pl-2.5 pr-1" style={meta}>
             <div className="flex min-w-0 items-center gap-2">
               <span className="shrink-0 text-muted-foreground">Verdict</span>
               {verdict
@@ -458,25 +458,25 @@ export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, on
             </Button>
           </div>
           {/* Rendered markdown by default; the textarea only appears while
-              editing. Both are max-h capped (the textarea auto-grows via
-              field-sizing-content) so a long review scrolls inside its box
-              instead of inflating the panel. */}
+              editing. Both shrink into the space left by the header and actions,
+              with a shared height cap for taller windows. The feedback box
+              keeps a small minimum; below that, the panel scrolls as a fallback. */}
           {editing ? (
             <Textarea
-              className="font-mono min-h-28 max-h-72 rounded-none border-0 shadow-none focus-visible:ring-0"
+              className="font-mono min-h-0 max-h-72 shrink resize-none overflow-y-auto rounded-none border-0 shadow-none focus-visible:ring-0"
               style={meta}
               value={feedback}
               onChange={(e) => onDraftChange(e.target.value)}
             />
           ) : (
-            <div className="max-h-72 overflow-y-auto px-3 py-2" style={meta}>
+            <div className="min-h-0 max-h-72 overflow-y-auto px-3 py-2" style={meta}>
               <MessageResponse>{feedback}</MessageResponse>
             </div>
           )}
         </div>
       )}
       {run.status === "waiting_feedback" && (
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className="flex shrink-0 flex-wrap justify-end gap-2">
           {/* With a ship verdict this is the secondary choice — the outline style
               carries the "anyway" a longer label used to spell out. */}
           <Hint label="Send this feedback to the source session">
@@ -497,7 +497,7 @@ export function ReviewCard({ run, busy, error, editing, draft, onDraftChange, on
         </div>
       )}
       {error && (
-        <div className="flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-destructive" style={meta}>
+        <div className="flex shrink-0 items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-destructive" style={meta}>
           <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
           <span className="min-w-0 break-words">{error}</span>
         </div>
