@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, useRef, type Ref } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { Plus, X, Terminal, Monitor, Cloud } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -25,13 +25,19 @@ interface TerminalPanelProps {
 function TerminalInstance({
   terminalId,
   onExit,
-  focusHandle,
+  active,
 }: {
   terminalId: string;
   onExit: (id: string) => void;
-  focusHandle: Ref<TerminalFocusHandle>;
+  active: boolean;
 }) {
   const { logs, sendInput, sendResize, exitCode, replayingHistory } = useExecutorLogs(terminalId);
+
+  // Each mounted terminal owns its focus handle; hidden shells never take focus.
+  const focusHandleRef = useRef<TerminalFocusHandle | null>(null);
+  useEffect(() => {
+    if (active) focusHandleRef.current?.focus();
+  }, [active]);
 
   // When shell exits, notify parent
   useEffect(() => {
@@ -48,7 +54,7 @@ function TerminalInstance({
       onInput={sendInput}
       onResize={sendResize}
       muteInput={replayingHistory}
-      focusHandle={focusHandle}
+      focusHandle={focusHandleRef}
     />
   );
 }
@@ -64,19 +70,6 @@ export function TerminalPanel({ projectId, selectedBranch, project, active = tru
   } = useTerminals(projectId, selectedBranch);
 
   const { remotes } = useProjectRemotesContext();
-
-  // Give the visible shell keyboard focus when the tab is opened (⌃⇧T /
-  // Ctrl+Alt+T or a click on the tab button) and whenever the shown terminal
-  // changes while the tab is open — switching or creating a terminal should
-  // leave you able to type right away instead of needing a click. Nothing
-  // happens while the panel is hidden, so background terminals never grab
-  // focus from the composer. The tab's `hidden` class is already off the DOM
-  // by the time effects run, so focus() lands on a visible textarea.
-  const focusHandleRef = useRef<TerminalFocusHandle | null>(null);
-  useEffect(() => {
-    if (!active || !activeTerminalId) return;
-    focusHandleRef.current?.focus();
-  }, [active, activeTerminalId]);
 
   const [showLocationMenu, setShowLocationMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -228,14 +221,20 @@ export function TerminalPanel({ projectId, selectedBranch, project, active = tru
 
       {/* Terminal content */}
       <div className="flex-1 overflow-hidden bg-zinc-950">
-        {activeTerminalId ? (
-          <TerminalInstance
-            key={activeTerminalId}
-            terminalId={activeTerminalId}
-            onExit={handleExit}
-            focusHandle={focusHandleRef}
-          />
-        ) : (
+        {/* Keep connections and xterm buffers alive across tab switches. */}
+        {terminals.map((terminal) => (
+          <div
+            key={terminal.id}
+            className={cn("h-full", activeTerminalId !== terminal.id && "hidden")}
+          >
+            <TerminalInstance
+              terminalId={terminal.id}
+              onExit={handleExit}
+              active={active && activeTerminalId === terminal.id}
+            />
+          </div>
+        ))}
+        {!activeTerminalId && (
           <div className="h-full flex items-center justify-center text-muted-foreground">
             <Terminal className="h-10 w-10 text-muted-foreground/70" />
           </div>

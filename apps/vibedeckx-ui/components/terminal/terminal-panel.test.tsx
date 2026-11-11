@@ -6,6 +6,9 @@ import { TerminalPanel } from "./terminal-panel";
 
 const state = vi.hoisted(() => ({
   activeTerminalId: "term-1" as string | null,
+  terminalIds: ["term-1", "term-2"],
+  connected: [] as string[],
+  disconnected: [] as string[],
 }));
 
 // Terminal ids that were asked for keyboard focus, in order.
@@ -13,10 +16,7 @@ const focused = vi.hoisted(() => [] as string[]);
 
 vi.mock("@/hooks/use-terminals", () => ({
   useTerminals: () => ({
-    terminals: [
-      { id: "term-1", name: "Terminal 1", location: "local" },
-      { id: "term-2", name: "Terminal 2", location: "local" },
-    ],
+    terminals: state.terminalIds.map((id) => ({ id, name: id, location: "local" })),
     activeTerminalId: state.activeTerminalId,
     createTerminal: vi.fn(),
     closeTerminal: vi.fn(),
@@ -25,15 +25,24 @@ vi.mock("@/hooks/use-terminals", () => ({
   }),
 }));
 
-vi.mock("@/hooks/use-executor-logs", () => ({
-  useExecutorLogs: () => ({
-    logs: [],
-    sendInput: vi.fn(),
-    sendResize: vi.fn(),
-    exitCode: null,
-    replayingHistory: false,
-  }),
-}));
+vi.mock("@/hooks/use-executor-logs", async () => {
+  const { useEffect } = await import("react");
+  return {
+    useExecutorLogs: (id: string) => {
+      useEffect(() => {
+        state.connected.push(id);
+        return () => { state.disconnected.push(id); };
+      }, [id]);
+      return {
+        logs: [{ data: id }],
+        sendInput: vi.fn(),
+        sendResize: vi.fn(),
+        exitCode: null,
+        replayingHistory: false,
+      };
+    },
+  };
+});
 
 vi.mock("@/hooks/project-remotes-context", () => ({
   useProjectRemotesContext: () => ({ remotes: [] }),
@@ -42,10 +51,10 @@ vi.mock("@/hooks/project-remotes-context", () => ({
 vi.mock("@/components/executor/executor-output", async () => {
   const { useImperativeHandle } = await import("react");
   return {
-    ExecutorOutput: ({ focusHandle }: { focusHandle: React.Ref<{ focus: () => void }> }) => {
-      const id = state.activeTerminalId ?? "";
+    ExecutorOutput: ({ focusHandle, logs }: { focusHandle: React.Ref<{ focus: () => void }>; logs: { data: string }[] }) => {
+      const id = logs[0].data;
       useImperativeHandle(focusHandle, () => ({ focus: () => focused.push(id) }), [id]);
-      return <div>terminal window</div>;
+      return <div data-terminal-id={id}>terminal window</div>;
     },
   };
 });
@@ -62,6 +71,9 @@ afterEach(() => {
   root = null;
   focused.length = 0;
   state.activeTerminalId = "term-1";
+  state.terminalIds = ["term-1", "term-2"];
+  state.connected.length = 0;
+  state.disconnected.length = 0;
 });
 
 function render(active: boolean) {
@@ -104,5 +116,42 @@ describe("TerminalPanel focus handoff", () => {
     render(false);
 
     expect(focused).toEqual(["term-1"]);
+  });
+});
+
+describe("TerminalPanel instance lifetime", () => {
+  it("preserves terminal DOM and log subscriptions when switching away and back", () => {
+    mount(true);
+    const first = container!.querySelector('[data-terminal-id="term-1"]')!;
+    const second = container!.querySelector('[data-terminal-id="term-2"]')!;
+    expect(first.parentElement!.classList.contains("hidden")).toBe(false);
+    expect(second.parentElement!.classList.contains("hidden")).toBe(true);
+
+    state.activeTerminalId = "term-2";
+    render(true);
+    expect(first.parentElement!.classList.contains("hidden")).toBe(true);
+    expect(second.parentElement!.classList.contains("hidden")).toBe(false);
+
+    state.activeTerminalId = "term-1";
+    render(true);
+    expect(container!.querySelector('[data-terminal-id="term-1"]')).toBe(first);
+    expect(container!.querySelector('[data-terminal-id="term-2"]')).toBe(second);
+    expect(first.parentElement!.classList.contains("hidden")).toBe(false);
+    expect(state.connected).toEqual(["term-1", "term-2"]);
+    expect(state.disconnected).toEqual([]);
+    expect(focused).toEqual(["term-1", "term-2", "term-1"]);
+  });
+
+  it("cleans up only the removed terminal, then all remaining terminals on unmount", () => {
+    mount(true);
+    state.terminalIds = ["term-1"];
+    render(true);
+    expect(state.disconnected).toEqual(["term-2"]);
+    expect(container!.querySelector('[data-terminal-id="term-2"]')).toBeNull();
+    expect(state.connected).toEqual(["term-1", "term-2"]);
+
+    act(() => root!.unmount());
+    root = null;
+    expect(state.disconnected).toEqual(["term-2", "term-1"]);
   });
 });
