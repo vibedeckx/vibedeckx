@@ -1,0 +1,4 @@
+{"direction": "stdin", "message": {"jsonrpc": "2.0", "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {}, "clientInfo": {"name": "vibedeckx-fx-probe", "version": "1"}}, "id": 1}}
+{"direction": "stdout", "message": {"jsonrpc": "2.0", "id": 1, "error": {"code": -32600, "message": "fx needs access to Vercel AI Gateway. Run fx login to sign in, fx setup to use an API key, or set AI_GATEWAY_API_KEY."}}}
+{"direction": "stdin", "message": {"jsonrpc": "2.0", "method": "session/new", "params": {"cwd": "<WORKSPACE>", "mcpServers": []}, "id": 2}}
+{"direction": "stdout", "message": {"jsonrpc": "2.0", "id": 2, "error": {"code": -32600, "message": "Not initialized. Call initialize first."}}}
