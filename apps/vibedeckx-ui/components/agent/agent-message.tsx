@@ -1,10 +1,11 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { Bot, User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye, CalendarClock, Copy, Check, ListPlus, PencilLine } from "lucide-react";
+import { DEFAULT_AGENT_TYPE, getAgentMetadata } from "@/lib/agent-metadata";
+import { User, Wrench, Brain, AlertCircle, Info, HelpCircle, FileCheck, ListTodo, FileText, Terminal, Search, FolderSearch, Workflow, FilePenLine, Globe, Sparkles, FilePlus2, Globe2, ShieldAlert, Code, Eye, CalendarClock, Copy, Check, ListPlus, PencilLine } from "lucide-react";
 import type { AgentMessage, ContentPart } from "@/hooks/use-agent-session";
 import { AgentMarkdown } from "./agent-markdown";
-import { useAgentConversation } from "./agent-conversation";
+import { useOptionalAgentConversation } from "./agent-conversation";
 import { AskUserQuestion } from "./ask-user-question";
 import { ExitPlanModeUI } from "./exit-plan-mode";
 import { CommandApprovalUI, FileChangeApprovalUI } from "./approval-request";
@@ -328,22 +329,6 @@ function UserMessage({
   );
 }
 
-function useAgentType(): string {
-  try {
-    return useAgentConversation().agentType;
-  } catch {
-    return "claude-code";
-  }
-}
-
-function useConversationSessionId(): string | null {
-  try {
-    return useAgentConversation().sessionId;
-  } catch {
-    return null;
-  }
-}
-
 function AssistantMessage({
   content,
   agentType: messageAgentType,
@@ -355,11 +340,13 @@ function AssistantMessage({
   streaming?: boolean;
   entryIndex?: number;
 }) {
-  const currentAgentType = useAgentType();
+  const conversation = useOptionalAgentConversation();
+  const currentAgentType = conversation?.agentType ?? DEFAULT_AGENT_TYPE;
+  const providers = conversation?.providers;
   // Identifies this message to the page-wide read-aloud player (see
   // speakOwnerKey); prefixed with the session id so a session switch can stop
   // only its own playback.
-  const sessionId = useConversationSessionId();
+  const sessionId = conversation?.sessionId ?? null;
   const speakKey = useMemo(
     () => speakOwnerKey(sessionId, content ?? "", entryIndex),
     [sessionId, content, entryIndex],
@@ -371,12 +358,9 @@ function AssistantMessage({
     ? "opacity-100"
     : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100";
   const agentType = messageAgentType ?? currentAgentType;
-  const isCodex = agentType === "codex";
-  const label = isCodex ? "Codex" : "Claude";
   // The agent's colour lives on its avatar only; the name stays body text like
   // every other row title.
-  const iconBg = isCodex ? "bg-green-500/10" : "bg-violet-500/10";
-  const iconColor = isCodex ? "text-green-500" : "text-violet-500";
+  const { messageName: label, Icon, avatarBackground: iconBg, accentText: iconColor } = getAgentMetadata(agentType, providers);
 
   // Debug aid: toggle a single message between rendered markdown and its raw
   // source (the exact string fed to the renderer). Per-message, default rendered.
@@ -403,7 +387,7 @@ function AssistantMessage({
   return (
     <div className="group flex gap-3 py-3" data-speak-message="">
       <div className={`flex-shrink-0 w-7 h-7 rounded-lg ${iconBg} flex items-center justify-center`}>
-        <Bot className={`w-4 h-4 ${iconColor}`} />
+        <Icon className={`w-4 h-4 ${iconColor}`} />
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">
         <div className="flex items-center gap-2 mb-1">

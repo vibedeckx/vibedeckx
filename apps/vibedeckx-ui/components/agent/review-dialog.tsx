@@ -28,6 +28,8 @@ import {
 } from "@/lib/tab-shortcuts";
 import { Clock, Info, Loader2, Lock, SearchCheck, Send, TriangleAlert, X } from "lucide-react";
 import { toast } from "sonner";
+import { DEFAULT_AGENT_TYPE, getAgentMetadata } from "@/lib/agent-metadata";
+import { useAgentProviders } from "@/hooks/use-agent-providers";
 
 /** Typed text → a valid round cap (the server rejects anything outside 1..max). */
 function clampLoopRounds(raw: string): number {
@@ -37,11 +39,6 @@ function clampLoopRounds(raw: string): number {
 }
 
 const noopSubscribe = () => () => {};
-
-const FALLBACK_PROVIDERS: AgentProviderInfo[] = [
-  { type: "claude-code", displayName: "Claude Code", available: true },
-  { type: "codex", displayName: "Codex", available: true },
-];
 
 /**
  * Default reviewer = the first available agent that is NOT the one being
@@ -55,7 +52,7 @@ export function defaultReviewerAgent(
   return (
     usable.find((p) => p.type !== currentAgentType)?.type ??
     usable[0]?.type ??
-    "claude-code"
+    DEFAULT_AGENT_TYPE
   );
 }
 
@@ -184,7 +181,7 @@ export function ReviewDialog({
   const isMac = useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
   const [open, setOpen] = useState(false);
   const [focus, setFocus] = useState("");
-  const [reviewerAgent, setReviewerAgent] = useState<AgentType>("claude-code");
+  const [selectedReviewerAgent, setReviewerAgent] = useState<AgentType | null>(null);
   const [reviewSpan, setReviewSpan] = useState<ReviewSpan>("this_turn");
   const [contextMode, setContextMode] = useState<ReviewContextMode>("briefed");
   // Review loop: off = today's single pass. Rounds is kept as typed text so a
@@ -285,17 +282,20 @@ export function ReviewDialog({
   // — before the effect that starts the new request runs.
   const candidateLoading = open && candidateKey !== null && !candidateSettled;
 
-  const options = providers?.length ? providers : FALLBACK_PROVIDERS;
+  const fetched = useAgentProviders(open && !providers?.length);
+  const options = providers?.length ? providers : fetched.providers;
+  const reviewerAgent = selectedReviewerAgent && options.some((p) => p.type === selectedReviewerAgent && p.available)
+    ? selectedReviewerAgent : defaultReviewerAgent(options, currentAgentType ?? null);
+  const reviewerAvailable = options.some((p) => p.type === reviewerAgent && p.available);
 
   // Re-derive the default on every open: the source session's agent (and thus
   // the "other" agent) may have changed since the last time the dialog closed.
   useEffect(() => {
     if (open) {
-      setReviewerAgent(defaultReviewerAgent(options, currentAgentType ?? null));
+      setReviewerAgent(null);
       setReviewSpan("this_turn");
       setContextMode("briefed");
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   useEffect(() => {
@@ -437,6 +437,7 @@ export function ReviewDialog({
   };
 
   const start = async () => {
+    if (submitDisabled) return;
     setBusy(true);
     setError(null);
     try {
@@ -466,6 +467,9 @@ export function ReviewDialog({
         }
         setReviewerModeOverride(candidateKey ? { key: candidateKey, mode: "new" } : null);
         return;
+      }
+      if (!(reviewerMode === "reuse" && reuseCandidate?.sessionId) && !reviewerAvailable) {
+        throw new Error("No available agent providers");
       }
       const reviewer = reviewerMode === "reuse" && reuseCandidate?.sessionId
         ? { reviewerSessionId: reuseCandidate.sessionId }
@@ -549,13 +553,13 @@ export function ReviewDialog({
   // but present the only truthful value and disable both choices.
   const displayedContextMode: ReviewContextMode = reuseSelected ? "briefed" : contextMode;
   const agentLabel = (type: AgentType | null | undefined) =>
-    options.find((p) => p.type === type)?.displayName ?? type ?? "—";
+    type ? getAgentMetadata(type, options).displayName : "—";
   // Blocking on the candidate check is only needed when we cannot predict its
   // answer — i.e. `undefined`, where the selection could still flip under the
   // user between reading the dialog and pressing Start. When we do know, the
   // card is already in its final position and a submit inside the check's
   // window is resolved inside start(), behind the spinner.
-  const submitDisabled = busy || (candidateLoading && priorReview === undefined);
+  const submitDisabled = busy || (!reuseSelected && !reviewerAvailable) || (candidateLoading && priorReview === undefined);
   const footNote = busy
     ? { Icon: Info, text: "Setup continues in the background" }
     : reuseSelected
@@ -817,10 +821,13 @@ export function ReviewDialog({
             </div>
           </div>
 
-          {error && (
+          {fetched.loading && !reuseSelected && (
+            <p role="status" className="text-xs text-muted-foreground">Loading agent providers…</p>
+          )}
+          {(error || fetched.error || (!fetched.loading && !reuseSelected && !reviewerAvailable)) && (
             <div className="border-destructive/30 bg-destructive/10 text-destructive flex items-start gap-2 rounded-lg border px-2.5 py-2 text-[11.5px]">
               <TriangleAlert className="mt-px size-3.5 shrink-0" />
-              <span className="min-w-0">{error}</span>
+              <span className="min-w-0">{error || fetched.error || "No available agent providers"}</span>
             </div>
           )}
         </div>

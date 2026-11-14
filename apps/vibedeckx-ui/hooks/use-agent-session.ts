@@ -14,6 +14,7 @@ import {
   type PendingSubmission,
 } from "@/lib/pending-submissions";
 
+import { DEFAULT_AGENT_TYPE } from "@/lib/agent-metadata";
 import type { AgentType, BackgroundTask, WorkflowRun } from "@/lib/api";
 import {
   workspaceKey,
@@ -2334,7 +2335,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
       branch: summary.branch,
       status: summary.status as AgentSessionStatus,
       permissionMode: (summary.permissionMode ?? "edit") as "plan" | "edit",
-      agentType: (summary.agentType ?? "claude-code") as AgentType,
+      agentType: (summary.agentType ?? DEFAULT_AGENT_TYPE) as AgentType,
       model: summary.model ?? null,
       processAlive: summary.processAlive ?? true,
     };
@@ -2748,7 +2749,7 @@ export function useAgentSession(projectId: string | null, branch: string | null,
           branch: data.session.branch,
           status: data.session.status as AgentSessionStatus,
           permissionMode: (data.session.permissionMode ?? "edit") as "plan" | "edit",
-          agentType: (data.session.agentType ?? "claude-code") as AgentType,
+          agentType: (data.session.agentType ?? DEFAULT_AGENT_TYPE) as AgentType,
           model: data.session.model ?? null,
           processAlive: data.session.processAlive ?? true,
         };

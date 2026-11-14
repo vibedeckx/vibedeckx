@@ -1,6 +1,6 @@
 "use client";
 
-import { Bot } from "lucide-react";
+import { getAgentMetadata } from "@/lib/agent-metadata";
 import { cn } from "@/lib/utils";
 import type { AgentType } from "@/lib/api";
 
@@ -11,9 +11,10 @@ import type { AgentType } from "@/lib/api";
  * that true; three inline ternaries drift.
  */
 export function agentAccentTextClass(type: AgentType): string {
-  return type === "codex" ? "text-green-500" : "text-violet-500";
+  return getAgentMetadata(type).accentText;
 }
 
 export function AgentTypeIcon({ type, className }: { type: AgentType; className?: string }) {
-  return <Bot className={cn("h-3 w-3 shrink-0", agentAccentTextClass(type), className)} />;
+  const { Icon } = getAgentMetadata(type);
+  return <Icon className={cn("h-3 w-3 shrink-0", agentAccentTextClass(type), className)} />;
 }

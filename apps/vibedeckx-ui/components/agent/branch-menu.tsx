@@ -1,11 +1,12 @@
 "use client";
 
-import { Bot, Loader2, Split } from "lucide-react";
+import { Loader2, Split } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem,
   DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { getAgentMetadata } from "@/lib/agent-metadata";
 import { cn } from "@/lib/utils";
 import type { AgentType } from "@/lib/api";
 
@@ -22,8 +23,13 @@ interface BranchMenuProps {
 const agentDot = (type: AgentType) =>
   cn(
     "flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
-    type === "codex" ? "bg-emerald-500/10 text-emerald-600" : "bg-violet-500/10 text-violet-600",
+    getAgentMetadata(type).branchAccent,
   );
+
+function BranchIcon({ type }: { type: AgentType }) {
+  const { Icon } = getAgentMetadata(type);
+  return <div className={agentDot(type)}><Icon className="h-3 w-3" /></div>;
+}
 
 export function BranchMenu({ agentType, currentAgentName, alternateProviders, onBranch, disabled, emphasis = "normal" }: BranchMenuProps) {
   return (
@@ -49,7 +55,7 @@ export function BranchMenu({ agentType, currentAgentName, alternateProviders, on
           <div className="text-xs font-medium">Branch conversation</div>
         </DropdownMenuLabel>
         <DropdownMenuItem className="h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs" onSelect={() => onBranch()}>
-          <div className={agentDot(agentType)}><Bot className="h-3 w-3" /></div>
+          <BranchIcon type={agentType} />
           <span className="min-w-0 flex-1 truncate">{currentAgentName}</span>
           <span className="shrink-0 text-[11px] text-muted-foreground">current</span>
         </DropdownMenuItem>
@@ -58,7 +64,7 @@ export function BranchMenu({ agentType, currentAgentName, alternateProviders, on
             <DropdownMenuSeparator className="my-1" />
             {alternateProviders.map((p) => (
               <DropdownMenuItem key={p.type} className="h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-xs" onSelect={() => onBranch(p.type)}>
-                <div className={agentDot(p.type)}><Bot className="h-3 w-3" /></div>
+                <BranchIcon type={p.type} />
                 <span className="min-w-0 flex-1 truncate">{p.displayName}</span>
               </DropdownMenuItem>
             ))}

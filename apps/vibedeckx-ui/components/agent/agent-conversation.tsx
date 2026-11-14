@@ -66,6 +66,7 @@ import { Hint } from "@/components/ui/hint";
 import { useSessionRemoteGrants } from "@/hooks/use-session-remote-grants";
 import { useAppConfig } from "@/hooks/use-app-config";
 import { cn } from "@/lib/utils";
+import { DEFAULT_AGENT_TYPE, getAgentMetadata, supportsPlanMode } from "@/lib/agent-metadata";
 import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 import { ReservedWidthLabel } from "@/components/ui/reserved-width-label";
 import { AgentTypeIcon } from "./agent-type-icon";
@@ -162,6 +163,7 @@ interface AgentConversationContextValue {
   acceptPlan: (planContent: string) => Promise<void>;
   permissionMode: "plan" | "edit";
   agentType: AgentType;
+  providers?: AgentProviderInfo[];
   sessionId: string | null;
   /**
    * The session's authoritative bindings, for tool cards that create server
@@ -321,13 +323,15 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const [input, setInput] = useWorkspaceDraft(projectId, branch);
   const [pastes, setPastes] = useState<PasteEntry[]>([]);
   const [nextPasteId, setNextPasteId] = useState(1);
-  const [permissionMode, setPermissionMode] = useState<"plan" | "edit">("edit");
+  const [selectedPermissionMode, setPermissionMode] = useState<"plan" | "edit">("edit");
   const [translateEnabled, setTranslateEnabled] = useState(false);
   const [isTranslating, setIsTranslating] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const activeSubmissionRef = useRef<symbol | null>(null);
-  const [agentType, setAgentType] = useState<AgentType>("claude-code");
+  const [agentType, setAgentType] = useState<AgentType>(DEFAULT_AGENT_TYPE);
   const [providers, setProviders] = useState<AgentProviderInfo[]>([]);
+  const planModeSupported = supportsPlanMode(providers.find((p) => p.type === agentType));
+  const permissionMode = planModeSupported ? selectedPermissionMode : "edit";
   // Pre-session model choice. Mirrors how agentType is pre-selected before a
   // session exists (see the agent dropdown's `if (!session)` branch). Reset to
   // null on New Conversation so a choice never leaks into the next session —
@@ -656,6 +660,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   }, [isConnected]);
 
   const handlePermissionModeChange = async (newMode: "plan" | "edit") => {
+    if (newMode === "plan" && !planModeSupported) return;
     setPermissionMode(newMode);
     if (session) {
       await switchMode(newMode);
@@ -698,8 +703,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
     }
   };
   const currentAgentName =
-    providers.find((p) => p.type === agentType)?.displayName
-    ?? (agentType === "codex" ? "Codex" : "Claude Code");
+    getAgentMetadata(agentType, providers).displayName;
   const availableBranchProviders = providers.filter((p) => p.available);
   const alternateBranchProviders = availableBranchProviders.filter((p) => p.type !== agentType);
 
@@ -1498,6 +1502,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                   value={agentType}
                   onValueChange={async (v) => {
                     const newType = v as AgentType;
+                    if (session && permissionMode === "plan" && !supportsPlanMode(providers.find((p) => p.type === newType))) return;
                     if (!session) {
                       // No session yet — just pick the agent for the upcoming one.
                       // A model name belongs to one agent ("opus" means nothing
@@ -1508,6 +1513,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                       // clears.
                       if (newType !== agentType) setPendingModel(null);
                       setAgentType(newType);
+                      if (!supportsPlanMode(providers.find((p) => p.type === newType))) setPermissionMode("edit");
                       return;
                     }
                     // Non-destructive switch: history is preserved; the next
@@ -1525,7 +1531,8 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     <DropdownMenuRadioItem
                       key={p.type}
                       value={p.type}
-                      disabled={!p.available}
+                      disabled={!p.available || (!!session && permissionMode === "plan" && !supportsPlanMode(p))}
+                      title={session && permissionMode === "plan" && !supportsPlanMode(p) ? "Switch to Edit before selecting this agent" : undefined}
                       className="text-xs pl-2 [&>span:first-child]:hidden data-[state=checked]:bg-accent data-[state=checked]:text-accent-foreground"
                     >
                       {/* Same accent as the collapsed chip — the colour is only a
@@ -1559,6 +1566,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             locked={session != null && status === "running" && messages.length > 0}
           />
           <PermissionModeToggle
+            planModeSupported={planModeSupported}
             mode={permissionMode}
             onModeChange={handlePermissionModeChange}
           />
@@ -1781,7 +1789,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                 )}
               </div>
             ) : (
-              <AgentConversationContext.Provider value={{ sendMessage, messages, acceptPlan: handleAcceptPlan, permissionMode: session?.permissionMode ?? permissionMode, agentType: session?.agentType ?? agentType, sessionId: session?.id ?? null, projectId, branch, target: sessionTarget, targetLabel: sessionTargetLabel, openSchedule: onOpenSchedule, openTask: onOpenTask }}>
+              <AgentConversationContext.Provider value={{ sendMessage, messages, providers, acceptPlan: handleAcceptPlan, permissionMode: session?.permissionMode ?? permissionMode, agentType: session?.agentType ?? agentType, sessionId: session?.id ?? null, projectId, branch, target: sessionTarget, targetLabel: sessionTargetLabel, openSchedule: onOpenSchedule, openTask: onOpenTask }}>
                 <div
                   className="space-y-1 outline-none"
                   ref={messagesRef}

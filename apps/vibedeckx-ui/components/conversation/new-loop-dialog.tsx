@@ -38,11 +38,12 @@ import {
 } from "@/lib/loop-presets";
 import { DOCS_URL } from "@/components/layout/docs-button";
 import { isMacPlatform } from "@/lib/tab-shortcuts";
+import { DEFAULT_AGENT_TYPE } from "@/lib/agent-metadata";
+import { useAgentProviders } from "@/hooks/use-agent-providers";
+import type { AgentType } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const noopSubscribe = () => () => {};
-
-const AGENT_LABELS = { "claude-code": "Claude Code", codex: "Codex" } as const;
 
 /** The hub refused a start because this machine's worker predates the feature (api.ts `WorkflowRequestError`). */
 function isWorkerUnsupported(err: unknown): boolean {
@@ -81,7 +82,11 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
   const [view, setView] = useState<"form" | "instruction">("form");
   /** A pending action that would overwrite hand-written text, waiting for the user's OK. */
   const [confirm, setConfirm] = useState<{ action: "regenerate" } | { action: "switch"; to: LoopPresetKind } | null>(null);
-  const [agentType, setAgentType] = useState<"claude-code" | "codex">("claude-code");
+  const [selectedAgentType, setAgentType] = useState<AgentType>(DEFAULT_AGENT_TYPE);
+  const { providers, error: providerError, loading: providersLoading } = useAgentProviders(open);
+  const agentType = providers.find((p) => p.type === selectedAgentType && p.available)?.type
+    ?? providers.find((p) => p.available)?.type ?? selectedAgentType;
+  const agentAvailable = providers.some((p) => p.type === agentType && p.available);
   const [iterations, setIterations] = useState(String(REPEAT_LOOP_DEFAULT_ITERATIONS));
   const [minutes, setMinutes] = useState(String(REPEAT_LOOP_DEFAULT_MINUTES));
   const [checkCommand, setCheckCommand] = useState("");
@@ -149,7 +154,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
     setEdited(wasEdited);
     setPrompt(p.fields.length > 0 && !wasEdited ? generateInstruction(k, f) : d.prompt ?? "");
     setView(p.fields.length > 0 && !wasEdited ? "form" : "instruction");
-    if (d.agentType === "claude-code" || d.agentType === "codex") setAgentType(d.agentType);
+    if (typeof d.agentType === "string") setAgentType(d.agentType);
     if (typeof d.iterations === "string") setIterations(d.iterations);
     if (typeof d.minutes === "string") setMinutes(d.minutes);
     if (typeof d.checkCommand === "string") setCheckCommand(d.checkCommand);
@@ -199,7 +204,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
 
   /** `withHandoff` overrides the switch for "turn it off and retry", which cannot wait for a re-render. */
   const start = async (withHandoff = handoff) => {
-    if (!projectId || !prompt.trim() || busy || pauseFailed) return;
+    if (!projectId || !prompt.trim() || busy || pauseFailed || !agentAvailable) return;
     setBusy(true);
     setError(null);
     setHandoffRefused(false);
@@ -238,7 +243,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
   };
 
   const isMac = useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
-  const submitDisabled = !prompt.trim() || busy || pauseFailed !== null;
+  const submitDisabled = !prompt.trim() || busy || pauseFailed !== null || !agentAvailable;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -397,8 +402,8 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
             </div>
             <div className="flex min-w-0 flex-col gap-[7px]">
               <FieldLabel>Agent</FieldLabel>
-              <div role="radiogroup" aria-label="Agent" className="grid h-[34px] min-w-0 grid-cols-2 gap-0.5 rounded-[9px] border bg-secondary p-[3px]">
-                {(Object.keys(AGENT_LABELS) as Array<keyof typeof AGENT_LABELS>).map((type) => {
+              <div role="radiogroup" aria-label="Agent" className="grid min-h-[34px] min-w-0 gap-0.5 rounded-[9px] border bg-secondary p-[3px]" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 80px), 1fr))" }}>
+                {providers.map(({ type, displayName, available }) => {
                   const on = agentType === type;
                   return (
                     <button
@@ -406,13 +411,15 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
                       type="button"
                       role="radio"
                       aria-checked={on}
+                      disabled={!available}
+                      title={available ? displayName : `${displayName} (unavailable)`}
                       onClick={() => setAgentType(type)}
                       className={cn(
-                        "min-w-0 truncate rounded-md border border-transparent px-2 text-[12px] font-medium transition-colors",
+                        "min-h-[26px] min-w-0 truncate rounded-md border border-transparent px-2 text-[12px] font-medium transition-colors disabled:opacity-50",
                         on ? "border-border bg-card text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground",
                       )}
                     >
-                      {AGENT_LABELS[type]}
+                      {displayName}
                     </button>
                   );
                 })}
@@ -469,9 +476,12 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
             </span>
           </label>
 
-          {error && (
+          {providersLoading && (
+            <p role="status" className="text-xs text-muted-foreground">Loading agent providers…</p>
+          )}
+          {(error || providerError || (!providersLoading && !agentAvailable)) && (
             <Strip tone="rose" icon={<TriangleAlert />}>
-              {error}
+              {error || providerError || "No available agent providers"}
               {handoffRefused && (
                 <>
                   {" "}

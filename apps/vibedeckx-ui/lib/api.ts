@@ -1421,13 +1421,15 @@ export const CONVERSATION_SETTINGS_LIMITS = {
 
 // ============ Agent Provider Types ============
 
-export type AgentType = "claude-code" | "codex";
+/** Provider identifiers come from /api/agent-providers, including unknown future agents. */
+export type AgentType = string;
 
 /** Review-scope span; mirrors the backend `ReviewSpan` (frontend can't import backend types). */
 export type ReviewSpan = "this_turn" | "session_start";
 export type ReviewContextMode = "briefed" | "blind";
 
 export interface AgentProviderInfo {
+  capabilities?: { planMode?: boolean };
   type: AgentType;
   displayName: string;
   available: boolean;
@@ -1440,6 +1442,7 @@ export interface AgentProviderInfo {
 
 export async function getAgentProviders(): Promise<AgentProviderInfo[]> {
   const res = await authFetch(`${getApiBase()}/api/agent-providers`);
+  if (!res.ok) throw new Error("Failed to load agent providers");
   const data = await res.json();
   return data.providers;
 }

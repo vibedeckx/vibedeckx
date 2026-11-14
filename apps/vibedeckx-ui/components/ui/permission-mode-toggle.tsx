@@ -7,24 +7,27 @@ interface PermissionModeToggleProps {
   mode: "plan" | "edit";
   onModeChange: (mode: "plan" | "edit") => void;
   disabled?: boolean;
+  planModeSupported?: boolean;
 }
 
 export function PermissionModeToggle({
   mode,
   onModeChange,
   disabled,
+  planModeSupported = true,
 }: PermissionModeToggleProps) {
   return (
     <div className="inline-flex items-center rounded-md border bg-muted/50 px-0.5 text-xs">
       <button
         onClick={() => onModeChange("plan")}
-        disabled={disabled}
+        title={!planModeSupported ? "This agent does not support plan mode" : undefined}
+        disabled={disabled || !planModeSupported}
         className={cn(
           "inline-flex items-center gap-1 rounded-sm px-2 py-0.5 transition-colors",
           mode === "plan"
             ? "bg-primary text-primary-foreground font-medium shadow-sm"
             : "text-muted-foreground hover:text-foreground",
-          disabled && "opacity-50 cursor-not-allowed"
+          "disabled:opacity-50 disabled:cursor-not-allowed"
         )}
       >
         <ClipboardList className="h-3 w-3" />
@@ -38,7 +41,7 @@ export function PermissionModeToggle({
           mode === "edit"
             ? "bg-primary text-primary-foreground font-medium shadow-sm"
             : "text-muted-foreground hover:text-foreground",
-          disabled && "opacity-50 cursor-not-allowed"
+          "disabled:opacity-50 disabled:cursor-not-allowed"
         )}
       >
         <Pencil className="h-3 w-3" />

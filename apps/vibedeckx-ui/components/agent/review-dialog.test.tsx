@@ -15,6 +15,10 @@ vi.mock("@/lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/api")>();
   return {
     ...actual,
+    getAgentProviders: vi.fn().mockResolvedValue([
+      { type: "claude-code", displayName: "Claude Code", available: true },
+      { type: "codex", displayName: "Codex", available: true },
+    ]),
     api: {
       ...actual.api,
       getReviewerCandidate,
@@ -28,6 +32,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 const { toastInfo } = vi.hoisted(() => ({ toastInfo: vi.fn() }));
 vi.mock("sonner", () => ({ toast: { info: toastInfo } }));
 
+import { getAgentProviders } from "@/lib/api";
 import { ReviewDialog } from "./review-dialog";
 import { fetchActiveWorkflowRuns, resetWorkflowRunsInflightForTests } from "@/lib/workflow-runs-fetch";
 
@@ -970,4 +975,50 @@ describe("ReviewDialog review loop", () => {
     expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({ loop: { maxRounds: 3 } }));
     expect(toastInfo).toHaveBeenCalledTimes(1);
   });
+});
+
+it.each([{ providers: undefined }, { providers: [] }])("loads a third reviewer from the API when providers is $providers", async ({ providers }) => {
+  vi.mocked(getAgentProviders).mockResolvedValueOnce([
+    { type: "third", displayName: "Third Agent", available: true },
+  ]);
+  getReviewerCandidate.mockResolvedValueOnce({ available: false, reason: null });
+  createWorkflowRun.mockResolvedValue({});
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await act(async () => { root!.render(<ReviewDialog projectId="p1" branch="dev" sessionId="s-src" providers={providers} />); });
+  await act(async () => { container!.querySelector("button")!.click(); });
+  expect(document.body.textContent).toContain("Third Agent");
+  await act(async () => { startButton().click(); });
+  expect(createWorkflowRun).toHaveBeenCalledWith(expect.objectContaining({
+    reviewerAgentType: "third",
+  }));
+});
+
+it("shows loading for an empty parent list and retries a failed provider fetch on reopen", async () => {
+  let rejectFirst!: (error: Error) => void;
+  vi.mocked(getAgentProviders).mockReturnValueOnce(new Promise((_, reject) => { rejectFirst = reject; }));
+  getReviewerCandidate.mockResolvedValue({ available: false, reason: null });
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  await act(async () => { root!.render(<ReviewDialog projectId="p1" branch="dev" sessionId="s-src" providers={[]} />); });
+  await act(async () => { container!.querySelector("button")!.click(); });
+  expect(document.body.textContent).toContain("Loading agent providers…");
+  expect(document.body.textContent).not.toContain("No available agent providers");
+  expect(startButton().disabled).toBe(true);
+  await act(async () => { rejectFirst(new Error("offline")); });
+  expect(document.body.textContent).toContain("Failed to load agent providers");
+  await act(async () => { button("Cancel").click(); });
+
+  let resolveRetry!: (providers: Awaited<ReturnType<typeof getAgentProviders>>) => void;
+  vi.mocked(getAgentProviders).mockReturnValueOnce(new Promise((resolve) => { resolveRetry = resolve; }));
+  await act(async () => { container!.querySelector("button")!.click(); });
+  expect(document.body.textContent).toContain("Loading agent providers…");
+  expect(document.body.textContent).not.toContain("Failed to load agent providers");
+  expect(document.body.textContent).not.toContain("No available agent providers");
+  await act(async () => { resolveRetry([{ type: "third", displayName: "Third Agent", available: true }]); });
+  expect(document.body.textContent).toContain("Third Agent");
+  expect(document.body.textContent).not.toContain("Loading agent providers…");
+  expect(startButton().disabled).toBe(false);
 });

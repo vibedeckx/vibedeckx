@@ -1,3 +1,5 @@
+import type { AgentType } from "./api";
+
 /**
  * New loop presets (docs/superpowers/specs/2026-10-31-loop-presets-design.md §2).
  *
@@ -301,7 +303,7 @@ export interface LoopDraft {
   fields: Record<string, string>;
   prompt: string;
   edited: boolean;
-  agentType: "claude-code" | "codex";
+  agentType: AgentType;
   iterations: string;
   minutes: string;
   checkCommand: string;

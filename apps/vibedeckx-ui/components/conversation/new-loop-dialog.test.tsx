@@ -5,6 +5,12 @@ import { createRoot, type Root } from "react-dom/client";
 
 const { createRepeatLoop, workflowRunGate } = vi.hoisted(() => ({ createRepeatLoop: vi.fn(), workflowRunGate: vi.fn() }));
 vi.mock("@/lib/api", () => ({
+  getAgentProviders: vi.fn().mockResolvedValue([
+    { type: "claude-code", displayName: "Claude Code", available: true },
+    { type: "codex", displayName: "Codex", available: true },
+    { type: "third", displayName: "Third Agent", available: true, capabilities: { planMode: false } },
+    { type: "offline", displayName: "Offline Agent", available: false },
+  ]),
   api: { createRepeatLoop, workflowRunGate },
   REPEAT_LOOP_DEFAULT_ITERATIONS: 20,
   REPEAT_LOOP_MAX_ITERATIONS: 200,
@@ -14,6 +20,7 @@ vi.mock("@/lib/api", () => ({
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
 import { NewLoopDialog } from "./new-loop-dialog";
+import { getAgentProviders } from "@/lib/api";
 import { loopDraftKey } from "@/lib/loop-presets";
 
 /** What api.ts throws for a refused request (`WorkflowRequestError`) — the dialog reads only `code`. */
@@ -74,6 +81,39 @@ describe("NewLoopDialog", () => {
     act(() => root.unmount());
     container.remove();
     vi.clearAllMocks();
+  });
+
+  it("shows loading on reopen and reports an empty list only after the request settles", async () => {
+    await closeDialog();
+    let resolveProviders!: (providers: Awaited<ReturnType<typeof getAgentProviders>>) => void;
+    vi.mocked(getAgentProviders).mockReturnValueOnce(new Promise((resolve) => { resolveProviders = resolve; }));
+    await openDialog();
+    expect(document.body.textContent).toContain("Loading agent providers…");
+    expect(document.body.textContent).not.toContain("No available agent providers");
+    expect(startButton().disabled).toBe(true);
+    await act(async () => { resolveProviders([]); });
+    expect(document.body.textContent).not.toContain("Loading agent providers…");
+    expect(document.body.textContent).toContain("No available agent providers");
+    expect(startButton().disabled).toBe(true);
+  });
+
+  it("does not invent available agents when the provider request fails", async () => {
+    await closeDialog();
+    vi.mocked(getAgentProviders).mockRejectedValueOnce(new Error("offline"));
+    await openDialog();
+    expect(document.body.textContent).toContain("Failed to load agent providers");
+    expect(startButton().disabled).toBe(true);
+    expect(document.body.querySelectorAll('[role="radio"]').length).toBe(0);
+  });
+
+  it("selects and restores a third provider without requiring plan permission mode", async () => {
+    await click(buttonNamed("Third Agent"));
+    await closeDialog();
+    await openDialog();
+    expect(buttonNamed("Third Agent")?.getAttribute("aria-checked")).toBe("true");
+    expect(buttonNamed("Offline Agent")?.disabled).toBe(true);
+    await click(startButton());
+    expect(createRepeatLoop).toHaveBeenCalledWith(expect.objectContaining({ agentType: "third" }));
   });
 
   it("opens on the Plan preset: editing a field regenerates the instruction", async () => {
