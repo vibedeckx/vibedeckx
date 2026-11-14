@@ -1,3 +1,5 @@
+import type { AgentType } from "../agent-types.js";
+
 /**
  * Suggested model names per agent CLI.
  *
@@ -11,7 +13,7 @@
  * points at the current model in its tier, so this list cannot rot. A dated id
  * like "claude-opus-4-5-20251101" would be stale within months.
  */
-export const MODEL_SUGGESTIONS: Record<"claude-code" | "codex", readonly string[]> = {
+export const MODEL_SUGGESTIONS: Partial<Record<AgentType, readonly string[]>> = {
   "claude-code": ["opus", "sonnet", "haiku", "fable"],
   codex: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
 } as const;

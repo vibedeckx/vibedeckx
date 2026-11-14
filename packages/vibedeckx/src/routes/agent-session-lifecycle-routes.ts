@@ -21,6 +21,7 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { findWorkspaceMissingOnRemote, workspaceMissingOnRemoteBody } from "../workspace-presence.js";
 import fp from "fastify-plugin";
+import { DEFAULT_AGENT_TYPE, invalidAgentTypeMessage, resolveAgentType } from "../agent-types.js";
 import type { AgentType, ContentPart, NotificationDisposition } from "../agent-types.js";
 import { requireAuth as requireRawAuth } from "../server.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
@@ -203,6 +204,8 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     if (!projectPath) return reply.code(400).send({ error: "Path is required" });
     if (!validKey(req.body.operationId)) return reply.code(400).send({ error: "operationId must contain 1-512 characters" });
     const purpose = purposeOf(req.body.purpose, ALL_PURPOSES);
+    const agentType = resolveAgentType(req.body.agentType);
+    if (agentType === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
     if (!purpose) return reply.code(400).send({ error: "Invalid purpose" });
     const projectId = await resolvePathProject(projectPath, authResult);
     if (!projectId) return reply.code(404).send({ error: "Project not found" });
@@ -212,7 +215,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
       projectId,
       branch: req.body.branch ?? null,
       permissionMode: permission(req.body.permissionMode),
-      agentType: (req.body.agentType as AgentType) || "claude-code",
+      agentType,
       model: modelOf(req.body.model),
       purpose,
       owner: ownerOf(req.body.owner),
@@ -228,6 +231,8 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     if (!validKey(req.body.operationId)) return reply.code(400).send({ error: "operationId must contain 1-512 characters" });
     if (!validInstruction(req.body.instruction)) return reply.code(400).send({ error: "Instruction is required" });
     const purpose = purposeOf(req.body.purpose, ["interactive", "commander", "project_chat"]);
+    const agentType = resolveAgentType(req.body.agentType);
+    if (agentType === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
     if (!purpose) return reply.code(400).send({ error: "Invalid purpose" });
     const projectId = await resolvePathProject(projectPath, authResult);
     if (!projectId) return reply.code(404).send({ error: "Project not found" });
@@ -238,7 +243,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
       projectId,
       branch: req.body.branch ?? null,
       permissionMode: permission(req.body.permissionMode),
-      agentType: (req.body.agentType as AgentType) || "claude-code",
+      agentType,
       model: modelOf(req.body.model),
       purpose: purpose as "interactive" | "commander" | "project_chat",
       owner: ownerOf(req.body.owner),
@@ -249,7 +254,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
       crossRemoteMcp: crossRemoteOf(req.body.crossRemoteMcp),
       userId: resolveUserId(authResult),
     });
-    return send(reply, result, { permissionMode: permission(req.body.permissionMode), agentType: (req.body.agentType as string) || "claude-code", model: modelOf(req.body.model) });
+    return send(reply, result, { permissionMode: permission(req.body.permissionMode), agentType, model: modelOf(req.body.model) });
   });
 
   // -------------------------------------------------------------------------
@@ -285,13 +290,15 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     if (!validKey(req.body.operationId)) return reply.code(400).send({ error: "operationId must contain 1-512 characters" });
     const purpose = purposeOf(req.body.purpose, CLIENT_PURPOSES);
     if (!purpose) return reply.code(400).send({ error: "Invalid purpose" });
+    const agentType = resolveAgentType(req.body.agentType);
+    if (agentType === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
     const grants = await checkGrants(req.body.grantedRemoteIds, ctx.userId, ctx.remote?.serverId ?? null);
     if (!grants.ok) return reply.code(400).send({ error: grants.error });
     const common = {
       operationId: req.body.operationId,
       branch: req.body.branch ?? null,
       permissionMode: permission(req.body.permissionMode),
-      agentType: (req.body.agentType as AgentType) || "claude-code",
+      agentType,
       model: modelOf(req.body.model),
       purpose,
     };
@@ -321,19 +328,21 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
     if (!validKey(req.body.operationId)) return reply.code(400).send({ error: "operationId must contain 1-512 characters" });
     if (!validInstruction(req.body.instruction)) return reply.code(400).send({ error: "Instruction is required" });
     if (req.body.purpose !== undefined && req.body.purpose !== "interactive") return reply.code(400).send({ error: "Invalid purpose" });
+    const agentType = resolveAgentType(req.body.agentType);
+    if (agentType === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
     const grants = await checkGrants(req.body.grantedRemoteIds, ctx.userId, ctx.remote?.serverId ?? null);
     if (!grants.ok) return reply.code(400).send({ error: grants.error });
     const common = {
       operationId: req.body.operationId,
       branch: req.body.branch ?? null,
       permissionMode: permission(req.body.permissionMode),
-      agentType: (req.body.agentType as AgentType) || "claude-code",
+      agentType,
       model: modelOf(req.body.model),
       instruction: req.body.instruction,
       force: req.body.force === true,
       userId: ctx.userId,
     };
-    const fallback = { permissionMode: common.permissionMode, agentType: common.agentType as string, model: common.model };
+    const fallback = { permissionMode: common.permissionMode, agentType: common.agentType, model: common.model };
     if (ctx.remote) {
       const missing = await findWorkspaceMissingOnRemote(fastify.storage, {
         projectId: ctx.project.id, remoteServerId: ctx.remote.serverId, branch: common.branch,
@@ -388,7 +397,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
       return send(reply, await remote().activate({
         ...common, localSessionId: sessionId, userId: authResult, grantedRemoteIds: remoteGrants.ids,
       }), {
-        permissionMode: intent?.permission_mode ?? "edit", agentType: intent?.agent_type ?? "claude-code", model: intent?.model ?? null,
+        permissionMode: intent?.permission_mode ?? "edit", agentType: intent?.agent_type ?? DEFAULT_AGENT_TYPE, model: intent?.model ?? null,
       });
     }
 
@@ -405,7 +414,7 @@ const routes: FastifyPluginAsync<LifecycleRoutesOptions> = async (fastify, opts)
       ...common, sessionId, crossRemoteMcp, userId: resolveUserId(authResult),
       grants: grants.ids && { userId: resolveUserId(authResult), remoteServerIds: grants.ids },
     });
-    return send(reply, result, { permissionMode: "edit", agentType: "claude-code", model: null });
+    return send(reply, result, { permissionMode: "edit", agentType: DEFAULT_AGENT_TYPE, model: null });
   });
 
   fastify.delete<{ Params: { sessionId: string }; Body?: { reason?: string } }>("/api/agent-sessions/:sessionId/preparation", async (req, reply) => {

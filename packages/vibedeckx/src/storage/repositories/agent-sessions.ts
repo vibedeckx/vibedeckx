@@ -1,4 +1,5 @@
 import { sql, type Kysely, type Selectable, type SqlBool } from "kysely";
+import { DEFAULT_AGENT_TYPE } from "../../agent-types.js";
 import type { DB, AgentSessionsTable, RemoteSessionMappingsTable, RemoteSessionCreationIntentsTable, RemoteReviewerCreationIntentsTable } from "../schema.js";
 import { fromDbBool, type DialectHelpers } from "../dialect.js";
 import type {
@@ -547,7 +548,7 @@ export const createAgentSessionRepos = (
         branch,
         status: "running",
         permission_mode: permission_mode ?? "edit",
-        agent_type: agent_type ?? "claude-code",
+        agent_type: agent_type ?? DEFAULT_AGENT_TYPE,
         model: model ?? null,
         created_at: h.nowMs(),
         updated_at: h.nowMs(),
@@ -585,7 +586,7 @@ export const createAgentSessionRepos = (
         workspace_checkout_id: checkout.id,
         status: "running",
         permission_mode: permission_mode ?? "edit",
-        agent_type: agent_type ?? "claude-code",
+        agent_type: agent_type ?? DEFAULT_AGENT_TYPE,
         model: model ?? null,
         created_at: h.nowMs(),
         updated_at: h.nowMs(),

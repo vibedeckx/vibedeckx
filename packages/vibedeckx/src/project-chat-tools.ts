@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { AGENT_TYPES, DEFAULT_AGENT_TYPE, type AgentType } from "./agent-types.js";
 import { z } from "zod";
 import type {
   ProjectChatContextEntityType,
@@ -185,7 +186,7 @@ export type ProjectChatTools = {
   }, Record<string, unknown>>;
   create_agent_session: ProjectChatTool<{
     workspaceId?: string; instruction: string; permissionMode?: "plan" | "edit";
-    agentType?: "claude-code" | "codex"; model?: string | null;
+    agentType?: AgentType; model?: string | null;
   }, Record<string, unknown>>;
   select_workspace: ProjectChatTool<{ requestId: string; workspaceId: string }, Record<string, unknown>>;
   send_agent_instruction: ProjectChatTool<{ sessionId: string; instruction: string }, Record<string, unknown>>;
@@ -196,7 +197,7 @@ export interface ProjectChatMutationServices {
   createAgentSession(input: {
     sessionId: string; workerSessionId: string; idempotencyKey: string; projectId: string; userId: string;
     target: string; branch: string | null; instruction: string;
-    permissionMode: "plan" | "edit"; agentType: "claude-code" | "codex"; model: string | null;
+    permissionMode: "plan" | "edit"; agentType: AgentType; model: string | null;
   }): Promise<{ sessionId: string }>;
   /**
    * At-least-once across process crashes. Callers persist `idempotencyKey`
@@ -267,7 +268,7 @@ const createSessionSchema = z.object({
   workspaceId: selectorSchema.optional(),
   instruction: instructionSchema,
   permissionMode: z.enum(["plan", "edit"]).optional(),
-  agentType: z.enum(["claude-code", "codex"]).optional(),
+  agentType: z.enum(AGENT_TYPES).optional(),
   model: z.string().trim().min(1).max(MODEL_CHAR_LIMIT).nullable().optional(),
 }).strict();
 const pendingSessionOperationSchema = z.object({
@@ -281,7 +282,7 @@ const pendingSessionOperationSchema = z.object({
   workerSessionId: selectorSchema,
   instruction: instructionSchema,
   permissionMode: z.enum(["plan", "edit"]),
-  agentType: z.enum(["claude-code", "codex"]),
+  agentType: z.enum(AGENT_TYPES),
   model: z.string().max(MODEL_CHAR_LIMIT).nullable(),
   initialInstructionDelivery: z.literal("pending"),
   candidates: z.array(z.object({
@@ -740,7 +741,7 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
     create_agent_session: {
       description: "Create an agent session in an explicitly selected existing workspace.",
       inputSchema: createSessionSchema,
-      execute: async ({ workspaceId, instruction, permissionMode = "edit", agentType = "claude-code", model = null }) => {
+      execute: async ({ workspaceId, instruction, permissionMode = "edit", agentType = DEFAULT_AGENT_TYPE, model = null }) => {
         const service = mutationService();
         await revalidateScope();
         const operationId = randomUUID();

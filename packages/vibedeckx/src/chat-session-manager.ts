@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "crypto";
+import { AGENT_TYPES, DEFAULT_AGENT_TYPE } from "./agent-types.js";
 import { streamText, tool, stepCountIs } from "ai";
 import type { ModelMessage, ToolApprovalResponse, ToolSet } from "ai";
 import { ChatPlanState, chatPlanSchema } from "./chat-plan.js";
@@ -1430,7 +1431,7 @@ export class ChatSessionManager {
     try {
       started = await lifecycle.start({
         projectId, remoteServerId: agentMode, remotePath: remoteConfig.remote_path, branch,
-        permissionMode: "edit", agentType: agentType ?? "claude-code", model: null,
+        permissionMode: "edit", agentType: agentType ?? DEFAULT_AGENT_TYPE, model: null,
         purpose: "commander", owner: { kind: "commander_request", id: chatSessionId }, operationId,
         // Title generation reads the commanding user's chat_provider config
         // (per-user in SaaS) — fall back to the "local" sentinel if the chat
@@ -2598,7 +2599,7 @@ export class ChatSessionManager {
                 "Because it runs autonomously in edit mode, spell out any irreversible or destructive-operation boundaries it must respect.",
             ),
           agentType: z
-            .enum(["claude-code", "codex"])
+            .enum(AGENT_TYPES)
             .optional()
             .describe("Which agent to spawn. Defaults to claude-code."),
         }),
@@ -2658,7 +2659,7 @@ export class ChatSessionManager {
               projectId,
               branch,
               permissionMode: "edit",
-              agentType: (agentType as AgentType | undefined) ?? "claude-code",
+              agentType: (agentType as AgentType | undefined) ?? DEFAULT_AGENT_TYPE,
               purpose: "commander",
               owner: { kind: "commander_request", id: sessionId },
               instruction: prompt,

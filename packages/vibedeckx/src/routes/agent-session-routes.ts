@@ -1,6 +1,8 @@
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { getAuth } from "@clerk/fastify";
 import fp from "fastify-plugin";
+import { resolveAgentCapabilities } from "../agent-provider.js";
+import { DEFAULT_AGENT_TYPE, invalidAgentTypeMessage, isAgentType, resolveAgentType } from "../agent-types.js";
 import type { AgentMessage, AgentType, ContentPart } from "../agent-types.js";
 import { ConversationPatch } from "../conversation-patch.js";
 import { getAllProviders } from "../providers/index.js";
@@ -365,7 +367,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           branch: session?.branch ?? null,
           status: session?.status || "stopped",
           permissionMode: session?.permissionMode || "edit",
-          agentType: session?.agentType || "claude-code",
+          agentType: session?.agentType || DEFAULT_AGENT_TYPE,
           model: session?.model ?? null,
           title: dbRow?.title ?? null,
           ...(session ? sendBackFields(session) : {}),
@@ -403,7 +405,8 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // validates against this list — the session's real capabilities depend
         // on the CLI version and account tier of whichever machine spawns it,
         // which this server cannot know.
-        models: MODEL_SUGGESTIONS[type as keyof typeof MODEL_SUGGESTIONS] ?? [],
+        models: MODEL_SUGGESTIONS[type] ?? [],
+        capabilities: resolveAgentCapabilities(provider),
       };
     });
     return reply.code(200).send({ providers });
@@ -413,10 +416,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{
     Body: { path: string; branch?: string | null; permissionMode?: "plan" | "edit"; agentType?: string; force?: boolean; model?: string | null; historyTurns?: number };
   }>("/api/path/agent-sessions", async (req, reply) => {
-    const { path: projectPath, branch, permissionMode, agentType, force, model, historyTurns } = req.body;
+    const { path: projectPath, branch, permissionMode, force, model, historyTurns } = req.body;
     if (!projectPath) {
       return reply.code(400).send({ error: "Path is required" });
     }
+    const agentType = resolveAgentType(req.body.agentType);
+    if (agentType === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
 
     try {
       let pseudoProjectId = `path:${projectPath}`;
@@ -490,7 +495,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           target: projection?.target ?? "local",
           status: effectiveStatus,
           permissionMode: session?.permissionMode || "edit",
-          agentType: session?.agentType || "claude-code",
+          agentType: session?.agentType || DEFAULT_AGENT_TYPE,
           model: session?.model ?? null,
           workspaceCheckoutId: session?.workspaceCheckoutId ?? null,
           worktreePath: projection?.worktreePath ?? session?.checkoutPath ?? null,
@@ -599,7 +604,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
   }>("/api/path/agent-sessions/new", async (req, reply) => {
     const authResult = requireRawAuth(req, reply);
     if (authResult === null) return;
-    const { path: projectPath, branch, permissionMode, agentType, force, sessionId, crossRemoteMcp, model } = req.body;
+    const { path: projectPath, branch, permissionMode, force, sessionId, crossRemoteMcp, model } = req.body;
+    const agentType = resolveAgentType(req.body.agentType);
+    if (agentType === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
     // Hub-minted `vibedeckx` MCP tools (additive field; older hubs omit it). Set
     // before the create, which spawns the agent.
     const sessionToolsMcp = parseSessionToolsMcpConfig(req.body.sessionToolsMcp);
@@ -641,7 +648,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         if (stored || active) {
           const requestedBranch = branch ?? null;
           const requestedPermission = permissionMode || "edit";
-          const requestedAgentType = (agentType as AgentType) || "claude-code";
+          const requestedAgentType = agentType;
           const requestedModel = model?.trim() ? model.trim() : null;
           const storedMatches = !stored || (["running", "stopped"].includes(stored.status)
             && stored.project_id === pseudoProjectId
@@ -701,7 +708,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         projectPath,
         false,
         permissionMode || "edit",
-        (agentType as AgentType) || "claude-code",
+        agentType,
         false,
         force === true,
         { sessionId, crossRemoteMcp, model, purpose, operationId },
@@ -714,7 +721,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           branch: branch ?? null,
           status: session?.status || "running",
           permissionMode: session?.permissionMode || "edit",
-          agentType: session?.agentType || "claude-code",
+          agentType: session?.agentType || DEFAULT_AGENT_TYPE,
           model: session?.model ?? null,
           workspaceCheckoutId: session?.workspaceCheckoutId ?? null,
           worktreePath: session?.checkoutPath ?? null,
@@ -1004,6 +1011,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const { branch, permissionMode, agentType, model, historyTurns } = req.body;
+    if (resolveAgentType(agentType) === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
 
     let agentMode = project.agent_mode;
     let useRemoteAgent = agentMode !== 'local';
@@ -1174,7 +1182,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           branch: branch ?? null,
               status: effectiveStatus,
               permissionMode: session?.permissionMode || "edit",
-              agentType: session?.agentType || "claude-code",
+              agentType: session?.agentType || DEFAULT_AGENT_TYPE,
               model: session?.model ?? null,
               processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
               ...(session ? sendBackFields(session) : {}),
@@ -1201,7 +1209,9 @@ const routes: FastifyPluginAsync = async (fastify) => {
       return reply.code(404).send({ error: "Project not found" });
     }
 
-    const { branch, permissionMode, agentType, force, model } = req.body;
+    const { branch, permissionMode, force, model } = req.body;
+    const agentType = resolveAgentType(req.body.agentType);
+    if (agentType === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
     // Phase 0 (lifecycle design §12): accepted for log correlation only — no
     // replay semantics yet. The UI does not send it today.
     const operationId = typeof req.body.operationId === "string" ? req.body.operationId : undefined;
@@ -1273,7 +1283,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         project.path,
         false,
         permissionMode || "edit",
-        (agentType as AgentType) || "claude-code",
+        agentType,
         false,
         force === true,
         { sessionId: preSessionId, crossRemoteMcp, model, userId: userId ?? undefined, purpose: "interactive", operationId },
@@ -1286,7 +1296,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           branch: branch ?? null,
           status: session?.status || "running",
           permissionMode: session?.permissionMode || "edit",
-          agentType: session?.agentType || "claude-code",
+          agentType: session?.agentType || DEFAULT_AGENT_TYPE,
           model: session?.model ?? null,
           processAlive: session ? fastify.agentSessionManager.getSessionProcessAlive(sessionId) : false,
         },
@@ -1400,7 +1410,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
           checkoutDeletedAt: projection?.checkoutDeletedAt ?? null,
           status: session.status,
           permissionMode: session.permissionMode,
-          agentType: session.agentType || "claude-code",
+          agentType: session.agentType || DEFAULT_AGENT_TYPE,
           model: session.model ?? null,
           processAlive: fastify.agentSessionManager.getSessionProcessAlive(session.id),
           ...sendBackFields(session),
@@ -2097,6 +2107,11 @@ const routes: FastifyPluginAsync = async (fastify) => {
   fastify.post<{ Params: { sessionId: string }; Body: { agentType?: string } }>(
     "/api/agent-sessions/:sessionId/restart",
     async (req, reply) => {
+      // Validate before the local/remote split: a remote restart kills the
+      // worker process and clears the hub's patch cache before the worker
+      // could reject the type.
+      const { agentType } = (req.body || {}) as { agentType?: string };
+      if (resolveAgentType(agentType) === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
         if (userId === null) return;
@@ -2126,8 +2141,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(404).send({ error: "Project not found or has no local path" });
       }
 
-      const { agentType } = (req.body || {}) as { agentType?: string };
-      const restarted = await fastify.agentSessionManager.restartSession(req.params.sessionId, projectPath, agentType as AgentType | undefined);
+      const restarted = await fastify.agentSessionManager.restartSession(req.params.sessionId, projectPath, (agentType || undefined) as AgentType | undefined);
       if (!restarted) {
         return reply.code(500).send({ error: "Failed to restart session" });
       }
@@ -2146,6 +2160,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!agentType) {
         return reply.code(400).send({ error: "agentType is required" });
       }
+      if (!isAgentType(agentType)) return reply.code(400).send({ error: invalidAgentTypeMessage() });
 
       if (req.params.sessionId.startsWith("remote-")) {
         const userId = requireAuth(req, reply);
@@ -2336,6 +2351,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     "/api/agent-sessions/:sessionId/branch",
     async (req, reply) => {
       const { agentType, upToEntryIndex } = (req.body || {}) as { agentType?: string; upToEntryIndex?: number };
+      if (resolveAgentType(agentType) === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
       if (upToEntryIndex !== undefined && (!Number.isInteger(upToEntryIndex) || upToEntryIndex < 0)) {
         return reply.code(400).send({ error: "upToEntryIndex must be a non-negative integer" });
       }
@@ -2425,6 +2441,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     Body: { agentType?: string; sessionId?: string; crossRemoteMcp?: CrossRemoteMcpConfig; sessionToolsMcp?: unknown; upToEntryIndex?: number };
   }>("/api/path/agent-sessions/:sessionId/branch", async (req, reply) => {
     const { agentType, sessionId, crossRemoteMcp, upToEntryIndex } = req.body || {};
+    if (resolveAgentType(agentType) === null) return reply.code(400).send({ error: invalidAgentTypeMessage() });
     const sessionToolsMcp = parseSessionToolsMcpConfig(req.body?.sessionToolsMcp);
     if (upToEntryIndex !== undefined && (!Number.isInteger(upToEntryIndex) || upToEntryIndex < 0)) {
       return reply.code(400).send({ error: "upToEntryIndex must be a non-negative integer" });

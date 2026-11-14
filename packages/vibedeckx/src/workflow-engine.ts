@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { AGENT_TYPES, DEFAULT_AGENT_TYPE } from "./agent-types.js";
 import type { AgentSession, ReviewSpan, Storage, WorkflowRun, WorkflowRunStep, WorkflowRunStepKind, WorkflowVerdict } from "./storage/types.js";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
 import type { AgentMessage, AgentType, NotificationDisposition, TextPart } from "./agent-types.js";
@@ -508,7 +509,12 @@ export interface ReviewerCandidate {
   reason: ReviewerCandidateUnavailableReason | null;
 }
 
-export const REVIEWER_AGENT_TYPES = new Set<AgentType>(["claude-code", "codex"]);
+/**
+ * Valid agent types for reviewer / loop requests, from the shared type list.
+ * Accepting a type here does not certify its review/loop support; fx workflow
+ * integration and verification belong to fx integration task 9.
+ */
+export const REVIEWER_AGENT_TYPES: ReadonlySet<AgentType> = new Set(AGENT_TYPES);
 
 /**
  * How long a run may sit in `preparing` before the engine fails it. The
@@ -1822,7 +1828,7 @@ export class WorkflowEngine {
           projectId: opts.project.id,
           branch: opts.branch,
           permissionMode: "plan",
-          agentType: (opts.reviewerAgentType ?? "claude-code") as AgentType,
+          agentType: (opts.reviewerAgentType ?? DEFAULT_AGENT_TYPE) as AgentType,
           purpose: "workflow_review",
           owner: { kind: "workflow_run", id: run.id },
           startSnapshot: endSnap,

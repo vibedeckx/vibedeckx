@@ -1,4 +1,5 @@
 import { sql, type Kysely, type Selectable } from "kysely";
+import { AGENT_TYPES } from "../../agent-types.js";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type {
@@ -74,7 +75,7 @@ const operationPayloadSchema = z.discriminatedUnion("kind", [
     status: operationStatusSchema, sessionId: z.string().min(1).max(512), workerSessionId: z.string().min(1).max(512).optional(),
     workspaceId: z.string().min(1).max(512).optional(),
     target: z.string().min(1).max(512).optional(), branch: z.string().max(512).nullable().optional(), instruction: z.string().max(8_000).optional(),
-    permissionMode: z.enum(["plan", "edit"]).optional(), agentType: z.enum(["claude-code", "codex"]).optional(), model: z.string().max(512).nullable().optional(),
+    permissionMode: z.enum(["plan", "edit"]).optional(), agentType: z.enum(AGENT_TYPES).optional(), model: z.string().max(512).nullable().optional(),
     initialInstructionDelivery: z.enum(["pending", "confirmed"]).optional(),
     phase: z.literal("workspace_selection").optional(), requestId: z.string().min(1).max(512).optional(),
     candidates: z.array(z.object({ id: z.string().min(1).max(512), target: z.string().min(1).max(512), branch: z.string().max(512).nullable() }).strict()).max(20).optional(),

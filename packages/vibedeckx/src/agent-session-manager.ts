@@ -18,6 +18,7 @@ import {
   sessionMilestoneForTurnEnd,
 } from "./notification-milestones.js";
 import { getProvider } from "./providers/index.js";
+import { DEFAULT_AGENT_TYPE } from "./agent-types.js";
 import type { ParsedAgentEvent } from "./agent-provider.js";
 import { crossRemoteMcpEnabled, mintCrossRemoteMcpConfig, type CrossRemoteMcpConfig } from "./cross-remote-mcp-config.js";
 import { mintSessionToolsMcpConfig, sessionToolsPublicBaseUrl, type SessionToolsMcpConfig } from "./session-tools-mcp.js";
@@ -1326,7 +1327,7 @@ export class AgentSessionManager {
     projectPath: string,
     skipDb: boolean = false,
     permissionMode: "plan" | "edit" = "edit",
-    agentType: AgentType = "claude-code",
+    agentType: AgentType = DEFAULT_AGENT_TYPE,
     announceRunning: boolean = false,
     force: boolean = false,
     opts: {
@@ -3828,7 +3829,7 @@ export class AgentSessionManager {
       if (!session.skipDb) await this.storage.agentSessions.updateModel(sessionId, null);
     }
 
-    const agentDisplayName = (t: AgentType) => (t === "codex" ? "Codex" : "Claude Code");
+    const agentDisplayName = (t: AgentType) => getProvider(t).getDisplayName();
 
     // Visible confirmation in the conversation; replayed to the new agent as
     // part of the context like other system entries ("Session stopped by user.")
@@ -4600,7 +4601,7 @@ export class AgentSessionManager {
         buffer: "",
         skipDb: false,
         permissionMode,
-        agentType: ((dbSession as unknown as Record<string, unknown>).agent_type as AgentType) || "claude-code",
+        agentType: ((dbSession as unknown as Record<string, unknown>).agent_type as AgentType) || DEFAULT_AGENT_TYPE,
         model: dbSession.model ?? null,
         branchedFromSessionId: dbSession.branched_from_session_id ?? null,
         branchedFromEntryIndex: dbSession.branched_from_entry_index ?? null,
@@ -4749,7 +4750,7 @@ export class AgentSessionManager {
       ?? ((sourceRow?.permission_mode === "plan" ? "plan" : "edit") as "plan" | "edit");
     const agentType = agentTypeOverride
       ?? source?.agentType
-      ?? ((sourceRow?.agent_type as AgentType) || "claude-code");
+      ?? ((sourceRow?.agent_type as AgentType) || DEFAULT_AGENT_TYPE);
     // A branch continues the same conversation, so it continues on the same
     // model. Inheriting is only the starting point: the branch arrives dormant,
     // so the picker is live on it and a different model is one click away —
@@ -4758,7 +4759,7 @@ export class AgentSessionManager {
     // Except when the branch switches agent: a model name is agent-specific,
     // so inheriting "opus" onto a Codex branch would spawn a session that
     // fails every turn. Fall back to the new CLI's own default instead.
-    const sourceAgentType = source?.agentType ?? ((sourceRow?.agent_type as AgentType) || "claude-code");
+    const sourceAgentType = source?.agentType ?? ((sourceRow?.agent_type as AgentType) || DEFAULT_AGENT_TYPE);
     const model = agentType === sourceAgentType
       ? (source?.model ?? sourceRow?.model ?? null)
       : null;

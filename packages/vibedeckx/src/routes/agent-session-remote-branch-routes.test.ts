@@ -82,10 +82,11 @@ function makeApp() {
     emitSessionTitle: vi.fn(),
   });
   app.decorate("remoteSessionMap", remoteSessionMap);
-  app.decorate("remotePatchCache", { getOrCreate: () => ({ messages: [] }), appendMessage: vi.fn() });
+  const replaceAll = vi.fn();
+  app.decorate("remotePatchCache", { getOrCreate: () => ({ messages: [] }), appendMessage: vi.fn(), replaceAll });
   app.decorate("reverseConnectManager", null);
 
-  return { app, upsert, getMapping, getCheckoutById, noteSessionCreated, updateCachedSessionTitle, projectsGetById, branchSession, remoteSessionMap };
+  return { app, replaceAll, upsert, getMapping, getCheckoutById, noteSessionCreated, updateCachedSessionTitle, projectsGetById, branchSession, remoteSessionMap };
 }
 
 /** Echo the center-supplied branch id back, as an upgraded remote would. */
@@ -264,5 +265,25 @@ describe("center-side remote branch protocol", () => {
     expect(res.statusCode).toBe(409);
     expect(res.json()).toMatchObject({ errorCode: "workspace-missing-on-remote", serverId: "srv1", name: "worker3", branch: "dev" });
     expect(proxyMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("remote restart agentType validation", () => {
+  it("rejects an unknown agentType before proxying or clearing the patch cache", async () => {
+    proxyMock.mockReset();
+    const ctx = makeApp();
+    await ctx.app.register(agentSessionRoutes);
+    await ctx.app.ready();
+    try {
+      const res = await ctx.app.inject({
+        method: "POST", url: `/api/agent-sessions/${SRC_SESSION_ID}/restart`, payload: { agentType: "not-an-agent" },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/agentType must be one of/);
+      expect(proxyMock).not.toHaveBeenCalled();
+      expect(ctx.replaceAll).not.toHaveBeenCalled();
+    } finally {
+      await ctx.app.close();
+    }
   });
 });

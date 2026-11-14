@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { DEFAULT_AGENT_TYPE } from "../agent-types.js";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { requireAuth as requireRawAuth } from "../server.js";
@@ -41,7 +42,7 @@ export function parseRepeatLoopBody(body: Record<string, unknown> | undefined): 
   if (typeof b.prompt !== "string" || b.prompt.trim() === "") return "prompt is required";
   if (b.prompt.length > 64 * 1024) return "prompt is too long";
   const agentType = parseReviewerAgentType(b.agentType);
-  if (agentType === null) return "agentType must be one of: claude-code, codex";
+  if (agentType === null) return `agentType must be one of: ${[...REVIEWER_AGENT_TYPES].join(", ")}`;
   const bounded = (raw: unknown, max: number): number | undefined | null =>
     raw === undefined || raw === null ? undefined
       : typeof raw === "number" && Number.isInteger(raw) && raw >= 1 && raw <= max ? raw : null;
@@ -516,7 +517,7 @@ async function routes(fastify: FastifyInstance) {
     const { projectId, branch, sourceSessionId, reviewFocus, sourceTurnEndIndex } = req.body ?? {};
     if (!projectId || !sourceSessionId) return reply.code(400).send({ error: "projectId and sourceSessionId are required" });
     const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
-    if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
+    if (reviewerAgentType === null) return reply.code(400).send({ error: `reviewerAgentType must be one of: ${[...REVIEWER_AGENT_TYPES].join(", ")}` });
     const reviewSpan = parseReviewSpan(req.body?.reviewSpan);
     if (reviewSpan === null) return reply.code(400).send({ error: "reviewSpan must be one of: this_turn, session_start" });
     const loop = parseLoop(req.body?.loop);
@@ -644,7 +645,7 @@ async function routes(fastify: FastifyInstance) {
           // and runs a briefed (tier-2) review — the reviewer prompt's
           // trailing "(review context: …)" line records what actually ran.
           reviewContextMode,
-          reviewerAgentType: reviewerAgentType ?? "claude-code",
+          reviewerAgentType: reviewerAgentType ?? DEFAULT_AGENT_TYPE,
           intentBrief,
           loopMaxRounds: loop?.maxRounds,
           userId,
@@ -1227,7 +1228,7 @@ async function routes(fastify: FastifyInstance) {
     }
     const intentBrief = blind ? undefined : normalizeIntentBrief(intentBriefRaw);
     const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
-    if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
+    if (reviewerAgentType === null) return reply.code(400).send({ error: `reviewerAgentType must be one of: ${[...REVIEWER_AGENT_TYPES].join(", ")}` });
     const reviewerSessionIdRaw = req.body?.reviewerSessionId;
     if (reviewerSessionIdRaw !== undefined &&
         (typeof reviewerSessionIdRaw !== "string" || reviewerSessionIdRaw.trim() === "")) {
@@ -1314,7 +1315,7 @@ async function routes(fastify: FastifyInstance) {
     const loop = parseLoop(req.body?.loop);
     if (loop === null) return reply.code(400).send({ error: LOOP_ERROR });
     const reviewerAgentType = parseReviewerAgentType(req.body?.reviewerAgentType);
-    if (reviewerAgentType === null) return reply.code(400).send({ error: "reviewerAgentType must be one of: claude-code, codex" });
+    if (reviewerAgentType === null) return reply.code(400).send({ error: `reviewerAgentType must be one of: ${[...REVIEWER_AGENT_TYPES].join(", ")}` });
     const runId = typeof req.body?.runId === "string" ? req.body.runId.trim() : "";
     const newReviewerSessionId = typeof req.body?.newReviewerSessionId === "string"
       ? req.body.newReviewerSessionId.trim() : "";

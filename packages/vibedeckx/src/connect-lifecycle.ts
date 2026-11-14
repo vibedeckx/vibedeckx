@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { AGENT_CLI_COMMANDS } from "./agent-types.js";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -623,7 +624,7 @@ export async function installService(options: InstallServiceOptions): Promise<Da
 
   // 3. Service definition (registered for auto-start, not started yet).
   const pathEnv = sanitizeServicePath(env.PATH ?? "");
-  for (const cli of ["claude", "codex", "git"]) {
+  for (const cli of [...AGENT_CLI_COMMANDS, "git"]) {
     if (!findOnPath(cli, pathEnv, env)) {
       log(`Note: \`${cli}\` is not on PATH; the service will not find it either.`);
     }

@@ -16,6 +16,7 @@
  * `activation_uncertain` and is never re-sent automatically.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { DEFAULT_AGENT_TYPE } from "./agent-types.js";
 import type { ContentPart } from "./agent-types.js";
 import type { AgentType } from "./agent-types.js";
 import type { NotificationDisposition } from "./agent-types.js";
@@ -641,7 +642,7 @@ export class AgentSessionLifecycleService {
           projectId: row.project_id,
           branch: branchOf(row),
           permissionMode: row.permission_mode === "plan" ? "plan" : "edit",
-          agentType: (row.agent_type ?? "claude-code") as AgentType,
+          agentType: (row.agent_type ?? DEFAULT_AGENT_TYPE) as AgentType,
           model: row.model,
           purpose,
           operationId,

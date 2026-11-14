@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "crypto";
+import { type AgentType } from "./agent-types.js";
 import { stepCountIs, streamText, tool, type ToolSet } from "ai";
 import type WebSocket from "ws";
 import type { EventBus, GlobalEvent } from "./event-bus.js";
@@ -1235,7 +1236,7 @@ export class ProjectChatManager {
           target: payload.target, branch: payload.branch ?? null,
           instruction: payload.instruction,
           permissionMode: payload.permissionMode as "plan" | "edit",
-          agentType: payload.agentType as "claude-code" | "codex",
+          agentType: payload.agentType as AgentType,
           model: payload.model ?? null,
         });
         if (created.sessionId !== sessionId) throw new Error("Session identity mismatch");

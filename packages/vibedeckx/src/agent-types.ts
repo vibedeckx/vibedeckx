@@ -4,7 +4,48 @@
 
 // ============ Agent Type ============
 
-export type AgentType = "claude-code" | "codex";
+/**
+ * The single source of truth for which coding agents exist. Adding an agent
+ * type means: add an entry here, implement its AgentProvider, and register it
+ * in providers/index.ts. The type union, zod enums and request validation all
+ * derive from this table.
+ *
+ * Each entry's value is the agent's CLI command name, used only for
+ * diagnostics (e.g. `connect install` warning when it is not on PATH).
+ */
+const AGENT_TYPE_CLI = {
+  "claude-code": "claude",
+  codex: "codex",
+} as const;
+
+export type AgentType = keyof typeof AGENT_TYPE_CLI;
+
+/** Every valid agent type, as a non-empty tuple (usable with `z.enum`). */
+export const AGENT_TYPES = Object.keys(AGENT_TYPE_CLI) as [AgentType, ...AgentType[]];
+
+/** Used when a request or stored row carries no agent type at all. */
+export const DEFAULT_AGENT_TYPE: AgentType = "claude-code";
+
+/** CLI command names of every agent type. */
+export const AGENT_CLI_COMMANDS: readonly string[] = Object.values(AGENT_TYPE_CLI);
+
+export function isAgentType(value: unknown): value is AgentType {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(AGENT_TYPE_CLI, value);
+}
+
+/**
+ * Resolve a requested agent type: absent (undefined/null/"") falls back to
+ * DEFAULT_AGENT_TYPE, a known type passes through, and an unknown non-empty
+ * value yields null — callers must reject it rather than silently run Claude.
+ */
+export function resolveAgentType(value: unknown): AgentType | null {
+  if (value === undefined || value === null || value === "") return DEFAULT_AGENT_TYPE;
+  return isAgentType(value) ? value : null;
+}
+
+export function invalidAgentTypeMessage(field = "agentType"): string {
+  return `${field} must be one of: ${AGENT_TYPES.join(", ")}`;
+}
 
 // ============ Content Part Types (for image attachments) ============
 

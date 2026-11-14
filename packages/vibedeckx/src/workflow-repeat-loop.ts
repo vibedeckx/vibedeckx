@@ -21,6 +21,7 @@
  * that ends abnormally puts up a gate and rings the bell.
  */
 import { execFile } from "child_process";
+import { DEFAULT_AGENT_TYPE } from "./agent-types.js";
 import { randomUUID } from "crypto";
 import type { AgentMessage, AgentType } from "./agent-types.js";
 import type { ActivationResult } from "./agent-session-lifecycle.js";
@@ -258,7 +259,7 @@ export class RepeatLoopRunner {
     const params: RepeatLoopParams = {
       name: opts.name?.trim() || "Loop",
       prompt: opts.prompt,
-      agentType: opts.agentType ?? "claude-code",
+      agentType: opts.agentType ?? DEFAULT_AGENT_TYPE,
       model: opts.model ?? null,
       maxIterations,
       maxMinutes: opts.maxMinutes ?? REPEAT_MAX_MINUTES_DEFAULT,
