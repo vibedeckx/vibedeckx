@@ -8,7 +8,7 @@ import type { AgentMessage } from "@/hooks/use-agent-session";
 vi.mock("./agent-conversation", () => ({
   useOptionalAgentConversation: () => ({
     agentType: "codex", sessionId: null,
-    providers: [{ type: "third", displayName: "Third Agent", available: true }],
+    providers: [{ type: "third", displayName: "Third Agent" }],
   }),
 }));
 

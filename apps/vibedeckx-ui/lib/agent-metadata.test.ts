@@ -7,14 +7,14 @@ describe("agent metadata", () => {
     expect(getAgentMetadata("codex")).toMatchObject({ messageName: "Codex", accentText: "text-green-500" });
   });
   it("uses the server name and neutral colours for unknown providers", () => {
-    expect(getAgentMetadata("third", [{ type: "third", displayName: "Third Agent", available: true }])).toMatchObject({
+    expect(getAgentMetadata("third", [{ type: "third", displayName: "Third Agent" }])).toMatchObject({
       displayName: "Third Agent", messageName: "Third Agent", accentText: "text-muted-foreground", branchAccent: "bg-muted text-muted-foreground",
     });
     expect(getAgentMetadata("uninstalled").displayName).toBe("uninstalled");
     expect(getAgentMetadata("constructor").messageName).toBe("constructor");
   });
   it("honours plan support and keeps older providers compatible", () => {
-    expect(supportsPlanMode({ type: "third", displayName: "Third Agent", available: true, capabilities: { planMode: false } })).toBe(false);
-    expect(supportsPlanMode({ type: "codex", displayName: "Codex", available: true })).toBe(true);
+    expect(supportsPlanMode({ type: "third", displayName: "Third Agent", capabilities: { planMode: false } })).toBe(false);
+    expect(supportsPlanMode({ type: "codex", displayName: "Codex" })).toBe(true);
   });
 });

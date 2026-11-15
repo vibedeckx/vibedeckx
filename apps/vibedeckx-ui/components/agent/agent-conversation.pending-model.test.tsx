@@ -172,8 +172,8 @@ vi.mock("@/hooks/use-marker-keyboard-nav", () => ({
 // label — the pre-session branch of that dropdown is the second reset site.
 vi.mock("@/lib/api", () => ({
   getAgentProviders: vi.fn().mockResolvedValue([
-    { type: "claude-code", displayName: "Claude Code", available: true, models: ["opus", "sonnet"] },
-    { type: "codex", displayName: "Codex", available: true, models: ["gpt-5.6-sol"] },
+    { type: "claude-code", displayName: "Claude Code", models: ["opus", "sonnet"] },
+    { type: "codex", displayName: "Codex", models: ["gpt-5.6-sol"] },
   ]),
   translateText: vi.fn(),
   branchAgentSession: vi.fn(),

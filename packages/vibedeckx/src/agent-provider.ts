@@ -23,7 +23,7 @@ export interface SpawnConfig {
 // ============ ParsedAgentEvent (task 1.2) ============
 
 export type ParsedAgentEvent =
-  | { type: "text"; content: string }
+  | { type: "text"; content: string; delta?: true }
   // `outOfTurn`: the provider attributed this event to an already-completed
   // turn (e.g. a codex backgrounded exec whose item/completed lands after
   // turn/completed, with no follow-up turn behind it). The session manager
@@ -31,10 +31,10 @@ export type ParsedAgentEvent =
   // effects — opening a turn on it would leave that turn open forever.
   | { type: "tool_use"; tool: string; input: unknown; toolUseId: string; outOfTurn?: true }
   | { type: "tool_result"; tool: string; output: string; toolUseId: string; outOfTurn?: true }
-  | { type: "thinking"; content: string }
+  | { type: "thinking"; content: string; delta?: true }
   | { type: "system"; content: string }
   | { type: "error"; message: string }
-  | { type: "result"; subtype: "success" | "error"; error?: string; duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number }
+  | { type: "result"; subtype: "success" | "error" | "cancelled"; restartRequired?: true; error?: string; duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number }
   // Background-task lifecycle (Claude Code `system/task_started` and
   // `system/task_notification` stream events). The session manager keeps a
   // per-session ledger of these so a `result` arriving while background tasks
@@ -62,9 +62,15 @@ export type ParsedAgentEvent =
   | { type: "approval_request"; requestType: "fileChange"; requestId: string; changes: Array<{path: string; diff?: string; kind: string}> }
   | { type: "stdin_write"; content: string };
 
+export interface AgentInitializationContext {
+  cwd: string;
+}
+
 // ============ AgentProvider Interface (task 1.1) ============
 
 export interface AgentProvider {
+  /** A process exit cannot substitute for a protocol turn result. */
+  readonly requiresExplicitTurnResult?: boolean;
   /** Detect the agent binary on the system. Returns path or null if not found. */
   detectBinary(): string | null;
 
@@ -111,7 +117,7 @@ export interface AgentProvider {
   onSessionDestroyed?(sessionId: string): void;
 
   /** Return initialization messages to write to stdin immediately after spawn (optional). */
-  getInitializationMessages?(sessionId: string): string | null;
+  getInitializationMessages?(sessionId: string, context?: AgentInitializationContext): string | null;
 
   /**
    * Format an interrupt/cancel message to send via stdin (optional).
@@ -119,6 +125,9 @@ export interface AgentProvider {
    * or null to fall back to SIGTERM.
    */
   formatInterrupt?(sessionId: string): string | null;
+
+  /** Cancel completes through the original prompt response; keep the connection alive. */
+  readonly keepAliveOnInterrupt?: boolean;
 
   /**
    * Format a "stop this one background task" message for stdin, or null when

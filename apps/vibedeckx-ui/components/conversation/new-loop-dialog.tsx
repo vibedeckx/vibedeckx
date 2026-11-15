@@ -84,9 +84,9 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
   const [confirm, setConfirm] = useState<{ action: "regenerate" } | { action: "switch"; to: LoopPresetKind } | null>(null);
   const [selectedAgentType, setAgentType] = useState<AgentType>(DEFAULT_AGENT_TYPE);
   const { providers, error: providerError, loading: providersLoading } = useAgentProviders(open);
-  const agentType = providers.find((p) => p.type === selectedAgentType && p.available)?.type
-    ?? providers.find((p) => p.available)?.type ?? selectedAgentType;
-  const agentAvailable = providers.some((p) => p.type === agentType && p.available);
+  const agentType = providers.find((p) => p.type === selectedAgentType)?.type
+    ?? providers[0]?.type ?? selectedAgentType;
+  const agentRegistered = providers.some((p) => p.type === agentType);
   const [iterations, setIterations] = useState(String(REPEAT_LOOP_DEFAULT_ITERATIONS));
   const [minutes, setMinutes] = useState(String(REPEAT_LOOP_DEFAULT_MINUTES));
   const [checkCommand, setCheckCommand] = useState("");
@@ -204,7 +204,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
 
   /** `withHandoff` overrides the switch for "turn it off and retry", which cannot wait for a re-render. */
   const start = async (withHandoff = handoff) => {
-    if (!projectId || !prompt.trim() || busy || pauseFailed || !agentAvailable) return;
+    if (!projectId || !prompt.trim() || busy || pauseFailed || !agentRegistered) return;
     setBusy(true);
     setError(null);
     setHandoffRefused(false);
@@ -243,7 +243,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
   };
 
   const isMac = useSyncExternalStore(noopSubscribe, isMacPlatform, () => false);
-  const submitDisabled = !prompt.trim() || busy || pauseFailed !== null || !agentAvailable;
+  const submitDisabled = !prompt.trim() || busy || pauseFailed !== null || !agentRegistered;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -403,7 +403,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
             <div className="flex min-w-0 flex-col gap-[7px]">
               <FieldLabel>Agent</FieldLabel>
               <div role="radiogroup" aria-label="Agent" className="grid min-h-[34px] min-w-0 gap-0.5 rounded-[9px] border bg-secondary p-[3px]" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 80px), 1fr))" }}>
-                {providers.map(({ type, displayName, available }) => {
+                {providers.map(({ type, displayName }) => {
                   const on = agentType === type;
                   return (
                     <button
@@ -411,8 +411,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
                       type="button"
                       role="radio"
                       aria-checked={on}
-                      disabled={!available}
-                      title={available ? displayName : `${displayName} (unavailable)`}
+                      title={displayName}
                       onClick={() => setAgentType(type)}
                       className={cn(
                         "min-h-[26px] min-w-0 truncate rounded-md border border-transparent px-2 text-[12px] font-medium transition-colors disabled:opacity-50",
@@ -479,7 +478,7 @@ export function NewLoopDialog({ projectId, branch, disabled, onStarted }: {
           {providersLoading && (
             <p role="status" className="text-xs text-muted-foreground">Loading agent providers…</p>
           )}
-          {(error || providerError || (!providersLoading && !agentAvailable)) && (
+          {(error || providerError || (!providersLoading && !agentRegistered)) && (
             <Strip tone="rose" icon={<TriangleAlert />}>
               {error || providerError || "No available agent providers"}
               {handoffRefused && (

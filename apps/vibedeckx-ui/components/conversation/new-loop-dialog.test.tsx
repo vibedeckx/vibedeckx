@@ -6,10 +6,10 @@ import { createRoot, type Root } from "react-dom/client";
 const { createRepeatLoop, workflowRunGate } = vi.hoisted(() => ({ createRepeatLoop: vi.fn(), workflowRunGate: vi.fn() }));
 vi.mock("@/lib/api", () => ({
   getAgentProviders: vi.fn().mockResolvedValue([
-    { type: "claude-code", displayName: "Claude Code", available: true },
-    { type: "codex", displayName: "Codex", available: true },
-    { type: "third", displayName: "Third Agent", available: true, capabilities: { planMode: false } },
-    { type: "offline", displayName: "Offline Agent", available: false },
+    { type: "claude-code", displayName: "Claude Code" },
+    { type: "codex", displayName: "Codex" },
+    { type: "third", displayName: "Third Agent", capabilities: { planMode: false } },
+    { type: "offline", displayName: "Offline Agent" },
   ]),
   api: { createRepeatLoop, workflowRunGate },
   REPEAT_LOOP_DEFAULT_ITERATIONS: 20,
@@ -111,7 +111,7 @@ describe("NewLoopDialog", () => {
     await closeDialog();
     await openDialog();
     expect(buttonNamed("Third Agent")?.getAttribute("aria-checked")).toBe("true");
-    expect(buttonNamed("Offline Agent")?.disabled).toBe(true);
+    expect(buttonNamed("Offline Agent")?.disabled).toBe(false);
     await click(startButton());
     expect(createRepeatLoop).toHaveBeenCalledWith(expect.objectContaining({ agentType: "third" }));
   });

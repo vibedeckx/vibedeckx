@@ -119,6 +119,16 @@ async function liveSession(manager: AgentSessionManager, openSince: number | nul
 const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("turn_end on turn completion", () => {
+  it.each(["claude-code", "codex"] as const)("turn_started restores running for idle %s before content arrives", async agentType => {
+    const { storage } = makeHarness(agentType);
+    const manager = new AgentSessionManager(storage);
+    const { session } = await liveSession(manager, null);
+    session.status = "stopped";
+    await (manager as unknown as { processAgentEvent(id: string, event: { type: "turn_started" }): Promise<void> }).processAgentEvent(SESSION_ID, { type: "turn_started" });
+    expect(session.status).toBe("running");
+    expect(session.turnOpenSince).not.toBeNull();
+  });
+
   it("writes exactly one turn_end (outcome=completed, wall-clock duration) before status:stopped", async () => {
     const { storage, ops, turnEnds } = makeHarness();
     const manager = new AgentSessionManager(storage, { completionGraceMs: GRACE_MS });

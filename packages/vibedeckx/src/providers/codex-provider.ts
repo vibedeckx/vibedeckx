@@ -107,7 +107,7 @@ export class CodexProvider implements AgentProvider {
   }
 
   detectBinary(): string | null {
-    return detectBinary(CODEX_BINARY_NAME);
+    return detectBinary(CODEX_BINARY_NAME, { refresh: true });
   }
 
   isAvailable(): boolean {

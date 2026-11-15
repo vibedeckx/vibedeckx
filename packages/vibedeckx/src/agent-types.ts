@@ -16,6 +16,7 @@
 const AGENT_TYPE_CLI = {
   "claude-code": "claude",
   codex: "codex",
+  fx: "fx",
 } as const;
 
 export type AgentType = keyof typeof AGENT_TYPE_CLI;

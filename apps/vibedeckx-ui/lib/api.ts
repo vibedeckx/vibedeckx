@@ -1432,7 +1432,6 @@ export interface AgentProviderInfo {
   capabilities?: { planMode?: boolean };
   type: AgentType;
   displayName: string;
-  available: boolean;
   /**
    * Suggested model names for this agent. NOT a whitelist — the picker also
    * accepts free text, and nothing validates against this list.

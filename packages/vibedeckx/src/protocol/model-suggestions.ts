@@ -15,5 +15,6 @@ import type { AgentType } from "../agent-types.js";
  */
 export const MODEL_SUGGESTIONS: Partial<Record<AgentType, readonly string[]>> = {
   "claude-code": ["opus", "sonnet", "haiku", "fable"],
+  fx: ["spacexai/grok-4.7", "openai/gpt-5.4-mini"],
   codex: ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"],
 } as const;

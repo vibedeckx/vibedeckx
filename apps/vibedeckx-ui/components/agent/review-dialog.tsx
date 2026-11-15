@@ -41,17 +41,16 @@ function clampLoopRounds(raw: string): number {
 const noopSubscribe = () => () => {};
 
 /**
- * Default reviewer = the first available agent that is NOT the one being
+ * Default reviewer = the first registered agent that is NOT the one being
  * reviewed: a different agent gives a more independent second opinion.
  */
 export function defaultReviewerAgent(
   providers: AgentProviderInfo[],
   currentAgentType: AgentType | null,
 ): AgentType {
-  const usable = providers.filter((p) => p.available);
   return (
-    usable.find((p) => p.type !== currentAgentType)?.type ??
-    usable[0]?.type ??
+    providers.find((p) => p.type !== currentAgentType)?.type ??
+    providers[0]?.type ??
     DEFAULT_AGENT_TYPE
   );
 }
@@ -284,9 +283,9 @@ export function ReviewDialog({
 
   const fetched = useAgentProviders(open && !providers?.length);
   const options = providers?.length ? providers : fetched.providers;
-  const reviewerAgent = selectedReviewerAgent && options.some((p) => p.type === selectedReviewerAgent && p.available)
+  const reviewerAgent = selectedReviewerAgent && options.some((p) => p.type === selectedReviewerAgent)
     ? selectedReviewerAgent : defaultReviewerAgent(options, currentAgentType ?? null);
-  const reviewerAvailable = options.some((p) => p.type === reviewerAgent && p.available);
+  const reviewerRegistered = options.some((p) => p.type === reviewerAgent);
 
   // Re-derive the default on every open: the source session's agent (and thus
   // the "other" agent) may have changed since the last time the dialog closed.
@@ -468,7 +467,7 @@ export function ReviewDialog({
         setReviewerModeOverride(candidateKey ? { key: candidateKey, mode: "new" } : null);
         return;
       }
-      if (!(reviewerMode === "reuse" && reuseCandidate?.sessionId) && !reviewerAvailable) {
+      if (!(reviewerMode === "reuse" && reuseCandidate?.sessionId) && !reviewerRegistered) {
         throw new Error("No available agent providers");
       }
       const reviewer = reviewerMode === "reuse" && reuseCandidate?.sessionId
@@ -559,7 +558,7 @@ export function ReviewDialog({
   // user between reading the dialog and pressing Start. When we do know, the
   // card is already in its final position and a submit inside the check's
   // window is resolved inside start(), behind the spinner.
-  const submitDisabled = busy || (!reuseSelected && !reviewerAvailable) || (candidateLoading && priorReview === undefined);
+  const submitDisabled = busy || (!reuseSelected && !reviewerRegistered) || (candidateLoading && priorReview === undefined);
   const footNote = busy
     ? { Icon: Info, text: "Setup continues in the background" }
     : reuseSelected
@@ -697,7 +696,7 @@ export function ReviewDialog({
                     </SelectTrigger>
                     <SelectContent>
                       {options.map((p) => (
-                        <SelectItem key={p.type} value={p.type} disabled={!p.available}>
+                        <SelectItem key={p.type} value={p.type}>
                           {p.displayName}
                           {p.type === currentAgentType ? " (current agent)" : ""}
                         </SelectItem>
@@ -824,7 +823,7 @@ export function ReviewDialog({
           {fetched.loading && !reuseSelected && (
             <p role="status" className="text-xs text-muted-foreground">Loading agent providers…</p>
           )}
-          {(error || fetched.error || (!fetched.loading && !reuseSelected && !reviewerAvailable)) && (
+          {(error || fetched.error || (!fetched.loading && !reuseSelected && !reviewerRegistered)) && (
             <div className="border-destructive/30 bg-destructive/10 text-destructive flex items-start gap-2 rounded-lg border px-2.5 py-2 text-[11.5px]">
               <TriangleAlert className="mt-px size-3.5 shrink-0" />
               <span className="min-w-0">{error || fetched.error || "No available agent providers"}</span>

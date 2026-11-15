@@ -16,8 +16,8 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return {
     ...actual,
     getAgentProviders: vi.fn().mockResolvedValue([
-      { type: "claude-code", displayName: "Claude Code", available: true },
-      { type: "codex", displayName: "Codex", available: true },
+      { type: "claude-code", displayName: "Claude Code" },
+      { type: "codex", displayName: "Codex" },
     ]),
     api: {
       ...actual.api,
@@ -74,8 +74,8 @@ async function renderAndOpen(candidate: unknown) {
         sessionId="s-src"
         currentAgentType="claude-code"
         providers={[
-          { type: "claude-code", displayName: "Claude Code", available: true },
-          { type: "codex", displayName: "Codex", available: true },
+          { type: "claude-code", displayName: "Claude Code" },
+          { type: "codex", displayName: "Codex" },
         ]}
       />,
     );
@@ -414,8 +414,8 @@ async function renderAndOpenPending() {
         sessionId="s-src"
         currentAgentType="claude-code"
         providers={[
-          { type: "claude-code", displayName: "Claude Code", available: true },
-          { type: "codex", displayName: "Codex", available: true },
+          { type: "claude-code", displayName: "Claude Code" },
+          { type: "codex", displayName: "Codex" },
         ]}
       />,
     );
@@ -471,8 +471,8 @@ function reviewDialog(sessionId: string) {
       sessionId={sessionId}
       currentAgentType="claude-code"
       providers={[
-        { type: "claude-code", displayName: "Claude Code", available: true },
-        { type: "codex", displayName: "Codex", available: true },
+        { type: "claude-code", displayName: "Claude Code" },
+        { type: "codex", displayName: "Codex" },
       ]}
     />
   );
@@ -979,7 +979,7 @@ describe("ReviewDialog review loop", () => {
 
 it.each([{ providers: undefined }, { providers: [] }])("loads a third reviewer from the API when providers is $providers", async ({ providers }) => {
   vi.mocked(getAgentProviders).mockResolvedValueOnce([
-    { type: "third", displayName: "Third Agent", available: true },
+    { type: "third", displayName: "Third Agent" },
   ]);
   getReviewerCandidate.mockResolvedValueOnce({ available: false, reason: null });
   createWorkflowRun.mockResolvedValue({});
@@ -1017,7 +1017,7 @@ it("shows loading for an empty parent list and retries a failed provider fetch o
   expect(document.body.textContent).toContain("Loading agent providers…");
   expect(document.body.textContent).not.toContain("Failed to load agent providers");
   expect(document.body.textContent).not.toContain("No available agent providers");
-  await act(async () => { resolveRetry([{ type: "third", displayName: "Third Agent", available: true }]); });
+  await act(async () => { resolveRetry([{ type: "third", displayName: "Third Agent" }]); });
   expect(document.body.textContent).toContain("Third Agent");
   expect(document.body.textContent).not.toContain("Loading agent providers…");
   expect(startButton().disabled).toBe(false);

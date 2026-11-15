@@ -6,6 +6,33 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 
 “明确不支持”“延期”是承诺范围内的缺口，收尾时须用户确认；“超出基线（不做）”无需确认。**写了差异说明不等于通过验收。** 源码阅读、协议声明、参数被接受均不等于功能端到端可用。未验证不得写成不支持。
 
+## 任务 4 产品接入（2026-11-15，fx 0.0.17 产品验证）
+
+**任务 4 已完成基础会话及核心生命周期验收（fx 0.0.17）**：使用原始登录配置和凭据锁，彻底移除临时 HOME / 凭据复制。fx 0.0.17 的真实多轮、排队、取消后继续、thinking、工具结果和换模型重放测试已通过；浏览器验收记录见下文。
+
+已接入 `FxProvider`、`protocol/fx/{cli,codec,schema}`、provider 注册表与模型建议。以下验证区分真实 fx、管理器集成和 UI 组件，不将协议探针直接视为 UI 端到端验收。
+
+- **握手与排队**：initialize → new 逐个等待成功响应并核对 currentModeId=auto；此后才发送历史或消息。同一连接只允许一个 prompt，追加输入 FIFO 排队；每个 prompt response 先产生 result，再开启下一轮，空输出也保留 turn_end。
+- **取消**：只有用户 Stop 路由显式传 `interruptOnly: true` 时，发送无 id 的 session/cancel 并保留进程；下一条消息等原 prompt 的 cancelled 响应。取消超过 5 秒或再次按 Stop 会终止进程，SIGTERM 不生效则升级 SIGKILL。取消计时器在轮次结束、进程重置或 shutdown 时清除，并与 stdout 串行校验，不能误杀后续轮次。result 明确区分 cancelled，记录 stopped 和用户停止说明，不写错误或失败通知；保活取消和普通 Stop 共用状态发布逻辑，将 stopped 分支活动镜像到会话 WebSocket，供远端 hub 更新工作区状态点；Stop 取消尚未发送的排队消息时显示数量及重发提示。默认 `stopSession` 仍会杀进程，不依赖 note 判断语义；强制容量回收使用 `stopSessionAndWait`，确认退出后才允许占用新名额，无法确认则拒绝新建。
+- **恢复与模型**：沿用 buildFullConversationContext，休眠、退出、换模型后均重新 initialize/new；不发送 load/resume，不读取旧 native id 或旧模型配置。修复进程意外退出后未进入 dormant、导致下一条消息不能唤醒的问题；旧进程迟到输出不能污染新 provider 状态。历史只送 stdin，不新增可见 user 消息。
+- **权限**：edit 映射 auto，plan 在创建、切换模式、切换 agent 时明确拒绝；UI 按 capabilities 禁用。启动前探测 `fx acp --help`，只有该子命令明确支持才传 `--permission-mode auto`；本机 0.0.17 已实测支持，参数位于子命令之后。new 返回值必须确认 currentModeId=auto 才发送历史/消息。0.0.16 不假定支持该 flag，只接受本来就是 auto 的原生模式，其他模式明确报错并提示升级；不把 ask 当 plan。
+- **配置与认证边界**：不调用会持久化默认权限的 set_mode，不覆盖 HOME，不复制/链接 OAuth 凭据，继续使用原始认证文件及 fx 自己的刷新锁。真实测试确认用户 settings 文件逐字节未变。0.0.17 的进程级覆盖优先于保存值，源码佐证：[loadStartingMode](https://github.com/vercel-labs/fx/blob/72ee78cf235739960b827e4c0fe4f80df7e31312/src/acp/server.zig#L4399)。历史通过应用重放恢复，不恢复旧原生模式/模型。
+- **工具与审批**：文本/thinking 按 delta 流式合并（文本保留完整输出，连续 thinking 只更新同一条记录，流结束时一次落库）；原始工具名、输入按 toolCallId 缓存，completed/failed 快照替换进度，不重复卡片或输出。完整审批任务接入前，permission request 返回 cancelled 并显示拒绝说明，不自动批准、不悬挂；双向同号 RPC 分开处理。
+- **错误**：认证/JSON-RPC error、损坏的报文或必须字段、在途进程退出均显示错误并关闭当前轮次。初始化失败不继续发 new/prompt；协议损坏会退役进程，下次发送自动重建并重放历史；prompt 请求错误允许在同一连接重试，未知更新类型忽略。usage_update 为上下文占用，不写进本轮 token；只有 prompt usage 计入结果。
+- **可用性（按用户后续决定调整）**：选择器列出所有支持的 Agent，不做安装探测、不展示安装提示、不因未安装而禁用。`/api/agent-providers` 仅返回元数据，移除 `available` 字段，前端同步移除对此字段的读取。新建/唤醒/重启实际构造 spawn 配置时重新检测 CLI，绕过旧路径缓存；fx 未安装时不提供 npx 回退，启动失败的安装说明写入 Agent 对话错误消息。远端 agentType 继续字符串透传，无新隧道路由。
+
+验证入口：
+
+- `src/protocol/fx/*.test.ts`：全部现有 ACP 录制经离线契约检查（包括未采用的 load/resume 录制的 envelope/update），以及参数、图片构造、ACP flag 探测与旧版拒绝策略测试。HTTP MCP 服务端录制由原探针负责，不冒充 ACP envelope。
+- `src/providers/fx-provider.test.ts`：握手、初始化前多条积压、多轮队列、同号反向 RPC、取消后继续、工具快照去重、错误收尾、独立原生 id、禁用 plan。
+- `src/agent-session-manager.fx.test.ts`：真实 stdio 子进程 + SQLite（模拟 ACP 服务端），验证多块文本不覆盖、thinking 合并、逐轮 turn_end、用户 Stop 保活、默认 Stop 终止、强制容量回收及退出确认失败拒绝、重复 Stop、取消超时/SIGKILL、旧取消计时器不影响下一轮、休眠唤醒不重复历史、换模型、异常退出后再唤醒、损坏报文退出 running、提前拒绝 plan。
+- `src/protocol/live/fx.live.test.ts`：真实 fx **0.0.17** + 原始 OAuth 登录，2026-11-15 通过（初次约 23 秒，增量修复后复验约 19 秒）。验证两轮及运行中排队、取消后续问、thinking、成功工具结果、新原生会话重放标记、`spacexai/grok-4.7` → `openai/gpt-5.4-mini`，并校验原 settings 字节不变。通过 `pnpm --filter vibedeckx exec vitest run --config vitest.live.config.ts src/protocol/live/fx.live.test.ts --retry 0` 运行。
+- **浏览器产品验证**：独立本地实例 + 临时项目 + 真实 OAuth/fx 0.0.17；已操作 fx 选择/新建、多轮、Stop 后续问，观察到文本、thinking 与通用 shell 工具卡片。重启测试后端后继续原会话，返回历史标记 UI731；工具 `printf FX_UI_STREAM_OK` 的结果和完整最终文本均落库。浏览器验收发现并修复了 ACP 增量被当成快照覆盖、thinking 每块新增卡片的问题，新增管理器回归断言。新版 UI 的 Plan 按钮禁用。UI 换模型后进程参数实际为 `fx acp --permission-mode auto --model openai/gpt-5.4-mini`，仍记得历史标记。截图及临时日志保存在本机 `/tmp/fx-task4-browser.png`、`/tmp/fx-ui-server3.log`，不作为跨机器运行依赖。
+- UI provider 组件测试另验证动态选项与禁用 plan。图片端到端、工具专用映射、完整审批、HTTP MCP 业务接入仍由后续任务负责。
+- 此前全量离线检查：`pnpm --filter vibedeckx test` 通过（3519 passed / 11 skipped），后端 `tsc --noEmit` 通过，UI provider 组件 3 项通过，UI 生产构建通过，离线契约与远端能力检查 32 项通过，reverse-connect-capabilities 快照无变化。
+
+- 安装提示交互调整后回归：后端针对性测试 114 项、UI 相关测试 67 项通过；覆盖列表不探测安装/不返回 hint、启动缺少 fx 时把安装提示写入对话历史、安装与移除后的路径重探测。
+
 ## 环境与证据
 
 - fx **0.0.16**，build revision `481104fdbc24`，Linux x86_64。
@@ -21,7 +48,7 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 
 ## 阻塞项结论与录制
 
-所有链接均在 [fixtures 目录](../packages/vibedeckx/src/protocol/fx/__fixtures__/)。这是协议探针通过，不是产品功能验收；当前尚无 fx Provider。
+所有链接均在 [fixtures 目录](../packages/vibedeckx/src/protocol/fx/__fixtures__/)。这是协议探针通过，不是产品功能验收；探针完成时尚无 fx Provider；任务 4 的实现与验证见上节。
 
 | 项目 | 实测结论 | 录制 |
 | --- | --- | --- |
@@ -115,7 +142,7 @@ load 和 resume 请求都使用 `{sessionId,cwd,mcpServers}`。主实验进程�
 | tool_use | tool_call 的 name/rawInput/toolCallId；缓存名字/输入/kind，避免 pending 重复建卡。 |
 | tool_result | completed/failed 的文本 content，shell command_result 可补充退出码；需要增量合并/去重，不能把 in_progress 当完成。 |
 | 文件 diff | 未获原生 diff，降级为输入 old/new 和文字结果；不能宣称完整 diff。 |
-| result / turn_started | prompt 请求与响应驱动生命周期；stopReason end_turn 成功，cancelled 必须保留中断语义（当前 result 仅 success/error，需要明确降级）。后台任务收尾任务 5。 |
+| result / turn_started | prompt 请求与响应驱动生命周期；stopReason end_turn 成功，cancelled 保留中断语义，记录 stopped 且不通知。后台任务收尾任务 5。 |
 | native_session_id | new 的 sessionId；用于关联，不作为首版恢复入口。 |
 | approval_request | command/fileChange 可由 shell/edit 映射；MCP kind other 无现有 union 对应项，需小范围扩展审批表达，或明确可见地拒绝，不能默认批准。 |
 | formatApprovalResponse | 保留服务端 request id 与 optionId，发送 outcome.selected；allow_always 行为未测。 |
@@ -125,31 +152,31 @@ load 和 resume 请求都使用 `{sessionId,cwd,mcpServers}`。主实验进程�
 | error | JSON-RPC error.code/message，包含认证 -32600、参数 -32602；要区分初始化/请求错误并停止失败初始化。 |
 | onSessionCreated / onSessionDestroyed | 分配/清理 RPC、原生 id、工具/用量状态；不得跨会话泄漏。 |
 
-明确需降级：禁用 plan、历史重放非无损、无原生 diff。明确的现有接口缺口：MCP 审批类型、取消结果的表达。它们不意味着要设计通用权限引擎。
+明确需降级：禁用 plan、历史重放非无损、无原生 diff。明确的现有接口缺口：MCP 审批类型。它们不意味着要设计通用权限引擎。
 
 ## 功能对齐矩阵
 
 Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端到端验收；“共用路径”也不等于每种组合都测过。fx 的待实现项不表示协议实验已通过。
 
-| 功能 | Claude Code 基线 | Codex 基线 | fx 0.0.16 状态 / 后续责任 |
+| 功能 | Claude Code 基线 | Codex 基线 | fx 状态（0.0.16 探针 / 0.0.17 产品） / 后续责任 |
 | --- | --- | --- | --- |
-| 会话与流式输出 | stream-json Provider | app-server Provider | 已验证；会话/文本/thinking/工具报文见主录制，产品待实现 |
-| thinking | thinking 事件 | reasoning 文本映射 | 已验证；会话/文本/thinking/工具报文见主录制，产品待实现 |
-| 工具卡片 | tool_use/result | item 事件映射 | 已验证；会话/文本/thinking/工具报文见主录制，产品待实现 |
-| 审批 | edit 使用跳过权限；plan 原生模式 | 有 command/fileChange 映射；默认 approvalPolicy never | 已验证；ask 审批及 auto 显式规则审批，产品待实现 |
-| plan 与 ExitPlanMode | 原生 plan；产品接受计划后切 edit | plan 采用 read-only sandbox；非 Claude ExitPlanMode 协议 | 待实现；首版禁用 plan、UI 与后端均限制；范围缺口须收尾确认 |
+| 会话与流式输出 | stream-json Provider | app-server Provider | 已实现；真实 Provider 与录制契约验证见任务 4 |
+| thinking | thinking 事件 | reasoning 文本映射 | 已实现；真实 Provider 与录制契约验证见任务 4 |
+| 工具卡片 | tool_use/result | item 事件映射 | 已实现；真实 Provider 与录制契约验证见任务 4 |
+| 审批 | edit 使用跳过权限；plan 原生模式 | 有 command/fileChange 映射；默认 approvalPolicy never | 临时可见拒绝已实现；完整审批由任务 6 接入 |
+| plan 与 ExitPlanMode | 原生 plan；产品接受计划后切 edit | plan 采用 read-only sandbox；非 Claude ExitPlanMode 协议 | 首版已禁用；UI capabilities 与后端显式拒绝，按已选决策执行 |
 | AskUserQuestion | CLI 禁用该工具，退化为普通对话提问 | userInput request 映射 AskUserQuestion 工具事件；完整交互非本轮验收 | 未验证；任务 5 |
 | 后台任务显示 | 任务开始/结束/集合事件 | subagent 生命周期、outOfTurn 处理 | 未验证；任务 5 |
 | 后台任务单独停止 | stop_task | 无等价接口，退化为停止会话 | 未验证；任务 5 |
-| 中断 | 进程/管理器路径 | turn/interrupt | 已验证；cancelled 后可续问，产品待实现 |
+| 中断 | 进程/管理器路径 | turn/interrupt | 已实现；真实 fx cancelled 后续问及管理器 Stop 保活测试通过 |
 | 图片与文件附件 | 内容转换及工具读取路径 | image prompt / imageView 映射 | 未验证；任务 11；本任务只测普通文件读改 |
-| 模型选择 | spawn --model | app-server -c model | 已验证；新会话 --model 生效、恢复返回新模型配置，产品待实现 |
+| 模型选择 | spawn --model | app-server -c model | 已实现；真实新进程切换模型 + 重放通过，不采用原生恢复 |
 | 费用与用量 | result 成本字段 | tokenUsage 缓存到 result；不等同成本支持 | 已验证；token/上下文字段已录到；成本未验证 → 任务 12 |
 | hub vibedeckx HTTP MCP | --mcp-config HTTP bearer | -c mcp_servers / token env | 已验证；同名合成 HTTP MCP + Authorization + 工具调用，产品待实现 |
 | cross-remote HTTP MCP | 同上 | 同上 | 已验证；同名合成 HTTP MCP + Authorization + 工具调用，产品待实现；网关完整业务由对应实现任务补齐 |
-| 休眠唤醒 | 管理器历史重放 | 共用管理器历史重放 | 待实现；已选历史重放，load/resume 已验证但首版不用 |
-| 切换 agent | 共用管理器迁移历史 | 共用管理器迁移历史 | 待实现；新 fx 会话 + 重放 |
-| 分支 / 截断分支 | 共用分支历史复制 | 共用分支历史复制 | 待实现；独立 fx id + 截断历史 |
+| 休眠唤醒 | 管理器历史重放 | 共用管理器历史重放 | 已实现；管理器子进程 + SQLite 休眠唤醒回归通过；首版不用 load/resume |
+| 切换 agent | 共用管理器迁移历史 | 共用管理器迁移历史 | 新 fx 会话 + 重放路径已接通；跨 agent 完整验收留任务 11 |
+| 分支 / 截断分支 | 共用分支历史复制 | 共用分支历史复制 | 独立 fx id + 历史路径已接通；截断分支完整验收留任务 11 |
 | 执行器 | prompt executor Claude CLI | codex exec CLI | 待实现；对应执行器接入任务；不能仅新增 Provider，routes 仍把非 codex 当 claude |
 | 定时任务 | scheduler 调用执行器 | scheduler 传递 prompt_provider | 待实现；对应定时任务接入任务 |
 | Reviewer | 现有产品入口，具体 agent 组合未复核 | 同左 | 未验证；对应 Reviewer 接入任务补齐，不在本探针实现 |
@@ -157,8 +184,8 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | Commander 派生 | 现有会话/MCP/执行器路径 | 现有共用路径，组合未复核 | 未验证；对应 Commander 接入任务补齐 |
 | Windows | binary 检测有 win32 分支；本轮未实跑 | 同左 | 未验证；对应平台接入任务 |
 | macOS | 现有非 win32 检测路径；本轮未实跑 | 同左 | 未验证；对应平台接入任务 |
-| Linux | 现有 Provider；本轮未重跑 | 同左 | 已验证；本轮 Linux 会话、工具、权限、MCP；产品集成待实现 |
-| 未登录错误 | 有启动错误路径 | 有启动错误路径 | 已验证；任务 10 接入，见 fixture |
+| Linux | 现有 Provider；本轮未重跑 | 同左 | 已验证；Linux 基础会话产品验收见任务 4；MCP 为原探针证据，业务接入仍待后续任务 |
+| 未登录错误 | 有启动错误路径 | 有启动错误路径 | 已实现初始化错误收尾；认证分类与其他登录场景留任务 10 |
 
 未提供任务 5/10/11/12 之外的具体任务 id，表中按功能注明后续负责人任务，未杜撰编号或新建任务。暂无能力被擅自归为“超出基线”。
 
@@ -176,6 +203,14 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 
 五个阻塞项都有真实录制，两个决策已定：禁用 plan，恢复只实现新会话加历史重放。无需因协议可行性放弃；优先补齐 Provider 状态机、MCP 命名规范化与审批类型缺口，再推进产品入口。
 
-剩余产品验证按矩阵交后续任务。本任务没有实现产品功能；plan 等降级在最终产品收尾仍须用户确认，不能把本探针结论当作这些缺口已获验收。
+剩余产品验证按矩阵交后续任务。探针本身没有实现产品功能；任务 4 已实现基础接入代码并解决权限/OAuth 阻塞，验证范围见本文任务 4 小节，后续完整产品验收仍须覆盖其余矩阵项。
 
 脚本/录制校验覆盖：双向 JSONL 可解析、RPC 对应、两轮记忆、取消后续问、工具状态、ask/auto 审批、两种恢复历史重播差别、MCP 服务端认证与调用、模型配置及参数错误。未跑无关产品全套测试；未改产品代码、未更新任务状态。
+
+### Review 后的生命周期修正
+
+- 未知 sessionUpdate 通知忽略，已知通知仍严格校验；prompt JSON-RPC error 仅结束当前轮次，连接仍可重试；握手失败或损坏协议结束轮次并退役进程，下次发送重建连接并重放历史。
+- ACP help 能力探测按二进制路径和文件指纹缓存，升级后重新探测；首次探测仍使用有 5 秒上限的同步调用。
+- 退出前必须收到结果由 provider 元数据声明，manager 不按 fx 名称分支，意外退出错误不再附加原始 stderr。Claude/Codex 同样在进程退出后进入可唤醒状态，并补充共享生命周期回归测试。
+- 移除尚无调用来源的初始化 systemPrompt 参数；codec 保留经过探针验证的 append 构造支持。
+- 本轮验证：`pnpm --filter vibedeckx test` 全量 3530 通过、11 跳过（含离线契约）；追加的取消竞态及 prompt 错误恢复测试所在 fx manager 套件 17/17 通过；后端 `tsc --noEmit` 通过。此次未重跑真实 fx/UI 验收。

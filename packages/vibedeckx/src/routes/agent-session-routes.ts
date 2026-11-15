@@ -393,14 +393,13 @@ const routes: FastifyPluginAsync = async (fastify) => {
     fastify.agentSessionManager.emitSessionTitle(projectId, branch, sessionId, title);
   }
 
-  // List available agent providers
+  // List supported agent providers; installation is checked on the spawning machine.
   fastify.get("/api/agent-providers", async (_req, reply) => {
     const providers = getAllProviders().map((provider) => {
       const type = provider.getAgentType();
       return {
         type,
         displayName: provider.getDisplayName(),
-        available: provider.isAvailable?.() ?? provider.detectBinary() !== null,
         // Suggestions only. The picker also accepts free text, and nothing
         // validates against this list — the session's real capabilities depend
         // on the CLI version and account tier of whichever machine spawns it,
@@ -2095,7 +2094,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
-      const stopped = await fastify.agentSessionManager.stopSession(req.params.sessionId);
+      const stopped = await fastify.agentSessionManager.stopSession(req.params.sessionId, { interruptOnly: true });
       if (!stopped) {
         return reply.code(404).send({ error: "Session not found" });
       }

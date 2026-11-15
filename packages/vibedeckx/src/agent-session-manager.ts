@@ -243,6 +243,7 @@ export class SpawnSupersededError extends Error {
 }
 
 interface RunningSession {
+  currentThinkingIndex?: number;
   id: string;
   projectId: string;
   branch: string | null;
@@ -251,6 +252,8 @@ interface RunningSession {
   checkoutPath: string | null;
   process: ChildProcess | null;
   dormant: boolean; // true when restored from DB (no process yet)
+  /** Deadline for a user-requested, process-preserving interrupt. */
+  interruptTimer?: NodeJS.Timeout;
   /**
    * How many operations are currently on their way to spawning a process for
    * this session — a wake, or a restart. Incremented SYNCHRONOUSLY before the
@@ -1145,7 +1148,9 @@ export class AgentSessionManager {
           .filter((session) => session.status === "running")
           .sort((a, b) => a.lastActiveAt - b.lastActiveAt)[0];
         if (running) {
-          await this.stopSession(running.id);
+          if (!await this.stopSessionAndWait(running.id, { note: "Session stopped to free resident process capacity." })) {
+            throw new Error("Could not confirm agent process exit; resident capacity was not released.");
+          }
           return;
         }
       }
@@ -1351,6 +1356,9 @@ export class AgentSessionManager {
       allowPending?: boolean;
     } = {},
   ): Promise<string> {
+    if (permissionMode === "plan" && getProvider(agentType).getCapabilities?.().planMode === false) {
+      throw new Error(`${getProvider(agentType).getDisplayName()} does not support plan mode; choose edit mode.`);
+    }
     // The caller may supply the id so it can mint a session-scoped token before spawn.
     const sessionId = opts.sessionId ?? randomUUID();
     const branchKey = branch ?? "";
@@ -1728,7 +1736,7 @@ export class AgentSessionManager {
 
     // Pre-initialize provider protocol (e.g. Codex needs initialize + thread/start handshake)
     if (provider.getInitializationMessages) {
-      const initMsgs = provider.getInitializationMessages(session.id);
+      const initMsgs = provider.getInitializationMessages(session.id, { cwd });
       if (initMsgs) {
         childProcess.stdin?.write(initMsgs);
       }
@@ -1739,7 +1747,9 @@ export class AgentSessionManager {
     // the queue a second data chunk (or the completion-grace timer) could
     // interleave mid-await and race the turn-completion state.
     childProcess.stdout?.on("data", (data: Buffer) => {
-      this.enqueueSessionWork(session, () => this.handleStdout(session, data.toString()), "stdout");
+      this.enqueueSessionWork(session, async () => {
+        if (session.process === childProcess) await this.handleStdout(session, data.toString());
+      }, "stdout");
     });
 
     // Handle stderr (errors and debug info)
@@ -1765,6 +1775,8 @@ export class AgentSessionManager {
       }
 
       session.process = null;
+      // The next send must spawn and replay history after an unexpected exit.
+      session.dormant = true;
       this.emitProcessAlive(session, false);
 
       // A clean exit with a held completion commits it immediately: the
@@ -1798,6 +1810,10 @@ export class AgentSessionManager {
         } catch (err) {
           console.error(`[AgentSession] Failed to push startup-failure entry for ${session.id}:`, err);
         }
+      }
+
+      if (provider.requiresExplicitTurnResult && session.turnOpenSince !== null && session.producedOutput && !spawnFailed) {
+        await this.pushEntry(session.id, { type: "error", message: `${provider.getDisplayName()} process exited before the turn completed (code ${code ?? "signal"}).`, timestamp: Date.now() }, true);
       }
 
       // Persist any partial streaming assistant text before the turn_end
@@ -2028,6 +2044,7 @@ export class AgentSessionManager {
 
   /** Discard all turn-completion state (fresh spawn / stop / hibernate / agent switch). */
   private resetCompletion(session: RunningSession): void {
+    this.clearInterruptTimer(session);
     this.clearGraceTimer(session);
     session.completion.reset();
     this.syncParkTimer(session);
@@ -2273,7 +2290,8 @@ export class AgentSessionManager {
     if (
       session.status !== "running" &&
       !outOfTurn &&
-      (event.type === "text" ||
+      (event.type === "turn_started" ||
+        event.type === "text" ||
         event.type === "thinking" ||
         event.type === "tool_use" ||
         event.type === "tool_result" ||
@@ -2296,9 +2314,11 @@ export class AgentSessionManager {
       }
     }
 
+    if (event.type !== "thinking" || !event.delta) await this.finalizeThinkingEntry(session);
+
     switch (event.type) {
       case "text":
-        await this.updateAssistantMessage(sessionId, event.content, timestamp);
+        await this.updateAssistantMessage(sessionId, event.content, timestamp, event.delta);
         break;
 
       case "tool_use": {
@@ -2375,15 +2395,30 @@ export class AgentSessionManager {
         break;
       }
 
-      case "thinking":
-        await this.finalizeStreamingEntry(session);
+      case "thinking": {
+        if (session.store.currentAssistantIndex !== null) await this.finalizeStreamingEntry(session);
         session.store.currentAssistantIndex = null;
-        await this.pushEntry(sessionId, {
-          type: "thinking",
-          content: event.content,
-          timestamp,
-        }, true);
+        const index = session.store.entries.length - 1;
+        const previous = session.store.entries[index];
+        if (event.delta && session.currentThinkingIndex === index && previous?.type === "thinking") {
+          const message: AgentMessage = { ...previous, content: previous.content + event.content, timestamp };
+          session.store.entries[index] = message;
+          const patch = ConversationPatch.replaceEntry(index, message);
+          session.store.patches.push(patch);
+          this.broadcastPatch(sessionId, patch);
+          break;
+        }
+        await this.finalizeThinkingEntry(session);
+        const message: AgentMessage = { type: "thinking", content: event.content, timestamp };
+        if (event.delta) {
+          const { index, patch } = this.stageEntry(session, message);
+          session.currentThinkingIndex = index;
+          this.broadcastPatch(sessionId, patch);
+        } else {
+          await this.pushEntry(sessionId, message, true);
+        }
         break;
+      }
 
       case "system":
         await this.finalizeStreamingEntry(session);
@@ -2456,6 +2491,8 @@ export class AgentSessionManager {
         break;
 
       case "result":
+        // Stop owns the disposition even if completion races the cancel RPC.
+        if (session.interruptTimer && !event.restartRequired) event = { ...event, subtype: "cancelled", error: undefined };
         console.log(`[Agent:result] sessionId=${sessionId} subtype=${event.subtype} prevStatus=${session.status}`);
         // Protocol-drift check: the model asked for background execution this
         // turn, but no task_started system event ever arrived. Most likely
@@ -2481,8 +2518,15 @@ export class AgentSessionManager {
           }, true);
         }
 
+        if (event.subtype === "cancelled") {
+          this.resetCompletion(session);
+          await this.pushEntry(sessionId, { type: "system", content: "Session stopped by user.", timestamp }, true);
+          await this.endActiveTurn(session, "stopped");
+          await this.publishStoppedStatus(session);
+        }
+
         if (event.subtype === "error") {
-          // A failed turn never dings — discard any held completion candidate.
+          // Discard the held completion; endActiveTurn records the failure milestone.
           this.applyCompletionTimerAction(session, session.completion.errorResult());
           await this.endActiveTurn(session, "failed");
           // The turn is over even though it failed — without this the UI
@@ -2493,6 +2537,10 @@ export class AgentSessionManager {
             this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
             this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId, status: "stopped" });
           }
+        }
+
+        if (event.restartRequired) {
+          await this.stopSessionAndWait(sessionId, { note: "Agent connection reset after a protocol error. Send another message to reconnect." });
         }
 
         if (event.subtype === "success") {
@@ -2571,7 +2619,7 @@ export class AgentSessionManager {
    * Update or add an assistant message using JSON Patch semantics
    * This is the key method that handles streaming updates correctly
    */
-  private async updateAssistantMessage(sessionId: string, content: string, timestamp: number): Promise<void> {
+  private async updateAssistantMessage(sessionId: string, content: string, timestamp: number, delta = false): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
@@ -2583,7 +2631,7 @@ export class AgentSessionManager {
       const existing = store.entries[existingIndex];
       const message: AgentMessage = {
         type: "assistant",
-        content,
+        content: delta && existing?.type === "assistant" ? existing.content + content : content,
         agentType: existing?.type === "assistant" ? existing.agentType ?? session.agentType : session.agentType,
         timestamp,
       };
@@ -2874,9 +2922,18 @@ export class AgentSessionManager {
   }
 
   /**
-   * Finalize and persist the current streaming assistant message
+   * Persist a completed thinking stream once, including partial streams on Stop/exit.
    */
+  private async finalizeThinkingEntry(session: RunningSession): Promise<void> {
+    const index = session.currentThinkingIndex;
+    if (index === undefined) return;
+    session.currentThinkingIndex = undefined;
+    const entry = session.store.entries[index];
+    if (entry && !session.skipDb) await this.persistEntry(session, index, entry);
+  }
+
   private async finalizeStreamingEntry(session: RunningSession): Promise<void> {
+    await this.finalizeThinkingEntry(session);
     const index = session.store.currentAssistantIndex;
     if (index === null || session.skipDb) return;
 
@@ -2899,6 +2956,7 @@ export class AgentSessionManager {
     session: RunningSession,
     outcome: Exclude<TurnOutcome, "server_restart">,
   ): Promise<number | null> {
+    this.clearInterruptTimer(session);
     if (session.turnOpenSince === null) return null; // no turn in flight
     const endedAt = Date.now(); // single clock read: timestamp === end bound of durationMs
     const durationMs = endedAt - session.turnOpenSince;
@@ -3336,16 +3394,53 @@ export class AgentSessionManager {
     return session?.status === "running";
   }
 
+  private clearInterruptTimer(session: RunningSession): void {
+    if (session.interruptTimer) clearTimeout(session.interruptTimer);
+    session.interruptTimer = undefined;
+  }
+
+  /** Publish Stop to local subscribers and mirror its activity to remote hubs. */
+  private async publishStoppedStatus(session: RunningSession): Promise<void> {
+    session.status = "stopped";
+    if (!session.skipDb) await this.storage.agentSessions.updateStatus(session.id, "stopped");
+    this.broadcastPatch(session.id, ConversationPatch.updateStatus("stopped"));
+    this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
+    // The derived activity is "stopped" iff the user's last message hadn't
+    // reached completion — that's the "interrupted, unfinished work" case
+    // we want to surface as amber. If the prior turn already completed
+    // naturally (e.g. New Conversation stops a dormant session between
+    // turns), the derived activity is still "completed" and dedupe
+    // suppresses any redundant emit, so the workspace dot stays green.
+    // Both rules live in `computeBranchActivity`; this site doesn't
+    // re-derive them inline.
+    if (!session.skipDb) {
+      const emitted = await this.emitDerivedBranchActivity(session.projectId, session.branch);
+      if (emitted?.activity === "stopped") {
+        // Mirror over the per-session WS so the local-side bridge for
+        // remote sessions can re-emit on the local EventBus (parallel to
+        // how taskCompleted bridges into branch:activity:completed).
+        // Local-direct subscribers ignore unknown message types, so this
+        // is a no-op there.
+        this.broadcastRaw(session.id, {
+          branchActivity: { activity: emitted.activity, since: emitted.since },
+        });
+      }
+    }
+  }
+
   /**
    * Stop a session — kills the process but preserves conversation history
    * (like pressing ESC in Claude Code). The session becomes dormant so the
    * next user message will spawn a fresh process with full context replay.
    * The WebSocket stays alive so the UI remains connected.
    *
+   * Only the user Stop route opts into `interruptOnly`: capable providers may
+   * keep their process after cancelling the turn. A second Stop or a missing
+   * acknowledgement forces process termination instead.
    * `opts.note` overrides the system entry written into the conversation, for
    * stops the user did not press Stop for (e.g. the worktree being deleted).
    */
-  async stopSession(sessionId: string, opts?: { note?: string }): Promise<boolean> {
+  async stopSession(sessionId: string, opts?: { note?: string; interruptOnly?: boolean; cancelGraceMs?: number }): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return false;
@@ -3353,14 +3448,31 @@ export class AgentSessionManager {
 
     try {
       const proc = session.process;
+      if (opts?.interruptOnly && session.interruptTimer) {
+        return await this.stopSessionAndWait(sessionId, { note: "Session force-stopped after repeated Stop." });
+      }
 
       // Try provider-specific interrupt first (e.g. turn/interrupt for Codex)
       const provider = getProvider(session.agentType);
       const interruptMsg = provider.formatInterrupt?.(sessionId);
       if (interruptMsg && proc?.stdin) {
         proc.stdin.write(interruptMsg);
+        if (provider.keepAliveOnInterrupt && opts?.interruptOnly) {
+          // Serialize the deadline with stdout so an acknowledgement already
+          // being processed can retire it before the next turn begins.
+          const timer = setTimeout(() => {
+            this.enqueueSessionWork(session, async () => {
+              if (session.interruptTimer !== timer || session.process !== proc) return;
+              await this.stopSessionAndWait(sessionId, { note: "Agent did not acknowledge cancellation; process stopped." });
+            }, "interrupt-timeout");
+          }, opts.cancelGraceMs ?? 5000);
+          session.interruptTimer = timer;
+          timer.unref();
+          return true;
+        }
       }
 
+      this.clearInterruptTimer(session);
       // Clear session.process before killing so the process close handler
       // (which checks session.process !== childProcess) skips its cleanup —
       // we handle status + broadcast here instead.
@@ -3389,31 +3501,7 @@ export class AgentSessionManager {
       // Killing the process kills its background tasks with it — and a user
       // Stop must never ding, so any held completion candidate goes too.
       this.resetCompletion(session);
-      session.status = "stopped";
-      if (!session.skipDb) await this.storage.agentSessions.updateStatus(sessionId, "stopped");
-      this.broadcastPatch(sessionId, ConversationPatch.updateStatus("stopped"));
-      this.eventBus?.emit({ type: "session:status", projectId: session.projectId, branch: session.branch, sessionId: session.id, status: "stopped" });
-      // The derived activity is "stopped" iff the user's last message hadn't
-      // reached completion — that's the "interrupted, unfinished work" case
-      // we want to surface as amber. If the prior turn already completed
-      // naturally (e.g. New Conversation stops a dormant session between
-      // turns), the derived activity is still "completed" and dedupe
-      // suppresses any redundant emit, so the workspace dot stays green.
-      // Both rules live in `computeBranchActivity`; this site doesn't
-      // re-derive them inline.
-      if (!session.skipDb) {
-        const emitted = await this.emitDerivedBranchActivity(session.projectId, session.branch);
-        if (emitted?.activity === "stopped") {
-          // Mirror over the per-session WS so the local-side bridge for
-          // remote sessions can re-emit on the local EventBus (parallel to
-          // how taskCompleted bridges into branch:activity:completed).
-          // Local-direct subscribers ignore unknown message types, so this
-          // is a no-op there.
-          this.broadcastRaw(sessionId, {
-            branchActivity: { activity: emitted.activity, since: emitted.since },
-          });
-        }
-      }
+      await this.publishStoppedStatus(session);
       // Unload point. A no-op when the session was already cold — Stop on a
       // session restored from disk, or a second Stop.
       this.unloadHistory(session, "stop");
@@ -3796,6 +3884,9 @@ export class AgentSessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return "not_found";
     if (session.agentType === agentType) return "ok";
+    if (session.permissionMode === "plan" && getProvider(agentType).getCapabilities?.().planMode === false) {
+      throw new Error(`${getProvider(agentType).getDisplayName()} does not support plan mode; choose edit mode before switching agents.`);
+    }
 
     if (session.status === "running" && this.hasHistory(session)) return "busy";
 
@@ -3992,6 +4083,9 @@ export class AgentSessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return false;
+    }
+    if (newMode === "plan" && getProvider(session.agentType).getCapabilities?.().planMode === false) {
+      throw new Error(`${getProvider(session.agentType).getDisplayName()} does not support plan mode; choose edit mode.`);
     }
     // Claimed before the FIRST await — that is the counter's contract, not
     // merely "before the mutations". Resolving the checkout first would leave
@@ -4937,6 +5031,7 @@ export class AgentSessionManager {
       try {
         getProvider(session.agentType).onSessionDestroyed?.(id);
       } catch { /* ignore - provider cleanup is best-effort */ }
+      this.clearInterruptTimer(session);
       this.clearGraceTimer(session);
       this.killProcess(session.process);
     }

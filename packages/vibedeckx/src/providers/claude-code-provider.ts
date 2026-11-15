@@ -40,7 +40,7 @@ export class ClaudeCodeProvider implements AgentProvider {
   }
 
   detectBinary(): string | null {
-    return detectBinary(CLAUDE_BINARY_NAME);
+    return detectBinary(CLAUDE_BINARY_NAME, { refresh: true });
   }
 
   isAvailable(): boolean {

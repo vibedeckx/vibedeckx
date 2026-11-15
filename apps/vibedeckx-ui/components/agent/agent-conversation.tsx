@@ -527,7 +527,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   onActiveSessionChangeRef.current = onActiveSessionChange;
   useEffect(() => () => onActiveSessionChangeRef.current?.(null), []);
 
-  // Fetch available agent providers on mount
+  // Fetch supported agent providers on mount; installation is checked at spawn.
   useEffect(() => {
     getAgentProviders().then(setProviders).catch(() => {});
   }, []);
@@ -704,8 +704,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   };
   const currentAgentName =
     getAgentMetadata(agentType, providers).displayName;
-  const availableBranchProviders = providers.filter((p) => p.available);
-  const alternateBranchProviders = availableBranchProviders.filter((p) => p.type !== agentType);
+  const alternateBranchProviders = providers.filter((p) => p.type !== agentType);
 
   // ---- Send-back: post a turn's answer into the session this one was branched from ----
   const sendBackTargetId = session?.branchedFromSessionId ?? null;
@@ -1531,7 +1530,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                     <DropdownMenuRadioItem
                       key={p.type}
                       value={p.type}
-                      disabled={!p.available || (!!session && permissionMode === "plan" && !supportsPlanMode(p))}
+                      disabled={!!session && permissionMode === "plan" && !supportsPlanMode(p)}
                       title={session && permissionMode === "plan" && !supportsPlanMode(p) ? "Switch to Edit before selecting this agent" : undefined}
                       className="text-xs pl-2 [&>span:first-child]:hidden data-[state=checked]:bg-accent data-[state=checked]:text-accent-foreground"
                     >
@@ -1539,7 +1538,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
                           useful cue if it is visible where the choice is made,
                           not just after the menu closes. */}
                       <AgentTypeIcon type={p.type} />
-                      {p.displayName}
+                      <span>{p.displayName}</span>
                     </DropdownMenuRadioItem>
                   ))}
                 </DropdownMenuRadioGroup>

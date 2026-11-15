@@ -28,13 +28,13 @@ afterEach(() => {
 });
 
 describe("provider-driven controls", () => {
-  it("renders and branches to a third agent with a neutral avatar", async () => {
+  it.each([["third", "Third Agent"], ["fx", "fx"]])("renders and branches to %s with a neutral avatar", async (type, displayName) => {
     const onBranch = vi.fn();
-    await render(<BranchMenu agentType="codex" currentAgentName="Codex" alternateProviders={[{ type: "third", displayName: "Third Agent" }]} onBranch={onBranch} />);
-    const option = [...container!.querySelectorAll("button")].find((b) => b.textContent === "Third Agent")!;
+    await render(<BranchMenu agentType="codex" currentAgentName="Codex" alternateProviders={[{ type, displayName }]} onBranch={onBranch} />);
+    const option = [...container!.querySelectorAll("button")].find((b) => b.textContent === displayName)!;
     expect(option.querySelector(".bg-muted.text-muted-foreground")).not.toBeNull();
     await act(async () => { option.click(); });
-    expect(onBranch).toHaveBeenCalledWith("third");
+    expect(onBranch).toHaveBeenCalledWith(type);
   });
   it("disables the unsupported plan entry while leaving edit available", async () => {
     const onModeChange = vi.fn();

@@ -16,6 +16,7 @@ vi.mock("../utils/remote-proxy.js", async (importOriginal) => {
   return { ...actual, proxyToRemoteAuto, proxyStatus: (r: { status: number }) => r.status };
 });
 
+import { getProvider } from "../providers/index.js";
 import agentSessionRoutes from "./agent-session-routes.js";
 
 const SESSION_ID = "created-session";
@@ -50,6 +51,7 @@ function makeApp() {
       agentType: "claude-code",
       model: created.model ?? null,
     }),
+    stopSession: vi.fn(async () => true),
     getMessages: () => [],
     getSessionProcessAlive: () => true,
   });
@@ -63,6 +65,14 @@ function makeApp() {
 describe("agent session model routes", () => {
   let app: FastifyInstance;
   afterEach(async () => { await app?.close(); });
+
+  it("explicitly opts the user Stop route into process-preserving cancellation", async () => {
+    ({ app } = makeApp());
+    await app.register(agentSessionRoutes);
+    const res = await app.inject({ method: "POST", url: `/api/agent-sessions/${SESSION_ID}/stop` });
+    expect(res.statusCode).toBe(200);
+    expect(app.agentSessionManager.stopSession).toHaveBeenCalledWith(SESSION_ID, { interruptOnly: true });
+  });
 
   it("GET /api/agent-providers returns a suggestion list per provider", async () => {
     ({ app } = makeApp());
@@ -85,6 +95,24 @@ describe("agent session model routes", () => {
       "gpt-5.6-luna",
       "gpt-5.5",
     ]);
+  });
+
+  it("lists fx without probing installation or sending installation hints", async () => {
+    const detection = vi.spyOn(getProvider("fx"), "detectBinary").mockReturnValue(null);
+    try {
+      ({ app } = makeApp());
+      await app.register(agentSessionRoutes);
+      const res = await app.inject({ method: "GET", url: "/api/agent-providers" });
+      expect(res.json().providers.find((p: { type: string }) => p.type === "fx")).toMatchObject({
+        displayName: "fx", capabilities: { planMode: false },
+        models: ["spacexai/grok-4.7", "openai/gpt-5.4-mini"],
+      });
+      expect(detection).not.toHaveBeenCalled();
+      expect(res.json().providers.find((p: { type: string }) => p.type === "fx")).not.toHaveProperty("installHint");
+      for (const provider of res.json().providers) {
+        expect(provider).not.toHaveProperty("available");
+      }
+    } finally { detection.mockRestore(); }
   });
 
   it("passes the model into createNewSession and echoes it back", async () => {

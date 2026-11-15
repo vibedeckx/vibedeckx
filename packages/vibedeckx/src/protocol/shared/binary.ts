@@ -8,9 +8,9 @@ import { execFileSync } from "child_process";
 const pathCache = new Map<string, string | null>();
 const versionCache = new Map<string, string | null>();
 
-/** Locate a binary on PATH via which/where. Returns absolute path or null. Cached. */
-export function detectBinary(name: string): string | null {
-  if (pathCache.has(name)) {
+/** Locate a binary on PATH via which/where. Returns absolute path or null. Cached unless a fresh spawn-time check is requested. */
+export function detectBinary(name: string, options?: { refresh?: boolean }): string | null {
+  if (!options?.refresh && pathCache.has(name)) {
     return pathCache.get(name)!;
   }
   let found: string | null = null;
@@ -29,7 +29,7 @@ export function detectBinary(name: string): string | null {
   console.log(
     found
       ? `[protocol] Native ${name} binary found: ${found}`
-      : `[protocol] Native ${name} binary not found, will use npx`,
+      : `[protocol] Native ${name} binary not found on PATH`,
   );
   return found;
 }

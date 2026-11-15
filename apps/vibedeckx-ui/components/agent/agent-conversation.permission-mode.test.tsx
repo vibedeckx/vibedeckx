@@ -110,8 +110,8 @@ vi.mock("@/hooks/use-marker-keyboard-nav", () => ({
 
 vi.mock("@/lib/api", () => ({
   getAgentProviders: vi.fn().mockResolvedValue([
-    { type: "claude-code", displayName: "Claude Code", available: true, models: ["opus"] },
-    { type: "third", displayName: "Third Agent", available: true, capabilities: { planMode: false } },
+    { type: "claude-code", displayName: "Claude Code", models: ["opus"] },
+    { type: "third", displayName: "Third Agent", capabilities: { planMode: false } },
   ]),
   translateText: vi.fn(),
   branchAgentSession: vi.fn(),
