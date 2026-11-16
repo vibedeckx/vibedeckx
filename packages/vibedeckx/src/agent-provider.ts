@@ -64,6 +64,8 @@ export type ParsedAgentEvent =
 
 export interface AgentInitializationContext {
   cwd: string;
+  crossRemoteMcp?: CrossRemoteMcpConfig;
+  sessionToolsMcp?: SessionToolsMcpConfig;
 }
 
 // ============ AgentProvider Interface (task 1.1) ============

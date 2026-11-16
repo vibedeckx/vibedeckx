@@ -7,6 +7,7 @@ import { createSqliteStorage } from "./storage/sqlite.js";
 import { AgentSessionManager } from "./agent-session-manager.js";
 import { getProvider } from "./providers/index.js";
 import type { Storage } from "./storage/types.js";
+import * as sessionMcp from "./session-tools-mcp.js";
 import type { AgentMessage } from "./agent-types.js";
 
 // A real stdio child process and real SQLite, with only the external fx binary
@@ -23,16 +24,18 @@ rl.on('line', line => {
  const m = JSON.parse(line);
  fs.appendFileSync(process.env.FX_TEST_LOG, JSON.stringify({ ...m, pid: process.pid, model: process.env.FX_TEST_MODEL }) + '\n');
  if (m.method === 'initialize') send({ id: m.id, result: { protocolVersion: 1 } });
- if (m.method === 'session/new') send({ id: m.id, result: { sessionId: 'native-' + process.pid, modes: { currentModeId: 'auto' } } });
+ if (m.method === 'session/new') send({ id: m.id, result: { sessionId: 'native-' + process.pid, modes: { currentModeId: 'full-access' } } });
  if (m.method === 'session/set_mode') send({ id: m.id, result: null });
  if (m.method === 'session/cancel' && active) {
    if (activeText() === 'IGNORE_CANCEL' || activeText() === 'IGNORE_TERM') return;
    clearTimeout(timer); send({ id: active.id, result: { stopReason: activeText() === 'CANCEL_RACE' ? 'end_turn' : 'cancelled' } }); active = null;
  }
+ if (m.id === 'approval' && m.result && active) { send({ id: active.id, result: { stopReason: 'end_turn' } }); active = null; }
  if (m.method === 'session/prompt') {
    if (active) { send({ id: m.id, error: { code: -32600, message: 'Concurrent prompt' } }); return; }
    active = m;
    const text = m.params.prompt.map(p => p.text || '').join('');
+   if (text === 'APPROVAL') { send({ id: 'approval', method: 'session/request_permission', params: { sessionId: m.params.sessionId, toolCall: { toolCallId: 'mcp', name: 'mcp_vibedeckx_propose_task', rawInput: { tasks: [] } }, options: [{ optionId: 'deny', kind: 'reject_once' }] } }); return; }
    if (text.startsWith('TOOLS_')) {
      for (const name of ['shell', 'subagent']) send({ method: 'session/update', params: { sessionId: m.params.sessionId, update: { sessionUpdate: 'tool_call', toolCallId: name, name, rawInput: { action: 'run', command: 'sleep 30' }, status: 'in_progress' } } });
      if (text === 'TOOLS_ERROR') { send({ id: m.id, error: { code: -32000, message: 'Failed with tools in progress' } }); active = null; return; }
@@ -80,6 +83,35 @@ describe("fx manager lifecycle", () => {
     vi.spyOn(provider, "buildSpawnConfig").mockImplementation((_cwd, _mode, _cross, model) => ({ command: process.execPath, args: ["-e", fakeAcp], env: { FX_TEST_LOG: log, FX_TEST_MODEL: model ?? "default" } }));
   });
   afterEach(async () => { for (const row of await storage.agentSessions.getAll()) await manager.stopSessionAndWait(row.id); await manager.shutdown(); await storage.close(); vi.restoreAllMocks(); rmSync(dir, { recursive: true, force: true }); });
+
+  it("passes freshly minted MCP configuration through initialization on each spawn", async () => {
+    manager.hostsSessionTools = true;
+    manager.localApiOrigin = "http://127.0.0.1:9999";
+    const mint = vi.spyOn(sessionMcp, "mintSessionToolsMcpConfig")
+      .mockResolvedValueOnce({ url: "http://127.0.0.1:9999/api/session-mcp", token: "first-token" })
+      .mockResolvedValueOnce({ url: "http://127.0.0.1:9999/api/session-mcp", token: "renewed-token" });
+    const init = vi.spyOn(provider, "getInitializationMessages");
+    const id = await newSession();
+    await manager.sendUserMessage(id, "first", dir); await completed(id, 1);
+    await (manager as unknown as { hibernateSession(id: string): Promise<boolean> }).hibernateSession(id);
+    await manager.sendUserMessage(id, "wake", dir); await completed(id, 2);
+    expect(mint).toHaveBeenCalledTimes(2);
+    const tokens = init.mock.calls.filter(c => c[1]).map(c => c[1]?.sessionToolsMcp?.token);
+    expect(tokens).toEqual(["first-token", "renewed-token"]);
+    const requests = readFileSync(log, "utf8").trim().split("\n").map(l => JSON.parse(l)).filter(m => m.method === "session/new");
+    expect(requests.map(m => m.params.mcpServers[0].headers[0].value)).toEqual(["Bearer first-token", "Bearer renewed-token"]);
+  });
+
+  it("cancels unexpected fx approval requests and records an error without a card", async () => {
+    const id = await newSession();
+    await manager.sendUserMessage(id, "APPROVAL", dir);
+    await completed(id, 1);
+    const history = await entries(id);
+    expect(history.some(e => e.type === "error" && e.message.includes("full-access"))).toBe(true);
+    expect(history.some(e => e.type === "approval_request")).toBe(false);
+    const messages = readFileSync(log, "utf8").trim().split("\n").map(l => JSON.parse(l));
+    expect(messages.find(m => m.id === "approval").result).toEqual({ outcome: { outcome: "cancelled" } });
+  });
 
   it.each(["TOOLS_SUCCESS", "TOOLS_CANCEL", "TOOLS_ERROR"])("returns to stopped after tools were in progress: %s", async scenario => {
     const id = await newSession();
@@ -332,6 +364,10 @@ describe("fx manager lifecycle", () => {
 
   it("rejects plan before creating a row or killing an existing process", async () => {
     await expect(manager.createNewSession("p", null, dir, false, "plan", "fx")).rejects.toThrow(/plan/);
+    await expect(manager.prepareSessionRow({ sessionId: "reviewer", projectId: "p", branch: null, projectPath: dir,
+      permissionMode: "plan", agentType: "fx", model: null, purpose: "workflow_review", owner: null,
+      prepareOperationId: "operation", pendingExpiresAt: Date.now() + 60_000,
+    })).rejects.toThrow(/plan/);
     expect(await storage.agentSessions.getAll()).toHaveLength(0);
     const id = await newSession();
     await expect(manager.switchMode(id, dir, "plan")).rejects.toThrow(/plan/);

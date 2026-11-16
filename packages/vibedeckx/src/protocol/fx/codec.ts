@@ -1,7 +1,18 @@
 import type { ContentPart } from "../../agent-types.js";
 import { FX_METHODS, FxEnvelopeSchema, FxUpdateParamsSchema, FxUpdateSchema, FxPermissionParamsSchema } from "./schema.js";
 
-export interface FxSessionOptions { cwd: string; systemPrompt?: string }
+export interface FxSessionOptions { cwd: string; systemPrompt?: string; crossRemoteMcp?: { url: string; token: string }; sessionToolsMcp?: { url: string; token: string } }
+
+export function buildFxMcpServers(options: FxSessionOptions) {
+  return ([['cross-remote', options.crossRemoteMcp], ['vibedeckx', options.sessionToolsMcp]] as const).flatMap(([name, config]) => {
+    if (!config) return [];
+    const url = new URL(config.url);
+    if (url.username || url.password || !(url.protocol === 'https:' || (url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '[::1]' || /^127\./.test(url.hostname))))) {
+      throw new Error(`fx MCP ${name} requires HTTPS or a loopback HTTP URL.`);
+    }
+    return [{ type: 'http' as const, name, url: config.url, headers: [{ name: 'Authorization', value: `Bearer ${config.token}` }] }];
+  });
+}
 export type FxIncoming =
   | { kind: "response"; id: string | number; result: unknown }
   | { kind: "error_response"; id: string | number | null; message: string }
@@ -43,7 +54,7 @@ export function buildInitialize(id: number): string {
 }
 export function buildSessionNew(id: number, options: FxSessionOptions): string {
   return line({ id, method: FX_METHODS.newSession, params: {
-    cwd: options.cwd, mcpServers: [],
+    cwd: options.cwd, mcpServers: buildFxMcpServers(options),
     ...(options.systemPrompt?.trim() ? { systemPrompt: [{ type: "text", text: options.systemPrompt }], systemPromptMode: "append" } : {}),
   } });
 }
@@ -65,4 +76,13 @@ export function toolOutput(content: unknown[]): string {
     const block = item as { type?: string; content?: { type?: string; text?: string } };
     return block.type === "content" && block.content?.type === "text" ? block.content.text ?? "" : JSON.stringify(item);
   }).filter(Boolean).join("\n");
+}
+
+/** fx wraps MCP results; unwrap only complete JSON, keeping truncated previews readable. */
+export function unwrapFxMcpOutput(output: string): string {
+  try {
+    const value = JSON.parse(output);
+    if (typeof value?.server === "string" && typeof value?.tool === "string" && Array.isArray(value?.result?.content)) return JSON.stringify(value.result);
+  } catch { /* ACP may supply only a truncated text preview. */ }
+  return output;
 }

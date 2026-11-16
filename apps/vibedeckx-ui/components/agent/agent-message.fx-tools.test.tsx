@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { AgentMessageItem } from "./agent-message";
 import { normalizeFxTool } from "../../../../packages/vibedeckx/src/protocol/fx/tool-mapping";
 
+vi.mock("@/hooks/use-remote-server-names", () => ({ useRemoteServerName: () => "Remote worker" }));
 const sendMessage = vi.hoisted(() => vi.fn(async () => {}));
 vi.mock("./agent-conversation", () => ({ useAgentConversation: () => ({ sendMessage, messages: [] }) }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -18,6 +19,8 @@ async function render(name: string, input: unknown) {
 }
 describe("fx tools reuse existing cards", () => {
   it.each([
+    ["mcp_cross-remote_list_accessible_remotes", {}, "List Remotes", "List Remotes"],
+    ["mcp_vibedeckx_propose_task", { tasks: [{ title: "FX MCP proposal", description: "Smoke only" }] }, "FX MCP proposal", "Smoke only"],
     ["read_file", { path: "probe.txt" }, "Read File", "probe.txt"],
     ["edit_file", { path: "probe.txt", old_string: "before", new_string: "after" }, "Edit File", "before"],
     ["write_file", { path: "probe.txt", content: "new content" }, "Write File", "new content"],

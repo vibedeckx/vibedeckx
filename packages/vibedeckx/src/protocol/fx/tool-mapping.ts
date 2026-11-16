@@ -11,6 +11,10 @@ export function normalizeFxTool(name: string, input: unknown, meta?: unknown): {
   if (typeof server === "string" && server.trim() && typeof tool === "string" && tool) {
     return { name: qualifiedMcpToolName(tool, server), input };
   }
+  for (const server of ["vibedeckx", "cross-remote"]) {
+    const prefix = `mcp_${server}_`;
+    if (name.startsWith(prefix)) return { name: qualifiedMcpToolName(name.slice(prefix.length), server), input };
+  }
   const names: Record<string, string> = {
     read_file: "Read", edit_file: "Edit", write_file: "Write", shell: "Bash",
     glob_files: "Glob", grep_files: "Grep", web_search: "WebSearch", web_fetch: "WebFetch",

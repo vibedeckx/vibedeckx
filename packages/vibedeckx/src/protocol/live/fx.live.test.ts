@@ -34,6 +34,7 @@ describe("fx live provider lifecycle", () => {
     const launch = (model: string) => {
       p.onSessionDestroyed("live"); p.onSessionCreated("live", "edit");
       const config = p.buildSpawnConfig(cwd, "edit", undefined, model); configs.push(config);
+      expect(config.args).toContain("full-access");
       const child = spawn(config.command, config.args, { cwd, env: { ...process.env, ...config.env }, stdio: ["pipe", "pipe", "pipe"] }); processes.push(child);
       child.stderr.resume();
       const lines = createInterface({ input: child.stdout });
@@ -74,6 +75,7 @@ describe("fx live provider lifecycle", () => {
       expect(results()[4].subtype).toBe("success");
       expect(events.some(e => e.type === "tool_result" && e.output.includes("FX_TOOL_OK"))).toBe(true);
       expect(events.some(e => e.type === "thinking")).toBe(true);
+      expect(events.some(e => e.type === "approval_request")).toBe(false);
       child.kill(); await once(child, "close");
       events.length = 0;
       child = launch("openai/gpt-5.4-mini");

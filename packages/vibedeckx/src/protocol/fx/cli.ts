@@ -29,7 +29,7 @@ export function buildFxSpawnConfig(binary: string | null, model?: string | null,
   const args = ["acp"];
   // 0.0.17 supports a process-local override. 0.0.16 does not: its native
   // starting mode is checked in the handshake, without writing global settings.
-  if (binary && supportsFxPermissionOverride(binary)) args.push("--permission-mode", "auto");
+  if (binary && supportsFxPermissionOverride(binary)) args.push("--permission-mode", "full-access");
   if (model?.trim()) args.push("--model", model.trim());
   if (logFile) args.push("--log-file", logFile);
   // Use the original profile and its credential locks. Never copy refresh tokens.

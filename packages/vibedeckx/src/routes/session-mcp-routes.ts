@@ -1,3 +1,4 @@
+import { negotiateMcpVersion } from "../protocol/mcp/version.js";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import {
@@ -34,7 +35,6 @@ import { validateCron } from "../scheduler.js";
 import type { Task, TaskStatus } from "../storage/types.js";
 import "../server-types.js";
 
-const PROTOCOL_VERSION = "2024-11-05";
 const LIST_LIMIT = 50;
 const LIST_DESCRIPTION_PREVIEW = 200;
 const QUERY_MAX = 256;
@@ -43,7 +43,7 @@ interface JsonRpcRequest {
   jsonrpc: string;
   id?: string | number;
   method: string;
-  params?: { name?: string; arguments?: Record<string, unknown> };
+  params?: { protocolVersion?: string; name?: string; arguments?: Record<string, unknown> };
 }
 
 const PROPOSAL_TOOLS = [
@@ -308,7 +308,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     switch (rpc.method) {
       case "initialize":
         return respond({
-          protocolVersion: PROTOCOL_VERSION,
+          protocolVersion: negotiateMcpVersion(rpc.params?.protocolVersion),
           capabilities: { tools: {} },
           serverInfo: { name: "vibedeckx-session-tools", version: "1.0.0" },
           instructions: sessionToolsInstructions(proposalsOnly),

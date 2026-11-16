@@ -115,6 +115,7 @@ describe("canonicalizeSessionToolName", () => {
   it("maps every shape the CLIs are known to report onto one name", () => {
     for (const reported of [
       "propose_schedule",
+      "mcp_vibedeckx_propose_schedule",
       "vibedeckx.propose_schedule",
       "vibedeckx/propose_schedule",
       "vibedeckx__propose_schedule",
@@ -127,7 +128,7 @@ describe("canonicalizeSessionToolName", () => {
   });
 
   it("maps propose_task's shapes onto its own canonical name", () => {
-    for (const reported of ["propose_task", "vibedeckx.propose_task", "mcp__vibedeckx__propose_task"]) {
+    for (const reported of ["propose_task", "mcp_vibedeckx_propose_task", "vibedeckx.propose_task", "mcp__vibedeckx__propose_task"]) {
       expect(canonicalizeSessionToolName(reported), reported).toBe(CANONICAL_PROPOSE_TASK_TOOL);
     }
     expect(canonicalizeSessionToolName("propose_task", "vibedeckx")).toBe(CANONICAL_PROPOSE_TASK_TOOL);

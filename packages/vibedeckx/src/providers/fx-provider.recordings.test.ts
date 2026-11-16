@@ -16,6 +16,11 @@ function replay(file: string) {
       if (message.method === "session/prompt") provider.formatUserInput(message.params.prompt, "recorded");
       if (message.method === "session/cancel") provider.formatInterrupt("recorded");
     } else if (direction === "stdout") {
+      // These immutable tool recordings predate edit → full-access. Adapt only
+      // the handshake mode for tool replay; mode enforcement has its own tests.
+      if (message.result?.sessionId && message.result?.modes) {
+        message.result.modes.currentModeId = "full-access";
+      }
       events.push(...provider.parseStdoutLine(JSON.stringify(message), "recorded"));
       if (message.result?.stopReason) resultsAt.push(events.length - 1);
     }

@@ -4,7 +4,7 @@ import type { CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import type { SessionToolsMcpConfig } from "../session-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import { buildFxSpawnConfig } from "../protocol/fx/cli.js";
-import { buildInitialize, buildSessionNew, buildPrompt, buildCancel, buildPermissionDenied, buildUnsupportedRequest, parseFxLine, toolOutput, type FxSessionOptions } from "../protocol/fx/codec.js";
+import { buildInitialize, buildSessionNew, buildPrompt, buildCancel, buildPermissionDenied, buildFxMcpServers, buildUnsupportedRequest, parseFxLine, toolOutput, unwrapFxMcpOutput, type FxSessionOptions } from "../protocol/fx/codec.js";
 import { FX_BINARY_NAME, FX_METHODS, FxInitializeResultSchema, FxNewResultSchema, FxPromptResultSchema } from "../protocol/fx/schema.js";
 import { normalizeFxTool } from "../protocol/fx/tool-mapping.js";
 
@@ -33,6 +33,7 @@ export class FxProvider implements AgentProvider {
   detectBinary() { return detectBinary(FX_BINARY_NAME, { refresh: true }); }
   buildSpawnConfig(_cwd: string, mode: "plan" | "edit", _cross?: CrossRemoteMcpConfig, model?: string | null, _tools?: SessionToolsMcpConfig): SpawnConfig {
     this.assertMode(mode);
+    buildFxMcpServers({ cwd: _cwd, crossRemoteMcp: _cross, sessionToolsMcp: _tools });
     return buildFxSpawnConfig(this.detectBinary(), model);
   }
   private assertMode(mode: "plan" | "edit") {
@@ -56,7 +57,7 @@ export class FxProvider implements AgentProvider {
   getInitializationMessages(id: string, context?: AgentInitializationContext): string | null {
     const state = this.state(id);
     if (state.phase !== "created") return null;
-    if (context) state.options = { cwd: context.cwd };
+    if (context) state.options = { ...context };
     state.phase = "initializing";
     return this.request(state, FX_METHODS.initialize, buildInitialize);
   }
@@ -107,11 +108,9 @@ export class FxProvider implements AgentProvider {
     if (!state) return [];
     const incoming = parseFxLine(line);
     if (incoming.kind === "permission") {
-      // Never auto-approve. Reply even when failed, otherwise the CLI can hang
-      // while trying to finish cancellation. IDs are not our pending requests.
       return [
         { type: "stdin_write", content: buildPermissionDenied(incoming.id) },
-        { type: "system", content: "fx requested permission. This integration does not yet support approval; the request was denied." },
+        { type: "error", message: "fx requested approval despite full-access mode. The tool request was cancelled." },
       ];
     }
     if (incoming.kind === "server_request") return [{ type: "stdin_write", content: buildUnsupportedRequest(incoming.id) }];
@@ -137,8 +136,8 @@ export class FxProvider implements AgentProvider {
       if (method === FX_METHODS.newSession) {
         const result = FxNewResultSchema.safeParse(incoming.result);
         if (!result.success) return this.fail(state, "fx returned an invalid session/new response.");
-        if (result.data.modes?.currentModeId !== "auto") {
-          return this.fail(state, "fx requires auto permission mode for edit sessions. Upgrade to fx 0.0.17 or newer, or select auto in fx before retrying. No global permission settings were changed.");
+        if (result.data.modes?.currentModeId !== "full-access") {
+          return this.fail(state, "fx requires full-access permission mode for edit sessions. Upgrade to fx 0.0.17 or newer, or select full-access in fx before retrying. No global permission settings were changed.");
         }
         state.nativeId = result.data.sessionId;
         state.phase = "ready";
@@ -178,7 +177,8 @@ export class FxProvider implements AgentProvider {
         const terminal = update.status === "completed" || update.status === "failed";
         if (terminal || (tool.completed && update.content)) {
           tool.completed = true;
-          const output = toolOutput(tool.content) || (terminal ? update.status : tool.lastOutput) || "completed";
+          const rawOutput = toolOutput(tool.content) || (terminal ? update.status : tool.lastOutput) || "completed";
+          const output = normalized.name.startsWith("mcp__") ? unwrapFxMcpOutput(rawOutput) : rawOutput;
           // fx can send a second completed snapshot containing the actual child
           // report, or shell output after the run call has yielded. Replace the
           // same result entry; suppress only identical snapshots.

@@ -8,7 +8,7 @@ function ready(p: FxProvider, app = "app", native = "native") {
   p.onSessionCreated(app, "edit");
   expect(JSON.parse(p.getInitializationMessages(app, { cwd: "/workspace" })!).method).toBe("initialize");
   expect(writes(p.parseStdoutLine(response(1, { protocolVersion: 1 }), app))[0]).toMatchObject({ id: 2, method: "session/new", params: { cwd: "/workspace" } });
-  expect(p.parseStdoutLine(response(2, { sessionId: native, modes: { currentModeId: "auto" } }), app)).toEqual([{ type: "native_session_id", id: native }]);
+  expect(p.parseStdoutLine(response(2, { sessionId: native, modes: { currentModeId: "full-access" } }), app)).toEqual([{ type: "native_session_id", id: native }]);
 }
 const update = (u: unknown, sessionId = "native") => JSON.stringify({ jsonrpc: "2.0", method: "session/update", params: { sessionId, update: u } });
 
@@ -21,7 +21,7 @@ describe("FxProvider lifecycle", () => {
     expect(p.formatUserInput("next", "a")).toBe("");
     const newSession = writes(p.parseStdoutLine(response(1, { protocolVersion: 1 }), "a"))[0];
     expect(newSession.params.cwd).toBe("/a");
-    const created = p.parseStdoutLine(response(2, { sessionId: "new-native", modes: { currentModeId: "auto" } }), "a");
+    const created = p.parseStdoutLine(response(2, { sessionId: "new-native", modes: { currentModeId: "full-access" } }), "a");
     expect(created[0]).toEqual({ type: "native_session_id", id: "new-native" });
     const prompt = writes(created)[0];
     expect(prompt.method).toBe("session/prompt");
@@ -30,12 +30,12 @@ describe("FxProvider lifecycle", () => {
     expect(ended.map(e => e.type)).toEqual(["result", "turn_started", "stdin_write"]);
     expect(writes(ended)[0].params.prompt[0].text).toBe("next");
   });
-  it.each(["ask", "full-access", undefined])("refuses unsafe or unknown starting mode %s without changing global defaults", mode => {
+  it.each(["ask", "auto", undefined])("refuses mismatched or unknown starting mode %s without changing global defaults", mode => {
     const p = new FxProvider(); p.onSessionCreated("a"); p.getInitializationMessages("a");
     p.formatUserInput("queued", "a");
     p.parseStdoutLine(response(1, { protocolVersion: 1 }), "a");
     const events = p.parseStdoutLine(response(2, { sessionId: "native", ...(mode ? { modes: { currentModeId: mode } } : {}) }), "a");
-    expect(events).toEqual([expect.objectContaining({ type: "result", subtype: "error", error: expect.stringContaining("auto permission mode") })]);
+    expect(events).toEqual([expect.objectContaining({ type: "result", subtype: "error", error: expect.stringContaining("full-access permission mode") })]);
     expect(writes(events)).toEqual([]);
   });
   it("serializes multiple turns, preserves result usage, and never treats occupancy as usage", () => {
@@ -61,13 +61,26 @@ describe("FxProvider lifecycle", () => {
     expect(events[0]).toMatchObject({ type: "result", subtype: "cancelled" });
     expect(writes(events)[0].params.prompt[0].text).toBe("after stop");
   });
-  it("routes server ids independently and explicitly denies permissions", () => {
+  it.each([3, "server-id"])("cancels unexpected approval id %s without opening a card or waiting for user input", serverId => {
     const p = new FxProvider(); ready(p);
-    const prompt = JSON.parse(p.formatUserInput("one", "app"));
-    const events = p.parseStdoutLine(JSON.stringify({ jsonrpc: "2.0", id: prompt.id, method: "session/request_permission", params: { sessionId: "native", toolCall: { toolCallId: "t" }, options: [{ optionId: "allow", kind: "allow_once" }] } }), "app");
-    expect(writes(events)[0]).toEqual({ jsonrpc: "2.0", id: prompt.id, result: { outcome: { outcome: "cancelled" } } });
-    expect(events[1].type).toBe("system");
+    const prompt = JSON.parse(p.formatUserInput("go", "app"));
+    const events = p.parseStdoutLine(JSON.stringify({ jsonrpc: "2.0", id: serverId, method: "session/request_permission", params: {
+      sessionId: "native", toolCall: { toolCallId: "t" }, options: [{ optionId: "allow", kind: "allow_once" }],
+    } }), "app");
+    expect(writes(events)[0]).toEqual({ jsonrpc: "2.0", id: serverId, result: { outcome: { outcome: "cancelled" } } });
+    expect(events[1]).toMatchObject({ type: "error", message: expect.stringContaining("full-access") });
+    expect(events.some(e => e.type === "approval_request")).toBe(false);
+    // A server request sharing our prompt's id must not consume its response.
     expect(p.parseStdoutLine(response(prompt.id, { stopReason: "end_turn" }), "app")[0]).toMatchObject({ type: "result", subtype: "success" });
+  });
+  it("injects fresh per-session MCP tokens without leaking between sessions", () => {
+    const p = new FxProvider();
+    for (const id of ["a", "b", "a"]) {
+      p.onSessionCreated(id);
+      p.getInitializationMessages(id, { cwd: "/work", sessionToolsMcp: { url: "https://hub/mcp", token: id } });
+      const request = writes(p.parseStdoutLine(response(1, { protocolVersion: 1 }), id))[0];
+      expect(request.params.mcpServers[0]).toMatchObject({ name: "vibedeckx", headers: [{ name: "Authorization", value: `Bearer ${id}` }] });
+    }
   });
   it("merges tool snapshots without duplicating cards or completed output and streams thoughts/text", () => {
     const p = new FxProvider(); ready(p); p.formatUserInput("go", "app");

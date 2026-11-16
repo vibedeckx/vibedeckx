@@ -534,6 +534,7 @@ const aliasesOf = (tool: string, canonical: string): Set<string> => new Set(
   [
     tool,
     canonical,
+    `mcp_${SESSION_TOOLS_MCP_SERVER_NAME}_${tool}`,
     `${SESSION_TOOLS_MCP_SERVER_NAME}.${tool}`,
     `${SESSION_TOOLS_MCP_SERVER_NAME}/${tool}`,
     `${SESSION_TOOLS_MCP_SERVER_NAME}__${tool}`,

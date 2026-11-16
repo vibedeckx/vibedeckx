@@ -1229,6 +1229,9 @@ export class AgentSessionManager {
     pendingExpiresAt: number;
     startSnapshot?: SnapshotState | null;
   }): Promise<{ workspaceCheckoutId: string; worktreePath: string }> {
+    if (input.permissionMode === "plan" && getProvider(input.agentType).getCapabilities?.().planMode === false) {
+      throw new Error(`${input.agentType} does not support plan mode; choose edit mode.`);
+    }
     const branchKey = input.branch ?? "";
     const existingCheckout = await this.storage.workspaceRegistry.getByProjectBranch(
       input.projectId, branchKey, "local",
@@ -1736,7 +1739,7 @@ export class AgentSessionManager {
 
     // Pre-initialize provider protocol (e.g. Codex needs initialize + thread/start handshake)
     if (provider.getInitializationMessages) {
-      const initMsgs = provider.getInitializationMessages(session.id, { cwd });
+      const initMsgs = provider.getInitializationMessages(session.id, { cwd, crossRemoteMcp: session.crossRemoteMcp, sessionToolsMcp });
       if (initMsgs) {
         childProcess.stdin?.write(initMsgs);
       }

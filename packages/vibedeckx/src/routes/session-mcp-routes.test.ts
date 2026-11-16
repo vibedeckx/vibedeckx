@@ -124,6 +124,11 @@ describe("session tools MCP endpoint", () => {
     }
   });
 
+  it.each(["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05", "unknown"])("negotiates MCP version %s", async version => {
+    const res = await rpc(tokenFor(), { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: version } });
+    expect(res.json().result.protocolVersion).toBe(version === "unknown" ? "2025-11-25" : version);
+  });
+
   it("answers initialize and ping", async () => {
     const init = await rpc(tokenFor(), { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
     expect(init.json().result.serverInfo.name).toBe("vibedeckx-session-tools");

@@ -6,6 +6,35 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 
 “明确不支持”“延期”是承诺范围内的缺口，收尾时须用户确认；“超出基线（不做）”无需确认。**写了差异说明不等于通过验收。** 源码阅读、协议声明、参数被接受均不等于功能端到端可用。未验证不得写成不支持。
 
+## 当前权限决策更新（2026-11-16）
+
+用户明确要求与现有 Claude Code / Codex 一样不等待人工工具审批，**edit 改为 full-access**，替代原任务的 auto 决策。启动使用进程级 `fx acp --permission-mode full-access`，握手必须确认 `currentModeId=full-access` 后才发送消息；auto、ask 或未知模式均明确报错。此模式关闭 fx 权限检查及自动模型审查，操作系统权限和 hub 远端授权仍生效。plan 继续禁用，不调用会持久化配置的 `session/set_mode`。
+
+按用户要求删除 fx 专用审批 UI、审批状态和人工回传接线；正常 full-access 会话没有已知会触发审批的场景。协议解析仅保留直接回复 `outcome: cancelled` 并显示错误的分支，不创建卡片、不等待用户、不默认批准。下文任务 4/5 及原探针中的 auto 记录是历史验证结果，不代表当前 edit 映射。
+
+本次变更验证：fx 协议、Provider、录制回放与管理器共 105 项测试通过，后端 `tsc --noEmit` 通过。真实 fx 0.0.17 生命周期测试通过，确认 full-access 启动、工具回合无审批请求、多轮/取消/重建换模型正常，用户 settings 文件逐字节未变。旧工具录制保持原样，仅测试回放时适配握手模式，不将历史 auto 录制冒充 full-access 实测。
+
+删除审批 UI 后验证：后端相关测试 100/100、UI 工具卡片与权限入口测试 23/23、前后端 `tsc --noEmit` 均通过。
+
+## 任务 6 产品接入（2026-11-16，fx 0.0.17）
+
+**代码已接入，本机真实 hub 调用通过；线上 hub / 授权远端完整验收尚未通过。用户于 2026-11-16 明确要求提交并关闭任务，按此决定收尾；关闭不代表下述待验收项已通过。**
+
+- 两个 HTTP MCP 经每次 spawn 的 `AgentInitializationContext` 传入 `session/new.mcpServers`，headers 使用 `{name,value}[]`。provider 不缓存共享 token；hub 每次 spawn 重签，worker 延用既有消息路由更新 hub token 的路径。管理器测试覆盖休眠后再次 mint 并注入新 token。非 HTTPS、非 loopback 的 HTTP 地址在启动前明确拒绝。
+- MCP 名称优先采用 `_meta.fx.toolCall.mcp`，已知 hub 名称支持 `mcp_vibedeckx_*` / `mcp_cross-remote_*` 回退；不会按任意下划线拆分第三方服务名。任务与跨机工具卡片有 UI 组件验证。完整 MCP 结果封装可解包；0.0.17 实测部分 ACP `content.text` 仅为约 200 字符预览，长 JSON 截断时保留原文，不能宣称获得完整结果。
+- 权限按用户最新决定使用进程级 `--permission-mode full-access` 和 `currentModeId=full-access` 校验，不调用持久化 `set_mode`。plan 除新建/切换外，在 `prepareSessionRow` 也提前拒绝，覆盖工作流 Reviewer / Commander 通过生命周期 prepare 派生会话的路径；不会静默改为 edit。
+- 审批随 full-access 决策简化：移除 `requestType: tool` 扩展和 `ToolApprovalUI`，不再维护待审批状态或 `formatApprovalResponse`。协议收到权限请求时直接回复取消并记录错误；单测验证字符串/数字 RPC id 与管理器无人工介入收尾。Claude/Codex 原有审批类型及 UI 不变。
+
+此前 auto/审批 UI 阶段验证（非当前删减后的测试数量）：后端 `tsc --noEmit`、前端 `tsc --noEmit` 均通过；后端全量 vitest **3594 通过 / 11 跳过**（246 文件通过 / 2 跳过）；审批、工具卡片与权限入口 UI **28/28** 通过。真实本地 hub 冒烟 **1/1**、真实审批选择 **3/3** 通过。
+
+### 真实实验与待验收边界
+
+1. **真实本地 hub + 真实 fx 成功**：`FX_LOCAL_HUB_SMOKE=1 pnpm --filter vibedeckx exec vitest run --config vitest.live.config.ts src/protocol/live/fx-hub.live.test.ts`。使用真实 `createServer`、隔离 SQLite、真实签名 token、loopback HTTP 和原始 fx 登录配置；两个工具均实际调用。测试只产生 proposal，不创建任务。不是同名合成 MCP 服务。远端列表为空不证明远端执行可用。
+2. **线上 hub 实测发现握手阻塞**：当前 worker3 的 fx 访问 `https://vibedeckx.dev` 两个真实端点时，`toolbox` 报 MCP 不可用。两端固定回复 `2024-11-05`；fx 要求较新的协商版本。已在本分支修复为支持的请求版本（2025-11-25 / 2025-06-18 / 2025-03-26 / 2024-11-05），未知版本返回最新支持版本，并补两端路由测试。本地真实实验确认修复有效；**尚未部署线上 hub，因此不能声称远端端到端成功**。
+3. **远端授权不足**：真实 hub 的 `list_accessible_remotes` 返回 `[]`，已请求用户授权可用 exec worker。没有绕过授权、修改生产授权或部署生产服务。现有网关回归覆盖撤销后下一调用拒绝（含已打开 MCP handle）；**真实 worker 上撤销授权后的下一次调用、完整浏览器卡片验收仍待完成**。
+4. **历史审批实验**：此前通过进程级 ask 对固定 `printf FX_APPROVAL_SMOKE` 分别回应 allow_once / allow_always / reject_once，三种均收到 prompt 结束响应，原始 settings 逐字节未变。改用 full-access 并移除审批 UI 后，删除仅用于这些选项的 live 测试与响应构造器，不作为当前产品能力。
+5. 可复验线上命令：设置 `FX_HUB_SMOKE_URL`，从会话环境提供 `VIBEDECKX_CROSS_REMOTE_MCP_TOKEN` 和 `VIBEDECKX_SESSION_MCP_TOKEN`，运行同一 live 文件。token 不进入命令参数、录制或仓库。
+
 ## 任务 4 产品接入（2026-11-15，fx 0.0.17 产品验证）
 
 **任务 4 已完成基础会话及核心生命周期验收（fx 0.0.17）**：使用原始登录配置和凭据锁，彻底移除临时 HOME / 凭据复制。fx 0.0.17 的真实多轮、排队、取消后继续、thinking、工具结果和换模型重放测试已通过；浏览器验收记录见下文。
@@ -193,7 +222,7 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | 会话与流式输出 | stream-json Provider | app-server Provider | 已实现；真实 Provider 与录制契约验证见任务 4 |
 | thinking | thinking 事件 | reasoning 文本映射 | 已实现；真实 Provider 与录制契约验证见任务 4 |
 | 工具卡片 | tool_use/result | item 事件映射 | 已实现；任务 5 归一到已有专用卡片，未知工具通用显示，真实录制回放与 UI 组件验证 |
-| 审批 | edit 使用跳过权限；plan 原生模式 | 有 command/fileChange 映射；默认 approvalPolicy never | 临时可见拒绝已实现；完整审批由任务 6 接入 |
+| 审批 | edit 使用跳过权限；plan 原生模式 | 有 command/fileChange 映射；默认 approvalPolicy never | edit 使用 full-access，无人工审批 UI；权限请求仅直接取消并显示错误，见最新决策 |
 | plan 与 ExitPlanMode | 原生 plan；产品接受计划后切 edit | plan 采用 read-only sandbox；非 Claude ExitPlanMode 协议 | 首版已禁用；UI capabilities 与后端显式拒绝，按已选决策执行 |
 | AskUserQuestion | CLI 禁用该工具，退化为普通对话提问 | userInput request 映射 AskUserQuestion 工具事件；完整交互非本轮验收 | 0.0.17 ACP 明确不支持阻塞式提问；任务 5 复用问题卡片发送普通后续消息 |
 | 后台任务显示 | 任务开始/结束/集合事件 | subagent 生命周期、outOfTurn 处理 | 子 agent 报告已验证先于 prompt response；shell 无可配对的独立生命周期事件，按任务 5 原则不显示后台条 |
@@ -202,8 +231,8 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | 图片与文件附件 | 内容转换及工具读取路径 | image prompt / imageView 映射 | 未验证；任务 11；本任务只测普通文件读改 |
 | 模型选择 | spawn --model | app-server -c model | 已实现；真实新进程切换模型 + 重放通过，不采用原生恢复 |
 | 费用与用量 | result 成本字段 | tokenUsage 缓存到 result；不等同成本支持 | 已验证；token/上下文字段已录到；成本未验证 → 任务 12 |
-| hub vibedeckx HTTP MCP | --mcp-config HTTP bearer | -c mcp_servers / token env | 已验证；同名合成 HTTP MCP + Authorization + 工具调用，产品待实现 |
-| cross-remote HTTP MCP | 同上 | 同上 | 已验证；同名合成 HTTP MCP + Authorization + 工具调用，产品待实现；网关完整业务由对应实现任务补齐 |
+| hub vibedeckx HTTP MCP | --mcp-config HTTP bearer | -c mcp_servers / token env | 已接入；本地真实 hub + fx 调用通过，线上需部署协议协商修复 |
+| cross-remote HTTP MCP | 同上 | 同上 | 已接入；本地真实 hub 调用通过；线上握手修复待部署、授权远端与撤销完整验收未完成 |
 | 休眠唤醒 | 管理器历史重放 | 共用管理器历史重放 | 已实现；管理器子进程 + SQLite 休眠唤醒回归通过；首版不用 load/resume |
 | 切换 agent | 共用管理器迁移历史 | 共用管理器迁移历史 | 新 fx 会话 + 重放路径已接通；跨 agent 完整验收留任务 11 |
 | 分支 / 截断分支 | 共用分支历史复制 | 共用分支历史复制 | 独立 fx id + 历史路径已接通；截断分支完整验收留任务 11 |

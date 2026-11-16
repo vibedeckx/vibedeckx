@@ -1,3 +1,4 @@
+import { negotiateMcpVersion } from "../protocol/mcp/version.js";
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import { proxyToRemoteAuto, type ProxyResult } from "../utils/remote-proxy.js";
@@ -27,7 +28,6 @@ import {
 import type { CrossRemoteAuditStatus } from "../storage/types.js";
 import "../server-types.js";
 
-const PROTOCOL_VERSION = "2024-11-05";
 const AUDIT_ARGS_MAX = 1024;
 const NOT_ACCESSIBLE = "remote not found or not accessible";
 const NOT_GRANTED = "remote not granted to this session; ask the user to allow it from the composer's + menu (Remote access)";
@@ -36,7 +36,7 @@ interface JsonRpcRequest {
   jsonrpc: string;
   id?: string | number;
   method: string;
-  params?: { name?: string; arguments?: Record<string, unknown> };
+  params?: { protocolVersion?: string; name?: string; arguments?: Record<string, unknown> };
 }
 
 const REMOTE_ID_PROP = {
@@ -563,7 +563,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     switch (rpc.method) {
       case "initialize":
         return respond({
-          protocolVersion: PROTOCOL_VERSION,
+          protocolVersion: negotiateMcpVersion(rpc.params?.protocolVersion),
           capabilities: { tools: {} },
           serverInfo: { name: "vibedeckx-cross-remote", version: "1.0.0" },
           instructions: CROSS_REMOTE_MCP_INSTRUCTIONS,
