@@ -39,7 +39,7 @@ export function detectBinary(name: string, options?: { refresh?: boolean }): str
  * when the probe fails. Used to attribute protocol failures to an agent
  * version in session logs — never gates behavior.
  */
-export function getBinaryVersion(command: string): string | null {
+export function getBinaryVersion(command: string, env?: NodeJS.ProcessEnv): string | null {
   if (versionCache.has(command)) {
     return versionCache.get(command)!;
   }
@@ -49,6 +49,7 @@ export function getBinaryVersion(command: string): string | null {
       encoding: "utf-8",
       stdio: ["pipe", "pipe", "ignore"],
       timeout: 5000,
+      env: { ...process.env, ...env },
     }).trim();
     version = result || null;
   } catch {

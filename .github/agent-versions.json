@@ -1,4 +1,5 @@
 {
   "claude-code": { "package": "@anthropic-ai/claude-code", "pinned": "2.1.205", "lastSeen": "2.1.205" },
-  "codex": { "package": "@openai/codex", "pinned": "0.144.1", "lastSeen": "0.144.1" }
+  "codex": { "package": "@openai/codex", "pinned": "0.144.1", "lastSeen": "0.144.1" },
+  "fx": { "pinned": "v0.0.17", "lastSeen": "v0.0.17" }
 }

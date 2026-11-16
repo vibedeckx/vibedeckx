@@ -21,17 +21,22 @@ jobs:
       run_matrix: ${{ steps.check.outputs.run_matrix }}
       claude_latest: ${{ steps.check.outputs.claude_latest }}
       codex_latest: ${{ steps.check.outputs.codex_latest }}
+      fx_latest: ${{ steps.check.outputs.fx_latest }}
     steps:
       - uses: actions/checkout@v7
       - id: check
         run: |
           CLAUDE_LATEST=$(npm view @anthropic-ai/claude-code version)
           CODEX_LATEST=$(npm view @openai/codex version)
+          FX_LATEST=$(curl -fsSL https://releases.fx.sh/latest.txt | tr -d '[:space:]')
+          [[ "$FX_LATEST" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           CLAUDE_SEEN=$(jq -r '."claude-code".lastSeen' .github/agent-versions.json)
           CODEX_SEEN=$(jq -r '.codex.lastSeen' .github/agent-versions.json)
+          FX_SEEN=$(jq -r '.fx.lastSeen' .github/agent-versions.json)
           echo "claude_latest=$CLAUDE_LATEST" >> "$GITHUB_OUTPUT"
           echo "codex_latest=$CODEX_LATEST" >> "$GITHUB_OUTPUT"
-          if [ "${{ inputs.force_matrix }}" = "true" ] || [ "$CLAUDE_LATEST" != "$CLAUDE_SEEN" ] || [ "$CODEX_LATEST" != "$CODEX_SEEN" ]; then
+          echo "fx_latest=$FX_LATEST" >> "$GITHUB_OUTPUT"
+          if [ "${{ inputs.force_matrix }}" = "true" ] || [ "$CLAUDE_LATEST" != "$CLAUDE_SEEN" ] || [ "$CODEX_LATEST" != "$CODEX_SEEN" ] || [ "$FX_LATEST" != "$FX_SEEN" ]; then
             echo "run_matrix=true" >> "$GITHUB_OUTPUT"
           else
             echo "run_matrix=false" >> "$GITHUB_OUTPUT"
@@ -61,10 +66,17 @@ jobs:
             package: "@openai/codex"
             file: codex.live.test.ts
             channel: latest
+          - agent: fx
+            file: fx.live.test.ts
+            channel: pinned
+          - agent: fx
+            file: fx.live.test.ts
+            channel: latest
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       VIBEDECKX_COMPAT_REQUIRED: "1"
+      FX_AUTO_UPGRADE: "0"
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -77,15 +89,36 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Resolve agent version
         id: ver
+        env:
+          FX_LATEST: ${{ needs.version-check.outputs.fx_latest }}
         run: |
           if [ "${{ matrix.channel }}" = "pinned" ]; then
             V=$(jq -r '."${{ matrix.agent }}".pinned' .github/agent-versions.json)
+          elif [ "${{ matrix.agent }}" = "fx" ]; then
+            V="$FX_LATEST"
           else
             V=$(npm view ${{ matrix.package }} version)
           fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
       - name: Install agent CLI
+        if: matrix.agent != 'fx'
         run: npm install -g ${{ matrix.package }}@${{ steps.ver.outputs.version }}
+      - name: Install fx CLI
+        if: matrix.agent == 'fx'
+        env:
+          FX_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          curl -fsSL https://fx.sh/setup.sh -o "$RUNNER_TEMP/fx-setup.sh"
+          bash "$RUNNER_TEMP/fx-setup.sh" "$FX_VERSION"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Check fx CI authentication
+        if: matrix.agent == 'fx'
+        env:
+          AI_GATEWAY_API_KEY: ${{ secrets.AI_GATEWAY_API_KEY }}
+        run: |
+          test -n "$AI_GATEWAY_API_KEY" || { echo 'Missing AI_GATEWAY_API_KEY secret for fx live probes'; exit 1; }
+          fx --version
+          fx provider gateway
       - name: Codex headless login
         # codex has no ambient-env-var auth path: `codex login --with-api-key`
         # reads the key from stdin and persists it to $CODEX_HOME/auth.json
@@ -94,6 +127,8 @@ jobs:
         if: matrix.agent == 'codex'
         run: printenv OPENAI_API_KEY | codex login --with-api-key
       - name: Live probes (${{ matrix.agent }} @ ${{ steps.ver.outputs.version }})
+        env:
+          AI_GATEWAY_API_KEY: ${{ matrix.agent == 'fx' && secrets.AI_GATEWAY_API_KEY || '' }}
         run: pnpm --filter vibedeckx test:compat src/protocol/live/${{ matrix.file }}
 
   report-drift:
@@ -107,9 +142,10 @@ jobs:
         env:
           CLAUDE_LATEST: ${{ needs.version-check.outputs.claude_latest }}
           CODEX_LATEST: ${{ needs.version-check.outputs.codex_latest }}
+          FX_LATEST: ${{ needs.version-check.outputs.fx_latest }}
         with:
           script: |
-            const title = `protocol-compat: live matrix failure (claude latest ${process.env.CLAUDE_LATEST}, codex latest ${process.env.CODEX_LATEST})`;
+            const title = `protocol-compat: live matrix failure (claude latest ${process.env.CLAUDE_LATEST}, codex latest ${process.env.CODEX_LATEST}, fx latest ${process.env.FX_LATEST})`;
             const existing = await github.rest.search.issuesAndPullRequests({
               q: `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open in:title "protocol-compat: live matrix failure"`,
             });
@@ -127,7 +163,7 @@ jobs:
                 `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
                 "",
                 "- `pinned` cell failing ⇒ likely our bug (or CI env).",
-                "- `latest` cell failing ⇒ likely upstream protocol drift — check the job log for contract IDs (CC-*/CX-*) and consumer pointers.",
+                "- `latest` cell failing ⇒ likely upstream protocol drift — check the job log for contract IDs (CC-*/CX-*/FX-*) and consumer pointers.",
                 "",
                 "Contracts live in `packages/vibedeckx/src/protocol/*/schema.ts`; the failing scenario names the guarded behavior.",
               ].join("\n"),

@@ -1706,7 +1706,7 @@ export class AgentSessionManager {
     // attributed to an agent version. npx runs are logged as such (probing
     // `npx --version` would report npx itself, not the agent).
     if (config.command !== "npx") {
-      const agentVersion = getBinaryVersion(config.command);
+      const agentVersion = getBinaryVersion(config.command, config.env);
       console.log(`[AgentSession] ${provider.getDisplayName()} version: ${agentVersion ?? "unknown (--version probe failed)"}`);
     } else {
       console.log(`[AgentSession] ${provider.getDisplayName()} running via npx (version resolved at spawn by npm)`);

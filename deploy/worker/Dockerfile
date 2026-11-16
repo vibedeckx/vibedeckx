@@ -23,10 +23,11 @@ FROM node:24-bookworm-slim
 # vibedeckx@<version>) or a tarball under the dist-out/ bind mount (build.sh
 # passes /tmp/dist-out/vibedeckx-<ver>-linux-<arch>.tar.gz).
 ARG VIBEDECKX_PACKAGE=vibedeckx@latest
-# Agent CLIs baked into the image: the versions current at build time. They are
-# a starting point, not the only source — see the PATH note below.
+# Claude Code/Codex default to build-time latest; fx uses a tested release.
+# These are starting points — user-installed copies can override them on PATH.
 ARG CLAUDE_CODE_VERSION=latest
 ARG CODEX_VERSION=latest
+ARG FX_VERSION=v0.0.17
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git openssh-client ca-certificates procps curl \
@@ -44,6 +45,12 @@ RUN --mount=type=bind,source=dist-out,target=/tmp/dist-out \
  && npm cache clean --force \
  && vibedeckx --version && claude --version && codex --version
 
+# Use fx's official installer with an explicit release, not its latest default.
+RUN curl -fsSL https://fx.sh/setup.sh -o /tmp/fx-setup.sh \
+ && FX_INSTALL_DIR=/usr/local/bin bash /tmp/fx-setup.sh "${FX_VERSION}" \
+ && FX_AUTO_UPGRADE=0 fx --version \
+ && rm /tmp/fx-setup.sh
+
 # Run as a normal user: Claude Code refuses --dangerously-skip-permissions as
 # root. The node image's `node` user (uid 1000) is used.
 #
@@ -52,7 +59,7 @@ RUN --mount=type=bind,source=dist-out,target=/tmp/dist-out \
 # ownership:
 #   /data                         data-dir: SQLite, token, logs
 #   /home/node                    agent credentials (~/.claude, ~/.claude.json,
-#                                 ~/.codex), git and ssh config
+#                                 ~/.codex, ~/.fx), git and ssh config
 #   /var/tmp/vibedeckx/worktrees  git worktrees the worker creates
 #   /projects                     project checkouts
 RUN mkdir -p /data /projects /var/tmp/vibedeckx/worktrees \

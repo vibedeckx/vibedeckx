@@ -46,7 +46,7 @@ The **Instruction** tab shows the full text generated from your fields. You can 
 
 | Setting | Meaning |
 |---|---|
-| **Agent** | Claude Code or Codex. |
+| **Agent** | Choose from the agents listed in the dialog. |
 | **Stop after … items** | Pause after this many sessions (default 20, at most 200). |
 | **Stop after … minutes** | Pause after this much time (default 240, at most 1440). |
 | **Check command** | Optional, for example `npm test`. Runs in the worktree after each item; a non-zero exit stops the loop. |
@@ -54,6 +54,8 @@ The **Instruction** tab shows the full text generated from your fields. You can 
 | **Run one item first, then decide** | The loop pauses after the first item so you can read that session before letting the rest run. |
 
 The dialog remembers your last settings for each project.
+
+For experimental fx, read the [permissions and session limitations](/connect-a-machine#fx-experimental). Its edit sessions use full-access permissions and do not offer Plan mode.
 
 <Callout type="warn">
   Loop sessions run in edit mode, and nothing asks you to confirm between items. Use a check command, or **Run one item first**, until you trust the instruction.

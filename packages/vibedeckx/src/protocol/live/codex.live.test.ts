@@ -81,7 +81,7 @@ describe.skipIf(!available)("codex live probes (items & exec)", () => {
   it("CX-4: fileChange item carries changes[].path", async () => {
     const cwd = mkdtempSync(path.join(tmpdir(), "vibedeckx-compat-cx4-"));
     const r = await runCodexAppServer({
-      turns: ["Create a file named probe.txt containing the single word hello. Then reply DONE."],
+      turns: ["Use your apply_patch file editing tool to create probe.txt containing the single word hello. Do not use shell commands to create the file. Then reply DONE."],
       cwd,
       recordAs: "cx4-filechange",
     });

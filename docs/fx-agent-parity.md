@@ -1,10 +1,45 @@
-# fx 接入对齐矩阵（0.0.16 真实 ACP 探针）
+# fx 接入对齐矩阵（0.0.16 探针 / 0.0.17 产品验证）
 
 ## 状态与验收规则
 
 fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明注明的范围；**待实现**＝产品改动尚未完成，不代表协议已验证；**未验证**＝缺少真实实验；**明确不支持**＝有版本限定及原因的缺口；**延期**＝承诺范围内推迟的能力；**超出基线（不做）**＝现有 Claude Code / Codex 也没有的能力。
 
 “明确不支持”“延期”是承诺范围内的缺口，收尾时须用户确认；“超出基线（不做）”无需确认。**写了差异说明不等于通过验收。** 源码阅读、协议声明、参数被接受均不等于功能端到端可用。未验证不得写成不支持。
+
+## 任务 7 收尾进度（2026-11-16）
+
+**本节记录本轮收尾范围；整个 fx 集成尚未达到最终验收条件。** 任务列表中任务 8–12 仍为待办，不能把历史探针和基础 Provider 通过当作其产品验收。下面的历史章节保留当时版本和决定，当前权限以 full-access 决策为准。
+
+- 版本处理按用户确认与 Claude Code / Codex 对齐：只记录实际版本，不做版本白名单、不提示“未验证版本”。公共版本日志探测继承 spawn 环境，fx 的 `--version` 和 ACP/help 均关闭自动升级；不新增安装器或升级机制。
+- 平台按用户确认只写文档；不新增 Windows 专用判断、禁用 UI 或不可用提示。命令缺失沿用现有启动失败处理。服务安装时的公共 PATH 检查已有 fx，本次不重复修改。
+- 已将 fx pinned/latest 接入现有 protocol-compat workflow 和 agent-versions 记录；仍沿用手动触发，未开启新的定时任务。CI 需要仓库 secret `AI_GATEWAY_API_KEY`，缺失会明确失败。编写 CI 配置不等于 GitHub Actions 已运行通过。
+- 官方安装器接受显式版本参数；worker Dockerfile 增加固定 v0.0.17 安装，使用已有 `/home/node` volume 保留 `.fx`。独立 Docker 安装阶段验证通过（node:24-bookworm-slim，以 node 用户运行 0.0.17）；未据此宣称完整 worker 镜像发布或跨架构验收。
+- 当前 full-access 真实生命周期、本地真实 hub 调用均通过；新增 task7 录制保持原始握手模式，离线 schema 和 Provider 回放通过。测试入口见 fixtures README。
+- 原 Python 验证器需要保留的断言已迁入 `protocol/fx/recordings.test.ts`，包括独立格式的 HTTP 服务端日志。现有 codec/schema、Provider、管理器、live 测试接管其余当前产品检查后，清理本地 fx 探针及对应字节码；不删除其他 `.dev` 内容，保留所有有回归价值的录制。
+- 公开文档补充会话安装、登录、平台与功能差异；Loop 文档描述已有选择器与权限限制，不宣称完整 Loop/Reviewer/Commander 验收。Docker 文档给出现有镜像手动安装方式，不把尚未发布的预装变更冒充已发布行为。
+
+### 本轮已完成的验证与发布影响
+
+- 前后端 `tsc --noEmit`、`pnpm build:docs` 通过；生成页面的 fx 锚点与安装命令已检查。
+- 后端全量 Vitest：247 文件通过、2 文件跳过，**3602 passed / 11 skipped**。前端全量首次 **1722 passed / 1 failed**，失败为此前已记录的 Shiki `startIndex` 异常（未改动的 `symbol-tokens.test.ts`）；单文件允许一次重试后 8/8 通过，随后全量 `vitest run --retry 1` **187 文件 / 1723 项通过**，该次全量未发生重试。未修改 UI 或 Shiki 实现。
+- fx 真实生命周期和本地真实 hub 两项通过；生命周期增加逐轮记忆断言后再跑通过。新录制经离线 schema 与 Provider 回放通过。
+- Claude Code 基础对话、工具、多轮 3 项，Codex 握手、命令、编辑、取消、一次性执行 5 项真实回归通过。Codex 编辑用例首轮选择 shell 而未产生 fileChange；仅将测试提示词明确为使用 apply_patch 后，该项复验通过，没有修改 Codex 产品代码。
+- `actionlint`、workflow 内 shell 语法与 worker build.sh 语法检查通过；固定版本 Docker 安装阶段通过。
+- `node scripts/classify-diff.mjs`（默认 origin/main）与 `node scripts/classify-diff.mjs HEAD` 均为 gray / non-runtime，无 wire-contract 变更。公共版本探测继承 spawn 环境属于 worker 可达代码，需要 worker npm 发布才在已安装 worker 生效；Docker 预装需发布新镜像。隧道方法、payload、能力注册表均未修改，不新增隧道版本门槛；fixtures 只是测试数据。
+
+### 仍未满足的最终验收条件
+
+| 项目 | 当前证据 / 后续动作 |
+| --- | --- |
+| 执行器、定时任务 | 任务 8 仍待办，process-manager 仍只有 Claude/Codex 命令构造；由任务 8 完成后验收。 |
+| Reviewer、Loop、Commander 派生 | 类型及选择器共用路径已有 fx，但完整产品验收属于任务 9；不能写成所有入口已通过。 |
+| 模型/登录失败诊断、附件、切换 agent、分支、指令、文件清理 | 任务 10/11 尚未完成最终验收；保留各行真实状态。 |
+| 限制处理结论 | 任务 12 待办；不在本次擅自将未验证项判为不支持或延期。 |
+| 真实远端 worker | 本轮可访问列表为空，已请求授权；未部署线上 hub，未运行远端六入口验收。 |
+| macOS / arm64 | 官方支持的平台不等于本轮实测；本轮证据仅 Linux x86_64。 |
+| CI | 配置已接入且 actionlint 通过；只读检查确认仓库尚无 `AI_GATEWAY_API_KEY` secret，GitHub Actions 未实跑。 |
+
+当前需在最终收尾明确列出的差异：Plan 禁用（已有决定）；ACP 阻塞式提问不支持、以普通后续消息替代；无后台任务条和单任务 Stop；停止回合不保证结束已 yield 的 shell；历史重放非无损；编辑卡片只有局部 old/new 而非原生完整 diff。这些记录不是用户对所有缺口的最终验收确认。版本与 Windows 提示按本轮用户要求不再是待实现项。
 
 ## 当前权限决策更新（2026-11-16）
 
@@ -52,7 +87,7 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 
 验证入口：
 
-- `src/protocol/fx/*.test.ts`：全部现有 ACP 录制经离线契约检查（包括未采用的 load/resume 录制的 envelope/update），以及参数、图片构造、ACP flag 探测与旧版拒绝策略测试。HTTP MCP 服务端录制由原探针负责，不冒充 ACP envelope。
+- `src/protocol/fx/*.test.ts`：全部现有 ACP 录制经离线契约检查（包括未采用的 load/resume 录制的 envelope/update），以及参数、图片构造、ACP flag 探测与旧版拒绝策略测试。HTTP MCP 服务端录制现由 `recordings.test.ts` 单独校验，不冒充 ACP envelope。
 - `src/providers/fx-provider.test.ts`：握手、初始化前多条积压、多轮队列、同号反向 RPC、取消后继续、工具快照去重、错误收尾、独立原生 id、禁用 plan。
 - `src/agent-session-manager.fx.test.ts`：真实 stdio 子进程 + SQLite（模拟 ACP 服务端），验证多块文本不覆盖、thinking 合并、逐轮 turn_end、用户 Stop 保活、默认 Stop 终止、强制容量回收及退出确认失败拒绝、重复 Stop、取消超时/SIGKILL、旧取消计时器不影响下一轮、休眠唤醒不重复历史、换模型、异常退出后再唤醒、损坏报文退出 running、提前拒绝 plan。
 - `src/protocol/live/fx.live.test.ts`：真实 fx **0.0.17** + 原始 OAuth 登录，2026-11-15 通过（初次约 23 秒，增量修复后复验约 19 秒）。验证两轮及运行中排队、取消后续问、thinking、成功工具结果、新原生会话重放标记、`spacexai/grok-4.7` → `openai/gpt-5.4-mini`，并校验原 settings 字节不变。通过 `pnpm --filter vibedeckx exec vitest run --config vitest.live.config.ts src/protocol/live/fx.live.test.ts --retry 0` 运行。
@@ -102,7 +137,7 @@ MCP 优先使用 `_meta.fx.toolCall.mcp.{server,tool}` 调用共用 `qualifiedMc
 - 首轮用户环境未登录；用户登录后，2026-11-13 完成真实 Gateway 模型实验，主模型 `spacexai/grok-4.7`，模型优先级实验使用 `openai/gpt-5.4-mini`。未使用假的模型服务。
 - 权限规则实验使用临时 HOME、本地复制的认证文件和合成 settings，权限为目录 0700、文件 0600；退出后删除。认证内容不进入录制。普通实验只操作临时工作区；MCP 使用本地合成工具及固定无效于外部的测试 token。
 - 发现 `session/set_mode` 会持久化默认模式；实验后恢复用户原来的 auto，脚本也加入 finally 恢复逻辑。未修改用户模型默认值。
-- [真实未登录录制](../packages/vibedeckx/src/protocol/fx/__fixtures__/unauthenticated.jsonl)；临时复现脚本位于本机 `.dev/scripts/`（Git 忽略，不作为交付依赖）。
+- [真实未登录录制](../packages/vibedeckx/src/protocol/fx/__fixtures__/unauthenticated.jsonl)；历史录制由正式 `protocol/fx/recordings.test.ts` 校验；临时 Python 探针已清理，不作为交付依赖。
 - 辅助源码固定到 [481104fdbc24](https://github.com/vercel-labs/fx/tree/481104fdbc24/src/acp)，不把最新文档或源码测试当作当前二进制实测。
 
 ## 阻塞项结论与录制
@@ -241,7 +276,7 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | Reviewer | 现有产品入口，具体 agent 组合未复核 | 同左 | 未验证；对应 Reviewer 接入任务补齐，不在本探针实现 |
 | Loop | workflow-repeat-loop 传 agentType | 同左 | 待实现；对应 Loop 接入任务 |
 | Commander 派生 | 现有会话/MCP/执行器路径 | 现有共用路径，组合未复核 | 未验证；对应 Commander 接入任务补齐 |
-| Windows | binary 检测有 win32 分支；本轮未实跑 | 同左 | 未验证；对应平台接入任务 |
+| Windows | binary 检测有 win32 分支；本轮未实跑 | 同左 | fx 官方无 Windows 原生版本；按用户决定仅文档说明，沿用命令缺失错误，不做平台专用检测或 UI 禁用 |
 | macOS | 现有非 win32 检测路径；本轮未实跑 | 同左 | 未验证；对应平台接入任务 |
 | Linux | 现有 Provider；本轮未重跑 | 同左 | 已验证；Linux 基础会话产品验收见任务 4；MCP 为原探针证据，业务接入仍待后续任务 |
 | 未登录错误 | 有启动错误路径 | 有启动错误路径 | 已实现初始化错误收尾；认证分类与其他登录场景留任务 10 |
@@ -255,7 +290,7 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 - 内联图片 prompt：**未验证 → 任务 11**。
 - usage_update.used/size 及 prompt response.usage token 字段：**已验证**；未出现成本字段、跨模型统计细节 **未验证 → 任务 12**。
 - 未登录错误：**已验证 → 任务 10**。错误发生在 initialize，不是仅退出进程。
-- 版本不符/额度用尽：**未验证 → 任务 10**；未耗尽额度取样。
+- 额度用尽：**未验证 → 任务 10**；未耗尽额度取样。版本按用户决定只记录供排查，不再要求版本范围提示。
 - stdio MCP：不属于本任务要求，未验证；此范围豁免不表示三方都没有该能力。
 
 ## 建议：继续做产品接入，首版按上述边界收敛

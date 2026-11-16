@@ -8,6 +8,7 @@
 #
 # Produces the image tagged: vibedeckx-worker:local  (override with IMAGE=...)
 # Agent CLI versions: CLAUDE_CODE_VERSION=... CODEX_VERSION=... (default: latest)
+# FX_VERSION=... (default: v0.0.17)
 #
 set -euo pipefail
 
@@ -46,6 +47,7 @@ docker build \
   --build-arg "VIBEDECKX_PACKAGE=/tmp/dist-out/${TARBALL}" \
   --build-arg "CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION:-latest}" \
   --build-arg "CODEX_VERSION=${CODEX_VERSION:-latest}" \
+  --build-arg "FX_VERSION=${FX_VERSION:-v0.0.17}" \
   "${ROOT_DIR}"
 
 echo "==> Done: ${IMAGE}"

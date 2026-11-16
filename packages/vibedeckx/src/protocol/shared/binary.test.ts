@@ -47,4 +47,15 @@ describe("protocol/shared/binary", () => {
   it("returns null version for a broken command", () => {
     expect(getBinaryVersion("/nonexistent/binary")).toBeNull();
   });
+
+  it.skipIf(process.platform === "win32")("uses spawn environment for version probes without changing the parent environment", () => {
+    const dir = mkdtempSync(join(tmpdir(), "binary-version-env-"));
+    const binary = join(dir, "fx");
+    const before = process.env.FX_AUTO_UPGRADE;
+    try {
+      writeFileSync(binary, '#!/bin/sh\n[ "$FX_AUTO_UPGRADE" = "0" ] || exit 1\nprintf "0.0.17\\n"\n', { mode: 0o755 });
+      expect(getBinaryVersion(binary, { FX_AUTO_UPGRADE: "0" })).toBe("0.0.17");
+      expect(process.env.FX_AUTO_UPGRADE).toBe(before);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 });

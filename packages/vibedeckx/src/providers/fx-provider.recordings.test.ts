@@ -4,13 +4,13 @@ import { FxProvider } from "./fx-provider.js";
 import type { ParsedAgentEvent } from "../agent-provider.js";
 
 /** Replay real ACP traffic through the product provider, including late reports. */
-function replay(file: string) {
+function replay(file: string, prefix = "task5") {
   const provider = new FxProvider();
   provider.onSessionCreated("recorded");
   provider.getInitializationMessages("recorded", { cwd: "/workspace" });
   const events: ParsedAgentEvent[] = [];
   const resultsAt: number[] = [];
-  for (const line of readFileSync(new URL(`../protocol/fx/__fixtures__/task5-${file}.jsonl`, import.meta.url), "utf8").trim().split("\n")) {
+  for (const line of readFileSync(new URL(`../protocol/fx/__fixtures__/${prefix}-${file}.jsonl`, import.meta.url), "utf8").trim().split("\n")) {
     const { direction, message } = JSON.parse(line);
     if (direction === "stdin") {
       if (message.method === "session/prompt") provider.formatUserInput(message.params.prompt, "recorded");
@@ -18,7 +18,7 @@ function replay(file: string) {
     } else if (direction === "stdout") {
       // These immutable tool recordings predate edit → full-access. Adapt only
       // the handshake mode for tool replay; mode enforcement has its own tests.
-      if (message.result?.sessionId && message.result?.modes) {
+      if (prefix === "task5" && message.result?.sessionId && message.result?.modes) {
         message.result.modes.currentModeId = "full-access";
       }
       events.push(...provider.parseStdoutLine(JSON.stringify(message), "recorded"));
@@ -32,6 +32,15 @@ function replay(file: string) {
   return { events, resultsAt };
 }
 describe("fx 0.0.17 tool recordings", () => {
+  it("replays current full-access lifecycle recordings without adapting the handshake", () => {
+    const first = replay("fx-lifecycle-1", "task7");
+    expect(first.events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["success", "success", "cancelled", "success", "success"]);
+    expect(first.events.some(e => e.type === "tool_result" && e.output.includes("FX_TOOL_OK"))).toBe(true);
+    const second = replay("fx-lifecycle-2", "task7");
+    expect(second.events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["success"]);
+    expect(second.events.filter(e => e.type === "text").map(e => e.content).join("")).toContain("LIFECYCLE731");
+    expect(second.events.find(e => e.type === "native_session_id")).not.toEqual(first.events.find(e => e.type === "native_session_id"));
+  });
   it("maps real file/search calls and their results", () => {
     const { events } = replay("tool-cards");
     const calls = events.filter(e => e.type === "tool_use");

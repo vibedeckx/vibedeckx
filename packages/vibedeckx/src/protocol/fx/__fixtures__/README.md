@@ -1,4 +1,4 @@
-# fx ACP recordings — 0.0.16
+# fx ACP recordings — 0.0.16 / 0.0.17
 
 Recorded on 2026-11-13, Linux x86_64, fx revision `481104fdbc24`.
 Binary SHA-256: `b8670dcc121b4289e2bdcd2a3e226fd64e3def53c976c42b42de72ee69f66cae`.
@@ -65,11 +65,20 @@ Validate both directions of RPC IDs, tool states, marker recall, cancellation,
 HTTP auth/calls and model configuration, then redact private paths and credentials
 before saving recordings.
 
-The original one-off Python probes remain locally in ignored `.dev/scripts/`.
-They are not committed or required to consume these fixtures. Provider unit and
-live contract tests should take over the relevant checks during integration.
-These probes create fx histories for disposable workspaces; they do not delete
-user sessions.
+The one-off Python probes have been retired after their retained checks moved
+into the committed test suite. No test or reproduction command requires `.dev`:
+
+- `schema.test.ts`: ACP envelopes and response/update contracts for every ACP transcript.
+- `recordings.test.ts`: historical turn memory, cancellation, direction-aware permission replies,
+  native load/resume evidence, model overrides, system prompt, invalid parameters,
+  unauthenticated errors and HTTP authentication/calls (using the separate HTTP log format).
+- `providers/fx-provider.recordings.test.ts`: product behavior when replaying real traffic.
+- `../live/fx.live.test.ts`: current full-access lifecycle with a real CLI/model.
+- `../live/fx-hub.live.test.ts`: opt-in real hub MCP calls.
+
+The older ask/auto and native load/resume fixtures are historical evidence, not
+current product promises. Keep them unchanged; current tests do not copy OAuth
+credentials, change HOME, or call persistent `session/set_mode`.
 
 See [the parity matrix and decisions](../../../../../../docs/fx-agent-parity.md)
 for mapping details, downgrade boundaries and remaining implementation tasks.
@@ -118,3 +127,29 @@ truncated by fx itself (including web_fetch); recordings preserve them as sent.
 turn-end outcomes with a simulated ACP process. UI card and question submission
 tests are in `agent-message.fx-tools.test.tsx`. None substitutes for a browser
 end-to-end test or guarantees that cancelling a prompt kills every child process.
+
+
+## Task 7 — current full-access lifecycle (2026-11-16)
+
+`task7-fx-lifecycle-1.jsonl` and `task7-fx-lifecycle-2.jsonl` were captured by the
+committed `fx.live.test.ts` using fx 0.0.17 on Linux x86_64, the original login,
+and process-local `--permission-mode full-access`. The adjacent metadata file
+records the version, platform and models. The first transcript covers queued
+turns, thinking, cancel-then-continue and a completed shell tool. The second
+starts a new native session with a different model and replays a conversation
+marker. No handshake mode is rewritten for these recordings. User settings
+remained byte-identical. Workspace/home paths are redacted; stderr is not recorded.
+
+Run from the repository root:
+
+```bash
+pnpm --filter vibedeckx exec vitest run src/protocol/fx src/providers/fx-provider.recordings.test.ts
+pnpm --filter vibedeckx test:compat src/protocol/live/fx.live.test.ts --retry 0
+FX_LOCAL_HUB_SMOKE=1 pnpm --filter vibedeckx test:compat src/protocol/live/fx-hub.live.test.ts --retry 0
+```
+
+Live runs write new local transcripts to the ignored `protocol/live/recordings/`
+directory. Review and redact a recording before promoting it here; fixtures are
+not product runtime data. See [live probe setup](../../live/README.md) for CI
+credentials and missing-binary behavior. These tests do not replace remote-worker
+acceptance of every product entry point.
