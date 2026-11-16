@@ -33,16 +33,23 @@ rl.on('line', line => {
    if (active) { send({ id: m.id, error: { code: -32600, message: 'Concurrent prompt' } }); return; }
    active = m;
    const text = m.params.prompt.map(p => p.text || '').join('');
+   if (text.startsWith('TOOLS_')) {
+     for (const name of ['shell', 'subagent']) send({ method: 'session/update', params: { sessionId: m.params.sessionId, update: { sessionUpdate: 'tool_call', toolCallId: name, name, rawInput: { action: 'run', command: 'sleep 30' }, status: 'in_progress' } } });
+     if (text === 'TOOLS_ERROR') { send({ id: m.id, error: { code: -32000, message: 'Failed with tools in progress' } }); active = null; return; }
+   }
    if (text === 'IGNORE_CANCEL' || text === 'IGNORE_TERM') return;
    if (text === 'PROMPT_ERROR') { send({ id: m.id, error: { code: -32000, message: 'Rate limit' } }); active = null; return; }
    if (text === 'CRASH') { process.exit(1); }
    if (text === 'MALFORMED') { process.stdout.write('broken-json\n'); return; }
    timer = setTimeout(() => {
+     if (text === 'TOOLS_REPORT' || text === 'LATE_REPORT') {
+       for (const text of ['Sent to child', 'CHILD_DONE', 'CHILD_DONE']) send({ method: 'session/update', params: { sessionId: m.params.sessionId, update: { sessionUpdate: 'tool_call_update', toolCallId: 'subagent', status: 'completed', content: [{ type: 'content', content: { type: 'text', text } }] } } });
+     }
      for (const [kind, text] of [['agent_thought_chunk', 'think '], ['agent_thought_chunk', 'more'], ['agent_message_chunk', 'ans'], ['agent_message_chunk', 'wer']]) {
        send({ method: 'session/update', params: { sessionId: m.params.sessionId, update: { sessionUpdate: kind, content: { type: 'text', text } } } });
      }
      send({ id: m.id, result: { stopReason: 'end_turn' } }); active = null;
-   }, text === 'HOLD' || text === 'CANCEL_RACE' ? 2000 : 20);
+   }, text === 'TOOLS_CANCEL' || text === 'HOLD' || text === 'CANCEL_RACE' ? 2000 : 20);
  }
 });
 `;
@@ -73,6 +80,47 @@ describe("fx manager lifecycle", () => {
     vi.spyOn(provider, "buildSpawnConfig").mockImplementation((_cwd, _mode, _cross, model) => ({ command: process.execPath, args: ["-e", fakeAcp], env: { FX_TEST_LOG: log, FX_TEST_MODEL: model ?? "default" } }));
   });
   afterEach(async () => { for (const row of await storage.agentSessions.getAll()) await manager.stopSessionAndWait(row.id); await manager.shutdown(); await storage.close(); vi.restoreAllMocks(); rmSync(dir, { recursive: true, force: true }); });
+
+  it.each(["TOOLS_SUCCESS", "TOOLS_CANCEL", "TOOLS_ERROR"])("returns to stopped after tools were in progress: %s", async scenario => {
+    const id = await newSession();
+    await manager.sendUserMessage(id, scenario, dir);
+    await waitFor(async () => (await entries(id)).filter(e => e.type === "tool_use").length === 2);
+    if (scenario === "TOOLS_CANCEL") await manager.stopSession(id, { interruptOnly: true });
+    await completed(id, 1);
+    expect(manager.getSession(id)?.status).toBe("stopped");
+    expect((await entries(id)).filter(e => e.type === "turn_end").map(e => e.outcome)).toEqual([scenario === "TOOLS_SUCCESS" ? "completed" : scenario === "TOOLS_CANCEL" ? "stopped" : "failed"]);
+    await manager.sendUserMessage(id, "next", dir);
+    await completed(id, 2);
+    expect(manager.getSession(id)?.status).toBe("stopped");
+  });
+
+  it("persists the late child report in the same result card", async () => {
+    const id = await newSession();
+    await manager.sendUserMessage(id, "TOOLS_REPORT", dir);
+    await completed(id, 1);
+    const results = (await entries(id)).filter(e => e.type === "tool_result");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ tool: "Agent", toolUseId: "subagent", output: "CHILD_DONE" });
+    expect(manager.getSession(id)?.status).toBe("stopped");
+  });
+
+  it("preserves the original tool cards in storage when reports arrive in the next turn after cancellation", async () => {
+    const id = await newSession();
+    await manager.sendUserMessage(id, "TOOLS_CANCEL", dir);
+    await waitFor(async () => (await entries(id)).filter(e => e.type === "tool_use").length === 2);
+    await manager.stopSession(id, { interruptOnly: true });
+    await completed(id, 1);
+    const originalCalls = (await entries(id)).filter(e => e.type === "tool_use");
+    await manager.sendUserMessage(id, "LATE_REPORT", dir);
+    await completed(id, 2);
+    const persisted = await entries(id);
+    expect(persisted.filter(e => e.type === "tool_use")).toEqual(originalCalls);
+    expect(persisted.filter(e => e.type === "tool_result")).toEqual([
+      expect.objectContaining({ tool: "Agent", toolUseId: "subagent", output: "CHILD_DONE" }),
+    ]);
+    expect(persisted.filter(e => e.type === "turn_end").map(e => e.outcome)).toEqual(["stopped", "completed"]);
+    expect(manager.getSession(id)?.status).toBe("stopped");
+  });
 
   it("queues turns with distinct end markers, keeps Stop's process and permits a following turn", async () => {
     const turnWrites = vi.spyOn(storage.agentSessions, "upsertTurnEndWithOutbox");

@@ -75,14 +75,55 @@ describe("FxProvider lifecycle", () => {
       expect(p.parseStdoutLine(update({ sessionUpdate: kind, content: { type: "text", text: "chunk" } }), "app")).toEqual([{ type, content: "chunk", delta: true }]);
     }
     const start = { sessionUpdate: "tool_call", toolCallId: "t", name: "shell", rawInput: { command: "pwd" }, status: "pending" };
-    expect(p.parseStdoutLine(update(start), "app")[0]).toMatchObject({ type: "tool_use", tool: "shell", input: { command: "pwd" } });
+    expect(p.parseStdoutLine(update(start), "app")[0]).toMatchObject({ type: "tool_use", tool: "Bash", input: { command: "pwd" } });
     expect(p.parseStdoutLine(update(start), "app")).toEqual([]);
     const content = [{ type: "content", content: { type: "text", text: "/workspace" } }];
     expect(p.parseStdoutLine(update({ sessionUpdate: "tool_call_update", toolCallId: "t", status: "in_progress", content }), "app")).toEqual([]);
     const end = update({ sessionUpdate: "tool_call_update", toolCallId: "t", status: "completed", content });
-    expect(p.parseStdoutLine(end, "app")).toEqual([{ type: "tool_result", tool: "shell", output: "/workspace", toolUseId: "t" }]);
+    expect(p.parseStdoutLine(end, "app")).toEqual([{ type: "tool_result", tool: "Bash", output: "/workspace", toolUseId: "t" }]);
     expect(p.parseStdoutLine(end, "app")).toEqual([]);
     expect(p.parseStdoutLine(update(start, "foreign"), "app")).toEqual([]);
+  });
+  it("replaces changed completed snapshots with the child report and preserves MCP names on results", () => {
+    const p = new FxProvider(); ready(p); p.formatUserInput("go", "app");
+    p.parseStdoutLine(update({ sessionUpdate: "tool_call", toolCallId: "child", name: "subagent", rawInput: { action: "message", agent: "child", message: "work" } }), "app");
+    const result = (text: string) => update({ sessionUpdate: "tool_call_update", toolCallId: "child", status: "completed", content: [{ type: "content", content: { type: "text", text } }] });
+    expect(p.parseStdoutLine(result("Sent to child"), "app")[0]).toMatchObject({ tool: "Agent", output: "Sent to child" });
+    expect(p.parseStdoutLine(result("CHILD_DONE"), "app")[0]).toMatchObject({ tool: "Agent", output: "CHILD_DONE", toolUseId: "child" });
+    expect(p.parseStdoutLine(result("CHILD_DONE"), "app")).toEqual([]);
+    expect(p.parseStdoutLine(update({ sessionUpdate: "tool_call", toolCallId: "mcp", name: "mcp_my_server_my_tool", rawInput: {}, _meta: { fx: { toolCall: { mcp: { server: "my_server", tool: "my_tool" } } } } }), "app")[0]).toMatchObject({ tool: "mcp__my_server__my_tool" });
+    expect(p.parseStdoutLine(update({ sessionUpdate: "tool_call_update", toolCallId: "mcp", status: "completed" }), "app")[0]).toMatchObject({ tool: "mcp__my_server__my_tool" });
+  });
+  it.each(["end_turn", "cancelled", "error"])("ends a turn with yielded shell and pending child on %s without inventing background tasks", stopReason => {
+    const p = new FxProvider(); ready(p);
+    const prompt = JSON.parse(p.formatUserInput("go", "app"));
+    for (const name of ["shell", "subagent"]) {
+      const events = p.parseStdoutLine(update({ sessionUpdate: "tool_call", toolCallId: name, name, rawInput: { action: name === "shell" ? "run" : "message" }, status: "in_progress" }), "app");
+      expect(events.map(e => e.type)).toEqual(["tool_use"]);
+    }
+    p.parseStdoutLine(update({ sessionUpdate: "tool_call_update", toolCallId: "shell", status: "completed", content: [] }), "app");
+    if (stopReason === "cancelled") p.formatInterrupt("app");
+    const events = p.parseStdoutLine(stopReason === "error" ? JSON.stringify({ jsonrpc: "2.0", id: prompt.id, error: { code: -32000, message: "Failed" } }) : response(prompt.id, { stopReason }), "app");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ type: "result", subtype: stopReason === "end_turn" ? "success" : stopReason });
+    expect(JSON.parse(p.formatUserInput("next", "app")).method).toBe("session/prompt");
+  });
+  it("preserves yielded shell identity and output across prompts and empty progress", () => {
+    const p = new FxProvider(); ready(p);
+    const first = JSON.parse(p.formatUserInput("run", "app"));
+    p.parseStdoutLine(update({ sessionUpdate: "tool_call", toolCallId: "shell", name: "shell", rawInput: { action: "run", command: "sleep 30" } }), "app");
+    const progress = (status: string, text: string) => update({ sessionUpdate: "tool_call_update", toolCallId: "shell", status, content: [{ type: "content", content: { type: "text", text } }] });
+    p.parseStdoutLine(progress("completed", "initial output"), "app");
+    expect(p.parseStdoutLine(progress("in_progress", ""), "app")).toEqual([]);
+    p.parseStdoutLine(response(first.id, { stopReason: "end_turn" }), "app");
+    // Idle updates still cannot reopen a turn.
+    expect(p.parseStdoutLine(progress("in_progress", "idle output"), "app")).toEqual([]);
+    p.formatUserInput("next", "app");
+    expect(p.parseStdoutLine(progress("in_progress", "late output"), "app")).toEqual([
+      { type: "tool_result", tool: "Bash", toolUseId: "shell", output: "late output" },
+    ]);
+    expect(p.parseStdoutLine(progress("in_progress", ""), "app")).toEqual([]);
+    expect(p.parseStdoutLine(update({ sessionUpdate: "tool_call_update", toolCallId: "shell", status: "in_progress", content: [] }), "app")).toEqual([]);
   });
   it.each(["bad-json", response(1, {}), JSON.stringify({ jsonrpc: "2.0", id: 1, error: { code: -32600, message: "Not authenticated" } })])("ends a failed initialization and never flushes queued prompts: %s", line => {
     const p = new FxProvider(); p.onSessionCreated("a"); p.getInitializationMessages("a"); p.formatUserInput("buffered", "a");

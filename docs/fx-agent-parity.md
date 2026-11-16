@@ -33,6 +33,36 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 
 - 安装提示交互调整后回归：后端针对性测试 114 项、UI 相关测试 67 项通过；覆盖列表不探测安装/不返回 hint、启动缺少 fx 时把安装提示写入对话历史、安装与移除后的路径重探测。
 
+## 任务 5 工具卡片与生命周期（2026-11-16，fx 0.0.17）
+
+工具名和参数在 `protocol/fx/tool-mapping.ts` 归一，复用现有 UI：Read / Write 的 `path → file_path`，Read 的 `start_line/line_count → offset/limit`，Edit 使用 `old_string/new_string` 展示**局部替换**，不构造完整文件 diff；shell → Bash（interact/stop 没有 command 时保留原参数回退显示）；Glob、Grep（include → glob）、WebSearch、WebFetch、Agent、AskUserQuestion 均用现有卡片。subagent 的 agent/action/message 适配为描述和提示词；toolbox、vision、read_tool_result、install_skill 及未知工具保留通用 JSON 卡片。真实 OpenAI 模型的原生 web_search 可上报空 rawInput，此时保留空参数，不捏造 query。
+
+MCP 优先使用 `_meta.fx.toolCall.mcp.{server,tool}` 调用共用 `qualifiedMcpToolName`，结果事件沿用缓存的 metadata；没有 metadata 时不拆单下划线名字。这里只完成命名，HTTP MCP 配置/业务接入仍属于任务 6。
+
+真实录制见 `__fixtures__/task5-*.jsonl`，版本与复现说明见 fixtures README。四份录制既经过协议契约检查，也经 `fx-provider.recordings.test.ts` 回放到产品 provider。补测结论：
+
+| 项目 | 0.0.17 真实观察 | 产品行为 / 差异 |
+| --- | --- | --- |
+| 提问 | ask_user_question 立即完成，输出 “only available in the interactive shell; ask the user freeform instead”；没有等待用户回答的 ACP 请求 | 明确不支持本版本 ACP 阻塞式提问。映射到现有问题卡片，补齐缺省 header；选择/自由输入通过现有 sendMessage 发送普通后续消息，若前一 prompt 尚未完成则 FIFO 排队。并非向悬挂工具返回答案。UI 测试验证提交路径。 |
+| 子 agent 正常收尾 | message 工具先 completed（Sent to…），随后同一 toolCallId 再 completed（真实最终报告）；即便要求父 agent 不调用 wait，prompt response 仍在 CHILD_NOWAIT_DONE 报告之后 | 直接利用 prompt 响应收尾，不另建账本。修复旧 provider 丢弃第二个 completed 的问题，以同一结果 ID 替换卡片，重复快照不重复展示。 |
+| 长驻 shell | run 在进程运行中即 completed；后续输出可能以原 ID 的 in_progress 到达；interact 有退出码/耗时 command_result；不等待的 run 回合未录到独立进程结束事件 | run 的 completed 不等价于进程结束。没有可配对的独立生命周期事件，不发 task_started/task_finished，不显示后台任务条。回合内、run 工具已 completed 后到达的输出更新原卡片；prompt 结束后不把迟到更新当作新回合。 |
+| shell 正常/失败 | sleep 3 后输出 SHELL_DONE；另一次 sleep 2 后退出 7，interact status=failed，prompt 仍 end_turn | 工具失败不假装成协议失败；以真实 prompt 响应结束回合。管理器测试另覆盖在 shell/subagent 进行时发生 prompt JSON-RPC error，状态均回 stopped（非 running），下一轮可用。 |
+| shell 取消 | 先由命令写 cancel.pid，确认已启动后发 session/cancel；返回 cancelled，下一轮 AFTER_CANCEL 成功。检查时 shell PID 仍存在，结束实验前清理 | **取消回合不保证杀死已 yield 的 shell**。UI 状态以 cancelled 正确结束；不宣称底层进程被终止。原有超时/重复 Stop 杀进程兜底保持不变。 |
+| 子 agent 取消 | 子任务 shell 写出 cancel.pid 后发 cancel；prompt cancelled，后续 AFTER_CHILD_CANCEL 成功；实验结束检查 PID 已不存在，未产生取消后的标记文件 | 管理器与 provider 回归覆盖取消后的状态收尾；此样本不推广成所有派生进程的终止保证。 |
+| 单任务停止 | shell action=stop / session_id / force 已实测调用成功 | 协议工具可停止 shell；没有后台条所需的可靠会话 ID 与生命周期配对，未暴露产品单任务 Stop 按钮，也不模拟 Claude task 事件。 |
+
+验证分层：真实 fx 工具/生命周期录制；录制经 provider 回放；真实 stdio 模拟服务端 + SQLite 验证管理器正常、取消、错误收尾及下一轮；UI 组件直接消费归一结果，验证专用卡片、通用卡片和问题提交。此次未另做浏览器端到端验收，不将组件测试称为浏览器验收。
+
+最终验证：前后端 `tsc --noEmit` 均通过；后端 `pnpm --filter vibedeckx test` 为 **3571 passed / 11 skipped**；前端 `pnpm --filter vibedeckx-ui exec vitest run --retry 1` 为 **1721 passed**。前端首轮有一个未改动的 Shiki `symbol-tokens` 用例在库内抛出 startIndex 异常，单独复跑及全量复跑均通过；未为此修改无关实现。后端首轮与映射增量修改交错导致两项读到旧转换缓存，固定最终代码后全量复跑通过。fx 专项 92 项及 UI 新增 15 项覆盖上述产品路径。
+
+### 任务 5 review 修正
+
+本轮验证：fx 相关 7 个测试文件、94 项测试通过，后端 `tsc --noEmit` 通过；本轮未重跑前后端全量套件。
+
+- 录制 `task5-subagent-cancel-shell-stop` 中，被取消子任务的报告实际在下一次 prompt 内到达。工具缓存改为原生会话生命周期保留，避免发出无名 tool_use 覆盖旧 Agent/Bash 卡片；会话销毁时清理。空闲期间的更新仍不启动新回合。
+- 空的非终态进度快照保留已有结果，不再将它替换成字面量 in_progress。补充真实录制断言、跨回合 shell 测试及取消后下一轮报告的 SQLite 持久化回归。
+- 问题卡片的已回答判断仍要求紧邻 user 消息；fx 中间有 tool_result，因此旧问题仍可点击。这是现有共享 UI 的限制，不是“已回答后自动关闭”的承诺；本轮不改共享问题关联逻辑。UI 测试保留跨包导入，以直接验证实际归一函数与现有卡片的契约。
+
 ## 环境与证据
 
 - fx **0.0.16**，build revision `481104fdbc24`，Linux x86_64。
@@ -147,7 +177,7 @@ load 和 resume 请求都使用 `{sessionId,cwd,mcpServers}`。主实验进程�
 | approval_request | command/fileChange 可由 shell/edit 映射；MCP kind other 无现有 union 对应项，需小范围扩展审批表达，或明确可见地拒绝，不能默认批准。 |
 | formatApprovalResponse | 保留服务端 request id 与 optionId，发送 outcome.selected；allow_always 行为未测。 |
 | formatInterrupt | session/cancel 通知，等待原 prompt 响应后进入下一轮；已验证。 |
-| task_started / task_finished / task_list_changed / formatStopBackgroundTask | 未验证，任务 5；不从 prompt 完成推断所有后台任务结束。 |
+| task_started / task_finished / task_list_changed / formatStopBackgroundTask | 任务 5 已补测：子 agent 利用 prompt 收尾；shell 无独立配对事件，不生成后台账本或停止按钮，不从 prompt 完成推断进程已结束。 |
 | result 用量与成本 | response.usage.inputTokens/outputTokens 可映射；cacheReadTokens/reasoningTokens 额外字段，mini 另有 cacheWriteTokens；usage_update.used/size 是上下文占用，不能当本轮 token 用量。成本未出现，不填 0；任务 12。 |
 | error | JSON-RPC error.code/message，包含认证 -32600、参数 -32602；要区分初始化/请求错误并停止失败初始化。 |
 | onSessionCreated / onSessionDestroyed | 分配/清理 RPC、原生 id、工具/用量状态；不得跨会话泄漏。 |
@@ -162,12 +192,12 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | --- | --- | --- | --- |
 | 会话与流式输出 | stream-json Provider | app-server Provider | 已实现；真实 Provider 与录制契约验证见任务 4 |
 | thinking | thinking 事件 | reasoning 文本映射 | 已实现；真实 Provider 与录制契约验证见任务 4 |
-| 工具卡片 | tool_use/result | item 事件映射 | 已实现；真实 Provider 与录制契约验证见任务 4 |
+| 工具卡片 | tool_use/result | item 事件映射 | 已实现；任务 5 归一到已有专用卡片，未知工具通用显示，真实录制回放与 UI 组件验证 |
 | 审批 | edit 使用跳过权限；plan 原生模式 | 有 command/fileChange 映射；默认 approvalPolicy never | 临时可见拒绝已实现；完整审批由任务 6 接入 |
 | plan 与 ExitPlanMode | 原生 plan；产品接受计划后切 edit | plan 采用 read-only sandbox；非 Claude ExitPlanMode 协议 | 首版已禁用；UI capabilities 与后端显式拒绝，按已选决策执行 |
-| AskUserQuestion | CLI 禁用该工具，退化为普通对话提问 | userInput request 映射 AskUserQuestion 工具事件；完整交互非本轮验收 | 未验证；任务 5 |
-| 后台任务显示 | 任务开始/结束/集合事件 | subagent 生命周期、outOfTurn 处理 | 未验证；任务 5 |
-| 后台任务单独停止 | stop_task | 无等价接口，退化为停止会话 | 未验证；任务 5 |
+| AskUserQuestion | CLI 禁用该工具，退化为普通对话提问 | userInput request 映射 AskUserQuestion 工具事件；完整交互非本轮验收 | 0.0.17 ACP 明确不支持阻塞式提问；任务 5 复用问题卡片发送普通后续消息 |
+| 后台任务显示 | 任务开始/结束/集合事件 | subagent 生命周期、outOfTurn 处理 | 子 agent 报告已验证先于 prompt response；shell 无可配对的独立生命周期事件，按任务 5 原则不显示后台条 |
+| 后台任务单独停止 | stop_task | 无等价接口，退化为停止会话 | shell stop 工具调用已实测；产品没有后台条或单任务停止按钮，见任务 5 差异 |
 | 中断 | 进程/管理器路径 | turn/interrupt | 已实现；真实 fx cancelled 后续问及管理器 Stop 保活测试通过 |
 | 图片与文件附件 | 内容转换及工具读取路径 | image prompt / imageView 映射 | 未验证；任务 11；本任务只测普通文件读改 |
 | 模型选择 | spawn --model | app-server -c model | 已实现；真实新进程切换模型 + 重放通过，不采用原生恢复 |
@@ -191,8 +221,8 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 
 ## 顺带项登记
 
-- 长驻 shell、subagent 事件，以及 prompt 完成是否覆盖收尾：**未验证 → 任务 5**。
-- ask_user_question：**未验证 → 任务 5**。
+- 长驻 shell、subagent 生命周期：**已补测 → 任务 5**，具体覆盖与差异见上节；取消 shell 回合不保证结束已 yield 的进程。
+- ask_user_question：**已补测 → 任务 5**，0.0.17 ACP 不等待答案，复用问题卡片发送普通后续消息。
 - 内联图片 prompt：**未验证 → 任务 11**。
 - usage_update.used/size 及 prompt response.usage token 字段：**已验证**；未出现成本字段、跨模型统计细节 **未验证 → 任务 12**。
 - 未登录错误：**已验证 → 任务 10**。错误发生在 initialize，不是仅退出进程。

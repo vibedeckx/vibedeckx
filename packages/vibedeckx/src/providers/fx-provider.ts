@@ -6,6 +6,7 @@ import { detectBinary } from "../protocol/shared/binary.js";
 import { buildFxSpawnConfig } from "../protocol/fx/cli.js";
 import { buildInitialize, buildSessionNew, buildPrompt, buildCancel, buildPermissionDenied, buildUnsupportedRequest, parseFxLine, toolOutput, type FxSessionOptions } from "../protocol/fx/codec.js";
 import { FX_BINARY_NAME, FX_METHODS, FxInitializeResultSchema, FxNewResultSchema, FxPromptResultSchema } from "../protocol/fx/schema.js";
+import { normalizeFxTool } from "../protocol/fx/tool-mapping.js";
 
 type Input = string | ContentPart[];
 interface FxSessionState {
@@ -18,7 +19,7 @@ interface FxSessionState {
   promptId: number | null;
   failure?: string;
   discardedOnStop?: number;
-  tools: Map<string, { name: string; input: unknown; content: unknown[]; emitted: boolean; completed: boolean }>;
+  tools: Map<string, { name: string; input: unknown; meta?: unknown; content: unknown[]; emitted: boolean; completed: boolean; lastOutput?: string }>;
 }
 
 export class FxProvider implements AgentProvider {
@@ -68,7 +69,9 @@ export class FxProvider implements AgentProvider {
   private flush(state: FxSessionState): string {
     if (state.phase !== "ready" || state.promptId !== null || !state.nativeId || !state.queue.length) return "";
     const content = state.queue.shift()!;
-    state.tools.clear();
+    // Tool IDs live for the native session: cancelled children and yielded
+    // shells can report during a later prompt. Keep their card identity until
+    // onSessionDestroyed removes the session state.
     return this.request(state, FX_METHODS.prompt, id => {
       state.promptId = id;
       return buildPrompt(id, state.nativeId!, content);
@@ -166,13 +169,23 @@ export class FxProvider implements AgentProvider {
         const tool = state.tools.get(update.toolCallId) ?? { name: update.name ?? "Tool", input: update.rawInput ?? {}, content: [], emitted: false, completed: false };
         if (update.name) tool.name = update.name;
         if (update.rawInput !== undefined) tool.input = update.rawInput;
+        if (update._meta !== undefined) tool.meta = update._meta;
         if (update.content) tool.content = update.content;
         state.tools.set(update.toolCallId, tool);
+        const normalized = normalizeFxTool(tool.name, tool.input, tool.meta);
         const events: ParsedAgentEvent[] = [];
-        if (!tool.emitted) { tool.emitted = true; events.push({ type: "tool_use", tool: tool.name, input: tool.input, toolUseId: update.toolCallId }); }
-        if (!tool.completed && (update.status === "completed" || update.status === "failed")) {
+        if (!tool.emitted) { tool.emitted = true; events.push({ type: "tool_use", tool: normalized.name, input: normalized.input, toolUseId: update.toolCallId }); }
+        const terminal = update.status === "completed" || update.status === "failed";
+        if (terminal || (tool.completed && update.content)) {
           tool.completed = true;
-          events.push({ type: "tool_result", tool: tool.name, output: toolOutput(tool.content) || update.status, toolUseId: update.toolCallId });
+          const output = toolOutput(tool.content) || (terminal ? update.status : tool.lastOutput) || "completed";
+          // fx can send a second completed snapshot containing the actual child
+          // report, or shell output after the run call has yielded. Replace the
+          // same result entry; suppress only identical snapshots.
+          if (output !== tool.lastOutput) {
+            tool.lastOutput = output;
+            events.push({ type: "tool_result", tool: normalized.name, output, toolUseId: update.toolCallId });
+          }
         }
         return events;
       }

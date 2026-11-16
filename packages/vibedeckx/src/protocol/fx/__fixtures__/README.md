@@ -73,3 +73,48 @@ user sessions.
 
 See [the parity matrix and decisions](../../../../../../docs/fx-agent-parity.md)
 for mapping details, downgrade boundaries and remaining implementation tasks.
+
+## Task 5 — fx 0.0.17 (2026-11-16)
+
+The `task5-*.jsonl` recordings use installed fx 0.0.17, SHA-256
+`2cf4be240b42826d01c055913638bb879d1bb48afd80b7f3a3f21b15b2701296`,
+with `FX_AUTO_UPGRADE=0`, `fx acp --permission-mode auto --model …`, the original
+HOME/login and disposable workspaces. No credentials were copied, no set_mode
+was sent, and no settings file was written by the probes. Workspace paths are
+replaced with `<WORKSPACE>`. These are real exchanges, not synthetic tests.
+
+| Recording | Model | Evidence |
+| --- | --- | --- |
+| task5-tools-lifecycle | spacexai/grok-4.7 | ACP question fallback, subagent message + wait + late final report, yielded shell run/interact |
+| task5-shell-cancel-failure | openai/gpt-5.4-mini | Cancel after shell PID file exists; subsequent prompt; shell exit 7; child report before prompt response even without wait |
+| task5-subagent-cancel-shell-stop | openai/gpt-5.4-mini | Cancel after child's shell PID file exists; subsequent prompt; shell stop; run without interact |
+| task5-tool-cards | openai/gpt-5.4-mini | write/read/edit/glob/grep/web_search/web_fetch fields and outputs |
+
+Reproduce by starting the pinned CLI above in a disposable directory and sending
+the recorded stdin initialize/new/prompt messages, substituting your directory
+and the returned sessionId. Wait for each matching response before the next
+request. Keep the original authentication environment. For cancellation, poll
+`cancel.pid` in that workspace, then send the recorded cancel notification about
+300 ms after it exists (not on the pending tool event). Record both directions.
+Do not approve unexpected permission requests. After each cancel, send the next
+recorded prompt to verify the same session remains usable.
+
+The shell cancel probe observed its PID still alive before cleanup, with no
+`cancelled-marker`; it explicitly terminated that probe shell before exiting.
+The child cancellation probe observed its PID absent and marker absent at the
+end. These filesystem checks are observations outside the ACP transcript and
+must not be inferred merely from `stopReason: cancelled`. Always clean up probe
+processes; the shell commands are also bounded by sleep 30. shell stop was sent
+by the model as `action: stop`, `session_id: shell-2`, `force: true`.
+
+The first two files retain complete scenario turns and omit later unrelated
+schema-discovery prompts; no wire messages within the retained turns were
+altered except workspace redaction. Native web_search emitted empty rawInput in
+the OpenAI-model sample; do not invent a query. Native content snippets can be
+truncated by fx itself (including web_fetch); recordings preserve them as sent.
+
+`providers/fx-provider.recordings.test.ts` replays these through the real provider;
+`agent-session-manager.fx.test.ts` separately verifies persisted state and
+turn-end outcomes with a simulated ACP process. UI card and question submission
+tests are in `agent-message.fx-tools.test.tsx`. None substitutes for a browser
+end-to-end test or guarantees that cancelling a prompt kills every child process.
