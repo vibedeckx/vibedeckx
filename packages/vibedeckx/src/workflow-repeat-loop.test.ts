@@ -137,6 +137,19 @@ describe("repeat-until-done loop", () => {
     expect(await outbox()).toHaveLength(0);
   });
 
+  it("keeps fx and its model across fresh iterations and stops on a failed turn even with Status: done", async () => {
+    const first = await startLoop({ agentType: "fx", model: "test-model" });
+    const second = await finishAndAdvance(first, "Status: continue\nItem: first");
+    expect(second.source_session_id).not.toBe(first.source_session_id);
+    expect(parseRepeatParams(second)).toMatchObject({ agentType: "fx", model: "test-model" });
+    for (const [input] of agentOps.prepareReviewer.mock.calls) {
+      expect(input).toMatchObject({ agentType: "fx", model: "test-model", permissionMode: "edit" });
+    }
+    await finish(second, "Status: done\nItem: second", "failed");
+    await vi.waitFor(async () => expect((await onlyActive()).status).toBe("waiting_resume"));
+    expect(agentOps.prepareReviewer).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps the dialog's preset on every iteration and on the gate, without reading it", async () => {
     const preset = { kind: "plan" as const, fields: { planFile: "PLAN.md" }, edited: false };
     const first = await startLoop({ preset });

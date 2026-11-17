@@ -17,6 +17,8 @@ describe("parseVerdict", () => {
     ["- **Verdict**: `ship`", "ship"],
     ["### Verdict：Needs-Changes", "needs-changes"],
     ["1) VERDICT - SHIP", "ship"],
+    ["**1. Verdict — ship**", "ship"],
+    ["**1. Verdict — needs-changes**", "needs-changes"],
   ])("normalises %j", (line, expected) => {
     expect(parseVerdict(`some review text\n${line}\nBlocking findings: none`)).toBe(expected);
   });
@@ -26,6 +28,7 @@ describe("parseVerdict", () => {
     expect(parseVerdict("Verdict: ship (with notes)")).toBeNull();
     expect(parseVerdict("Verdict: not ready to ship yet")).toBeNull();
     expect(parseVerdict("Verdict: needs-changes, but close")).toBeNull();
+    expect(parseVerdict("**1. Verdict — do not ship**")).toBeNull();
   });
 
   it("refuses the option list echoed back", () => {

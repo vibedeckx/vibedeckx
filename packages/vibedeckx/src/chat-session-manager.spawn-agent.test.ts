@@ -65,8 +65,8 @@ describe("commander spawnAgentSession", () => {
         execute?: (input: unknown, options: unknown) => Promise<unknown>;
       }>;
     }).createTools("p1", "dev", "chat-1");
-    const run = async () => tools.spawnAgentSession.execute?.(
-      { prompt: "Implement the change", agentType: "claude-code" },
+    const run = async (agentType = "claude-code") => tools.spawnAgentSession.execute?.(
+      { prompt: "Implement the change", agentType },
       { toolCallId: "call-1", messages: [], abortSignal: new AbortController().signal },
     ) as Promise<{ success: boolean; agentSessionId?: string; message: string }>;
     return { start, run, agentSessionManager, deleteSession };
@@ -80,6 +80,14 @@ describe("commander spawnAgentSession", () => {
       operationId: "call-1", projectId: "p1", branch: "dev", permissionMode: "edit", agentType: "claude-code",
       purpose: "commander", owner: { kind: "commander_request", id: "chat-1" },
       instruction: "Implement the change", announceRunning: true,
+    }));
+  });
+
+  it.each(["local", "srv"])("passes fx through the %s lifecycle in edit mode", async (agentMode) => {
+    const { start, run } = makeTools({ kind: "activated", view: view() }, { agentMode });
+    expect(await run("fx")).toMatchObject({ success: true });
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({
+      agentType: "fx", permissionMode: "edit", purpose: "commander",
     }));
   });
 

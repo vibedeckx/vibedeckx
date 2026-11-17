@@ -2601,7 +2601,7 @@ export class ChatSessionManager {
           agentType: z
             .enum(AGENT_TYPES)
             .optional()
-            .describe("Which agent to spawn. Defaults to claude-code."),
+            .describe(`Which agent to spawn. Defaults to ${DEFAULT_AGENT_TYPE}. Available: ${AGENT_TYPES.join(", ")}.`),
         }),
         needsApproval: unattended,
         execute: async ({ prompt, agentType }, toolOptions?: { toolCallId?: string }) => {

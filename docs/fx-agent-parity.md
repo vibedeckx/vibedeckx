@@ -274,9 +274,9 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | 执行器 | prompt executor Claude CLI | codex exec CLI | `fx ask --permission-mode auto --json`；stdout 最终 Markdown、stderr 进度，退出码判定，进程树停止；本机实测通过，远端实机待验收 |
 | 定时任务 | scheduler 调用执行器 | scheduler 传递 prompt_provider | 同一 ProcessManager 路径，cron 触发、output/report/exit_code 落库；本机实测通过，远端实机待验收 |
 | 执行器 ACP 流式工具调用展示 | stream-json | 最终结果基线 | 超出基线（不做）；不创建另一套 ACP 生命周期 |
-| Reviewer | 现有产品入口，具体 agent 组合未复核 | 同左 | 未验证；对应 Reviewer 接入任务补齐，不在本探针实现 |
-| Loop | workflow-repeat-loop 传 agentType | 同左 | 待实现；对应 Loop 接入任务 |
-| Commander 派生 | 现有会话/MCP/执行器路径 | 现有共用路径，组合未复核 | 未验证；对应 Commander 接入任务补齐 |
+| Reviewer | 现有产品入口，具体 agent 组合未复核 | 同左 | Claude reviewer → fx 作者两阶段启动、讨论、修复 / 复审本机通过；fx reviewer 被 plan 要求阻塞，待权限决定；ubuntu Claude → fx 路径通过，跨机器网络验收未完成，见任务 9 |
+| Loop | workflow-repeat-loop 传 agentType | 同左 | 本机 fx 0.0.17 产品路径已验证：多项、新会话、done 与校验失败即停；ubuntu 隔离 hub/worker 路径通过；跨机器网络验收未完成，见任务 9 |
+| Commander 派生 | 现有会话/MCP/执行器路径 | 现有共用路径，组合未复核 | 本机真实 Main Chat → fx spawn、续发、两次结果回传、单一 turn 收尾通过；ubuntu 隔离 hub/worker 路径通过；跨机器网络验收未完成，见任务 9 |
 | Windows | binary 检测有 win32 分支；本轮未实跑 | 同左 | fx 官方无 Windows 原生版本；按用户决定仅文档说明，沿用命令缺失错误，不做平台专用检测或 UI 禁用 |
 | macOS | 现有非 win32 检测路径；本轮未实跑 | 同左 | 未验证；对应平台接入任务 |
 | Linux | 现有 Provider；本轮未重跑 | 同左 | 已验证；Linux 基础会话产品验收见任务 4；MCP 为原探针证据，业务接入仍待后续任务 |
@@ -324,3 +324,33 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 - 尚未完成：外部远端 worker 的真实模型/停止/定时验收（待指定连接目标）。不能把本地合成模型、旧 worker 兼容检查或本机 cron 测试当作该验收的替代。
 
 协议参考：[fx ask 官方说明](https://fx.sh/docs/using-fx/fx-ask)。
+
+## 任务 9：Reviewer、Loop、Commander 派生（2026-11-17）
+
+**本任务尚未完成验收。** 本机 Linux x86_64、fx 0.0.17；以下是实际运行的产品服务集成测试，不代表浏览器交互或外部远端 worker 已验收。所有测试使用隔离临时仓库和 SQLite、真实 `createServer` 与原始登录凭据，不修改线上配置。
+
+- Loop：真实 fx 连续处理 alpha / beta，两项使用不同会话，第二项 `Status: done` 后不创建第三项；另一次运行的校验命令退出 7 后停在 `waiting_resume`，不派发下一项。离线回归另覆盖失败回合即使含 `Status: done` 也不能成功、fx/model 逐轮保留。
+- Commander：真实 Main Chat 模型（DeepSeek）派生 fx，收到第一轮完成事件，再发送固定第二条消息，收到第二轮完成事件；断言 fx 两个 `turn_end`、Commander 一个 `turn_end` 且 turn 清空。事件唤醒后的 send 沿用 Main Chat 审批卡，测试只通过正常审批入口批准固定的无工具消息；没有关闭审批或伪造完成事件。首次测试遗漏这一步，停在审批卡而超时，补齐用户动作后通过。
+- 单次 Review / 讨论：Claude 审 fx 作者，prepare 阶段确认 reviewer 尚无进程，activate 传入 brief，真实产生 `needs-changes`；讨论轮次进入 `discussing`，显式请求终稿后回到反馈门，fx 根据反馈修复，继续同一 reviewer 复审得到 `ship`。测试标记 `FX_REVIEW_AUTHOR_PASS`。这里验证 brief 的传递和使用，未调用浏览器侧蒸馏模型。首次测试指令“先不要改文件”缺少后续授权，作者拒绝修改；明确分阶段授权后修复成功。另一轮测试误把成功 verdict 写成 `pass`（实际协议为 `ship`），修正测试断言后完整通过；均未为测试改变产品判断。
+- 自动 Review：Claude Code 2.1.325 审 fx 作者，真实 `needs-changes` 自动回传、fx 修改 `sum.cjs` 并使 `sum(2,3) = 5`、同一 reviewer 第二轮 `ship` 均通过。测试标记 `FX_AUTO_REVIEW_PASS`；没有手工插入 verdict 或完成事件。
+- Project Chat：`create_agent_session` 在创建操作记录 / 要求选择工作区前检查 plan 能力，fx plan 明确报错并提示 edit；生命周期仍保留后端校验。本地 / 远端 Commander spawn 的 fx 透传有回归覆盖。spawn 工具描述从 `DEFAULT_AGENT_TYPE` 和 `AGENT_TYPES` 生成默认值与可用列表。
+- 提示词核对：Loop 的 plan preset 指“按计划文件工作”，会话始终是 edit；默认文件为 `docs/implementation-plan.md`，没有 `.claude/plans/` 或专属工具名假设。Review 使用通用文本 Verdict 协议，但当前新建和复审均强制 plan，提示词也声称只读；fx 不支持 plan，因此 **fx 作为 reviewer 仍阻塞**。是否允许 edit/full-access reviewer 并在 UI 明示仅靠提示词约束不改文件，已向用户询问，未将提问当作授权。
+- ubuntu 安装（2026-11-17 追加）：用户明确授权安装 fx。该机原无 fx，已安装官方 fx **0.0.17** 到 `~/.local/bin/fx`，用用户提供的 Gateway key 配置 `~/.fx/api-key`（0600，key 不写入仓库）。真实 `fx ask --provider gateway --model openai/gpt-5.4-mini --no-save` 返回 `FX_UBUNTU_READY`，退出 0。该机 Claude Code **2.1.81** 已登录；原有 worker **0.3.53** 未替换或重启。
+- ubuntu 隔离测试：本分支 bundle 传入 `/tmp/fx9-acceptance`，SHA-256 与本地构建一致；复用已有运行时及原生依赖，独立 hub/worker、端口、SQLite 和测试仓库。测试通过 hub REST API 和真实 reverse-connect 隧道驱动 worker，模型调用及完成事件均真实。**hub 和 worker 同在 ubuntu；不是跨机器网络验收。** ubuntu 连接开发机临时 TLS 端口超时，期间远端短暂掉线后恢复；未改防火墙或线上 worker 配置。
+- ubuntu Loop / Commander：Loop 两项会话 id 不同，第二项 done，校验命令退出 7 停在 waiting_resume；`REMOTE_PATH_LOOP_PASS`。Main Chat 使用 Gateway `openai/gpt-5.4-mini` 派生 fx、收到第一轮完成后续发、收到第二轮结果、一个 turn_end；`REMOTE_PATH_COMMANDER_PASS`。首次 Commander 测试与 Review 共用工作区，触发已有活动 agent 的保护；拆分独立工作区后通过，没有绕过该保护。
+- ubuntu Review：Claude 审 fx 作者，经 prepare/activate、讨论、finalize、批准反馈、fx 实际修改 `sum.cjs`、复用 reviewer 复审得到 ship；`REMOTE_PATH_REVIEW_PASS`。首次测试缩短了 reviewFocus，reviewer 按分析回合而非缺失实现评审；恢复本机用例的明确验收范围后重跑。
+- ubuntu 自动 Review：真实 needs-changes 自动回传、fx 将测试函数修为加法、同一 Claude reviewer 第二轮 ship；`REMOTE_PATH_AUTO_REVIEW_PASS`。日志在 ubuntu `/tmp/fx9-acceptance/{check,commander-check,review3,auto}.log`。测试后关闭隔离会话和 hub/worker，保留 fx 安装与用户授权的鉴权配置。
+- 实机发现并修复：`**1. Verdict — ship**` 这种加粗包含编号的合法输出未被识别，现先去 Markdown 强调再去编号，保留精确匹配和否定拒绝，新增回归。另有 reviewer 最终回复只引用计划文件而缺少结论，通用 verdict 提示词现明确要求最终回复完整输出，不创建计划文件、不要求开始实现、不以文件/前文引用代替结论。两个修复均已在 ubuntu 隔离构建中应用并重跑 Review；没有复制或修改线上 worker 程序。
+
+
+可复验入口：`packages/vibedeckx/src/protocol/live/fx-orchestration.live.test.ts`。设置 `FX_ORCHESTRATION_LIVE=1`，按现有 live config 运行；Main Chat 用例还需要正常的 `DEEPSEEK_API_KEY`（不写入仓库）。例如：
+
+```bash
+FX_ORCHESTRATION_LIVE=1 PATH=/usr/bin:$PATH pnpm --filter vibedeckx exec vitest run --config vitest.live.config.ts src/protocol/live/fx-orchestration.live.test.ts --retry 0
+```
+
+兼容性：按 `.claude/skills/compat-check/SKILL.md` 执行注册表对账（7/7）、origin/main 与 v0.3.58 两个 base 的 classify-diff（gray）、build 与已发布 worker 0.3.58 的跨版本检查（49 passed，0 missing，0 failed）。未修改隧道 payload、路由或注册表；本分支累计包含 worker 可达变更，远端必须发布 npm / 升级 worker 才能获得相应行为，不能仅部署 server。
+
+本轮前后端 `tsc --noEmit` 通过；前端全量 Vitest（`--maxWorkers=2`）187 文件 / 1729 tests 通过。ubuntu 实机修复后，后端全量 Vitest（`--maxWorkers=2`）248 文件 / 3630 tests 通过，2 文件 / 11 tests 按既有配置跳过。四项新增 live 场景各自实跑通过（Loop、Commander、讨论/复审、自动修复）；不会把未运行的 fx reviewer 或跨机器网络组合计入通过数量；后续 ubuntu 实测记录见上。
+
+任务 9 追加检查：两个 verdict 修复后的前后端 tsc 通过；后端全量中的注册表对账 7/7 通过；再次执行 origin/main、v0.3.58 classify-diff 和跨版本检查，49 passed、0 missing、0 failed。前端无改动，沿用本轮已通过的 1729 项结果。仍需后续发布并升级 worker 才能让正式入口使用这些修复；当前 ubuntu 的生产 worker 保持 0.3.53。剩余验收：fx reviewer 的 plan 权限策略，以及网络连通后的真正跨机器 hub/worker 验收。

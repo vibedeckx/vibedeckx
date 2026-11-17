@@ -9,8 +9,8 @@ const VERDICTS: readonly WorkflowVerdict[] = ["ship", "needs-changes", "cannot-v
  */
 function bareValue(line: string): string {
   return line
-    .replace(/^\s*(?:#+|>|[-*+]|\d+[.)、])\s*/, "")
     .replace(/[*_`]/g, "")
+    .replace(/^\s*(?:#+|>|[-+]|\d+[.)、])\s*/, "")
     .replace(/verdict/gi, "")
     .replace(/^[\s:：—–\-.。]+|[\s:：—–\-.。]+$/g, "")
     .toLowerCase();

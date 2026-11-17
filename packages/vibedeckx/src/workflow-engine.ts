@@ -274,6 +274,7 @@ const VERDICT_INSTRUCTIONS = [
   "\nThe bar for blocking: a real defect that is worth fixing — wrong behavior, a case a user or caller will actually hit, a security or data-loss risk, or a missing test for logic that matters. Report those plainly; do not soften a real problem because the fix is inconvenient.",
   "Not blocking: over-engineering — speculative hardening, defenses against inputs this code cannot receive, abstractions or configurability for cases nobody has asked for, or a rewrite in your preferred style. When the fix would add more complexity than the problem it prevents is worth, it is a non-blocking note at most.",
   "Both halves matter equally: solve real problems, and do not over-engineer.",
+  "Return the complete review in your final response. Do not create a plan file, ask to start implementation, or replace the verdict with a reference to an earlier message or file.",
   "\nEnd your final message with:",
   "1. Verdict — exactly one of: ship / needs-changes / cannot-verify. Use cannot-verify when you could not gather enough evidence to judge, rather than guessing.",
   "2. Blocking findings — what must change before shipping, each specific and actionable (say explicitly when there are none).",

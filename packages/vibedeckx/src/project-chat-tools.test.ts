@@ -72,6 +72,15 @@ describe("createProjectChatTools", () => {
     return Math.random().toString(36).slice(2);
   }
 
+  it("rejects fx plan before asking for a workspace or creating an operation", async () => {
+    const surface = await tools();
+    await expect(surface.create_agent_session.execute({
+      instruction: "Plan the change", agentType: "fx", permissionMode: "plan",
+    })).rejects.toThrow("fx does not support plan mode; choose edit mode.");
+    expect(createAgentSession).not.toHaveBeenCalled();
+    expect((await storage.projectChatOperations.listNonterminal(null, 10)).operations).toEqual([]);
+  });
+
   it("authorizes the bound project, user, and thread before exposing tools", async () => {
     await expect(tools({ projectId: "project-2" })).rejects.toThrow("Project Chat thread not found");
     await expect(tools({ userId: "user-2" })).rejects.toThrow("Project not found");
