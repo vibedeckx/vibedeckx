@@ -264,7 +264,7 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | 后台任务单独停止 | stop_task | 无等价接口，退化为停止会话 | shell stop 工具调用已实测；产品没有后台条或单任务停止按钮，见任务 5 差异 |
 | 中断 | 进程/管理器路径 | turn/interrupt | 已实现；真实 fx cancelled 后续问及管理器 Stop 保活测试通过 |
 | 图片与文件附件 | 内容转换及工具读取路径 | image prompt / imageView 映射 | 未验证；任务 11；本任务只测普通文件读改 |
-| 模型选择 | spawn --model | app-server -c model | 已实现；真实新进程切换模型 + 重放通过，不采用原生恢复 |
+| 模型选择 | spawn --model | app-server -c model | 已实现；任务 10 验证默认配置、静态建议与手输、回合间新进程换模型；busy 拒绝、切 agent 清空模型有回归 |
 | 费用与用量 | result 成本字段 | tokenUsage 缓存到 result；不等同成本支持 | 已验证；token/上下文字段已录到；成本未验证 → 任务 12 |
 | hub vibedeckx HTTP MCP | --mcp-config HTTP bearer | -c mcp_servers / token env | 已接入；本地真实 hub + fx 调用通过，线上需部署协议协商修复 |
 | cross-remote HTTP MCP | 同上 | 同上 | 已接入；本地真实 hub 调用通过；线上握手修复待部署、授权远端与撤销完整验收未完成 |
@@ -280,9 +280,14 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | Windows | binary 检测有 win32 分支；本轮未实跑 | 同左 | fx 官方无 Windows 原生版本；按用户决定仅文档说明，沿用命令缺失错误，不做平台专用检测或 UI 禁用 |
 | macOS | 现有非 win32 检测路径；本轮未实跑 | 同左 | 未验证；对应平台接入任务 |
 | Linux | 现有 Provider；本轮未重跑 | 同左 | 已验证；Linux 基础会话产品验收见任务 4；MCP 为原探针证据，业务接入仍待后续任务 |
-| 未登录错误 | 有启动错误路径 | 有启动错误路径 | 已实现初始化错误收尾；认证分类与其他登录场景留任务 10 |
+| 未登录错误 | 有启动错误路径 | 有启动错误路径 | 任务 10 已实现握手阶段认证分类、登录命令及原始错误；真实隔离 HOME 验证失败收尾，见下节 |
+| 未安装 / 模型错误 | 安装提示 / 原始错误 | 安装提示 / 原始错误 | 未安装提示已有管理器回归；无效模型原始 HTTP 错误保持可见，失败结束等待 |
+| 动态发现可用模型 | 无 | 无 | 超出基线（不做） |
+| 不重启进程换模型 | 无 | 无 | 超出基线（不做）；不使用 session/set_config_option |
+| provider / effort / fast UI | 本任务无对应基线 | 本任务无对应基线 | 超出基线（不做） |
+| 额度等细分诊断 | 本任务无对应基线 | 本任务无对应基线 | 超出基线（不做）；保留原始错误 |
 
-未提供任务 5/10/11/12 之外的具体任务 id，表中按功能注明后续负责人任务，未杜撰编号或新建任务。暂无能力被擅自归为“超出基线”。
+未提供任务 5/10/11/12 之外的具体任务 id，表中按功能注明后续负责人任务，未杜撰编号或新建任务。“超出基线（不做）”按任务明确范围登记，不作为延期验收项。
 
 ## 顺带项登记
 
@@ -290,7 +295,7 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 - ask_user_question：**已补测 → 任务 5**，0.0.17 ACP 不等待答案，复用问题卡片发送普通后续消息。
 - 内联图片 prompt：**未验证 → 任务 11**。
 - usage_update.used/size 及 prompt response.usage token 字段：**已验证**；未出现成本字段、跨模型统计细节 **未验证 → 任务 12**。
-- 未登录错误：**已验证 → 任务 10**。错误发生在 initialize，不是仅退出进程。
+- 未登录错误：**任务 10 已补认证分类与真实管理器验证**。错误发生在 initialize，不是仅退出进程。
 - 额度用尽：**未验证 → 任务 10**；未耗尽额度取样。版本按用户决定只记录供排查，不再要求版本范围提示。
 - stdio MCP：不属于本任务要求，未验证；此范围豁免不表示三方都没有该能力。
 
@@ -354,3 +359,16 @@ FX_ORCHESTRATION_LIVE=1 PATH=/usr/bin:$PATH pnpm --filter vibedeckx exec vitest 
 本轮前后端 `tsc --noEmit` 通过；前端全量 Vitest（`--maxWorkers=2`）187 文件 / 1729 tests 通过。ubuntu 实机修复后，后端全量 Vitest（`--maxWorkers=2`）248 文件 / 3630 tests 通过，2 文件 / 11 tests 按既有配置跳过。四项新增 live 场景各自实跑通过（Loop、Commander、讨论/复审、自动修复）；不会把未运行的 fx reviewer 或跨机器网络组合计入通过数量；后续 ubuntu 实测记录见上。
 
 任务 9 追加检查：两个 verdict 修复后的前后端 tsc 通过；后端全量中的注册表对账 7/7 通过；再次执行 origin/main、v0.3.58 classify-diff 和跨版本检查，49 passed、0 missing、0 failed。前端无改动，沿用本轮已通过的 1729 项结果。仍需后续发布并升级 worker 才能让正式入口使用这些修复；当前 ubuntu 的生产 worker 保持 0.3.53。剩余验收：fx reviewer 的 plan 权限策略，以及网络连通后的真正跨机器 hub/worker 验收。
+
+
+## 任务 10：模型选择与启动诊断（2026-11-17，fx 0.0.17）
+
+- 保留静态建议 `spacexai/grok-4.7`、`openai/gpt-5.4-mini` 与自由输入，不校验模型白名单。不选模型时省略 `--model`；真实管理器完成默认模型请求，再切到 `openai/gpt-5.4-mini` 并完成请求。仍为退役旧进程、下一次 spawn/new 与历史重放，不依赖 ACP 原地换模型或 `--provider`。
+- 认证分类位于 `protocol/fx/diagnostics.ts`：只在 initialize/session/new 的明确认证信息上增加未登录解释；不依据 `-32600` 单独分类。提示在 worker 所在机器、以 worker 用户运行 `fx login vercel` / `fx login codex` / `fx login grok`，登录后重发消息；保留原始错误，提供 `fx status --json` / `fx doctor --json`。
+- 真实未登录测试使用临时 HOME/XDG 目录并覆盖继承认证环境变量，不复制或修改用户凭据。真实 ACP 初始化失败后管理器关闭连接并结束 running；离线真实 stdio 子进程回归另覆盖错误后不退出、修正配置后重连成功。
+- 无效模型 `vibedeckx/invalid-model-task10` 的真实响应为 assistant 文本中的 `HTTP 404` / `model_not_found`，随后 prompt 返回错误 stopReason。原始错误作为正文保留，回合结束；不能假定所有模型错误都是 JSON-RPC error。来源无权限的 JSON-RPC 错误有离线透传回归，未使用无权限真实账户补测。
+- 自动回归覆盖默认参数省略、模型自由输入、busy 拒绝、切 agent 清空模型、缺失可执行文件、认证与普通协议错误区分、原始模型错误与失败重试。真实集成测试：`pnpm --filter vibedeckx exec vitest run --config vitest.live.config.ts src/protocol/live/fx-diagnostics.live.test.ts`（会使用当前登录并产生少量模型请求）。
+- 给任务 7 的公开文档要点：必须在 worker 机器以相同用户提前登录；ACP 不弹登录窗口；按配置来源选上述登录命令，Gateway 也可使用 `AI_GATEWAY_API_KEY`；登录后重发消息；status/doctor JSON 可辅助排查。模型建议不保证当前账户有权限，不选模型沿用 fx 默认配置。公开文档由任务 7 统一维护。
+- 验证结果：前后端 `tsc --noEmit` 通过；后端完整 Vitest 249 文件 / 3647 测试通过（2 文件 / 11 测试按既有配置跳过），前端 187 文件 / 1729 测试通过；任务相关最终回归 4 文件 / 72 测试通过；真实 fx 集成 2 测试通过。
+- 浏览器产品验收：当前源码 UI + 独立本地后端 + 临时项目，在隔离 HOME 下新建 fx 会话，界面显示未登录、三种登录命令与原始 `-32600`，Stop 禁用且输入框可继续使用。切回已有登录后同一会话默认模型返回 `FX_DEFAULT_UI_OK`；选择建议模型后实际进程为 `fx acp --permission-mode full-access --model openai/gpt-5.4-mini` 并返回 `FX_SELECTED_UI_OK`。手输无效模型显示原始 HTTP 404 / model_not_found 并结束等待；切换到 Codex 后模型恢复 Default。截图 `/tmp/fx10-unauth-ui.png`、`/tmp/fx10-model-ui.png` 仅作本机验收留档，不作为运行依赖。
+- UI 构建：默认构建中止，webpack 重试遇到本机磁盘不足；仅为本次验收临时关闭 webpack 缓存后构建成功，构建配置已恢复，没有交付构建方式变更。

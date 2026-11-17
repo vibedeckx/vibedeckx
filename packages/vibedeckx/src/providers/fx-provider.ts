@@ -4,6 +4,7 @@ import type { CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import type { SessionToolsMcpConfig } from "../session-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import { buildFxSpawnConfig } from "../protocol/fx/cli.js";
+import { formatFxRequestFailure } from "../protocol/fx/diagnostics.js";
 import { buildInitialize, buildSessionNew, buildPrompt, buildCancel, buildPermissionDenied, buildFxMcpServers, buildUnsupportedRequest, parseFxLine, toolOutput, unwrapFxMcpOutput, type FxSessionOptions } from "../protocol/fx/codec.js";
 import { FX_BINARY_NAME, FX_METHODS, FxInitializeResultSchema, FxNewResultSchema, FxPromptResultSchema } from "../protocol/fx/schema.js";
 import { normalizeFxTool } from "../protocol/fx/tool-mapping.js";
@@ -119,7 +120,7 @@ export class FxProvider implements AgentProvider {
     if (incoming.kind === "error_response") {
       const method = incoming.id === null ? undefined : state.pending.get(incoming.id);
       if (!method) return [];
-      if (method !== FX_METHODS.prompt) return this.fail(state, `fx request failed: ${incoming.message}`);
+      if (method !== FX_METHODS.prompt) return this.fail(state, formatFxRequestFailure(method, incoming.message));
       state.pending.delete(incoming.id!);
       state.promptId = null;
       return this.finishPrompt(state, [{ type: "result", subtype: "error", error: `fx request failed: ${incoming.message}` }]);

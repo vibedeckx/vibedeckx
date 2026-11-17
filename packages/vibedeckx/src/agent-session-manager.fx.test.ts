@@ -354,6 +354,44 @@ describe("fx manager lifecycle", () => {
     expect(other.formatUserInput).toHaveBeenLastCalledWith(expect.stringContaining("CRASH"), id);
   });
 
+  it.each([
+    "fx needs access to Vercel AI Gateway. Run fx login to sign in.",
+    "Unknown model: user/invalid-model",
+    "Access denied for model openai/private",
+  ])("surfaces handshake failure and retires a child that stays alive: %s", async message => {
+    vi.mocked(provider.buildSpawnConfig).mockReturnValue({ command: process.execPath, args: ["-e", `
+      require('node:readline').createInterface({input:process.stdin}).on('line', line => {
+        const m = JSON.parse(line);
+        if (m.method === 'initialize') process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,error:{code:-32600,message:${JSON.stringify(message)}}}) + '\\n');
+      });
+    `] });
+    const id = await newSession();
+    await waitFor(async () => (await entries(id)).some(e => e.type === "error" && e.message.includes(message)));
+    await waitFor(() => manager.getSession(id)?.process === null);
+    expect(manager.getSession(id)?.status).not.toBe("running");
+    const errors = (await entries(id)).filter(e => e.type === "error");
+    expect(errors.some(e => e.type === "error" && e.message.includes("fx is not logged in"))).toBe(message.includes("fx login"));
+    vi.mocked(provider.buildSpawnConfig).mockReturnValue({ command: process.execPath, args: ["-e", fakeAcp], env: { FX_TEST_LOG: log } });
+    await manager.sendUserMessage(id, "retry after fixing configuration", dir);
+    await waitFor(async () => (await entries(id)).some(e => e.type === "assistant"));
+    await waitFor(() => manager.getSession(id)?.status !== "running");
+  });
+
+  it("rejects changing the fx model during a turn and clears it when switching agents", async () => {
+    const id = await newSession();
+    await manager.sendUserMessage(id, "HOLD", dir);
+    await waitFor(() => wire().some(m => m.method === "session/prompt"));
+    expect(await manager.setModel(id, "user/custom-model")).toBe("busy");
+    expect(manager.getSession(id)?.model).toBe("old-model");
+    await completed(id, 1);
+    expect(await manager.switchAgentType(id, "codex")).toBe("ok");
+    expect(manager.getSession(id)?.model).toBeNull();
+    expect(await manager.switchAgentType(id, "fx")).toBe("ok");
+    await manager.sendUserMessage(id, "use fx default", dir);
+    await completed(id, 2);
+    expect(wire().filter(m => m.method === "session/prompt").at(-1)?.model).toBe("default");
+  });
+
   it("puts the installation hint in conversation history when the fx executable is missing", async () => {
     vi.mocked(provider.buildSpawnConfig).mockReturnValue({ command: join(dir, "missing-fx"), args: [] });
     const id = await newSession();

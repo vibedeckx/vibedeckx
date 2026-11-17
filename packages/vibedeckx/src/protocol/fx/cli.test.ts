@@ -15,6 +15,9 @@ describe("fx spawn", () => {
     expect(execFileSync).toHaveBeenCalledTimes(1);
     expect(execFileSync).toHaveBeenCalledWith("/bin/fx", ["acp", "--help"], expect.objectContaining({ timeout: 5000 }));
   });
+  it.each([undefined, null, "", "   "])("omits --model for the CLI default (%s)", model => {
+    expect(buildFxSpawnConfig(null, model).args).toEqual(["acp"]);
+  });
   it("does not assume older ACP supports interactive permission flags", () => {
     vi.mocked(execFileSync).mockReturnValue("fx acp [--model <id>] [--log-file <path>]");
     expect(buildFxSpawnConfig("/bin/fx-old").args).toEqual(["acp"]);

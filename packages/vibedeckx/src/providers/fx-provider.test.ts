@@ -159,6 +159,16 @@ describe("FxProvider lifecycle", () => {
     expect(p.parseStdoutLine(error(prompt.id), "app")).toEqual([{ type: "result", subtype: "error", error: "fx request failed: -32000: Rate limit" }]);
     expect(JSON.parse(p.formatUserInput("retry", "app")).method).toBe("session/prompt");
   });
+  it("preserves model errors streamed as text before an error stop reason (fx 0.0.17)", () => {
+    const p = new FxProvider(); ready(p);
+    const prompt = JSON.parse(p.formatUserInput("go", "app"));
+    const original = 'HTTP 404: {"error":{"message":"Model \'vendor/unknown\' not found","type":"model_not_found"}}';
+    expect(p.parseStdoutLine(update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: original } }), "app"))
+      .toEqual([{ type: "text", content: original, delta: true }]);
+    expect(p.parseStdoutLine(response(prompt.id, { stopReason: "error" }), "app")[0])
+      .toMatchObject({ type: "result", subtype: "error" });
+    expect(JSON.parse(p.formatUserInput("retry", "app")).method).toBe("session/prompt");
+  });
   it("does not create state for stdout from a destroyed session", () => {
     const p = new FxProvider();
     expect(p.parseStdoutLine(response(1, {}), "gone")).toEqual([]);
