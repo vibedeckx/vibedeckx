@@ -17,7 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { Executor, ExecutorLifecycle, ExecutorType, PromptProvider } from "@/lib/api";
+import { PROMPT_PROVIDERS, PROMPT_PROVIDER_LABELS, type Executor, type ExecutorLifecycle, type ExecutorType, type PromptProvider } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Terminal, MessageSquare, ChevronDown, ChevronRight } from "lucide-react";
 
@@ -187,10 +187,12 @@ export function ExecutorForm({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="claude">Claude</SelectItem>
-                    <SelectItem value="codex">Codex</SelectItem>
+                    {PROMPT_PROVIDERS.map((p) => (
+                      <SelectItem key={p} value={p}>{PROMPT_PROVIDER_LABELS[p]}</SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
+                {promptProvider === "fx" && <p className="text-xs text-muted-foreground">fx uses auto permission checks. Actions requiring approval fail unattended.</p>}
               </div>
               <div className="flex-1 space-y-2">
                 <label className="text-sm font-medium">

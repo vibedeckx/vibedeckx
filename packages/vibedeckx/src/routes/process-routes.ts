@@ -1,10 +1,11 @@
+import { isPromptProvider, parsePromptProvider } from "../storage/types.js";
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import path from "path";
 import { randomUUID } from "crypto";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { resolveWorktreePath } from "../utils/worktree-paths.js";
-import type { ExecutorType, PromptProvider } from "../storage/types.js";
+import type { ExecutorType } from "../storage/types.js";
 import { ProcessEffectConflictError } from "../process-manager.js";
 import { createRemoteExecutorStarts, listWorkerRunningProcessIds } from "../remote-executor-starts.js";
 import { requireAuth as requireRawAuth } from "../server.js";
@@ -26,6 +27,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     const userId = requireRawAuth(req, reply);
     if (userId === null) return;
     const { path: projectPath, command, executor_type, prompt_provider, cwd, branch, pty, processId: requestedProcessId, effectFingerprint } = req.body;
+    if (prompt_provider != null && !isPromptProvider(prompt_provider)) return reply.code(400).send({ error: "Unknown prompt provider" });
     if (!projectPath || !command) {
       return reply.code(400).send({ error: "Path and command are required" });
     }
@@ -52,7 +54,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       name: "remote-command",
       command,
       executor_type: (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType,
-      prompt_provider: (prompt_provider === 'codex' ? 'codex' : 'claude') as PromptProvider | null,
+      prompt_provider: parsePromptProvider(prompt_provider),
       cwd: resolvedCwd,
       pty: pty !== false,
       position: 0,

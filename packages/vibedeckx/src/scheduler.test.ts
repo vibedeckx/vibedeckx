@@ -549,17 +549,17 @@ describe("SchedulerService remote runs", () => {
     expect((exec.body as { branch?: unknown }).branch).toBeUndefined();
   });
 
-  it("remote prompt runs proxy their configured prompt provider with the report instruction", async () => {
+  it.each(["codex", "fx"] as const)("remote prompt runs proxy their configured %s provider with the report instruction", async (provider) => {
     await storage.scheduledTasks.update("s1", {
       run_type: "prompt",
-      prompt_provider: "codex",
+      prompt_provider: provider,
       content: "inspect remote state",
     });
     await scheduler.runNow("s1");
     const exec = proxyCalls.find((c) => c.path === "/api/path/execute")!;
     expect(exec.body).toMatchObject({
       executor_type: "prompt",
-      prompt_provider: "codex",
+      prompt_provider: provider,
       command: "inspect remote state" + REPORT_INSTRUCTION,
     });
   });

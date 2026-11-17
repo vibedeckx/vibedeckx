@@ -28,6 +28,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   api,
+  PROMPT_PROVIDERS,
+  PROMPT_PROVIDER_LABELS,
   type ProjectRemote,
   type PromptProvider,
   type Schedule,
@@ -57,7 +59,6 @@ const MAIN = "__main__";
 
 const noopSubscribe = () => () => {};
 
-const PROVIDER_LABELS: Record<PromptProvider, string> = { claude: "Claude", codex: "Codex" };
 
 // SQLite timestamps are UTC "YYYY-MM-DD HH:MM:SS"; ISO strings pass through.
 function parseTs(ts: string): Date {
@@ -244,7 +245,7 @@ export function ScheduleFormDialog({
   const blocker = error ?? (preview.ok ? null : "Fix the cron expression before saving.");
 
   const footNote = runType === "prompt"
-    ? `${PROVIDER_LABELS[promptProvider]} runs unattended on ${remoteName ?? "this machine"}`
+    ? `${PROMPT_PROVIDER_LABELS[promptProvider]} runs unattended on ${remoteName ?? "this machine"}${promptProvider === "fx" ? ". Auto permission checks apply; actions requiring approval fail." : ""}`
     : "Runs even while the app is closed";
 
   return (
@@ -329,8 +330,8 @@ export function ScheduleFormDialog({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {(Object.keys(PROVIDER_LABELS) as PromptProvider[]).map((p) => (
-                      <SelectItem key={p} value={p}>{PROVIDER_LABELS[p]}</SelectItem>
+                    {PROMPT_PROVIDERS.map((p) => (
+                      <SelectItem key={p} value={p}>{PROMPT_PROVIDER_LABELS[p]}</SelectItem>
                     ))}
                   </SelectContent>
                 </Select>

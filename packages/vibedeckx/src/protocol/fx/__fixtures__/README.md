@@ -153,3 +153,20 @@ directory. Review and redact a recording before promoting it here; fixtures are
 not product runtime data. See [live probe setup](../../live/README.md) for CI
 credentials and missing-binary behavior. These tests do not replace remote-worker
 acceptance of every product entry point.
+
+## Task 8 — fx ask 0.0.17 (2026-11-16)
+
+`task8-ask.json` records real `fx ask` argv, stdout, stderr, exit status and wall
+time in a disposable workspace with original login and `FX_AUTO_UPGRADE=0`.
+The auto text request succeeds; the ask-mode shell request cannot obtain
+approval with stdin closed and exits 1 promptly. No credentials/settings were
+copied or edited. Reproduce each recorded argv with stdin redirected from
+`/dev/null`. These are ask protocol observations, not ACP observations, and do
+not establish that auto bypasses explicit ask rules. Product cron/stop checks
+live in `src/protocol/live/fx-executor.live.test.ts`; enable `FX_EXECUTOR_LIVE=1`.
+
+`task8-auto-explicit-ask.json` instead uses a real fx executable with a synthetic
+local OpenAI-compatible model response requesting shell execution, isolated
+FX_HOME settings and no credentials. It proves auto still honors explicit ask
+rules and exits 1 without interaction. The live test reproduces the local
+provider setup; it is not evidence about an external model's decisions.

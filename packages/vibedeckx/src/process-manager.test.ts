@@ -8,7 +8,8 @@ import type { Executor } from "./storage/types.js";
 
 // Access the private method for a contract check without spawning anything.
 type WithBuildPromptCommand = {
-  buildPromptCommand(prompt: string, provider: "claude" | "codex", finalResultFile?: string): string;
+  buildPromptCommand(prompt: string, provider: "claude" | "codex" | "fx", finalResultFile?: string): string;
+  pipedPromptRun(prompt: string, provider: "claude" | "codex" | "fx"): { command: string; args: string[]; shell: boolean } | undefined;
 };
 
 describe("ProcessManager prompt commands (protocol layer)", () => {
@@ -23,13 +24,45 @@ describe("ProcessManager prompt commands (protocol layer)", () => {
     );
   });
 
-  it("routes claude prompts through buildClaudePrintCommand", () => {
+  it("runs claude and fx over pipes and only codex as a shell command", () => {
     clearBinaryCaches();
-    const nativeClaude = detectBinary("claude");
-    const expectedBase = nativeClaude ?? "npx -y @anthropic-ai/claude-code";
-    expect(pm.buildPromptCommand("hi", "claude")).toBe(
-      `${expectedBase} -p 'hi' --dangerously-skip-permissions --verbose`,
-    );
+    expect(pm.pipedPromptRun("hi", "claude")?.shell).toBe(false);
+    expect(pm.pipedPromptRun("hi", "fx")).toMatchObject({ shell: false, args: ["ask", "--permission-mode", "auto", "--json", "--", "hi"] });
+    expect(pm.pipedPromptRun("hi", "codex")).toBeUndefined();
+    expect(() => pm.buildPromptCommand("hi", "claude")).toThrow(/Unsupported shell prompt provider/);
+  });
+});
+
+describe("ProcessManager stop status", () => {
+  const command = (id: string): Executor => ({
+    id, project_id: "p1", workspace_id: "", name: "n", command: "sleep 30", executor_type: "command",
+    prompt_provider: null, cwd: null, pty: true, position: 0, disabled_targets: [], created_at: new Date().toISOString(),
+  });
+  const fakeStorage = () => {
+    const statuses: string[] = [];
+    const storage = { executorProcesses: {
+      create: async () => {}, updatePid: async () => {},
+      updateStatus: async (_id: string, status: string) => { statuses.push(status); },
+    } };
+    return { storage, statuses };
+  };
+  const waitFinished = async (pm: ProcessManager, id: string) => {
+    for (let i = 0; i < 100 && !pm.getLogs(id).some((l) => l.type === "finished"); i++) await new Promise((r) => setTimeout(r, 50));
+  };
+
+  it.each(["pty", "piped"] as const)("a stopped %s process settles as killed, not failed", async (mode) => {
+    const { storage, statuses } = fakeStorage();
+    const pm = new ProcessManager(storage as never);
+    const id = `stop-${mode}`;
+    if (mode === "pty") {
+      await pm.start(command(id), "/tmp", false, id);
+    } else {
+      (pm as unknown as { startRegularProcess(id: string, e: Executor, cwd: string, skipDb: boolean): void })
+        .startRegularProcess(id, command(id), "/tmp", false);
+    }
+    await pm.stop(id);
+    await waitFinished(pm, id);
+    expect(statuses.at(-1)).toBe("killed");
   });
 });
 

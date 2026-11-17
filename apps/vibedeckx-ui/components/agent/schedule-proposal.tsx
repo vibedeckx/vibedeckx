@@ -5,7 +5,7 @@ import { CalendarClock, CheckCircle2, ExternalLink, Loader2 } from "lucide-react
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { api } from "@/lib/api";
+import { parsePromptProvider, api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { noteScheduleCreated, useProposedSchedule } from "@/hooks/use-proposed-schedule";
 import { useAgentConversation } from "./agent-conversation";
@@ -108,12 +108,11 @@ export function ScheduleProposalUI({ input, toolUseId }: ScheduleProposalUIProps
         timezone: fields.timezone,
         target,
         run_type: fields.runType,
-        // Codex sessions must not create Claude-provider runs: the follow-up
-        // check should be run by the same agent that proposed it. A command run
+        // The follow-up check uses the same agent that proposed it. A command run
         // has no agent, so it has no provider either.
         prompt_provider: fields.runType === "command"
           ? null
-          : agentType === "codex" ? "codex" : "claude",
+          : parsePromptProvider(agentType === "claude-code" ? "claude" : agentType),
         content: fields.content,
         cwd_mode: "branch",
         branch: branchValue.trim() ? branchValue.trim() : null,
@@ -136,7 +135,7 @@ export function ScheduleProposalUI({ input, toolUseId }: ScheduleProposalUIProps
             <p className="text-sm font-medium text-foreground break-words">{created.name}</p>
             <p className="mt-0.5 font-mono text-xs text-muted-foreground break-all">
               {created.cron_expr} · {created.timezone}
-              {created.run_type === "command" ? " · command" : ""}
+              {created.run_type === "command" ? " · command" : ` · ${created.prompt_provider ?? "claude"}`}
               {created.branch ? ` · ${created.branch}` : ""}
             </p>
           </div>
@@ -191,7 +190,7 @@ export function ScheduleProposalUI({ input, toolUseId }: ScheduleProposalUIProps
       </div>
 
       <p className="mt-2 text-xs text-muted-foreground">
-        {isCommand ? "Runs as a command" : "Runs as an agent"} on {targetLabel} · {fields.timezone}
+        {isCommand ? "Runs as a command" : `Runs with ${agentType ?? "claude"}`} on {targetLabel} · {fields.timezone}
       </p>
 
       {error && <p className="mt-2 text-xs text-red-500 break-words">{error}</p>}

@@ -1,0 +1,28 @@
+{
+  "scope": "real fx 0.0.17 executable; synthetic local model tool call; isolated permission settings; no copied credentials",
+  "args": [
+    "fx",
+    "ask",
+    "--provider",
+    "probe",
+    "--model",
+    "probe-model",
+    "--permission-mode",
+    "auto",
+    "--json",
+    "--no-save",
+    "--",
+    "Run printf FX_AUTO_APPROVAL_PROBE using shell."
+  ],
+  "settings": {
+    "permission": {
+      "bash": {
+        "*": "ask"
+      }
+    }
+  },
+  "exitCode": 1,
+  "seconds": 0.04,
+  "stdout": "{\"output\":\"\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[{\"name\":\"shell\",\"status\":\"error\",\"action\":\"run\",\"error\":{\"category\":\"rejected\",\"code\":\"rejected\"}}],\"usage\":{\"input_tokens\":null,\"output_tokens\":null},\"error\":\"NonInteractivePermissionRequired\"}\n",
+  "stderr": "[notice] [context] skill descriptions shortened: 19; source=compiled default\n\n[notice] [context] toolbox menu shortened to fit skill_catalog_bytes: effective=2620 bytes source=compiled default\n\nRunning printf FX_AUTO_APPROVAL_PROBE\nfx ask: permission required by configured rule\nfx ask: blocked action: Running printf FX_AUTO_APPROVAL_PROBE\nfx ask: reason=noninteractive_permission_prompt_unavailable\nfx ask: rerun in the interactive shell to approve this action, or add a narrow matching permission rule before retrying\n"
+}

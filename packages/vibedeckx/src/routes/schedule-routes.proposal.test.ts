@@ -99,6 +99,15 @@ describe("schedule create from an agent proposal", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("creates an fx schedule and rejects an unknown provider patch", async () => {
+    const response = await create(body({ prompt_provider: "fx" }));
+    expect(response.statusCode).toBe(201);
+    const schedule = response.json().schedule;
+    expect(schedule.prompt_provider).toBe("fx");
+    const invalid = await app.inject({ method: "PUT", url: `/api/schedules/${schedule.id}`, payload: { prompt_provider: "typo" } });
+    expect(invalid.statusCode).toBe(400);
+  });
+
   it("creates the schedule and records its provenance", async () => {
     const res = await create(body());
     expect(res.statusCode, res.body).toBe(201);

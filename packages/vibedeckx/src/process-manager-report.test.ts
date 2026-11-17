@@ -12,7 +12,7 @@ const fakeStorage = {
   executorProcesses: { create: async () => {}, updateStatus: async () => {}, updatePid: async () => {} },
 } as unknown as Storage;
 
-function runPrompt(pm: ProcessManager, provider: "claude" | "codex", prompt: string, cwd: string) {
+function runPrompt(pm: ProcessManager, provider: "claude" | "codex" | "fx", prompt: string, cwd: string) {
   return new Promise<{ exitCode: number | null; finalResult?: string }>((resolve, reject) => {
     const executor: Executor = {
       id: `smoke-${provider}`, project_id: "p", workspace_id: "", name: "smoke",
@@ -59,6 +59,17 @@ done
 echo "codex stub running"
 if [ -n "$out" ]; then printf '## Codex Report\\nAll done.' > "$out"; fi
 `);
+    writeFileSync(path.join(bin, "fx"), `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (process.env.FX_AUTO_UPGRADE !== '0' || args[0] !== 'ask' || args[2] !== 'auto' || args[3] !== '--json') process.exit(2);
+const prompt = args.at(-1);
+if (prompt === 'malformed') { console.log('invalid'); process.exit(0); }
+const code = prompt === 'approval' ? 1 : prompt === 'usage' ? 2 : 0;
+console.error(code ? 'Permission required or invalid arguments' : 'working');
+console.log(JSON.stringify({ output: code ? '' : 'working\\n# fx Report', final_output: code ? '' : '# fx Report', exit_code: prompt === 'reported-failure' ? 1 : code }));
+process.exit(code);
+`);
+    chmodSync(path.join(bin, "fx"), 0o755);
     chmodSync(path.join(bin, "claude"), 0o755);
     chmodSync(path.join(bin, "codex"), 0o755);
     savedPath = process.env.PATH;
@@ -69,6 +80,13 @@ if [ -n "$out" ]; then printf '## Codex Report\\nAll done.' > "$out"; fi
     process.env.PATH = savedPath;
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it.each([['ok', 0, '# fx Report'], ['approval', 1, undefined], ['usage', 2, undefined], ['malformed', 1, undefined], ['reported-failure', 1, '# fx Report']] as const)(
+    "fx captures final output and status: %s", async (prompt, code, finalResult) => {
+      const pm = new ProcessManager(fakeStorage);
+      const res = await runPrompt(pm, "fx", prompt, cwd);
+      expect(res).toEqual({ exitCode: code, finalResult });
+    });
 
   it("claude stream run carries the result event text as finalResult", async () => {
     const pm = new ProcessManager(fakeStorage);

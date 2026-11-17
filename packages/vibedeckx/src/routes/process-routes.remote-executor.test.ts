@@ -103,6 +103,17 @@ describe("remote executor start/stop over an unreliable tunnel", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("sends fx prompt executors to the worker unchanged", async () => {
+    await storage.executors.update("e1", { executor_type: "prompt", prompt_provider: "fx", command: "hello" });
+    proxy.handler = async (_s, _m, _p, body) => ok({ processId: (body as ExecuteBody).processId });
+    const response = await startExecutor();
+    expect(response.statusCode).toBe(200);
+    const sends = vi.mocked(proxyToRemoteAuto).mock.calls.filter(([, method]) => method === "POST");
+    expect(sends).toHaveLength(1);
+    expect(sends[0][2]).toBe("/api/path/execute");
+    expect(sends[0][3]).toMatchObject({ executor_type: "prompt", prompt_provider: "fx" });
+  });
+
   describe("Start", () => {
     it("registers the process the worker started under the requested identity", async () => {
       proxy.handler = async (_s, _m, _p, body) => ok({ processId: (body as ExecuteBody).processId });

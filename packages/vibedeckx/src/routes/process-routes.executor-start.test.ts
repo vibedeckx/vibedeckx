@@ -65,6 +65,20 @@ describe("POST /api/executors/:id/start — workspace-derived working directory"
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("/api/path/execute preserves fx at the worker boundary", async () => {
+    const response = await app.inject({ method: "POST", url: "/api/path/execute",
+      payload: { path: "/repo", command: "hello", executor_type: "prompt", prompt_provider: "fx" } });
+    expect(response.statusCode).toBe(200);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ prompt_provider: "fx", executor_type: "prompt" }), "/repo", true, undefined, undefined);
+  });
+
+  it("rejects unknown providers on /api/path/execute", async () => {
+    const response = await app.inject({ method: "POST", url: "/api/path/execute",
+      payload: { path: "/repo", command: "hello", executor_type: "prompt", prompt_provider: "typo" } });
+    expect(response.statusCode).toBe(400);
+    expect(start).not.toHaveBeenCalled();
+  });
+
   it("runs in the executor's own workspace worktree", async () => {
     const response = await app.inject({
       method: "POST", url: "/api/executors/e-feat/start", payload: {},

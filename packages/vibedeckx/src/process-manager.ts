@@ -1,3 +1,5 @@
+import { buildFxAskRun } from "./protocol/fx/cli.js";
+import { parsePromptProvider } from "./storage/types.js";
 import { spawn, type ChildProcess } from "child_process";
 import { existsSync, chmodSync, readdirSync, statSync, readFileSync, rmSync } from "fs";
 import { tmpdir } from "os";
@@ -9,11 +11,8 @@ import type { Executor, ExecutorProcessStatus, PromptProvider, Storage } from ".
 import type { EventBus } from "./event-bus.js";
 import { detectBinary, getBinaryVersion } from "./protocol/shared/binary.js";
 import { buildCodexExecCommand } from "./protocol/codex/cli.js";
-import {
-  buildClaudePrintCommand,
-  buildClaudeStreamExecutorSpawn,
-} from "./protocol/claude-code/cli.js";
-import { serializeUserInput } from "./protocol/claude-code/codec.js";
+import { buildClaudeStreamExecutorRun } from "./protocol/claude-code/executor-run.js";
+import { passthroughDecoder, type PipedRunSpec } from "./protocol/shared/piped-run.js";
 import { killProcessTree, treeSpawnOptions } from "./utils/process-tree.js";
 
 export type LogMessage =
@@ -50,6 +49,7 @@ export interface TerminalInfo {
 type LogSubscriber = (msg: LogMessage) => void;
 
 interface RunningProcess {
+  stopRequested?: boolean;
   process: ChildProcess | IPty;
   isPty: boolean;
   isTerminal: boolean;
@@ -267,23 +267,15 @@ export class ProcessManager {
   }
 
   /**
-   * Build the shell command string for a prompt executor.
-   * Supports claude and codex providers. Command shapes live in the
-   * protocol layer (src/protocol/).
+   * Build the shell command string for a prompt provider that runs in a PTY
+   * (those for which pipedPromptRun returns undefined). Command shapes live in
+   * the protocol layer (src/protocol/).
    */
   private buildPromptCommand(prompt: string, provider: PromptProvider, finalResultFile?: string): string {
-    if (provider === 'codex') {
-      const binary = detectBinary('codex');
-      if (binary) {
-        console.log(`[ProcessManager] codex version: ${getBinaryVersion(binary) ?? 'unknown'}`);
-      }
-      return buildCodexExecCommand(binary, prompt, finalResultFile);
-    }
-    const binary = detectBinary('claude');
-    if (binary) {
-      console.log(`[ProcessManager] claude version: ${getBinaryVersion(binary) ?? 'unknown'}`);
-    }
-    return buildClaudePrintCommand(binary, prompt);
+    if (provider !== "codex") throw new Error(`Unsupported shell prompt provider: ${provider}`);
+    const binary = detectBinary("codex");
+    if (binary) console.log(`[ProcessManager] codex version: ${getBinaryVersion(binary) ?? "unknown"}`);
+    return buildCodexExecCommand(binary, prompt, finalResultFile);
   }
 
   /**
@@ -319,6 +311,8 @@ export class ProcessManager {
     preallocatedProcessId?: string,
     suppliedEffectFingerprint?: string,
   ): Promise<string> {
+    // Validate before any side effect (DB row, spawn).
+    const provider = executor.executor_type === "prompt" ? parsePromptProvider(executor.prompt_provider) : undefined;
     const processId = preallocatedProcessId ?? crypto.randomUUID();
     const cwd = executor.cwd
       ? (path.isAbsolute(executor.cwd) ? executor.cwd : path.join(projectPath, executor.cwd))
@@ -344,29 +338,27 @@ export class ProcessManager {
       });
     }
 
-    // Determine working directory
-    // If executor.cwd is set, resolve it relative to the worktree/project path
-    // so that sub-directory paths work correctly across worktrees
-    // For claude prompt executors, use stream-json mode for real-time streaming
-    if (executor.executor_type === 'prompt' && (executor.prompt_provider ?? 'claude') === 'claude') {
-      console.log(`[ProcessManager] Starting stream-json process ${processId}`);
-      console.log(`[ProcessManager] Type: prompt (claude stream-json)`);
+    // Prompt providers that speak a structured protocol run over plain pipes;
+    // plain commands and shell-command providers run in a PTY for colors.
+    const pipedRun = provider ? this.pipedPromptRun(executor.command, provider) : undefined;
+    if (pipedRun) {
+      console.log(`[ProcessManager] Starting ${provider} prompt process ${processId}`);
       console.log(`[ProcessManager] Prompt: ${executor.command.slice(0, 100)}${executor.command.length > 100 ? '...' : ''}`);
       console.log(`[ProcessManager] CWD: ${cwd}`);
-      this.startClaudeStreamProcess(processId, executor, cwd, skipDb);
+      this.startPipedProcess(processId, executor, cwd, skipDb, pipedRun);
     } else {
-      // For non-claude prompt executors, build the provider-specific command.
+      // Plain command, or a prompt provider that runs as a shell command.
       // Codex prompt runs get a scratch file for the agent's final message
       // (read back on exit as the run's report).
-      const finalResultFile = executor.executor_type === 'prompt' && executor.prompt_provider === 'codex'
+      const finalResultFile = provider === "codex"
         ? path.join(tmpdir(), `vibedeckx-last-msg-${processId}.txt`)
         : undefined;
-      const effectiveExecutor = executor.executor_type === 'prompt'
-        ? { ...executor, command: this.buildPromptCommand(executor.command, executor.prompt_provider ?? 'claude', finalResultFile) }
+      const effectiveExecutor = provider
+        ? { ...executor, command: this.buildPromptCommand(executor.command, provider, finalResultFile) }
         : executor;
 
       console.log(`[ProcessManager] Starting process ${processId}`);
-      console.log(`[ProcessManager] Type: ${executor.executor_type || 'command'}${executor.executor_type === 'prompt' ? ` (${executor.prompt_provider ?? 'claude'})` : ''}`);
+      console.log(`[ProcessManager] Type: ${executor.executor_type || 'command'}${provider ? ` (${provider})` : ''}`);
       console.log(`[ProcessManager] Command: ${effectiveExecutor.command}`);
       console.log(`[ProcessManager] CWD: ${cwd}`);
       console.log(`[ProcessManager] Forcing PTY mode for ANSI color support`);
@@ -541,25 +533,7 @@ export class ProcessManager {
       env: { ...process.env, TERM: "xterm-256color", FORCE_COLOR: "1" } as Record<string, string>,
     });
 
-    const runningProcess: RunningProcess = {
-      process: ptyProcess,
-      isPty: true,
-      isTerminal: false,
-      name: "",
-      logs: [],
-      logBytes: 0,
-      pending: null,
-      pendingTimer: null,
-      trimmed: false,
-      subscribers: new Set(),
-      executorId: executor.id,
-      projectId: executor.project_id,
-      projectPath: cwd,
-      branch: null,
-      skipDb,
-    };
-
-    this.processes.set(processId, runningProcess);
+    const runningProcess = this.registerProcess(processId, executor, cwd, skipDb, ptyProcess, true);
     console.log(`[ProcessManager] PTY process ${processId} added to map, PID: ${ptyProcess.pid}`);
 
     // Drain mechanism: node-pty can fire onExit before all onData callbacks
@@ -600,7 +574,7 @@ export class ProcessManager {
     // Handle PTY exit
     ptyProcess.onExit(({ exitCode }) => {
       const code = exitCode ?? 0;
-      const status: ExecutorProcessStatus = code === 0 ? "completed" : "failed";
+      const status = this.settledStatus(runningProcess, code);
 
       console.log(`[ProcessManager] PTY process ${processId} exited with code ${code}`);
 
@@ -617,30 +591,43 @@ export class ProcessManager {
       exitPending = { code };
       scheduleDrain();
 
-      // Schedule cleanup after retention period
-      setTimeout(() => {
-        console.log(`[ProcessManager] Cleaning up process ${processId}`);
-        this.processes.delete(processId);
-        this.processEffects.delete(processId);
-      }, LOG_RETENTION_MS);
+      this.scheduleCleanup(processId);
     });
   }
 
   /**
-   * Start a process using regular spawn (for non-interactive commands)
+   * The pipe-based run for a prompt provider, or undefined when the provider
+   * runs as a shell command in a PTY (see buildPromptCommand). Exhaustive: a
+   * new provider must decide here.
    */
-  private startRegularProcess(processId: string, executor: Executor, cwd: string, skipDb = false, finalResultFile?: string): void {
-    const childProcess = spawn(executor.command, {
-      shell: true,
-      cwd,
-      ...treeSpawnOptions(),
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, FORCE_COLOR: "1" },
-    });
+  private pipedPromptRun(prompt: string, provider: PromptProvider): PipedRunSpec | undefined {
+    switch (provider) {
+      case "claude": {
+        const binary = detectBinary("claude");
+        if (binary) console.log(`[ProcessManager] claude version: ${getBinaryVersion(binary) ?? "unknown"}`);
+        return buildClaudeStreamExecutorRun(binary, prompt);
+      }
+      case "fx":
+        return buildFxAskRun(detectBinary("fx"), prompt);
+      case "codex":
+        return undefined;
+      default: {
+        const unhandled: never = provider;
+        throw new Error(`Unsupported prompt provider: ${String(unhandled)}`);
+      }
+    }
+  }
 
+  /** A stop the user asked for wins over whatever exit code the kill produced. */
+  private settledStatus(rp: RunningProcess, exitCode: number): ExecutorProcessStatus {
+    if (rp.stopRequested) return "killed";
+    return exitCode === 0 ? "completed" : "failed";
+  }
+
+  private registerProcess(processId: string, executor: Executor, cwd: string, skipDb: boolean, proc: ChildProcess | IPty, isPty: boolean): RunningProcess {
     const runningProcess: RunningProcess = {
-      process: childProcess,
-      isPty: false,
+      process: proc,
+      isPty,
       isTerminal: false,
       name: "",
       logs: [],
@@ -655,51 +642,88 @@ export class ProcessManager {
       branch: null,
       skipDb,
     };
-
     this.processes.set(processId, runningProcess);
-    console.log(`[ProcessManager] Regular process ${processId} added to map, PID: ${childProcess.pid}`);
+    return runningProcess;
+  }
 
-    // Handle stdout
-    childProcess.stdout?.on("data", (data: Buffer) => {
-      this.appendOutput(processId, runningProcess, "stdout", data.toString());
+  private scheduleCleanup(processId: string): void {
+    setTimeout(() => {
+      console.log(`[ProcessManager] Cleaning up process ${processId}`);
+      this.processes.delete(processId);
+      this.processEffects.delete(processId);
+    }, LOG_RETENTION_MS);
+  }
+
+  /**
+   * Plain command without a PTY — the fallback when node-pty cannot spawn.
+   */
+  private startRegularProcess(processId: string, executor: Executor, cwd: string, skipDb = false, finalResultFile?: string): void {
+    this.startPipedProcess(processId, executor, cwd, skipDb, {
+      command: executor.command,
+      args: [],
+      shell: true,
+      decoder: passthroughDecoder(() => this.consumeFinalResultFile(finalResultFile)),
     });
+  }
 
-    // Handle stderr
-    childProcess.stderr?.on("data", (data: Buffer) => {
-      this.appendOutput(processId, runningProcess, "stderr", data.toString());
+  /**
+   * Run a process over plain pipes. Agent-agnostic: the spec says how to launch
+   * it and its decoder turns output into display text and a result; this owns
+   * registration, streaming, status, events and cleanup.
+   */
+  private startPipedProcess(processId: string, executor: Executor, cwd: string, skipDb: boolean, spec: PipedRunSpec): void {
+    const childProcess = spawn(spec.command, spec.args, {
+      shell: spec.shell,
+      cwd,
+      ...treeSpawnOptions(),
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, FORCE_COLOR: "1", ...spec.env },
+    });
+    const runningProcess = this.registerProcess(processId, executor, cwd, skipDb, childProcess, false);
+    console.log(`[ProcessManager] Piped process ${processId} added to map, PID: ${childProcess.pid}`);
+
+    if (spec.stdin === null) {
+      childProcess.stdin?.end();
+    } else if (spec.stdin !== undefined) {
+      childProcess.stdin?.write(spec.stdin, () => childProcess.stdin?.end());
+    }
+
+    // Decode as UTF-8 at the stream so multi-byte characters never split across chunks.
+    childProcess.stdout?.setEncoding("utf8");
+    childProcess.stderr?.setEncoding("utf8");
+    childProcess.stdout?.on("data", (chunk: string) => {
+      const text = spec.decoder.stdout(chunk);
+      if (text) this.appendOutput(processId, runningProcess, "stdout", text);
+    });
+    childProcess.stderr?.on("data", (chunk: string) => {
+      const text = spec.decoder.stderr(chunk);
+      if (text) this.appendOutput(processId, runningProcess, "stderr", text);
     });
 
     // Exactly-once terminal path. Both 'close' and 'error' can reach it, and a
     // spawn failure emits both — without the guard each would append its own
     // `finished`, emit a second stopped event and arm a second cleanup timer.
     let finalized = false;
-    const finalize = (exitCode: number, finalResult?: string) => {
+    const finalize = (status: ExecutorProcessStatus, exitCode: number, finalResult?: string) => {
       if (finalized) return;
       finalized = true;
-      this.appendFinished(processId, runningProcess, { type: "finished", exitCode, finalResult });
-      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs), finalResult });
-      setTimeout(() => {
-        console.log(`[ProcessManager] Cleaning up process ${processId}`);
-        this.processes.delete(processId);
-        this.processEffects.delete(processId);
-      }, LOG_RETENTION_MS);
-    };
-
-    // Handle process exit
-    childProcess.on("close", (code) => {
-      const exitCode = code ?? 0;
-      const status: ExecutorProcessStatus = exitCode === 0 ? "completed" : "failed";
-
-      console.log(`[ProcessManager] Process ${processId} exited with code ${exitCode}`);
-
+      console.log(`[ProcessManager] Process ${processId} exited with code ${exitCode} (${status})`);
       if (!skipDb) {
         this.storage.executorProcesses.updateStatus(processId, status, exitCode).catch((err) => {
           console.error(`[ProcessManager] Failed to update status for process ${processId}:`, err);
         });
       }
+      this.appendFinished(processId, runningProcess, { type: "finished", exitCode, finalResult });
+      this.eventBus?.emit({ type: "executor:stopped", projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs), finalResult });
+      this.scheduleCleanup(processId);
+    };
 
-      // close event guarantees all stdio is flushed — safe to snapshot now
-      finalize(exitCode, this.consumeFinalResultFile(finalResultFile));
+    // 'close' guarantees all stdio is flushed — safe to settle the decoder now.
+    childProcess.on("close", (code) => {
+      const result = spec.decoder.finish({ code, stopped: runningProcess.stopRequested === true });
+      if (result.output) this.appendOutput(processId, runningProcess, "stdout", result.output);
+      if (result.error) this.appendOutput(processId, runningProcess, "stderr", result.error);
+      finalize(this.settledStatus(runningProcess, result.exitCode), result.exitCode, result.finalResult);
     });
 
     childProcess.on("error", (error) => {
@@ -715,221 +739,7 @@ export class ProcessManager {
         console.warn(`[ProcessManager] Process ${processId} reported an error while still alive: ${error.message}`);
         return;
       }
-
-      if (!skipDb) {
-        this.storage.executorProcesses.updateStatus(processId, "failed", 1).catch((err) => {
-          console.error(`[ProcessManager] Failed to update status for process ${processId}:`, err);
-        });
-      }
-
-      finalize(1);
-    });
-  }
-
-  /**
-   * Start a Claude prompt executor using stream-json mode for real-time output.
-   * Spawns claude with --output-format=stream-json --input-format=stream-json,
-   * sends the prompt via stdin, and parses JSON output into formatted terminal text.
-   */
-  private startClaudeStreamProcess(processId: string, executor: Executor, cwd: string, skipDb: boolean): void {
-    const { command, args: fullArgs } = buildClaudeStreamExecutorSpawn(detectBinary('claude'));
-
-    if (command !== 'npx') {
-      console.log(`[ProcessManager] claude version: ${getBinaryVersion(command) ?? 'unknown'}`);
-    }
-
-    const childProcess = spawn(command, fullArgs, {
-      cwd,
-      ...treeSpawnOptions(),
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, FORCE_COLOR: '1' },
-    });
-
-    const runningProcess: RunningProcess = {
-      process: childProcess,
-      isPty: false,
-      isTerminal: false,
-      name: '',
-      logs: [],
-      logBytes: 0,
-      pending: null,
-      pendingTimer: null,
-      trimmed: false,
-      subscribers: new Set(),
-      executorId: executor.id,
-      projectId: executor.project_id,
-      projectPath: cwd,
-      branch: null,
-      skipDb,
-    };
-
-    this.processes.set(processId, runningProcess);
-    console.log(`[ProcessManager] Stream process ${processId} added to map, PID: ${childProcess.pid}`);
-
-    // Send prompt via stdin and close to signal single-turn
-    const userMessage = serializeUserInput(executor.command);
-    childProcess.stdin?.write(userMessage, () => {
-      childProcess.stdin?.end();
-    });
-
-    // Stream-JSON parsing state
-    let stdoutBuffer = '';
-    const prevTextByIndex = new Map<number, string>();
-    const seenToolUseIds = new Set<string>();
-    // Final assistant text from the 'result' event — captured as the run's report.
-    let finalResult: string | undefined;
-
-    const RESET = '\x1b[0m';
-    const DIM = '\x1b[2m';
-    const CYAN = '\x1b[36m';
-    const GREEN = '\x1b[32m';
-    const RED = '\x1b[31m';
-    const BOLD = '\x1b[1m';
-
-    const pushLog = (data: string) => {
-      this.appendOutput(processId, runningProcess, 'stdout', data);
-    };
-
-    // Parse stream-json stdout into formatted terminal output
-    childProcess.stdout?.on('data', (data: Buffer) => {
-      stdoutBuffer += data.toString();
-      const lines = stdoutBuffer.split('\n');
-      stdoutBuffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.trim()) continue;
-
-        let parsed: Record<string, unknown>;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          pushLog(line + '\n');
-          continue;
-        }
-
-        if (parsed.type === 'assistant') {
-          const message = parsed.message as Record<string, unknown> | undefined;
-          const content = message?.content as Array<Record<string, unknown>> | undefined;
-          if (!content || !Array.isArray(content)) continue;
-
-          let output = '';
-          for (let i = 0; i < content.length; i++) {
-            const block = content[i];
-
-            if (block.type === 'text') {
-              const fullText = (block.text as string) || '';
-              const prev = prevTextByIndex.get(i) || '';
-              if (fullText.length > prev.length && fullText.startsWith(prev)) {
-                output += fullText.slice(prev.length);
-              } else if (fullText !== prev) {
-                output += fullText;
-              }
-              prevTextByIndex.set(i, fullText);
-            } else if (block.type === 'tool_use' && block.id && !seenToolUseIds.has(block.id as string)) {
-              seenToolUseIds.add(block.id as string);
-              output += `\n${CYAN}${BOLD}> ${block.name}${RESET}\n`;
-              const input = block.input as Record<string, unknown> | undefined;
-              if (input && Object.keys(input).length > 0) {
-                const inputStr = JSON.stringify(input, null, 2);
-                const truncated = inputStr.length > 500 ? inputStr.slice(0, 500) + '...' : inputStr;
-                output += `${DIM}${truncated}${RESET}\n`;
-              }
-            }
-          }
-
-          if (output) pushLog(output);
-
-        } else if (parsed.type === 'user') {
-          const message = parsed.message as Record<string, unknown> | undefined;
-          const content = message?.content as Array<Record<string, unknown>> | undefined;
-          if (!content || !Array.isArray(content)) continue;
-
-          for (const block of content) {
-            if (block.type === 'tool_result') {
-              const resultStr = typeof block.content === 'string'
-                ? block.content
-                : JSON.stringify(block.content);
-              if (resultStr && resultStr.length > 0) {
-                const truncated = resultStr.length > 2000 ? resultStr.slice(0, 2000) + '...' : resultStr;
-                pushLog(`${DIM}${truncated}${RESET}\n`);
-              }
-            }
-          }
-
-        } else if (parsed.type === 'system') {
-          const msg = parsed.message || parsed.subtype;
-          if (msg) {
-            pushLog(`${DIM}${msg}${RESET}\n`);
-          }
-
-        } else if (parsed.type === 'result') {
-          if (parsed.subtype === 'error') {
-            pushLog(`\n${RED}Error: ${parsed.error || 'Unknown error'}${RESET}\n`);
-          } else {
-            if (typeof parsed.result === 'string' && parsed.result.trim()) {
-              finalResult = parsed.result;
-            }
-            const parts: string[] = [];
-            if (parsed.duration_ms) parts.push(`${((parsed.duration_ms as number) / 1000).toFixed(1)}s`);
-            if (parsed.cost_usd) parts.push(`$${(parsed.cost_usd as number).toFixed(4)}`);
-            const info = parts.length > 0 ? ` (${parts.join(', ')})` : '';
-            pushLog(`\n${GREEN}Done${info}${RESET}\n`);
-          }
-        }
-      }
-    });
-
-    // Ignore stderr (Claude Code uses it for progress/debug info)
-    childProcess.stderr?.on('data', () => {});
-
-    // Exactly-once terminal path — see startRegularProcess for why.
-    let finalized = false;
-    const finalize = (exitCode: number) => {
-      if (finalized) return;
-      finalized = true;
-      this.appendFinished(processId, runningProcess, { type: 'finished', exitCode, finalResult });
-      this.eventBus?.emit({ type: 'executor:stopped', projectId: runningProcess.projectId, executorId: runningProcess.executorId, processId, exitCode, target: "local", tailOutput: this.snapshotTailOutput(runningProcess.logs), finalResult });
-      setTimeout(() => {
-        console.log(`[ProcessManager] Cleaning up process ${processId}`);
-        this.processes.delete(processId);
-        this.processEffects.delete(processId);
-      }, LOG_RETENTION_MS);
-    };
-
-    // Handle process exit
-    childProcess.on('close', (code) => {
-      const exitCode = code ?? 0;
-      const status: ExecutorProcessStatus = exitCode === 0 ? 'completed' : 'failed';
-
-      console.log(`[ProcessManager] Stream process ${processId} exited with code ${exitCode}`);
-
-      if (!skipDb) {
-        this.storage.executorProcesses.updateStatus(processId, status, exitCode).catch((err) => {
-          console.error(`[ProcessManager] Failed to update status for process ${processId}:`, err);
-        });
-      }
-
-      // close event guarantees all stdio is flushed — safe to snapshot now
-      finalize(exitCode);
-    });
-
-    childProcess.on('error', (error) => {
-      this.appendOutput(processId, runningProcess, 'stderr', `Error: ${error.message}`);
-
-      // Only a spawn that never happened (no pid) is terminal here — see
-      // startRegularProcess.
-      if (childProcess.pid !== undefined) {
-        console.warn(`[ProcessManager] Stream process ${processId} reported an error while still alive: ${error.message}`);
-        return;
-      }
-
-      if (!skipDb) {
-        this.storage.executorProcesses.updateStatus(processId, 'failed', 1).catch((err) => {
-          console.error(`[ProcessManager] Failed to update status for process ${processId}:`, err);
-        });
-      }
-
-      finalize(1);
+      finalize("failed", 1);
     });
   }
 
@@ -944,6 +754,7 @@ export class ProcessManager {
       return this.stopByPid(processId);
     }
 
+    runningProcess.stopRequested = true;
     let killed = false;
     if (runningProcess.isPty) {
       // For PTY processes, kill the process group to ensure all children are terminated
@@ -1207,7 +1018,7 @@ export class ProcessManager {
     } else {
       // Regular processes: check killed and exitCode
       const childProcess = runningProcess.process as ChildProcess;
-      return !childProcess.killed && childProcess.exitCode === null;
+      return !childProcess.killed && childProcess.exitCode === null && childProcess.signalCode == null;
     }
   }
 
@@ -1222,7 +1033,7 @@ export class ProcessManager {
           return lastLog?.type !== "finished";
         } else {
           const childProcess = proc.process as ChildProcess;
-          return !childProcess.killed && childProcess.exitCode === null;
+          return !childProcess.killed && childProcess.exitCode === null && childProcess.signalCode == null;
         }
       })
       .map(([id]) => id);

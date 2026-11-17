@@ -52,12 +52,12 @@ describe("ExecutorForm lifecycle", () => {
     expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ lifecycle: "oneshot" }));
   });
 
-  it("is not offered for a prompt executor, which always submits oneshot", async () => {
+  it.each(["claude", "codex", "fx"] as const)("preserves %s prompts and always submits oneshot", async (provider) => {
     const onSubmit = vi.fn(async () => {});
-    const prompt: Executor = { ...existing, executor_type: "prompt", prompt_provider: "claude", lifecycle: "oneshot" };
+    const prompt: Executor = { ...existing, executor_type: "prompt", prompt_provider: provider, lifecycle: "oneshot" };
     await act(async () => { root.render(<ExecutorForm open onOpenChange={() => {}} executor={prompt} onSubmit={onSubmit} />); });
     expect(serviceSwitch()).toBeNull();
     await submit();
-    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ lifecycle: "oneshot" }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ lifecycle: "oneshot", prompt_provider: provider }));
   });
 });

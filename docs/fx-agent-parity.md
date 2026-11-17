@@ -8,7 +8,7 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 
 ## 任务 7 收尾进度（2026-11-16）
 
-**本节记录本轮收尾范围；整个 fx 集成尚未达到最终验收条件。** 任务列表中任务 8–12 仍为待办，不能把历史探针和基础 Provider 通过当作其产品验收。下面的历史章节保留当时版本和决定，当前权限以 full-access 决策为准。
+**本节记录本轮收尾范围；整个 fx 集成尚未达到最终验收条件。** 任务 8 已完成代码接入及本机验证，尚待外部 worker 实机验收；任务 9–12 仍待后续验收，不能把历史探针和基础 Provider 通过当作其产品验收。下面的历史章节保留当时版本和决定；交互式 ACP 当前使用 full-access，一次性 ask 执行器使用 auto（见任务 8）。
 
 - 版本处理按用户确认与 Claude Code / Codex 对齐：只记录实际版本，不做版本白名单、不提示“未验证版本”。公共版本日志探测继承 spawn 环境，fx 的 `--version` 和 ACP/help 均关闭自动升级；不新增安装器或升级机制。
 - 平台按用户确认只写文档；不新增 Windows 专用判断、禁用 UI 或不可用提示。命令缺失沿用现有启动失败处理。服务安装时的公共 PATH 检查已有 fx，本次不重复修改。
@@ -31,7 +31,7 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 
 | 项目 | 当前证据 / 后续动作 |
 | --- | --- |
-| 执行器、定时任务 | 任务 8 仍待办，process-manager 仍只有 Claude/Codex 命令构造；由任务 8 完成后验收。 |
+| 执行器、定时任务 | 已接入 `fx ask`；本机真实运行、输出、停止及 cron 报告落库通过。远端 worker 实机验收待提供目标；详见任务 8 验证记录。 |
 | Reviewer、Loop、Commander 派生 | 类型及选择器共用路径已有 fx，但完整产品验收属于任务 9；不能写成所有入口已通过。 |
 | 模型/登录失败诊断、附件、切换 agent、分支、指令、文件清理 | 任务 10/11 尚未完成最终验收；保留各行真实状态。 |
 | 限制处理结论 | 任务 12 待办；不在本次擅自将未验证项判为不支持或延期。 |
@@ -271,8 +271,9 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | 休眠唤醒 | 管理器历史重放 | 共用管理器历史重放 | 已实现；管理器子进程 + SQLite 休眠唤醒回归通过；首版不用 load/resume |
 | 切换 agent | 共用管理器迁移历史 | 共用管理器迁移历史 | 新 fx 会话 + 重放路径已接通；跨 agent 完整验收留任务 11 |
 | 分支 / 截断分支 | 共用分支历史复制 | 共用分支历史复制 | 独立 fx id + 历史路径已接通；截断分支完整验收留任务 11 |
-| 执行器 | prompt executor Claude CLI | codex exec CLI | 待实现；对应执行器接入任务；不能仅新增 Provider，routes 仍把非 codex 当 claude |
-| 定时任务 | scheduler 调用执行器 | scheduler 传递 prompt_provider | 待实现；对应定时任务接入任务 |
+| 执行器 | prompt executor Claude CLI | codex exec CLI | `fx ask --permission-mode auto --json`；stdout 最终 Markdown、stderr 进度，退出码判定，进程树停止；本机实测通过，远端实机待验收 |
+| 定时任务 | scheduler 调用执行器 | scheduler 传递 prompt_provider | 同一 ProcessManager 路径，cron 触发、output/report/exit_code 落库；本机实测通过，远端实机待验收 |
+| 执行器 ACP 流式工具调用展示 | stream-json | 最终结果基线 | 超出基线（不做）；不创建另一套 ACP 生命周期 |
 | Reviewer | 现有产品入口，具体 agent 组合未复核 | 同左 | 未验证；对应 Reviewer 接入任务补齐，不在本探针实现 |
 | Loop | workflow-repeat-loop 传 agentType | 同左 | 待实现；对应 Loop 接入任务 |
 | Commander 派生 | 现有会话/MCP/执行器路径 | 现有共用路径，组合未复核 | 未验证；对应 Commander 接入任务补齐 |
@@ -308,3 +309,18 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 - 退出前必须收到结果由 provider 元数据声明，manager 不按 fx 名称分支，意外退出错误不再附加原始 stderr。Claude/Codex 同样在进程退出后进入可唤醒状态，并补充共享生命周期回归测试。
 - 移除尚无调用来源的初始化 systemPrompt 参数；codec 保留经过探针验证的 append 构造支持。
 - 本轮验证：`pnpm --filter vibedeckx test` 全量 3530 通过、11 跳过（含离线契约）；追加的取消竞态及 prompt 错误恢复测试所在 fx manager 套件 17/17 通过；后端 `tsc --noEmit` 通过。此次未重跑真实 fx/UI 验收。
+
+
+## 任务 8：一次性执行器与定时任务
+
+- 协议构造和最终 JSON 解析位于 `protocol/fx/cli.ts`。使用 argv 直传（无 shell/PTY），`FX_AUTO_UPGRADE=0`，关闭 stdin；stderr 实时显示进度，stdout 在完成后解析 `output` 和 `final_output`。原生退出码和 JSON `exit_code` 任一非零都视为失败；非法 JSON 不能算成功。停止复用进程树终止，信号退出不能算成功或继续列为运行中。
+- 产品权限策略：固定 `auto`，保留权限规则和自动审核，绝不因失败改为 full-access；表单说明无人值守审批会失败。此策略独立于交互式 ACP 会话的 full-access 策略。
+- 本机 fx **0.0.17**（不是原始任务中的 0.0.16）实测 `ask --help` 支持上述 flag。真实 `auto --json` 文本请求退出 0；`ask --json` 的 shell 审批请求在 1.84 秒退出 1，JSON error 为 `NonInteractivePermissionRequired`，stderr 含 `noninteractive_permission_prompt_unavailable`。非法 `--config permission.bash.*=ask` 退出 2 / `InvalidAskArgs`，因此没有用它声称验证 auto 的显式 ask 规则。未修改用户设置或复制凭据。
+- 真实 CLI 记录：`protocol/fx/__fixtures__/task8-ask.json`。产品测试：`FX_EXECUTOR_LIVE=1 PATH=/usr/bin:$PATH pnpm --filter vibedeckx test:compat src/protocol/live/fx-executor.live.test.ts --retry 0`，覆盖输出/最终结果、停止、真正 cron 定时触发及 SQLite 详细结果里的 report。第一次探针误从不含 report 的列表接口读取报告，改为 getById 后通过；不将该首次失败称为产品失败。
+- 远端仍走 worker 的同一 `POST /api/path/execute` 与 ProcessManager；worker 现在原样接受 `prompt_provider: "fx"`（未知值 400）。不做旧 worker 兼容：旧 worker 会把 fx 强转为 Claude，所以必须在使用前统一升级所有 worker。日志、停止、finished/finalResult 帧不变。
+- `/compat-check` 注册表对账通过；origin/main 与 v0.3.58 两个 classify-diff 均为 wire-contract + gray（也包含分支已有的改动）；当前 server 对已发布 worker **0.3.58**：49 smokes passed，0 missing，0 failed。未新增 tunnel 入口，注册表快照不变。**需要发布 npm 并升级 worker** 才能在远端使用此功能。
+- 使用隔离 FX_HOME、无认证的本地合成模型服务，再以真实 fx 0.0.17 执行 auto + `permission.bash["*"] = "ask"`：0.04 秒退出 1，`NonInteractivePermissionRequired`，stderr 明确 `permission required by configured rule`。记录为 `task8-auto-explicit-ask.json`，live 测试可复现。这验证真实 ask 的权限执行，不是 ACP 推论，也不是外部模型验收；原用户设置/凭据未改动。
+- 检查结果：前后端 `tsc --noEmit` 通过；后端全量 248 个文件 / 3619 tests 通过（11 skipped），后续受影响用例复跑通过；前端全量 `--maxWorkers=2` 187 个文件 / 1729 tests 通过。首轮高负载下 Shiki symbol-tokens 出错，独立复跑和降低并发后的完整套件均通过，未修改该模块。真实 fx live 两项通过；`git diff --check` 通过。
+- 尚未完成：外部远端 worker 的真实模型/停止/定时验收（待指定连接目标）。不能把本地合成模型、旧 worker 兼容检查或本机 cron 测试当作该验收的替代。
+
+协议参考：[fx ask 官方说明](https://fx.sh/docs/using-fx/fx-ask)。

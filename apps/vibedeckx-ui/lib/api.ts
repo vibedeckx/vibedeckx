@@ -650,7 +650,21 @@ export interface WorktreeDeleteResult {
 }
 
 export type ExecutorType = 'command' | 'prompt';
-export type PromptProvider = 'claude' | 'codex';
+/** Single source of truth: the type, validation and parsing all derive from this list. */
+export const PROMPT_PROVIDERS = ['claude', 'codex', 'fx'] as const;
+export type PromptProvider = typeof PROMPT_PROVIDERS[number];
+
+export function isPromptProvider(value: unknown): value is PromptProvider {
+  return (PROMPT_PROVIDERS as readonly unknown[]).includes(value);
+}
+
+export function parsePromptProvider(value: unknown): PromptProvider {
+  if (value == null) return 'claude';
+  if (isPromptProvider(value)) return value;
+  throw new Error(`Unknown prompt provider: ${String(value)}`);
+}
+
+export const PROMPT_PROVIDER_LABELS: Record<PromptProvider, string> = { claude: 'Claude', codex: 'Codex', fx: 'fx' };
 /** `service`: a dev server — the Main Chat treats it as done once started instead of waiting for it to exit. */
 export type ExecutorLifecycle = 'oneshot' | 'service';
 

@@ -155,7 +155,19 @@ export type ExecutorType = 'command' | 'prompt';
  * its later exit is reported as an event.
  */
 export type ExecutorLifecycle = 'oneshot' | 'service';
-export type PromptProvider = 'claude' | 'codex';
+/** Single source of truth: the type, validation and parsing all derive from this list. */
+export const PROMPT_PROVIDERS = ['claude', 'codex', 'fx'] as const;
+export type PromptProvider = typeof PROMPT_PROVIDERS[number];
+
+export function isPromptProvider(value: unknown): value is PromptProvider {
+  return (PROMPT_PROVIDERS as readonly unknown[]).includes(value);
+}
+
+export function parsePromptProvider(value: unknown): PromptProvider {
+  if (value == null) return 'claude';
+  if (isPromptProvider(value)) return value;
+  throw new Error(`Unknown prompt provider: ${String(value)}`);
+}
 
 export interface Executor {
   id: string;

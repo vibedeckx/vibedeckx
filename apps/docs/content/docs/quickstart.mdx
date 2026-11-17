@@ -16,3 +16,16 @@ By default the server binds to `127.0.0.1` only and stores its data in `~/.vibed
 <Callout type="warn">
   Only bind to `0.0.0.0` behind `--auth` or an authenticating proxy — anyone who can reach the server can run agents on this machine.
 </Callout>
+
+## fx prompt executors and schedules
+
+Choose **fx** in a prompt executor or scheduled prompt to run `fx ask`. Install
+and authenticate fx on the machine that will run the task. Progress appears
+during the run; the answer and scheduled report appear when it finishes.
+
+These runs use fx's **auto** permission checks. They cannot accept interactive
+approval, so actions requiring approval fail with a diagnostic. Vibedeckx does
+not retry with full access. You can stop an active executor from its output view.
+
+Remote execution requires an updated worker. Upgrade every worker before running
+fx executors remotely.

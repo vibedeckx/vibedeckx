@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Play, Pencil, Trash2, CalendarClock } from "lucide-react";
 import { Streamdown } from "streamdown";
 import { cn } from "@/lib/utils";
-import { api, type Schedule, type ScheduleInput, type ScheduleRun, type Worktree } from "@/lib/api";
+import { api, PROMPT_PROVIDER_LABELS, isPromptProvider, type Schedule, type ScheduleInput, type ScheduleRun, type Worktree } from "@/lib/api";
 import { PageHeader } from "@/components/layout";
 import { Button, buttonVariants } from "@/components/ui/button";
 import {
@@ -274,7 +274,7 @@ export function SchedulesView({
           <div className="px-5 py-3 grid grid-cols-2 gap-x-8 gap-y-1 text-sm border-b border-border/50">
             <div>
               <span className="text-muted-foreground">Type: </span>
-              {selected.run_type === "command" ? "Command" : `Prompt (${selected.prompt_provider === "codex" ? "Codex" : "Claude"})`}
+              {selected.run_type === "command" ? "Command" : `Prompt (${selected.prompt_provider == null ? PROMPT_PROVIDER_LABELS.claude : isPromptProvider(selected.prompt_provider) ? PROMPT_PROVIDER_LABELS[selected.prompt_provider] : selected.prompt_provider})`}
             </div>
             <div className="flex items-center gap-1.5">
               <span className="text-muted-foreground">Runs in: </span>

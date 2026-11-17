@@ -1,7 +1,8 @@
+import { isPromptProvider, parsePromptProvider } from "../storage/types.js";
 import type { FastifyPluginAsync } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
-import type { Executor, ExecutorLifecycle, ExecutorType, PromptProvider } from "../storage/types.js";
+import type { Executor, ExecutorLifecycle, ExecutorType } from "../storage/types.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import "../server-types.js";
 
@@ -114,6 +115,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const { name, command, executor_type, prompt_provider, cwd, pty, lifecycle, branch } = req.body;
+    if (prompt_provider != null && !isPromptProvider(prompt_provider)) return reply.code(400).send({ error: "Unknown prompt provider" });
     if (branch === undefined) {
       return reply.code(400).send({ error: "branch is required" });
     }
@@ -130,7 +132,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const parsedType = (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType;
-    const parsedProvider = (prompt_provider === 'codex' ? 'codex' : 'claude') as PromptProvider;
+    const parsedProvider = parsePromptProvider(prompt_provider);
 
     const id = randomUUID();
     // Only a command can be a long-running service; a prompt run always ends.
@@ -170,11 +172,12 @@ const routes: FastifyPluginAsync = async (fastify) => {
     }
 
     const { executor_type, prompt_provider, lifecycle, target, disabled, ...rest } = req.body;
+    if (prompt_provider != null && !isPromptProvider(prompt_provider)) return reply.code(400).send({ error: "Unknown prompt provider" });
     const parsedType = executor_type !== undefined
       ? (executor_type === 'prompt' ? 'prompt' : 'command') as ExecutorType
       : undefined;
     const parsedProvider = prompt_provider !== undefined
-      ? (prompt_provider === 'codex' ? 'codex' : 'claude') as PromptProvider
+      ? parsePromptProvider(prompt_provider)
       : undefined;
 
     // Per-target disable toggle: add/remove this one target and persist the

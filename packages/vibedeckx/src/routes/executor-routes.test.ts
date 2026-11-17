@@ -67,7 +67,18 @@ describe("executor routes (workspace scoping)", () => {
   });
 
   describe("GET", () => {
-    it("scopes to the main workspace for the empty-string branch", async () => {
+    it("creates and updates fx prompt executors without provider coercion", async () => {
+    const response = await app.inject({ method: "POST", url: "/api/projects/project-1/executors",
+      payload: { name: "fx", command: "hello", branch: "", executor_type: "prompt", prompt_provider: "fx" } });
+    expect(response.statusCode).toBe(201);
+    const executor = response.json().executor;
+    expect(executor.prompt_provider).toBe("fx");
+    const invalid = await app.inject({ method: "PUT", url: `/api/executors/${executor.id}`, payload: { prompt_provider: "typo" } });
+    expect(invalid.statusCode).toBe(400);
+    expect((await storage.executors.getById(executor.id))?.prompt_provider).toBe("fx");
+  });
+
+  it("scopes to the main workspace for the empty-string branch", async () => {
       const response = await app.inject({ method: "GET", url: "/api/projects/project-1/executors?branch=" });
 
       expect(response.statusCode).toBe(200);

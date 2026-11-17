@@ -1,8 +1,9 @@
+import { isPromptProvider, parsePromptProvider } from "../storage/types.js";
 import type { FastifyPluginAsync, FastifyReply } from "fastify";
 import fp from "fastify-plugin";
 import { randomUUID } from "crypto";
 import path from "path";
-import type { PromptProvider, ScheduledTask, ScheduledTaskRunRequest, ScheduledTaskRunType, ScheduledTaskCwdMode } from "../storage/types.js";
+import type { ScheduledTask, ScheduledTaskRunRequest, ScheduledTaskRunType, ScheduledTaskCwdMode } from "../storage/types.js";
 import { requireUserFacingUserId as requireAuth } from "./user-facing-auth.js";
 import { validateCron } from "../scheduler.js";
 import { isProjectSourceSession, resolveSourceSessions, validSourceId } from "./source-sessions.js";
@@ -118,13 +119,14 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!project) return reply.code(404).send({ error: "Project not found" });
 
       const b = req.body ?? {};
+      if (b.prompt_provider != null && !isPromptProvider(b.prompt_provider)) return reply.code(400).send({ error: "Unknown prompt provider" });
       if (!b.name?.trim()) return reply.code(400).send({ error: "name is required" });
       if (!b.cron_expr?.trim()) return reply.code(400).send({ error: "cron_expr is required" });
       const resolved = {
         cron_expr: b.cron_expr.trim(),
         timezone: b.timezone?.trim() || "UTC",
         run_type: b.run_type ?? "command",
-        prompt_provider: (b.prompt_provider === "codex" ? "codex" : "claude") as PromptProvider,
+        prompt_provider: parsePromptProvider(b.prompt_provider),
         content: b.content ?? "",
         cwd_mode: b.cwd_mode ?? "branch",
         directory: b.directory ?? null,
@@ -226,6 +228,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       if (!existing) return;
 
       const b = req.body ?? {};
+      if (b.prompt_provider != null && !isPromptProvider(b.prompt_provider)) return reply.code(400).send({ error: "Unknown prompt provider" });
       // Timezone: if provided, coerce blank/whitespace-only to the existing
       // value — mirroring POST's fallback to "UTC" on create — so a blank
       // string can't slip past validateCron's `if (timezone)` skip and get
@@ -254,7 +257,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
       }
 
       const parsedProvider = b.prompt_provider !== undefined
-        ? (b.prompt_provider === "codex" ? "codex" : "claude") as PromptProvider
+        ? parsePromptProvider(b.prompt_provider)
         : undefined;
       const nextRunType = b.run_type ?? existing.run_type;
 

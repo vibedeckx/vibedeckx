@@ -1,0 +1,44 @@
+{
+  "version": "0.0.17",
+  "date": "2026-11-16",
+  "platform": "linux x64",
+  "env": {
+    "FX_AUTO_UPGRADE": "0"
+  },
+  "probes": [
+    {
+      "name": "approval",
+      "args": [
+        "fx",
+        "ask",
+        "--permission-mode",
+        "ask",
+        "--json",
+        "--no-save",
+        "--",
+        "Run printf FX_PERMISSION_PROBE using the shell tool. Do not answer without running it."
+      ],
+      "exitCode": 1,
+      "seconds": 1.84,
+      "stdout": "{\"output\":\"I'll run that probe now.\",\"final_output\":\"\",\"exit_code\":1,\"model\":\"\",\"resolved_provider\":null,\"session_id\":\"\",\"steps\":0,\"tool_calls\":[{\"name\":\"shell\",\"status\":\"error\",\"action\":\"run\",\"error\":{\"category\":\"rejected\",\"code\":\"rejected\"}}],\"usage\":{\"input_tokens\":5856,\"output_tokens\":109,\"cache_read_tokens\":2158},\"error\":\"NonInteractivePermissionRequired\"}\n",
+      "stderr": "[notice] [context] skill descriptions shortened: 19; source=compiled default\n\nRunning printf FX_PERMISSION_PROBE\nfx ask: permission required for tool execution in noninteractive mode\nfx ask: blocked action: Running printf FX_PERMISSION_PROBE\nfx ask: reason=noninteractive_permission_prompt_unavailable\nfx ask: rerun with --auto to review this exact action automatically, or use the interactive shell to approve it\n"
+    },
+    {
+      "name": "success",
+      "args": [
+        "fx",
+        "ask",
+        "--permission-mode",
+        "auto",
+        "--json",
+        "--no-save",
+        "--",
+        "Reply exactly FX_ASK_OK without tools."
+      ],
+      "exitCode": 0,
+      "seconds": 1.83,
+      "stdout": "{\"output\":\"FX_ASK_OK\",\"final_output\":\"FX_ASK_OK\",\"exit_code\":0,\"model\":\"deepseek/deepseek-v4.1-flash-1017-ultrafast\",\"resolved_provider\":\"fireworks\",\"session_id\":\"\",\"steps\":0,\"tool_calls\":[],\"usage\":{\"input_tokens\":5892,\"output_tokens\":6,\"cache_read_tokens\":5644}}\n",
+      "stderr": "[notice] [context] skill descriptions shortened: 19; source=compiled default\n\n"
+    }
+  ]
+}

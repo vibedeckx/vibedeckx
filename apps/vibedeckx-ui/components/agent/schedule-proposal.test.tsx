@@ -23,7 +23,7 @@ const apiMock = vi.hoisted(() => ({
   getSchedules: vi.fn(async () => [] as Schedule[]),
   createSchedule: vi.fn(async () => ({}) as Schedule),
 }));
-vi.mock("@/lib/api", () => ({ api: apiMock }));
+vi.mock("@/lib/api", async (importOriginal) => ({ ...await importOriginal<typeof import("@/lib/api")>(), api: apiMock }));
 
 import { ScheduleProposalUI } from "./schedule-proposal";
 import { __resetProposedScheduleCache } from "@/hooks/use-proposed-schedule";
@@ -77,6 +77,7 @@ describe("ScheduleProposalUI", () => {
     apiMock.getSchedules.mockReset().mockResolvedValue([]);
     apiMock.createSchedule.mockReset().mockResolvedValue(scheduleRow());
     conversation.value.openSchedule.mockReset();
+    conversation.value.agentType = "codex";
     conversation.value.sessionId = "sess-1";
     conversation.value.projectId = "proj-1";
     container = document.createElement("div");
@@ -127,6 +128,21 @@ describe("ScheduleProposalUI", () => {
     }));
     expect(container.textContent).toContain("Watch flakiness");
     expect(button("Create schedule")).toBeUndefined();
+  });
+
+  it.each([["fx", "fx"], ["claude-code", "claude"]])("preserves %s for a proposed prompt schedule", async (agent, provider) => {
+    conversation.value.agentType = agent;
+    await render({ input: PROPOSAL, toolUseId: "fx-proposal" });
+    await act(async () => { button("Create schedule")!.click(); });
+    expect(apiMock.createSchedule).toHaveBeenCalledWith("proj-1", expect.objectContaining({ prompt_provider: provider }));
+  });
+
+  it("does not silently turn an unknown agent into Claude", async () => {
+    conversation.value.agentType = "unknown";
+    await render({ input: PROPOSAL, toolUseId: "unknown-proposal" });
+    await act(async () => { button("Create schedule")!.click(); });
+    expect(apiMock.createSchedule).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Unknown prompt provider");
   });
 
   it("creates a command run when the proposal carries a command instead of a prompt", async () => {

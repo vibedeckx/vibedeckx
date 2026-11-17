@@ -90,6 +90,15 @@ describe("ScheduleFormDialog timing", () => {
   };
   const preview = () => document.body.querySelector<HTMLElement>("[data-slot='schedule-preview']");
 
+  it("preserves fx when saving a scheduled prompt", async () => {
+    const onSubmit = await render({ ...schedule, prompt_provider: "fx", content: "hello" });
+    expect(document.body.textContent).toContain("Auto permission checks apply");
+    await act(async () => {
+      document.body.querySelector<HTMLButtonElement>("button[aria-label='Save']")!.click();
+    });
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ prompt_provider: "fx", run_type: "prompt" }));
+  });
+
   it("opens a recognizable cron in the builder with a readable preview", async () => {
     await render({ ...schedule, cron_expr: "0 9 * * 1-5", timezone: "Asia/Shanghai" });
     expect(document.body.querySelector("[aria-label='Frequency']")?.textContent).toBe("Weekdays");
