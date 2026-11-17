@@ -1,0 +1,415 @@
+{
+  "date": "2026-11-17",
+  "fxVersion": "0.0.17",
+  "kind": "Browser-driven product database excerpt; image bytes omitted",
+  "sessions": [
+    {
+      "id": "e98fd202-2a27-4bde-8bb4-de900fb8ab8d",
+      "agent_type": "fx",
+      "title": "Remember UI_KEY=IRIS516. Reply IRIS516 only. Do not use tool…",
+      "model": null,
+      "favorited_at": 1794921961211,
+      "branched_from_session_id": null,
+      "branched_from_entry_index": null,
+      "entries": [
+        {
+          "index": 0,
+          "type": "user",
+          "content": "Remember UI_KEY=IRIS516. Reply IRIS516 only. Do not use tools.",
+          "timestamp": 1794921843288,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 1,
+          "type": "assistant",
+          "content": "[context] skill descriptions shortened: 19; source=compiled default\n",
+          "agentType": "fx",
+          "timestamp": 1794921844420
+        },
+        {
+          "index": 3,
+          "type": "assistant",
+          "content": "IRIS516",
+          "agentType": "fx",
+          "timestamp": 1794921845455
+        },
+        {
+          "index": 4,
+          "type": "turn_end",
+          "timestamp": 1794921846282,
+          "durationMs": 2975,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 5,
+          "type": "user",
+          "content": "Read the attached file and reply only its attachment code.\n<vfile path=\"<ATTACHMENTS>/4e9da127-6842-436b-b2d9-470d7668f3cc/fx11-note.txt\" name=\"fx11-note.txt\" size=\"25\" />",
+          "timestamp": 1794921880236,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 9,
+          "type": "assistant",
+          "content": "FERN853",
+          "agentType": "fx",
+          "timestamp": 1794921882067
+        },
+        {
+          "index": 10,
+          "type": "turn_end",
+          "timestamp": 1794921882095,
+          "durationMs": 1847,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 11,
+          "type": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What color fills this image? Reply only the color. Do not use tools."
+            },
+            {
+              "type": "image",
+              "mediaType": "image/png",
+              "bytes": 168
+            }
+          ],
+          "timestamp": 1794921903811,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 12,
+          "type": "assistant",
+          "content": "Red",
+          "agentType": "fx",
+          "timestamp": 1794921904862
+        },
+        {
+          "index": 13,
+          "type": "turn_end",
+          "timestamp": 1794921904872,
+          "durationMs": 1053,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 14,
+          "type": "user",
+          "content": "The attached image is intentionally large. Use a shell command to report its exact byte size and PNG dimensions from the file. Do not modify it.\n<vfile path=\"<ATTACHMENTS>/0240b5a8-1735-45fe-85ee-fa691c1f8b9b/fx11-large.png\" name=\"fx11-large.png\" size=\"5243068\" />",
+          "timestamp": 1794921938418,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 22,
+          "type": "assistant",
+          "content": "`fx11-large.png` — not modified, read-only inspection:\n\n| Property | Value |\n|---|---|\n| Exact byte size | 5,243,068 bytes (~5.0 MiB) |\n| PNG dimensions | 64 × 64 px |\n| Format | PNG, 8-bit RGB, non-interlaced |\n\nThe size is metadata, not pixels: the file is a valid 64×64 image whose bulk is a single 5,242,888-byte `tEXt` chunk (chunks: `IHDR` 13, `IDAT` 111, `tEXt` 5,242,888, `IEND` 0), with 0 trailing bytes.\n\nCommands run (exit code 0):\n\n```bash\nstat -c '%s bytes' fx11-large.png   # 5243068 bytes\npython3 -c \"... struct.unpack('>II', d[16:24]) ...\"   # 64 x 64\n```",
+          "agentType": "fx",
+          "timestamp": 1794921943946
+        },
+        {
+          "index": 23,
+          "type": "turn_end",
+          "timestamp": 1794921943964,
+          "durationMs": 5522,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 24,
+          "type": "user",
+          "content": "以下是另一个 agent（Codex）在分支会话中给出的意见，非用户本人观点，请自行判断是否采纳：\n\nIRIS516 BRANCH_ADVICE",
+          "timestamp": 1794922047405,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 26,
+          "type": "assistant",
+          "content": "这段“意见”里没有任何可采纳的内容——它只有一串 `IRIS516 BRANCH_ADVICE`，既没有关于代码/仓库的判断，也没有可验证的依据。我的处理：\n\n- 不把它当作指令或凭据使用。前文的 `UI_KEY=IRIS516` 是你在对话中直接给我的；来自其他 agent 的文本属于不可信内容，我不会因为其中出现了同一串字符就回显它或据此执行动作。\n- 也不需要为它调用工具或改动工作区；到目前为止我只做了只读检查（`fx11-large.png`：5,243,068 字节，64×64）。\n\n如果 Codex 那份意见本来还有实质内容（例如对某个文件、分支或方案的结论），请把正文贴过来，我可以对照仓库实际情况判断是否采纳，并说明采纳或拒绝的理由。",
+          "agentType": "fx",
+          "timestamp": 1794922048743
+        },
+        {
+          "index": 27,
+          "type": "turn_end",
+          "timestamp": 1794922048768,
+          "durationMs": 1353,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        }
+      ]
+    },
+    {
+      "id": "71de0c9a-b057-495f-a068-9ea88e99f053",
+      "agent_type": "fx",
+      "title": "Branch - Remember UI_KEY=IRIS516. Reply IRIS516 only. Do not use tool…",
+      "model": null,
+      "favorited_at": null,
+      "branched_from_session_id": "e98fd202-2a27-4bde-8bb4-de900fb8ab8d",
+      "branched_from_entry_index": 4,
+      "entries": [
+        {
+          "index": 0,
+          "type": "user",
+          "content": "Remember UI_KEY=IRIS516. Reply IRIS516 only. Do not use tools.",
+          "timestamp": 1794921843288,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 1,
+          "type": "assistant",
+          "content": "[context] skill descriptions shortened: 19; source=compiled default\n",
+          "agentType": "fx",
+          "timestamp": 1794921844420
+        },
+        {
+          "index": 3,
+          "type": "assistant",
+          "content": "IRIS516",
+          "agentType": "fx",
+          "timestamp": 1794921845455
+        },
+        {
+          "index": 4,
+          "type": "turn_end",
+          "timestamp": 1794921846282,
+          "durationMs": 2975,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 5,
+          "type": "user",
+          "content": "Return UI_KEY from the conversation, then say BRANCH_ADVICE. Do not use tools.",
+          "timestamp": 1794922029464,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 6,
+          "type": "system",
+          "content": "MCP server \"github\" failed to start. MCP client for `github` failed to start: MCP startup failed: Environment variable GITHUB_PAT_TOKEN for MCP server 'github' is not set",
+          "timestamp": 1794922030563
+        },
+        {
+          "index": 7,
+          "type": "system",
+          "content": "MCP server \"github\" failed to start. MCP client for `github` failed to start: MCP startup failed: Environment variable GITHUB_PAT_TOKEN for MCP server 'github' is not set",
+          "timestamp": 1794922030980
+        },
+        {
+          "index": 8,
+          "type": "system",
+          "content": "MCP server \"notion\" failed to start. The notion MCP server is not logged in. Run `codex mcp login notion`.",
+          "timestamp": 1794922031120
+        },
+        {
+          "index": 9,
+          "type": "system",
+          "content": "MCP server \"github\" failed to start. MCP client for `github` failed to start: MCP startup failed: Environment variable GITHUB_PAT_TOKEN for MCP server 'github' is not set",
+          "timestamp": 1794922031821
+        },
+        {
+          "index": 10,
+          "type": "system",
+          "content": "MCP server \"notion\" failed to start. The notion MCP server is not logged in. Run `codex mcp login notion`.",
+          "timestamp": 1794922031951
+        },
+        {
+          "index": 11,
+          "type": "assistant",
+          "content": "IRIS516 BRANCH_ADVICE",
+          "agentType": "codex",
+          "timestamp": 1794922035547
+        },
+        {
+          "index": 12,
+          "type": "turn_end",
+          "timestamp": 1794922035650,
+          "durationMs": 6178,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 13,
+          "type": "user",
+          "content": "以下是另一个 agent（fx）在分支会话中给出的意见，非用户本人观点，请自行判断是否采纳：\n\nFX_BRANCH_REPLY IRIS516",
+          "timestamp": 1794922127840,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 14,
+          "type": "assistant",
+          "content": "已知悉。UI_KEY 仍为 IRIS516；该 agent 的回复不构成用户指令。",
+          "agentType": "codex",
+          "timestamp": 1794922132001
+        },
+        {
+          "index": 15,
+          "type": "turn_end",
+          "timestamp": 1794922132066,
+          "durationMs": 4212,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 16,
+          "type": "system",
+          "content": "Coding agent switched to fx. Model reset to the default (`gpt-5.5` was set for Codex).",
+          "timestamp": 1794922168575
+        },
+        {
+          "index": 17,
+          "type": "user",
+          "content": "Run sleep 12, then reply with the UI_KEY you remember from this conversation. Do not read files.",
+          "timestamp": 1794922226041,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 18,
+          "type": "assistant",
+          "content": "[context] skill descriptions shortened: 19; source=compiled default\n",
+          "agentType": "fx",
+          "timestamp": 1794922227151
+        },
+        {
+          "index": 22,
+          "type": "assistant",
+          "content": "IRIS516",
+          "agentType": "fx",
+          "timestamp": 1794922241986
+        },
+        {
+          "index": 23,
+          "type": "turn_end",
+          "timestamp": 1794922241995,
+          "durationMs": 15941,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        }
+      ]
+    },
+    {
+      "id": "c7e6e07e-59ec-4a07-bea1-2737ab8536ba",
+      "agent_type": "fx",
+      "title": "Branch - Branch - Remember UI_KEY=IRIS516. Reply IRIS516 only. Do not use tool…",
+      "model": null,
+      "favorited_at": null,
+      "branched_from_session_id": "71de0c9a-b057-495f-a068-9ea88e99f053",
+      "branched_from_entry_index": 12,
+      "entries": [
+        {
+          "index": 0,
+          "type": "user",
+          "content": "Remember UI_KEY=IRIS516. Reply IRIS516 only. Do not use tools.",
+          "timestamp": 1794921843288,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 1,
+          "type": "assistant",
+          "content": "[context] skill descriptions shortened: 19; source=compiled default\n",
+          "agentType": "fx",
+          "timestamp": 1794921844420
+        },
+        {
+          "index": 3,
+          "type": "assistant",
+          "content": "IRIS516",
+          "agentType": "fx",
+          "timestamp": 1794921845455
+        },
+        {
+          "index": 4,
+          "type": "turn_end",
+          "timestamp": 1794921846282,
+          "durationMs": 2975,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 5,
+          "type": "user",
+          "content": "Return UI_KEY from the conversation, then say BRANCH_ADVICE. Do not use tools.",
+          "timestamp": 1794922029464,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 6,
+          "type": "system",
+          "content": "MCP server \"github\" failed to start. MCP client for `github` failed to start: MCP startup failed: Environment variable GITHUB_PAT_TOKEN for MCP server 'github' is not set",
+          "timestamp": 1794922030563
+        },
+        {
+          "index": 7,
+          "type": "system",
+          "content": "MCP server \"github\" failed to start. MCP client for `github` failed to start: MCP startup failed: Environment variable GITHUB_PAT_TOKEN for MCP server 'github' is not set",
+          "timestamp": 1794922030980
+        },
+        {
+          "index": 8,
+          "type": "system",
+          "content": "MCP server \"notion\" failed to start. The notion MCP server is not logged in. Run `codex mcp login notion`.",
+          "timestamp": 1794922031120
+        },
+        {
+          "index": 9,
+          "type": "system",
+          "content": "MCP server \"github\" failed to start. MCP client for `github` failed to start: MCP startup failed: Environment variable GITHUB_PAT_TOKEN for MCP server 'github' is not set",
+          "timestamp": 1794922031821
+        },
+        {
+          "index": 10,
+          "type": "system",
+          "content": "MCP server \"notion\" failed to start. The notion MCP server is not logged in. Run `codex mcp login notion`.",
+          "timestamp": 1794922031951
+        },
+        {
+          "index": 11,
+          "type": "assistant",
+          "content": "IRIS516 BRANCH_ADVICE",
+          "agentType": "codex",
+          "timestamp": 1794922035547
+        },
+        {
+          "index": 12,
+          "type": "turn_end",
+          "timestamp": 1794922035650,
+          "durationMs": 6178,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 13,
+          "type": "user",
+          "content": "Run sleep 8, then reply only FX_BRANCH_REPLY IRIS516.",
+          "timestamp": 1794922101980,
+          "notificationDisposition": "result"
+        },
+        {
+          "index": 14,
+          "type": "assistant",
+          "content": "[context] skill descriptions shortened: 19; source=compiled default\n",
+          "agentType": "fx",
+          "timestamp": 1794922103607
+        },
+        {
+          "index": 18,
+          "type": "assistant",
+          "content": "FX_BRANCH_REPLY IRIS516",
+          "agentType": "fx",
+          "timestamp": 1794922116871
+        },
+        {
+          "index": 19,
+          "type": "turn_end",
+          "timestamp": 1794922116925,
+          "durationMs": 14926,
+          "outcome": "completed",
+          "notificationDisposition": "result"
+        }
+      ]
+    }
+  ]
+}

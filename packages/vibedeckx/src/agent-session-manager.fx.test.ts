@@ -84,6 +84,50 @@ describe("fx manager lifecycle", () => {
   });
   afterEach(async () => { for (const row of await storage.agentSessions.getAll()) await manager.stopSessionAndWait(row.id); await manager.shutdown(); await storage.close(); vi.restoreAllMocks(); rmSync(dir, { recursive: true, force: true }); });
 
+  it.each(["claude-code", "codex"] as const)("replays product history from %s without a source native ID, then switches back", async other => {
+    // Keep initialization unsent so the source has no native ID at all,
+    // independent of how quickly the child starts on the test machine.
+    const initialization = vi.spyOn(provider, "getInitializationMessages").mockReturnValue(null);
+    const id = await newSession();
+    await manager.stopSessionAndWait(id);
+    initialization.mockRestore();
+    expect(await storage.agentSessions.getNativeSessionIds(id)).toEqual([]);
+    await manager.switchAgentType(id, other);
+    await storage.agentSessions.upsertEntry(id, 20, JSON.stringify({ type: "user", content: "SOURCE_ONLY_MARKER", timestamp: 1 }));
+    await storage.agentSessions.upsertEntry(id, 21, JSON.stringify({ type: "turn_end", timestamp: 2, outcome: "completed" }));
+    await manager.setModel(id, "other-model");
+    expect(await manager.switchAgentType(id, "fx")).toBe("ok");
+    expect((await storage.agentSessions.getById(id))?.model).toBeNull();
+    await manager.sendUserMessage(id, "continue", dir);
+    await waitFor(() => wire().some(m => m.method === "session/prompt" && JSON.stringify(m.params.prompt).includes("SOURCE_ONLY_MARKER")));
+    await waitFor(() => manager.getSession(id)?.status === "stopped");
+    await manager.setModel(id, "fx-model");
+    expect(await manager.switchAgentType(id, other)).toBe("ok");
+    expect((await storage.agentSessions.getById(id))?.model).toBeNull();
+    expect(JSON.stringify(await entries(id))).toContain("SOURCE_ONLY_MARKER");
+    expect(wire().filter(m => m.method === "session/prompt").at(-1)?.model).toBe("default");
+  });
+
+  it("sends only the inclusive branch history to a fresh fx native session", async () => {
+    const source = await newSession();
+    await manager.sendUserMessage(source, "BEFORE_CUTOFF", dir); await completed(source, 1);
+    const cutoff = (await storage.agentSessions.getEntries(source)).find(e => JSON.parse(e.data).type === "turn_end")!.entry_index;
+    await manager.sendUserMessage(source, "AFTER_CUTOFF", dir); await completed(source, 2);
+    const result = await manager.branchSession(source, "fx", { upToEntryIndex: cutoff });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.reason);
+    await manager.sendUserMessage(result.sessionId, "branch follow-up", dir);
+    await completed(result.sessionId, 2);
+    const parentNative = (await storage.agentSessions.getNativeSessionIds(source))[0].native_session_id;
+    const childNative = (await storage.agentSessions.getNativeSessionIds(result.sessionId))[0].native_session_id;
+    expect(childNative).not.toBe(parentNative);
+    const replay = wire().filter(m => m.method === "session/prompt" && m.params.sessionId === childNative);
+    expect(replay).toHaveLength(1);
+    expect(JSON.stringify(replay)).toContain("BEFORE_CUTOFF");
+    expect(JSON.stringify(replay)).not.toContain("AFTER_CUTOFF");
+    expect(manager.getSession(result.sessionId)?.branchedFromEntryIndex).toBe(cutoff);
+  });
+
   it("passes freshly minted MCP configuration through initialization on each spawn", async () => {
     manager.hostsSessionTools = true;
     manager.localApiOrigin = "http://127.0.0.1:9999";

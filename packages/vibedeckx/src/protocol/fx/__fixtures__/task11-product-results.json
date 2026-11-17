@@ -1,0 +1,170 @@
+{
+  "date": "2026-11-17",
+  "versions": {
+    "fx": "0.0.17",
+    "codex": "0.159.2",
+    "claude": "2.1.325"
+  },
+  "kind": "Product manager results, not raw ACP envelopes",
+  "tests": [
+    {
+      "test": "retains history through Claude → fx → Codex → fx → Claude and clears models",
+      "sessions": [
+        {
+          "agentType": "claude-code",
+          "messages": [
+            "ORCHID731",
+            "[context] skill descriptions shortened: 19; source=compiled default\nORCHID731",
+            "ORCHID731",
+            "[context] skill descriptions shortened: 19; source=compiled default\nORCHID731",
+            "ORCHID731"
+          ],
+          "outcomes": [
+            "completed",
+            "completed",
+            "completed",
+            "completed",
+            "completed"
+          ],
+          "nativeCount": 5
+        }
+      ]
+    },
+    {
+      "test": "branches codex → fx with inclusive cutoff and independent native ID",
+      "sessions": [
+        {
+          "agentType": "codex",
+          "messages": [
+            "ORCHID731",
+            "MAPLE984",
+            "BRANCH_RECEIVED"
+          ],
+          "outcomes": [
+            "completed",
+            "completed",
+            "completed"
+          ],
+          "nativeCount": 1
+        },
+        {
+          "agentType": "fx",
+          "messages": [
+            "ORCHID731",
+            "[context] skill descriptions shortened: 19; source=compiled default\n",
+            "FIRST_KEY: ORCHID731\nSECOND_KEY: UNKNOWN"
+          ],
+          "outcomes": [
+            "completed",
+            "completed"
+          ],
+          "nativeCount": 1
+        }
+      ]
+    },
+    {
+      "test": "branches fx → codex with inclusive cutoff and independent native ID",
+      "sessions": [
+        {
+          "agentType": "fx",
+          "messages": [
+            "[context] skill descriptions shortened: 19; source=compiled default\n",
+            "ORCHID731",
+            "MAPLE984",
+            "BRANCH_RECEIVED — note: the branch value for `SECOND_KEY` is wrong. The actual recorded value is `MAPLE984`, not `UNKNOWN`."
+          ],
+          "outcomes": [
+            "completed",
+            "completed",
+            "completed"
+          ],
+          "nativeCount": 1
+        },
+        {
+          "agentType": "codex",
+          "messages": [
+            "[context] skill descriptions shortened: 19; source=compiled default\n",
+            "ORCHID731",
+            "FIRST_KEY=ORCHID731\nSECOND_KEY=UNKNOWN"
+          ],
+          "outcomes": [
+            "completed",
+            "completed"
+          ],
+          "nativeCount": 1
+        }
+      ]
+    },
+    {
+      "test": "branches fx → fx with inclusive cutoff and independent native ID",
+      "sessions": [
+        {
+          "agentType": "fx",
+          "messages": [
+            "[context] skill descriptions shortened: 19; source=compiled default\n",
+            "ORCHID731",
+            "MAPLE984",
+            "BRANCH_RECEIVED — but note the conflict: you told me `SECOND_KEY=MAPLE984` directly; this branch answer says `UNKNOWN`, so I'm keeping MAPLE984 as authoritative."
+          ],
+          "outcomes": [
+            "completed",
+            "completed",
+            "completed"
+          ],
+          "nativeCount": 1
+        }
+      ]
+    },
+    {
+      "test": "checks codex project instruction baseline and AGENTS.md positive control",
+      "sessions": [
+        {
+          "agentType": "codex",
+          "messages": [
+            "BIRCH492"
+          ],
+          "outcomes": [
+            "completed"
+          ],
+          "nativeCount": 1
+        },
+        {
+          "agentType": "codex",
+          "messages": [
+            "UNKNOWN"
+          ],
+          "outcomes": [
+            "completed"
+          ],
+          "nativeCount": 1
+        }
+      ]
+    },
+    {
+      "test": "checks fx project instruction baseline and AGENTS.md positive control",
+      "sessions": [
+        {
+          "agentType": "fx",
+          "messages": [
+            "[context] skill descriptions shortened: 19; source=compiled default\nBIRCH492"
+          ],
+          "outcomes": [
+            "completed"
+          ],
+          "nativeCount": 1
+        },
+        {
+          "agentType": "fx",
+          "messages": [
+            "[context] skill descriptions shortened: 19; source=compiled default\n",
+            "UNKNOWN"
+          ],
+          "outcomes": [
+            "completed"
+          ],
+          "nativeCount": 1
+        }
+      ]
+    }
+  ]
+}

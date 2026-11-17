@@ -170,3 +170,29 @@ local OpenAI-compatible model response requesting shell execution, isolated
 FX_HOME settings and no credentials. It proves auto still honors explicit ask
 rules and exits 1 without interaction. The live test reproduces the local
 provider setup; it is not evidence about an external model's decisions.
+
+
+## Task 11 product lifecycle evidence (2026-11-17)
+
+`task11-product-results.json` contains assistant responses, completion outcomes,
+and native-ID counts captured from real manager sessions (fx 0.0.17, Codex
+0.159.2, Claude Code 2.1.325). This is a product result excerpt, **not an ACP
+wire recording**, and is not fed to the ACP schema replay tests. The final
+6-test live run passed without retries, including independent branch IDs,
+inclusive history cutoff, four switch directions, instruction-file controls,
+and retention leaving fx's native log unchanged after deleting product rows.
+
+Reproduce with all three CLIs installed and signed in:
+
+```sh
+FX_PARITY_RECORD_FILE=/tmp/fx11-new-results.jsonl pnpm --filter vibedeckx exec vitest run --config vitest.live.config.ts src/protocol/live/fx-parity.live.test.ts --retry 0
+```
+
+The optional result file is append-only; use a fresh path for each run.
+`task11-browser-results.json` is a database excerpt from the isolated browser
+acceptance run, with inline image bytes replaced by their length and temporary
+attachment paths normalized. It records ordinary file, inline PNG, >5 MiB PNG
+file fallback, cross-agent branch/send-back, favorite and model-reset results.
+UI observations and repeatable browser steps are in `docs/fx-agent-parity.md`
+under Task 11. Neither excerpt claims lossless history restoration, native-file
+cleanup, or real AI title generation without a configured title API key.

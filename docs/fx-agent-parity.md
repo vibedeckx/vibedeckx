@@ -263,14 +263,14 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | 后台任务显示 | 任务开始/结束/集合事件 | subagent 生命周期、outOfTurn 处理 | 子 agent 报告已验证先于 prompt response；shell 无可配对的独立生命周期事件，按任务 5 原则不显示后台条 |
 | 后台任务单独停止 | stop_task | 无等价接口，退化为停止会话 | shell stop 工具调用已实测；产品没有后台条或单任务停止按钮，见任务 5 差异 |
 | 中断 | 进程/管理器路径 | turn/interrupt | 已实现；真实 fx cancelled 后续问及管理器 Stop 保活测试通过 |
-| 图片与文件附件 | 内容转换及工具读取路径 | image prompt / imageView 映射 | 未验证；任务 11；本任务只测普通文件读改 |
+| 图片与文件附件 | 内容转换及工具读取路径 | image prompt / imageView 映射 | 已验证：页面上传普通文件、内联 PNG、超过 5 MiB PNG 的文件路径降级；见任务 11 |
 | 模型选择 | spawn --model | app-server -c model | 已实现；任务 10 验证默认配置、静态建议与手输、回合间新进程换模型；busy 拒绝、切 agent 清空模型有回归 |
 | 费用与用量 | result 成本字段 | tokenUsage 缓存到 result；不等同成本支持 | 已验证；token/上下文字段已录到；成本未验证 → 任务 12 |
 | hub vibedeckx HTTP MCP | --mcp-config HTTP bearer | -c mcp_servers / token env | 已接入；本地真实 hub + fx 调用通过，线上需部署协议协商修复 |
 | cross-remote HTTP MCP | 同上 | 同上 | 已接入；本地真实 hub 调用通过；线上握手修复待部署、授权远端与撤销完整验收未完成 |
 | 休眠唤醒 | 管理器历史重放 | 共用管理器历史重放 | 已实现；管理器子进程 + SQLite 休眠唤醒回归通过；首版不用 load/resume |
-| 切换 agent | 共用管理器迁移历史 | 共用管理器迁移历史 | 新 fx 会话 + 重放路径已接通；跨 agent 完整验收留任务 11 |
-| 分支 / 截断分支 | 共用分支历史复制 | 共用分支历史复制 | 独立 fx id + 历史路径已接通；截断分支完整验收留任务 11 |
+| 切换 agent | 共用管理器迁移历史 | 共用管理器迁移历史 | 已验证：Claude/Codex ↔ fx 四向真实切换、历史继续使用、模型清空；见任务 11 |
+| 分支 / 截断分支 | 共用分支历史复制 | 共用分支历史复制 | 已验证：Codex ↔ fx、fx → fx 截断分支、独立原生 id，页面双向回传；见任务 11 |
 | 执行器 | prompt executor Claude CLI | codex exec CLI | `fx ask --permission-mode auto --json`；stdout 最终 Markdown、stderr 进度，退出码判定，进程树停止；本机实测通过，远端实机待验收 |
 | 定时任务 | scheduler 调用执行器 | scheduler 传递 prompt_provider | 同一 ProcessManager 路径，cron 触发、output/report/exit_code 落库；本机实测通过，远端实机待验收 |
 | 执行器 ACP 流式工具调用展示 | stream-json | 最终结果基线 | 超出基线（不做）；不创建另一套 ACP 生命周期 |
@@ -372,3 +372,40 @@ FX_ORCHESTRATION_LIVE=1 PATH=/usr/bin:$PATH pnpm --filter vibedeckx exec vitest 
 - 验证结果：前后端 `tsc --noEmit` 通过；后端完整 Vitest 249 文件 / 3647 测试通过（2 文件 / 11 测试按既有配置跳过），前端 187 文件 / 1729 测试通过；任务相关最终回归 4 文件 / 72 测试通过；真实 fx 集成 2 测试通过。
 - 浏览器产品验收：当前源码 UI + 独立本地后端 + 临时项目，在隔离 HOME 下新建 fx 会话，界面显示未登录、三种登录命令与原始 `-32600`，Stop 禁用且输入框可继续使用。切回已有登录后同一会话默认模型返回 `FX_DEFAULT_UI_OK`；选择建议模型后实际进程为 `fx acp --permission-mode full-access --model openai/gpt-5.4-mini` 并返回 `FX_SELECTED_UI_OK`。手输无效模型显示原始 HTTP 404 / model_not_found 并结束等待；切换到 Codex 后模型恢复 Default。截图 `/tmp/fx10-unauth-ui.png`、`/tmp/fx10-model-ui.png` 仅作本机验收留档，不作为运行依赖。
 - UI 构建：默认构建中止，webpack 重试遇到本机磁盘不足；仅为本次验收临时关闭 webpack 缓存后构建成功，构建配置已恢复，没有交付构建方式变更。
+
+
+## 任务 11：剩余会话生命周期（2026-11-17）
+
+本轮使用 Linux x86_64、fx **0.0.17**、Codex **0.159.2**、Claude Code **2.1.325**，真实 CLI 登录、隔离 Git 项目和 SQLite。未修改登录配置，未部署服务或升级 worker。没有发现需要新增 fx 专用运行时机制的缺口，本次交付为回归测试及验收记录。历史重放仍有工具内容截断、忽略 thinking、复合用户消息只重放文本等限制，不能称为无损恢复。
+
+| 项目 | 状态与证据 |
+| --- | --- |
+| 切换 agent | **已验证**。真实 Claude → fx → Codex → fx → Claude，每次切换前设置旧 agent 的模型标记，切换后数据库 model 为 null、下一轮正确回忆 `ORCHID731`；5 次启动产生 5 个不同原生 ID。离线子进程测试另验证来自 Claude/Codex 的产品历史可直接重放到 fx，不要求来源有 fx 原生 ID。 |
+| 分支、截断、回传 | **已验证**。真实 Codex → fx、fx → Codex、fx → fx；第一轮记录 FIRST_KEY，第二轮记录 SECOND_KEY，从第一轮 turn_end 截断，新会话只知道 FIRST_KEY，SECOND_KEY 为 UNKNOWN；数据库及实际 stdin 回归都排除截止点后的内容。新原生 ID 与父会话不同，父会话保留第二轮。页面分别操作 fx → Codex 和 Codex → fx 的分支、生成回答、Send back；父会话收到带 agent 来源说明的回答并继续完成回合。 |
+| 项目指令 | **已验证，与 Codex 基线一致**。仅有 `CLAUDE.md` 时，Codex 和 fx 均回复 UNKNOWN；添加 `AGENTS.md` 后均回复只写在文件中的 `BIRCH492`。提示词要求不读文件、不调用工具，验证自动加载而非按路径临时读取。只读 CLAUDE.md 的兼容机制属于超出基线，不新增。 |
+| 普通文件 | **已验证**。页面上传 `fx11-note.txt`，产品保存 `<vfile/>` 路径，真实 fx 调用 Read，回复文件内的 `FERN853`。 |
+| 内联图片 | **已验证**。页面上传 64×64 红色 PNG，数据库用户消息包含 image 内容块，真实 fx 不调用工具即回复 Red。 |
+| 大图片 | **已验证**。同样从页面上传有效 PNG（5,243,068 字节，64×64，含大 tEXt 元数据块），共用 composer 的 `MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024` 将其变成 `<vfile/>`，不发送内联 image 块；fx 用 shell 读取文件，准确报告字节数和尺寸。此证据证明路径降级及文件可读，不声称大图仍被内联视觉理解。 |
+| 会话文件清理 | **已验证，与现有基线一致**。`deleteDormantSessionIfExpired` → repository `deleteIfExpired` 只删除产品数据库父行，entries/native_ids 等通过 FK 级联删除；三个 Provider 的 onSessionDestroyed 均只清理内存。真实 fx 测试删除自建分支，确认产品行及原生 ID 映射消失，而 `~/.fx/sessions/v2/<id>/log.jsonl` 逐字节保留。磁盘原生文件清理属于超出基线，不新增。 |
+| 搜索、加星 | **已验证**。页面搜索 `IRIS516` 找到 fx 会话，选择结果打开对应 session 深链；加星后菜单变为 Unfavorite，数据库 favorited_at 已写入。 |
+| 标题 | **已验证当前未配置标题模型的行为**：首条消息自动产生截断标题，分支标题加 `Branch -`；与其他 agent 共用生成器。测试实例未配置标题 API key，因此没有把这次回退标题冒充真实 AI 标题生成；真实 AI 标题服务调用不在本次实测证据内。标题服务不依赖 fx，该服务的独立实测不构成本任务缺口或收尾阻碍。 |
+| 通知、深链 | **已验证**。真实完成回合产生 Task completed toast 和通知中心 Session result is ready；点击通知进入正确的 `?session=` 会话，搜索深链及直接刷新链接也能恢复历史。此处验收应用内通知，不涉及操作系统推送。 |
+| 侧栏状态点 | **已验证**。真实 fx 执行 `sleep 12` 时，resident 行显示蓝色脉动状态点；回答完成后变为 lime 状态点。存在 resident 行时工作区主行按通用设计显示 idle，不能把该灰点误判为 fx 状态丢失。 |
+
+### 可重复验证
+
+- 离线：`pnpm --filter vibedeckx exec vitest run src/agent-session-manager.fx.test.ts`。新增 3 项覆盖跨 agent 产品历史、模型清空以及真正写入新 fx stdin 的截断分支，使用真实 SQLite/stdio 子进程、模拟 ACP。
+- 真实 CLI：`FX_PARITY_RECORD_FILE=/tmp/fx11-results.jsonl pnpm --filter vibedeckx exec vitest run --config vitest.live.config.ts src/protocol/live/fx-parity.live.test.ts --retry 0`。需三种 CLI 已登录，会产生模型调用；只删除测试创建的临时项目和数据库，原生文件沿用产品保留策略。输出文件为追加模式，每次使用新文件名可避免混入旧记录。
+- 实测结果摘录：[task11-product-results.json](../packages/vibedeckx/src/protocol/fx/__fixtures__/task11-product-results.json)。它保存真实管理器的 assistant 文本、回合结果及原生 ID 数量，是产品结果摘录，**不是原始 ACP 录制**。删除分支的断言在 live 测试中，摘录只含删除后仍存在的父会话。
+- 浏览器复验：在独立实例创建空 Git 项目，新建 fx 会话写入 `UI_KEY=IRIS516`；上传普通文本、小 PNG 和 >5 MiB PNG，检查消息及真实回答；从第一轮分隔线选择 Codex 分支，确认后续附件历史未复制；发送回答并点 Send back；再从 Codex 分支选择 fx 并回传。切换 agent 前选择模型，切换后确认 Default，再提问历史标记。通过搜索和通知入口打开同一会话并刷新，检查历史、加星和侧栏状态。
+- 页面驱动的数据库摘录：[task11-browser-results.json](../packages/vibedeckx/src/protocol/fx/__fixtures__/task11-browser-results.json)，保留附件标记、内联图片字节数（省略图像内容）、回答、回传来源说明、分支指针、加星和模型清空结果。
+- 本机页面截图：`/tmp/fx11-attachments.png`、`/tmp/fx11-running.png`；临时服务日志 `/tmp/fx11-server.log`。这些路径仅作本机留档，不是跨机器运行依赖。
+
+### 本轮检查结果
+
+- 前后端 `tsc --noEmit` 均通过；后端全量 Vitest **249 文件 / 3650 tests passed**，2 文件 / 11 tests 按既有配置跳过；前端 **187 文件 / 1729 tests passed**。两边使用 `--maxWorkers=2`，未开启重试。
+- 真实 CLI 最终复验 **6/6 passed**（`--retry 0`），包括 fx 原生文件保留断言；离线 fx 管理器 **33/33 passed**。本轮没有修改产品运行时代码。
+- `git diff --check` 通过；`node scripts/classify-diff.mjs HEAD` 对测试/文档判 non-runtime，对 JSON 证据文件保守判 gray。证据文件不是运行时输入，不修改 server/worker 线协议，也不需要为本次测试及文档发布 npm/升级 worker。
+- 本轮仅本机隔离实例，没有将结果外推为真实跨机器 worker、其他平台或操作系统通知验收。标题服务没有可用 API key，明确保留上述回退验证边界；没有新增“不支持”结论或改变既有产品策略。
+
+最终复核补强：离线切换测试显式禁止首次握手，保证来源确实没有原生 ID；项目指令 live 测试新增 UNKNOWN 及无 tool_use 断言。补强后相关离线 3/3、真实指令 2/2 通过，后端 tsc 再次通过；未更改产品实现。
