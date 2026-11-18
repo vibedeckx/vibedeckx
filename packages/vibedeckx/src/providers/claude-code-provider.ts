@@ -43,12 +43,6 @@ export class ClaudeCodeProvider implements AgentProvider {
     return detectBinary(CLAUDE_BINARY_NAME, { refresh: true });
   }
 
-  isAvailable(): boolean {
-    // Always runnable: buildSpawnConfig falls back to `npx @anthropic-ai/claude-code`
-    // when no native `claude` binary is on PATH.
-    return true;
-  }
-
   buildSpawnConfig(
     _cwd: string,
     permissionMode: "plan" | "edit",

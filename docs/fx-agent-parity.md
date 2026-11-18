@@ -67,7 +67,7 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 
 临时 hub 的 canonical `local` tenant、会话、签名 token 和授权均为隔离测试 fixture；MCP liveness 使用真实产品会话，没有 mock `getSessionProcessAlive`。测试使用真实 Provider、网关和 worker；broker 的 stdio 服务是最小测试 fixture，不是模型替身。
 
-保留首次脚本失败：cron 查询变量遮蔽导致驱动报 ReferenceError；修正后只读核对原两次 run，不重复付费执行。MCP 第一次激活因 fixture owner 与 canonical local 不匹配被 400 拒绝，修正测试 fixture 后成功；没有修改产品鉴权。原失败及后续实测摘录见 [task7-remote-results.json](../packages/vibedeckx/src/protocol/fx/__fixtures__/task7-remote-results.json)。它是产品验收证据，不是 ACP 原始录制，也不作为运行时输入。
+保留首次脚本失败：cron 查询变量遮蔽导致驱动报 ReferenceError；修正后只读核对原两次 run，不重复付费执行。MCP 第一次激活因 fixture owner 与 canonical local 不匹配被 400 拒绝，修正测试 fixture 后成功；没有修改产品鉴权。原失败及后续实测摘录见 [task7-remote-results.json](fx-acceptance/task7-remote-results.json)。它是产品验收证据，不是 ACP 原始录制，也不作为运行时输入。
 
 结束后停止测试 source 会话、hub、worker、SSH 转发与 broker，确认远端临时工作区无剩余进程；轮换并删除临时连接令牌、删除本轮远端临时目录。生产 worker 未发布、升级或重启。本轮不修改产品运行时代码，沿用上节已通过的全量回归；追加证据后正式 recordings / Provider 回放 **14/14** 通过，JSON 证据及 gateway audit 一致性检查、`git diff --check` 通过。公开生产部署仍是发布动作，不能把隔离验收写成已经上线。
 
@@ -86,7 +86,7 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 
 测试 hooks 完成后，显式停止仍保留事件循环的临时 runner，确认其无子进程，并删除该测试目录。未发布、升级或重启生产 worker。Mac 未重复浏览器及 Reviewer / Loop / Commander 验收；这些入口沿用已记录的 Ubuntu 跨机器证据，Linux arm64 / macOS x86_64 不作实测声明。
 
-结果见 `task7-remote-results.json` 的 `macInspection`；真实 ACP 录制为 `task7-macos-fx-lifecycle-{1,2}.jsonl` 及相邻版本 metadata，HOME / 工作区路径已脱敏。正式 schema 自动纳入新录制，Provider 回放参数化覆盖 Linux 与 Mac，**8 文件 / 86 tests passed**；后端 `tsc --noEmit`、证据脱敏 / JSON 校验及 `git diff --check` 通过。再次运行 `classify-diff HEAD`：测试和文档为 non-runtime，新 fixtures 为保守 gray；均非运行时输入，无隧道契约变化，本次 Mac 验证不新增 worker 发布要求。临时适配 runner 不作为长期第二套测试；复验使用仓库正式 live 用例（`FX_EXECUTOR_LIVE=1`），不依赖 `.dev` 或本次临时脚本。
+结果见 `docs/fx-acceptance/task7-remote-results.json` 的 `macInspection`；真实 ACP 录制为 `task7-macos-fx-lifecycle-{1,2}.jsonl` 及相邻版本 metadata，HOME / 工作区路径已脱敏。正式 schema 自动纳入新录制，Provider 回放参数化覆盖 Linux 与 Mac，**8 文件 / 86 tests passed**；后端 `tsc --noEmit`、证据脱敏 / JSON 校验及 `git diff --check` 通过。再次运行 `classify-diff HEAD`：测试和文档为 non-runtime，新 fixtures 为保守 gray；均非运行时输入，无隧道契约变化，本次 Mac 验证不新增 worker 发布要求。临时适配 runner 不作为长期第二套测试；复验使用仓库正式 live 用例（`FX_EXECUTOR_LIVE=1`），不依赖 `.dev` 或本次临时脚本。
 
 ### 2026-11-16 历史回归记录
 
@@ -135,7 +135,7 @@ B 部分（替代方案研究：真正只读的 Plan、Windows 可行性、上�
 
 ## 执行器权限决策更新（2026-11-18，fx 0.0.17）
 
-用户决定一次性执行器与定时任务和交互会话保持一致，`fx ask` 由 `--permission-mode auto` 改为 `full-access`（仍为单次请求参数，不改全局设置）。原因：auto 下用户配置里的显式 ask 规则会让无人值守运行以 `NonInteractivePermissionRequired` 失败（`task8-auto-explicit-ask.json`）。新增 live 用例：真实 fx 0.0.17 + 合成模型 + `permission.bash["*"]="ask"`，按产品 argv 运行，shell 调用实际执行、exit_code 0；原 auto 用例保留为历史证据。真实模型的执行器 / 停止 / cron 用例复跑通过。fx 0.0.17 设置 schema 中 `sandbox` 标为 “No longer used; fx ignores it”，即 fx 无自带沙箱；公开文档 quickstart 已同步说明。
+用户决定一次性执行器与定时任务和交互会话保持一致，`fx ask` 由 `--permission-mode auto` 改为 `full-access`（仍为单次请求参数，不改全局设置）。原因：auto 下用户配置里的显式 ask 规则会让无人值守运行以 `NonInteractivePermissionRequired` 失败（`docs/fx-acceptance/task8-auto-explicit-ask.json`）。新增 live 用例：真实 fx 0.0.17 + 合成模型 + `permission.bash["*"]="ask"`，按产品 argv 运行，shell 调用实际执行、exit_code 0；原 auto 用例保留为历史证据。真实模型的执行器 / 停止 / cron 用例复跑通过。fx 0.0.17 设置 schema 中 `sandbox` 标为 “No longer used; fx ignores it”，即 fx 无自带沙箱；公开文档 quickstart 已同步说明。
 
 ## 任务 6 产品接入（2026-11-16，fx 0.0.17）
 
@@ -410,7 +410,7 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 - 真实 CLI 记录：`protocol/fx/__fixtures__/task8-ask.json`。产品测试：`FX_EXECUTOR_LIVE=1 PATH=/usr/bin:$PATH pnpm --filter vibedeckx test:compat src/protocol/live/fx-executor.live.test.ts --retry 0`，覆盖输出/最终结果、停止、真正 cron 定时触发及 SQLite 详细结果里的 report。第一次探针误从不含 report 的列表接口读取报告，改为 getById 后通过；不将该首次失败称为产品失败。
 - 远端仍走 worker 的同一 `POST /api/path/execute` 与 ProcessManager；worker 现在原样接受 `prompt_provider: "fx"`（未知值 400）。不做旧 worker 兼容：旧 worker 会把 fx 强转为 Claude，所以必须在使用前统一升级所有 worker。日志、停止、finished/finalResult 帧不变。
 - `/compat-check` 注册表对账通过；origin/main 与 v0.3.58 两个 classify-diff 均为 wire-contract + gray（也包含分支已有的改动）；当前 server 对已发布 worker **0.3.58**：49 smokes passed，0 missing，0 failed。未新增 tunnel 入口，注册表快照不变。**需要发布 npm 并升级 worker** 才能在远端使用此功能。
-- 使用隔离 FX_HOME、无认证的本地合成模型服务，再以真实 fx 0.0.17 执行 auto + `permission.bash["*"] = "ask"`：0.04 秒退出 1，`NonInteractivePermissionRequired`，stderr 明确 `permission required by configured rule`。记录为 `task8-auto-explicit-ask.json`，live 测试可复现。这验证真实 ask 的权限执行，不是 ACP 推论，也不是外部模型验收；原用户设置/凭据未改动。
+- 使用隔离 FX_HOME、无认证的本地合成模型服务，再以真实 fx 0.0.17 执行 auto + `permission.bash["*"] = "ask"`：0.04 秒退出 1，`NonInteractivePermissionRequired`，stderr 明确 `permission required by configured rule`。记录为 `docs/fx-acceptance/task8-auto-explicit-ask.json`，live 测试可复现。这验证真实 ask 的权限执行，不是 ACP 推论，也不是外部模型验收；原用户设置/凭据未改动。
 - 检查结果：前后端 `tsc --noEmit` 通过；后端全量 248 个文件 / 3619 tests 通过（11 skipped），后续受影响用例复跑通过；前端全量 `--maxWorkers=2` 187 个文件 / 1729 tests 通过。首轮高负载下 Shiki symbol-tokens 出错，独立复跑和降低并发后的完整套件均通过，未修改该模块。真实 fx live 两项通过；`git diff --check` 通过。
 - 此处原保留的外部远端真实模型 / 停止 / 定时验收已由 2026-11-18 任务 7 的 worker3 hub → ubuntu worker 实测补齐，见下列追加记录；不是以本机或合成模型结果替代。
 
@@ -490,7 +490,7 @@ ubuntu 使用 fx 0.0.17、Claude Code 2.1.81；Main Chat 和 intent brief 使用
 - 原始 Commander 收到两次结果，但受上述空 ID 问题影响超时；修复后通过的是独立页面场景。额外空 ID 真实回归里，模型先发了不合法的新计划 in_progress，校验拒绝，随后自行改成 pending 并成功继续。
 - 浏览器首次在作者仍运行时点复审得到 409；等作者真正结束再启动成功。临时 hub 重启后旧 Main Chat ID 的首次提交得到 404，页面重新取得会话后重发成功。这些尝试不计入成功回合。期间本机磁盘不足影响截图 / 审计文件写入，清理本轮可再生成的构建中间文件后重写并核验了证据。
 
-实测摘录：[task9-cross-machine-results.json](../packages/vibedeckx/src/protocol/fx/__fixtures__/task9-cross-machine-results.json)，包含原始失败结果、四项 Review 补核对、页面 run、Commander 两次事件和单回合结束、空 ID 真实工具调用。它是验收证据，不是运行时输入或原始 ACP 录制。临时原始日志在两机 `/tmp/fx9-cross-20261118/`，本机截图 / 审计在 `/tmp/fx9-cross-browser/`；这些临时路径不构成产品依赖。
+实测摘录：[task9-cross-machine-results.json](fx-acceptance/task9-cross-machine-results.json)，包含原始失败结果、四项 Review 补核对、页面 run、Commander 两次事件和单回合结束、空 ID 真实工具调用。它是验收证据，不是运行时输入或原始 ACP 录制。临时原始日志在两机 `/tmp/fx9-cross-20261118/`，本机截图 / 审计在 `/tmp/fx9-cross-browser/`；这些临时路径不构成产品依赖。
 
 收尾验证：后端全量 **249 文件 / 3652 tests 通过，2 文件 / 11 tests 跳过**；后端 tsc、构建、diff check 通过。前端本轮未改代码，当前源码 UI 构建通过，沿用前一轮前端 tsc 和 1729 tests 通过记录。按 compat-check 再次检查两 base，仍为 gray；全量测试含注册表 7/7，已发布 worker 0.3.58 跨版本检查 **49 passed / 0 missing / 0 failed**。
 
@@ -534,9 +534,9 @@ ubuntu 使用 fx 0.0.17、Claude Code 2.1.81；Main Chat 和 intent brief 使用
 
 - 离线：`pnpm --filter vibedeckx exec vitest run src/agent-session-manager.fx.test.ts`。新增 3 项覆盖跨 agent 产品历史、模型清空以及真正写入新 fx stdin 的截断分支，使用真实 SQLite/stdio 子进程、模拟 ACP。
 - 真实 CLI：`FX_PARITY_RECORD_FILE=/tmp/fx11-results.jsonl pnpm --filter vibedeckx exec vitest run --config vitest.live.config.ts src/protocol/live/fx-parity.live.test.ts --retry 0`。需三种 CLI 已登录，会产生模型调用；只删除测试创建的临时项目和数据库，原生文件沿用产品保留策略。输出文件为追加模式，每次使用新文件名可避免混入旧记录。
-- 实测结果摘录：[task11-product-results.json](../packages/vibedeckx/src/protocol/fx/__fixtures__/task11-product-results.json)。它保存真实管理器的 assistant 文本、回合结果及原生 ID 数量，是产品结果摘录，**不是原始 ACP 录制**。删除分支的断言在 live 测试中，摘录只含删除后仍存在的父会话。
+- 实测结果摘录：[task11-product-results.json](fx-acceptance/task11-product-results.json)。它保存真实管理器的 assistant 文本、回合结果及原生 ID 数量，是产品结果摘录，**不是原始 ACP 录制**。删除分支的断言在 live 测试中，摘录只含删除后仍存在的父会话。
 - 浏览器复验：在独立实例创建空 Git 项目，新建 fx 会话写入 `UI_KEY=IRIS516`；上传普通文本、小 PNG 和 >5 MiB PNG，检查消息及真实回答；从第一轮分隔线选择 Codex 分支，确认后续附件历史未复制；发送回答并点 Send back；再从 Codex 分支选择 fx 并回传。切换 agent 前选择模型，切换后确认 Default，再提问历史标记。通过搜索和通知入口打开同一会话并刷新，检查历史、加星和侧栏状态。
-- 页面驱动的数据库摘录：[task11-browser-results.json](../packages/vibedeckx/src/protocol/fx/__fixtures__/task11-browser-results.json)，保留附件标记、内联图片字节数（省略图像内容）、回答、回传来源说明、分支指针、加星和模型清空结果。
+- 页面驱动的数据库摘录：[task11-browser-results.json](fx-acceptance/task11-browser-results.json)，保留附件标记、内联图片字节数（省略图像内容）、回答、回传来源说明、分支指针、加星和模型清空结果。
 - 本机页面截图：`/tmp/fx11-attachments.png`、`/tmp/fx11-running.png`；临时服务日志 `/tmp/fx11-server.log`。这些路径仅作本机留档，不是跨机器运行依赖。
 
 ### 本轮检查结果

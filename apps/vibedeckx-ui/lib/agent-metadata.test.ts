@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getAgentMetadata, supportsPlanMode } from "./agent-metadata";
+import { getAgentMetadata } from "./agent-metadata";
 
 describe("agent metadata", () => {
   it("preserves existing message names and accent colours", () => {
@@ -12,9 +12,5 @@ describe("agent metadata", () => {
     });
     expect(getAgentMetadata("uninstalled").displayName).toBe("uninstalled");
     expect(getAgentMetadata("constructor").messageName).toBe("constructor");
-  });
-  it("honours plan support and keeps older providers compatible", () => {
-    expect(supportsPlanMode({ type: "third", displayName: "Third Agent", capabilities: { planMode: false } })).toBe(false);
-    expect(supportsPlanMode({ type: "codex", displayName: "Codex" })).toBe(true);
   });
 });

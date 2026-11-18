@@ -1229,9 +1229,6 @@ export class AgentSessionManager {
     pendingExpiresAt: number;
     startSnapshot?: SnapshotState | null;
   }): Promise<{ workspaceCheckoutId: string; worktreePath: string }> {
-    if (input.permissionMode === "plan" && getProvider(input.agentType).getCapabilities?.().planMode === false) {
-      throw new Error(`${input.agentType} does not support plan mode; choose edit mode.`);
-    }
     const branchKey = input.branch ?? "";
     const existingCheckout = await this.storage.workspaceRegistry.getByProjectBranch(
       input.projectId, branchKey, "local",
@@ -1359,9 +1356,6 @@ export class AgentSessionManager {
       allowPending?: boolean;
     } = {},
   ): Promise<string> {
-    if (permissionMode === "plan" && getProvider(agentType).getCapabilities?.().planMode === false) {
-      throw new Error(`${getProvider(agentType).getDisplayName()} does not support plan mode; choose edit mode.`);
-    }
     // The caller may supply the id so it can mint a session-scoped token before spawn.
     const sessionId = opts.sessionId ?? randomUUID();
     const branchKey = branch ?? "";
@@ -3887,9 +3881,6 @@ export class AgentSessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) return "not_found";
     if (session.agentType === agentType) return "ok";
-    if (session.permissionMode === "plan" && getProvider(agentType).getCapabilities?.().planMode === false) {
-      throw new Error(`${getProvider(agentType).getDisplayName()} does not support plan mode; choose edit mode before switching agents.`);
-    }
 
     if (session.status === "running" && this.hasHistory(session)) return "busy";
 
@@ -4086,9 +4077,6 @@ export class AgentSessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return false;
-    }
-    if (newMode === "plan" && getProvider(session.agentType).getCapabilities?.().planMode === false) {
-      throw new Error(`${getProvider(session.agentType).getDisplayName()} does not support plan mode; choose edit mode.`);
     }
     // Claimed before the FIRST await — that is the counter's contract, not
     // merely "before the mutations". Resolving the checkout first would leave

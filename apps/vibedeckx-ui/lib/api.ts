@@ -1443,7 +1443,6 @@ export type ReviewSpan = "this_turn" | "session_start";
 export type ReviewContextMode = "briefed" | "blind";
 
 export interface AgentProviderInfo {
-  capabilities?: { planMode?: boolean };
   type: AgentType;
   displayName: string;
   /**

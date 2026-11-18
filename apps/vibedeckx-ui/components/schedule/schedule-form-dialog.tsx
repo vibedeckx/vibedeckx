@@ -245,7 +245,7 @@ export function ScheduleFormDialog({
   const blocker = error ?? (preview.ok ? null : "Fix the cron expression before saving.");
 
   const footNote = runType === "prompt"
-    ? `${PROMPT_PROVIDER_LABELS[promptProvider]} runs unattended on ${remoteName ?? "this machine"}${promptProvider === "fx" ? ". Auto permission checks apply; actions requiring approval fail." : ""}`
+    ? `${PROMPT_PROVIDER_LABELS[promptProvider]} runs unattended on ${remoteName ?? "this machine"}`
     : "Runs even while the app is closed";
 
   return (

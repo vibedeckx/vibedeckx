@@ -35,8 +35,3 @@ export function getAgentMetadata(type: string, providers: readonly AgentProvider
     branchAccent: "bg-muted text-muted-foreground",
   };
 }
-
-/** Missing capabilities preserve compatibility with older servers. */
-export function supportsPlanMode(provider: AgentProviderInfo | undefined): boolean {
-  return provider?.capabilities?.planMode !== false;
-}

@@ -8,7 +8,7 @@ vi.mock("@/lib/api", () => ({
   getAgentProviders: vi.fn().mockResolvedValue([
     { type: "claude-code", displayName: "Claude Code" },
     { type: "codex", displayName: "Codex" },
-    { type: "third", displayName: "Third Agent", capabilities: { planMode: false } },
+    { type: "third", displayName: "Third Agent" },
     { type: "offline", displayName: "Offline Agent" },
   ]),
   api: { createRepeatLoop, workflowRunGate },

@@ -58,9 +58,6 @@ export function buildSessionNew(id: number, options: FxSessionOptions): string {
     ...(options.systemPrompt?.trim() ? { systemPrompt: [{ type: "text", text: options.systemPrompt }], systemPromptMode: "append" } : {}),
   } });
 }
-export function buildSetMode(id: number, sessionId: string): string {
-  return line({ id, method: FX_METHODS.setMode, params: { sessionId, modeId: "auto" } });
-}
 /**
  * fx has no read-only mode (only ask / auto / full-access, and no sandbox), so
  * vibedeckx plan mode for fx is enforced by instructions alone. Sent ahead of

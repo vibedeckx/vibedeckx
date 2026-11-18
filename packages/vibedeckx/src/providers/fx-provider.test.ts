@@ -191,7 +191,6 @@ describe("FxProvider lifecycle", () => {
   });
   it("plan mode prefixes instructions as a separate block on every prompt; edit sends content untouched", () => {
     const p = new FxProvider();
-    expect((p as { getCapabilities?: unknown }).getCapabilities).toBeUndefined();
     ready(p, "plan", "native", "plan");
     const first = JSON.parse(p.formatUserInput("plan the change", "plan"));
     expect(first.params.prompt).toEqual([{ type: "text", text: FX_PLAN_MODE_INSTRUCTIONS }, { type: "text", text: "plan the change" }]);

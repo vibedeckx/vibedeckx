@@ -510,11 +510,7 @@ export interface ReviewerCandidate {
   reason: ReviewerCandidateUnavailableReason | null;
 }
 
-/**
- * Valid agent types for reviewer / loop requests, from the shared type list.
- * Accepting a type here does not certify its review/loop support; fx workflow
- * integration and verification belong to fx integration task 9.
- */
+/** Valid agent types for reviewer / loop requests, from the shared type list. */
 export const REVIEWER_AGENT_TYPES: ReadonlySet<AgentType> = new Set(AGENT_TYPES);
 
 /**

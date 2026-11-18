@@ -110,12 +110,6 @@ export class CodexProvider implements AgentProvider {
     return detectBinary(CODEX_BINARY_NAME, { refresh: true });
   }
 
-  isAvailable(): boolean {
-    // Always runnable: buildSpawnConfig falls back to `npx @openai/codex`
-    // when no native `codex` binary is on PATH.
-    return true;
-  }
-
   buildSpawnConfig(
     _cwd: string,
     permissionMode: "plan" | "edit",

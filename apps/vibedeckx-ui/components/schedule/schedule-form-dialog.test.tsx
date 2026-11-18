@@ -92,7 +92,6 @@ describe("ScheduleFormDialog timing", () => {
 
   it("preserves fx when saving a scheduled prompt", async () => {
     const onSubmit = await render({ ...schedule, prompt_provider: "fx", content: "hello" });
-    expect(document.body.textContent).toContain("Auto permission checks apply");
     await act(async () => {
       document.body.querySelector<HTMLButtonElement>("button[aria-label='Save']")!.click();
     });

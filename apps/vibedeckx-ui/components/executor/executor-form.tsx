@@ -192,7 +192,6 @@ export function ExecutorForm({
                     ))}
                   </SelectContent>
                 </Select>
-                {promptProvider === "fx" && <p className="text-xs text-muted-foreground">fx uses auto permission checks. Actions requiring approval fail unattended.</p>}
               </div>
               <div className="flex-1 space-y-2">
                 <label className="text-sm font-medium">

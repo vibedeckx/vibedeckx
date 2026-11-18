@@ -69,9 +69,7 @@ The one-off Python probes have been retired after their retained checks moved
 into the committed test suite. No test or reproduction command requires `.dev`:
 
 - `schema.test.ts`: ACP envelopes and response/update contracts for every ACP transcript.
-- `recordings.test.ts`: historical turn memory, cancellation, direction-aware permission replies,
-  native load/resume evidence, model overrides, system prompt, invalid parameters,
-  unauthenticated errors and HTTP authentication/calls (using the separate HTTP log format).
+- `recordings.test.ts`: every recording is parseable and free of credential fields and home paths.
 - `providers/fx-provider.recordings.test.ts`: product behavior when replaying real traffic.
 - `../live/fx.live.test.ts`: current full-access lifecycle with a real CLI/model.
 - `../live/fx-hub.live.test.ts`: opt-in real hub MCP calls.
@@ -165,7 +163,7 @@ copied or edited. Reproduce each recorded argv with stdin redirected from
 not establish that auto bypasses explicit ask rules. Product cron/stop checks
 live in `src/protocol/live/fx-executor.live.test.ts`; enable `FX_EXECUTOR_LIVE=1`.
 
-`task8-auto-explicit-ask.json` instead uses a real fx executable with a synthetic
+`docs/fx-acceptance/task8-auto-explicit-ask.json` instead uses a real fx executable with a synthetic
 local OpenAI-compatible model response requesting shell execution, isolated
 FX_HOME settings and no credentials. It proves auto still honors explicit ask
 rules and exits 1 without interaction. The live test reproduces the local
@@ -174,7 +172,7 @@ provider setup; it is not evidence about an external model's decisions.
 
 ## Task 11 product lifecycle evidence (2026-11-17)
 
-`task11-product-results.json` contains assistant responses, completion outcomes,
+`docs/fx-acceptance/task11-product-results.json` contains assistant responses, completion outcomes,
 and native-ID counts captured from real manager sessions (fx 0.0.17, Codex
 0.159.2, Claude Code 2.1.325). This is a product result excerpt, **not an ACP
 wire recording**, and is not fed to the ACP schema replay tests. The final
@@ -189,7 +187,7 @@ FX_PARITY_RECORD_FILE=/tmp/fx11-new-results.jsonl pnpm --filter vibedeckx exec v
 ```
 
 The optional result file is append-only; use a fresh path for each run.
-`task11-browser-results.json` is a database excerpt from the isolated browser
+`docs/fx-acceptance/task11-browser-results.json` is a database excerpt from the isolated browser
 acceptance run, with inline image bytes replaced by their length and temporary
 attachment paths normalized. It records ordinary file, inline PNG, >5 MiB PNG
 file fallback, cross-agent branch/send-back, favorite and model-reset results.
@@ -200,7 +198,7 @@ cleanup, or real AI title generation without a configured title API key.
 
 ## Task 7 remote product acceptance (2026-11-18)
 
-`task7-remote-results.json` records worker3 hub → ubuntu worker acceptance with
+`docs/fx-acceptance/task7-remote-results.json` records worker3 hub → ubuntu worker acceptance with
 fx 0.0.17 over real reverse-connect transport carried by SSH loopback forwarding.
 It contains executor output/stop/authentication failure, actual cron report and
 timeout results, and real fx hub tool calls. Direct HTTP MCP calls after grant

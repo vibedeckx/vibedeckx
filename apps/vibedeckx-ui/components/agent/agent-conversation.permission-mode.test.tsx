@@ -111,7 +111,6 @@ vi.mock("@/hooks/use-marker-keyboard-nav", () => ({
 vi.mock("@/lib/api", () => ({
   getAgentProviders: vi.fn().mockResolvedValue([
     { type: "claude-code", displayName: "Claude Code", models: ["opus"] },
-    { type: "third", displayName: "Third Agent", capabilities: { planMode: false } },
   ]),
   translateText: vi.fn(),
   branchAgentSession: vi.fn(),
@@ -215,16 +214,6 @@ describe("AgentConversation permissionMode", () => {
   };
 
   const mode = () => q(container, "mode-value")!.textContent;
-
-  it("displays a third provider and refuses plan mode even when stale session state says plan", async () => {
-    hookState.session = { id: "third-session", agentType: "third", permissionMode: "plan" };
-    await render();
-    expect(container.textContent).toContain("Third Agent");
-    expect(mode()).toBe("edit");
-    await act(async () => { q(container, "pick-plan")!.click(); });
-    expect(mode()).toBe("edit");
-    expect(switchMode).not.toHaveBeenCalled();
-  });
 
   it("follows the displayed session's mode", async () => {
     hookState.session = { id: "reviewer", permissionMode: "plan" };

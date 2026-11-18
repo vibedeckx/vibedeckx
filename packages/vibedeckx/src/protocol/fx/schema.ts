@@ -3,7 +3,7 @@ import type { ContractItem } from "../contracts.js";
 
 export const FX_BINARY_NAME = "fx";
 export const FX_METHODS = {
-  initialize: "initialize", newSession: "session/new", setMode: "session/set_mode",
+  initialize: "initialize", newSession: "session/new",
   prompt: "session/prompt", cancel: "session/cancel", update: "session/update",
   permission: "session/request_permission",
 } as const;

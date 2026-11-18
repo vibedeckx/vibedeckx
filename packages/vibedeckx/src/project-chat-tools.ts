@@ -1,7 +1,6 @@
 import { randomUUID } from "crypto";
 import { AGENT_TYPES, DEFAULT_AGENT_TYPE, type AgentType } from "./agent-types.js";
 import { z } from "zod";
-import { getProvider } from "./providers/index.js";
 import type {
   ProjectChatContextEntityType,
   ProjectChatOperationPayload,
@@ -268,7 +267,7 @@ const instructionSchema = z.string().trim().min(1).max(8_000);
 const createSessionSchema = z.object({
   workspaceId: selectorSchema.optional(),
   instruction: instructionSchema,
-  permissionMode: z.enum(["plan", "edit"]).optional().describe("Defaults to edit. Plan requires agent plan-mode support."),
+  permissionMode: z.enum(["plan", "edit"]).optional(),
   agentType: z.enum(AGENT_TYPES).optional(),
   model: z.string().trim().min(1).max(MODEL_CHAR_LIMIT).nullable().optional(),
 }).strict();
@@ -745,11 +744,6 @@ export async function createProjectChatTools(options: CreateProjectChatToolsOpti
       execute: async ({ workspaceId, instruction, permissionMode = "edit", agentType = DEFAULT_AGENT_TYPE, model = null }) => {
         const service = mutationService();
         await revalidateScope();
-        // Reject before creating a durable operation or asking for a workspace.
-        // The lifecycle enforces this too, including on a remote worker.
-        if (permissionMode === "plan" && getProvider(agentType).getCapabilities?.().planMode === false) {
-          throw new Error(`${agentType} does not support plan mode; choose edit mode.`);
-        }
         const operationId = randomUUID();
         const sessionSeed = randomUUID();
         const candidates = (await workspaceCandidates()).items;

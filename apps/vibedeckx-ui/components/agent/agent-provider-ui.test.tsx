@@ -3,7 +3,6 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BranchMenu } from "./branch-menu";
-import { PermissionModeToggle } from "@/components/ui/permission-mode-toggle";
 
 vi.mock("@/components/ui/dropdown-menu", () => {
   const Pass = ({ children }: { children?: ReactNode }) => <>{children}</>;
@@ -35,14 +34,5 @@ describe("provider-driven controls", () => {
     expect(option.querySelector(".bg-muted.text-muted-foreground")).not.toBeNull();
     await act(async () => { option.click(); });
     expect(onBranch).toHaveBeenCalledWith(type);
-  });
-  it("disables the unsupported plan entry while leaving edit available", async () => {
-    const onModeChange = vi.fn();
-    await render(<PermissionModeToggle mode="edit" planModeSupported={false} onModeChange={onModeChange} />);
-    const [plan, edit] = container!.querySelectorAll("button");
-    expect(plan.disabled).toBe(true);
-    expect(edit.disabled).toBe(false);
-    await act(async () => { plan.click(); });
-    expect(onModeChange).not.toHaveBeenCalled();
   });
 });

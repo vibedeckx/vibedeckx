@@ -77,14 +77,6 @@ export interface AgentProvider {
   detectBinary(): string | null;
 
   /**
-   * Whether this provider can actually run (and thus be selected in the UI).
-   * Distinct from detectBinary(): a provider may have no native binary on PATH
-   * yet still be runnable via an npx fallback in buildSpawnConfig(). Defaults to
-   * detectBinary() !== null when not implemented.
-   */
-  isAvailable?(): boolean;
-
-  /**
    * Build the spawn configuration for launching the agent process.
    *
    * `model` is an optional, UNVALIDATED model name for this session only.
@@ -155,24 +147,6 @@ export interface AgentProvider {
    */
   getInstallHint?(): string;
 
-  /**
-   * Feature differences this agent declares versus the baseline (Claude Code /
-   * Codex). Optional; omitted fields mean "supported" — see
-   * resolveAgentCapabilities(). Only add a field once a probe has shown an
-   * agent actually lacks the feature (docs/fx-agent-parity.md).
-   */
-  getCapabilities?(): Partial<AgentCapabilities>;
-
   /** The agent type identifier. */
   getAgentType(): AgentType;
-}
-
-/** Feature support served to the UI via GET /api/agent-providers. */
-export interface AgentCapabilities {
-  /** Whether the agent can run in plan (read-only planning) permission mode. */
-  planMode: boolean;
-}
-
-export function resolveAgentCapabilities(provider: AgentProvider): AgentCapabilities {
-  return { planMode: true, ...provider.getCapabilities?.() };
 }

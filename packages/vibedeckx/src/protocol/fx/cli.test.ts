@@ -10,7 +10,7 @@ describe("fx spawn", () => {
   afterEach(() => vi.resetAllMocks());
   it("uses a verified ACP permission override and keeps the original login profile", () => {
     vi.mocked(execFileSync).mockReturnValue("fx acp [--permission-mode <mode>]");
-    expect(buildFxSpawnConfig("/bin/fx", " vendor/model ", "/tmp/log")).toEqual({ command: "/bin/fx", args: ["acp", "--permission-mode", "full-access", "--model", "vendor/model", "--log-file", "/tmp/log"], env: { FX_AUTO_UPGRADE: "0" }, shell: false });
+    expect(buildFxSpawnConfig("/bin/fx", " vendor/model ")).toEqual({ command: "/bin/fx", args: ["acp", "--permission-mode", "full-access", "--model", "vendor/model"], env: { FX_AUTO_UPGRADE: "0" }, shell: false });
     buildFxSpawnConfig("/bin/fx", "another-model");
     expect(execFileSync).toHaveBeenCalledTimes(1);
     expect(execFileSync).toHaveBeenCalledWith("/bin/fx", ["acp", "--help"], expect.objectContaining({ timeout: 5000 }));

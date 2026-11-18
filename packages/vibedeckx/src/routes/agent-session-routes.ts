@@ -1,7 +1,6 @@
 import type { FastifyPluginAsync, FastifyRequest } from "fastify";
 import { getAuth } from "@clerk/fastify";
 import fp from "fastify-plugin";
-import { resolveAgentCapabilities } from "../agent-provider.js";
 import { DEFAULT_AGENT_TYPE, invalidAgentTypeMessage, isAgentType, resolveAgentType } from "../agent-types.js";
 import type { AgentMessage, AgentType, ContentPart } from "../agent-types.js";
 import { ConversationPatch } from "../conversation-patch.js";
@@ -405,7 +404,6 @@ const routes: FastifyPluginAsync = async (fastify) => {
         // on the CLI version and account tier of whichever machine spawns it,
         // which this server cannot know.
         models: MODEL_SUGGESTIONS[type] ?? [],
-        capabilities: resolveAgentCapabilities(provider),
       };
     });
     return reply.code(200).send({ providers });
