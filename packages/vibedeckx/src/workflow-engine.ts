@@ -1812,8 +1812,9 @@ export class WorkflowEngine {
         // Reviewer runs in plan (read-only) mode: it shares the worktree with
         // the implementer session it's reviewing, and an unrestricted
         // reviewer could mutate the very code it's supposed to be judging.
-        // Plan mode is read-only for both agents (codex maps it to
-        // sandbox: "read-only"), so any reviewer agent is safe here.
+        // Claude uses native plan permissions; Codex maps plan to a
+        // read-only sandbox. fx uses prompt-only plan instructions and
+        // retains full-access: it has no enforced read-only guarantee.
         // The reviewer's own session-start snapshot describes the same
         // worktree we just snapshotted for the scope, milliseconds earlier —
         // hand it over rather than walking the worktree a second time.

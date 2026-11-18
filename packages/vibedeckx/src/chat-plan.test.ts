@@ -12,6 +12,18 @@ const input = (): ChatPlanInput => chatPlanSchema.parse({
 });
 
 describe("Commander task plans", () => {
+  it("assigns a usable ID when the model supplies an empty new-plan ID", () => {
+    const state = new ChatPlanState();
+    const plan = state.apply(chatPlanSchema.parse({ ...input(), planId: "" }));
+    expect(plan.planId).toBeTruthy();
+    const progress = chatPlanSchema.parse({
+      ...plan, steps: [{ ...plan.steps[0], status: "completed", result: "Tests passed" }],
+    });
+    expect(state.needsConfirmation(progress)).toBe(false);
+    state.apply(progress);
+    expect(state.unfinishedSteps()).toEqual([]);
+  });
+
   it("requires confirmation for broad goals and allows progress updates after approval", () => {
     const state = new ChatPlanState();
     expect(state.needsConfirmation(input())).toBe(true);

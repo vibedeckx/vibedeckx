@@ -48,6 +48,15 @@ describe("parseVerdict", () => {
     expect(parseVerdict("Verdict:")).toBeNull();
   });
 
+  it("reads numbered Markdown headings produced by fx without accepting qualified verdicts", () => {
+    expect(parseVerdict("## 1. Verdict\n\n**ship**\n\n## 2. Blocking findings\nNone.")).toBe("ship");
+    expect(parseVerdict("## 1. Verdict\n\n**needs-changes**")).toBe("needs-changes");
+    expect(parseVerdict("## 1. Verdict — cannot-verify")).toBe("cannot-verify");
+    expect(parseVerdict("## 1. Verdict\n\n**do not ship**")).toBeNull();
+    expect(parseVerdict("## 1. Verdict — ship (with notes)")).toBeNull();
+    expect(parseVerdict("## 1. Verdict\n\nship / needs-changes")).toBeNull();
+  });
+
   it("returns null when there is no verdict at all", () => {
     expect(parseVerdict("Looks fine to me, ship it!")).toBeNull();
     expect(parseVerdict("")).toBeNull();

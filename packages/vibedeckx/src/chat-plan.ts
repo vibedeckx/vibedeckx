@@ -59,7 +59,7 @@ export class ChatPlanState {
     // Called only after the SDK's approval boundary has been satisfied.
     if (input.planId && input.planId !== this.current?.planId) throw new Error("Unknown plan ID.");
     const samePlan = Boolean(input.planId) && input.planId === this.current?.planId;
-    this.current = { ...input, planId: input.planId ?? randomUUID() };
+    this.current = { ...input, planId: input.planId || randomUUID() };
     this.blocked = false;
     this.stalled = false;
     if (!samePlan) this.nudges = 0;

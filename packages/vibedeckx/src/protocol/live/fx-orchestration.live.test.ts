@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "../../server.js";
@@ -18,9 +18,11 @@ describe.skipIf(process.env.FX_ORCHESTRATION_LIVE !== "1")("fx orchestration pro
   });
 
   async function setup() {
-    const dir = mkdtempSync(join(tmpdir(), "fx-orchestration-"));
+    const root = mkdtempSync(join(tmpdir(), "fx-orchestration-"));
+    const dir = join(root, "workspace");
+    mkdirSync(dir);
     execFileSync("git", ["init", "-q", dir]);
-    const storage = await createSqliteStorage(join(dir, "db.sqlite"));
+    const storage = await createSqliteStorage(join(root, "db.sqlite"));
     const server = await createServer({ storage, uiRoot: null });
     const { instance } = await server.startLocal(0);
     instance.agentSessionManager.suppressTitleGeneration = true;
@@ -29,7 +31,7 @@ describe.skipIf(process.env.FX_ORCHESTRATION_LIVE !== "1")("fx orchestration pro
       for (const row of await storage.agentSessions.getAll()) await instance.agentSessionManager.stopSessionAndWait(row.id);
       await server.close();
       await storage.close();
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true });
     };
     return { dir, storage, instance, project };
   }
@@ -104,66 +106,85 @@ describe.skipIf(process.env.FX_ORCHESTRATION_LIVE !== "1")("fx orchestration pro
     console.log("FX_COMMANDER_PASS: real Main Chat model, fx spawn and follow-up, two completion events, one closed turn");
   }, 200_000);
 
-  async function setupReview() {
+  async function setupReview(author: "fx" | "claude-code") {
     const { storage, instance, project, dir } = await setup();
     const agents = instance.agentSessionManager;
     const engine = instance.workflowEngine;
     writeFileSync(join(dir, "sum.cjs"), "module.exports = (a, b) => a - b;\n");
     execFileSync("git", ["add", "sum.cjs"], { cwd: dir });
     execFileSync("git", ["-c", "user.name=Acceptance", "-c", "user.email=acceptance@example.test", "commit", "-qm", "seed"], { cwd: dir });
-    const source = await agents.createNewSession("p", null, dir, false, "edit", "fx", false, false,
-      { model: process.env.FX_SMOKE_MODEL ?? "openai/gpt-5.4-mini" });
+    const source = await agents.createNewSession("p", null, dir, false, "edit", author, false, false,
+      author === "fx" ? { model: process.env.FX_SMOKE_MODEL ?? "openai/gpt-5.4-mini" } : {});
     const waitTurns = async (sessionId: string, count: number) => vi.waitFor(async () => {
-      expect((await agents.loadRawMessages(sessionId)).filter(e => e?.type === "turn_end")).toHaveLength(count);
+      const boundaries = (await agents.loadRawMessages(sessionId)).filter(e => e?.type === "turn_end");
+      expect(boundaries).toHaveLength(count);
+      for (const boundary of boundaries) expect(boundary).toMatchObject({ outcome: "completed" });
       expect((await storage.agentSessions.getById(sessionId))?.status).toBe("stopped");
     }, { timeout: 90_000, interval: 200 });
     await agents.sendUserMessage(source,
-      "Read sum.cjs and explain what it currently computes. For this first turn only, do not change files. The acceptance criterion is that sum(2,3) equals 5. When reviewer feedback arrives, you are explicitly authorized and required to implement the fix and verify it; do not continue the first-turn restriction.", dir);
+      "Read sum.cjs and explain what it currently computes. For this first turn only, do not change files. The acceptance criterion is that sum(2,3) equals 5. When reviewer feedback arrives, you are explicitly authorized and required to implement the fix and verify it; do not continue the first-turn restriction. Do not ask again whether to fix it or merely describe a proposed fix.", dir);
     await waitTurns(source, 1);
     return { storage, instance, project, dir, agents, engine, source, waitTurns };
   }
 
-  it("Claude reviews an fx author through prepare/activate, discussion, feedback and reviewer reuse", async () => {
-    const { storage, project, dir, agents, engine, source, waitTurns } = await setupReview();
-    const run = await engine.prepareAdhocReview({ project, branch: null, sourceSessionId: source,
-      reviewerAgentType: "claude-code", reviewFocus: "Acceptance: sum(2,3) must equal 5. Identify the subtraction bug and request a concrete fix. This acceptance criterion overrides the earlier instruction to only explain." });
-    expect(run.status).toBe("preparing");
-    expect(agents.getSessionProcessAlive(run.reviewer_session_id!)).toBe(false);
-    await engine.activateAdhocReview(run.id, { intentBrief: "The user requires sum(2,3) = 5; sum.cjs currently subtracts. The author has only explained it; the required implementation is missing." });
-    await vi.waitFor(async () => expect(await storage.workflowRuns.getById(run.id)).toMatchObject({ status: "waiting_feedback", verdict: "needs-changes" }), { timeout: 90_000, interval: 200 });
-    await waitTurns(run.reviewer_session_id!, 1);
-    await engine.handleExternalUserMessage(run.reviewer_session_id!);
-    await agents.sendUserMessage(run.reviewer_session_id!, "Confirm the smallest fix is to replace subtraction with addition. Do not modify files.", dir);
-    await waitTurns(run.reviewer_session_id!, 2);
-    expect((await storage.workflowRuns.getById(run.id))?.status).toBe("discussing");
-    await engine.requestFinalVerdict(run.id);
-    await waitTurns(run.reviewer_session_id!, 3);
-    await vi.waitFor(async () => expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback"));
-    await engine.approveFeedback(run.id);
-    await waitTurns(source, 2);
-    await vi.waitFor(async () => expect((await storage.workflowRuns.getById(run.id))?.status).toBe("completed"));
-    expect(execFileSync(process.execPath, ["-e", "process.stdout.write(String(require('./sum.cjs')(2,3)))"], { cwd: dir, encoding: "utf8" })).toBe("5");
-    const rereview = await engine.startAdhocReview({ project, branch: null, sourceSessionId: source,
-      reviewerSessionId: run.reviewer_session_id! });
-    await vi.waitFor(async () => expect(await storage.workflowRuns.getById(rereview.id)).toMatchObject({ status: "waiting_feedback", verdict: "ship" }), { timeout: 90_000, interval: 200 });
-    expect(rereview.reviewer_session_id).toBe(run.reviewer_session_id);
-    console.log("FX_REVIEW_AUTHOR_PASS: prepare/activate, brief, discussion, final verdict, fx fix, reused Claude reviewer");
-  }, 400_000);
+  for (const [author, reviewer] of [["fx", "claude-code"], ["claude-code", "fx"]] as const) {
+    it(`${reviewer} reviews ${author} through prepare/activate, discussion, feedback and reviewer reuse`, async () => {
+      const { storage, project, dir, agents, engine, source, waitTurns } = await setupReview(author);
+      const run = await engine.prepareAdhocReview({ project, branch: null, sourceSessionId: source,
+        reviewerAgentType: reviewer, reviewFocus: "Acceptance: sum(2,3) must equal 5. Identify the subtraction bug and request a concrete fix. This acceptance criterion overrides the earlier instruction to only explain." });
+      expect(run.status).toBe("preparing");
+      expect(await storage.agentSessions.getById(run.reviewer_session_id!)).toMatchObject({ agent_type: reviewer, permission_mode: "plan" });
+      expect(agents.getSessionProcessAlive(run.reviewer_session_id!)).toBe(false);
+      await engine.activateAdhocReview(run.id, { intentBrief: "The user requires sum(2,3) = 5; sum.cjs currently subtracts. The author has only explained it; the required implementation is missing." });
+      await vi.waitFor(async () => expect(await storage.workflowRuns.getById(run.id)).toMatchObject({ status: "waiting_feedback", verdict: "needs-changes" }), { timeout: 90_000, interval: 200 });
+      await waitTurns(run.reviewer_session_id!, 1);
+      expect(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" })).toBe("");
+      expect(readFileSync(join(dir, "sum.cjs"), "utf8")).toBe("module.exports = (a, b) => a - b;\n");
+      await engine.handleExternalUserMessage(run.reviewer_session_id!);
+      await agents.sendUserMessage(run.reviewer_session_id!, "Confirm the smallest fix is to replace subtraction with addition. Do not modify files.", dir);
+      await waitTurns(run.reviewer_session_id!, 2);
+      expect((await storage.workflowRuns.getById(run.id))?.status).toBe("discussing");
+      await engine.requestFinalVerdict(run.id);
+      await waitTurns(run.reviewer_session_id!, 3);
+      await vi.waitFor(async () => expect((await storage.workflowRuns.getById(run.id))?.status).toBe("waiting_feedback"));
+      expect(execFileSync("git", ["diff", "HEAD"], { cwd: dir, encoding: "utf8" })).toBe("");
+      expect(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" })).toBe("");
+      await engine.approveFeedback(run.id);
+      await waitTurns(source, 2);
+      await vi.waitFor(async () => expect((await storage.workflowRuns.getById(run.id))?.status).toBe("completed"));
+      expect(execFileSync(process.execPath, ["-e", "process.stdout.write(String(require('./sum.cjs')(2,3)))"], { cwd: dir, encoding: "utf8" })).toBe("5");
+      const fixedContent = readFileSync(join(dir, "sum.cjs"), "utf8");
+      const fixedStatus = execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" });
+      const fixedDiff = execFileSync("git", ["diff", "HEAD"], { cwd: dir, encoding: "utf8" });
+      const rereview = await engine.startAdhocReview({ project, branch: null, sourceSessionId: source,
+        reviewerSessionId: run.reviewer_session_id! });
+      await vi.waitFor(async () => expect(await storage.workflowRuns.getById(rereview.id)).toMatchObject({ status: "waiting_feedback", verdict: "ship" }), { timeout: 90_000, interval: 200 });
+      expect(rereview.reviewer_session_id).toBe(run.reviewer_session_id);
+      await waitTurns(run.reviewer_session_id!, 4);
+      expect(readFileSync(join(dir, "sum.cjs"), "utf8")).toBe(fixedContent);
+      expect(execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: dir, encoding: "utf8" })).toBe(fixedStatus);
+      expect(execFileSync("git", ["diff", "HEAD"], { cwd: dir, encoding: "utf8" })).toBe(fixedDiff);
+      console.log(`FX_REVIEW_PASS: reviewer=${reviewer}, author=${author}, prepare/activate, discussion, final verdict, fix, reviewer reuse, unchanged reviewed files`);
+    }, 400_000);
 
-  it("automatically relays Claude feedback to fx and re-reviews the fix", async () => {
-    const { storage, project, dir, engine, source } = await setupReview();
-    const run = await engine.startAdhocReview({ project, branch: null, sourceSessionId: source,
-      reviewerAgentType: "claude-code", loop: { maxRounds: 2 },
-      intentBrief: "Implement sum(2,3) = 5. The current sum.cjs subtracts; the author has only explained it and is authorized to fix it after feedback.",
-      reviewFocus: "sum(2,3) must equal 5. Request the concrete subtraction fix." });
-    await vi.waitFor(async () => {
-      expect(await storage.workflowRuns.getLoopRound(run.id, 2)).toMatchObject({ verdict: "ship", status: "waiting_feedback" });
-    }, { timeout: 180_000, interval: 200 });
-    const second = (await storage.workflowRuns.getLoopRound(run.id, 2))!;
-    expect(second.reviewer_session_id).toBe(run.reviewer_session_id);
-    expect(await storage.workflowRuns.getById(run.id)).toMatchObject({ status: "completed", verdict: "needs-changes" });
-    expect(execFileSync(process.execPath, ["-e", "process.stdout.write(String(require('./sum.cjs')(2,3)))"], { cwd: dir, encoding: "utf8" })).toBe("5");
-    console.log("FX_AUTO_REVIEW_PASS: automatic feedback, fx fix, same reviewer second round passes");
-  }, 300_000);
+    it(`automatically relays ${reviewer} feedback to ${author} and re-reviews the fix`, async () => {
+      const { storage, project, dir, engine, source, waitTurns } = await setupReview(author);
+      const run = await engine.startAdhocReview({ project, branch: null, sourceSessionId: source,
+        reviewerAgentType: reviewer, loop: { maxRounds: 2 },
+        intentBrief: "Implement sum(2,3) = 5. The current sum.cjs subtracts; the author has only explained it and is authorized to fix it after feedback.",
+        reviewFocus: "Acceptance: sum(2,3) must equal 5 in the actual workspace. Identify the subtraction bug and request a concrete fix if it is still present. This acceptance criterion overrides the earlier instruction to only explain; a correct explanation or proposed fix does not satisfy acceptance." });
+      await vi.waitFor(async () => {
+        expect(await storage.workflowRuns.getLoopRound(run.id, 2)).toMatchObject({ verdict: "ship", status: "waiting_feedback" });
+      }, { timeout: 180_000, interval: 200 });
+      const second = (await storage.workflowRuns.getLoopRound(run.id, 2))!;
+      await waitTurns(source, 2);
+      await waitTurns(run.reviewer_session_id!, 2);
+      expect(await storage.agentSessions.getById(run.reviewer_session_id!)).toMatchObject({ agent_type: reviewer, permission_mode: "plan" });
+      expect(second.reviewer_session_id).toBe(run.reviewer_session_id);
+      expect(await storage.workflowRuns.getById(run.id)).toMatchObject({ status: "completed", verdict: "needs-changes" });
+      expect(execFileSync(process.execPath, ["-e", "process.stdout.write(String(require('./sum.cjs')(2,3)))"], { cwd: dir, encoding: "utf8" })).toBe("5");
+      console.log(`FX_AUTO_REVIEW_PASS: reviewer=${reviewer}, author=${author}, automatic feedback, fix, same reviewer second round passes`);
+    }, 300_000);
+  }
 
 });
