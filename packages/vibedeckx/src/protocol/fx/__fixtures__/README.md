@@ -196,3 +196,35 @@ file fallback, cross-agent branch/send-back, favorite and model-reset results.
 UI observations and repeatable browser steps are in `docs/fx-agent-parity.md`
 under Task 11. Neither excerpt claims lossless history restoration, native-file
 cleanup, or real AI title generation without a configured title API key.
+
+
+## Task 7 remote product acceptance (2026-11-18)
+
+`task7-remote-results.json` records worker3 hub → ubuntu worker acceptance with
+fx 0.0.17 over real reverse-connect transport carried by SSH loopback forwarding.
+It contains executor output/stop/authentication failure, actual cron report and
+timeout results, and real fx hub tool calls. Direct HTTP MCP calls after grant
+revocation prove the same token and an already-open broker handle are rejected.
+The broker stdio service is a test fixture on the real worker. Initial harness
+errors and read-only audits of the original cron runs are retained.
+
+This is a product result excerpt, not ACP wire data or a runtime dependency.
+It contains no credentials. Its `macInspection` section records the subsequent
+fx 0.0.17 macOS arm64 lifecycle, executor and cron acceptance (four cases, no
+retries). The unchanged live test bodies were bundled with production modules
+and a temporary Node assertion adapter; this was not a Vitest run on Mac.
+Two permission cases use a synthetic model; lifecycle and product output/stop/cron
+use real Gateway models. This does not certify Mac browser or workflow entry points.
+Reproduction and cleanup details are in the Task 7
+remote acceptance section of `docs/fx-agent-parity.md`; no uncommitted `.dev`
+script is required by the formal tests.
+
+`task7-macos-fx-lifecycle-1.jsonl`, `task7-macos-fx-lifecycle-2.jsonl` and the
+adjacent metadata retain the Mac ACP evidence. Schema and Provider replay tests
+cover both Linux and Mac recordings without rewriting their handshakes. Settings
+were unchanged; paths are redacted. Run the same formal live tests on a signed-in
+Mac to reproduce (no temporary adapter or `.dev` script is required):
+
+```sh
+FX_EXECUTOR_LIVE=1 pnpm --filter vibedeckx test:compat src/protocol/live/fx.live.test.ts src/protocol/live/fx-executor.live.test.ts --retry 0
+```

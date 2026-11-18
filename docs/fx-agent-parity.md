@@ -6,19 +6,89 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 
 “明确不支持”“延期”是承诺范围内的缺口，收尾时须用户确认；“超出基线（不做）”无需确认。**写了差异说明不等于通过验收。** 源码阅读、协议声明、参数被接受均不等于功能端到端可用。未验证不得写成不支持。
 
-## 任务 7 收尾进度（2026-11-16）
+## 任务 7 最终收尾（2026-11-18）
 
-**本节记录本轮收尾范围；整个 fx 集成尚未达到最终验收条件。** 任务 8 已完成代码接入及本机验证，尚待外部 worker 实机验收；任务 9–12 仍待后续验收，不能把历史探针和基础 Provider 通过当作其产品验收。下面的历史章节保留当时版本和决定；交互式 ACP 当前使用 full-access，一次性 ask 执行器使用 auto（见任务 8）。
+本节和功能对齐矩阵描述当前状态；下文按日期保留历史实验，历史权限选择或验收缺口以较新的记录为准。任务关闭不自动等于所有验收条件通过。实测版本为 fx **0.0.17 / Linux x86_64、macOS arm64**，0.0.16 录制继续作为历史协议样本保留；不把这两个版本作为用户可用版本白名单。
 
-- 版本处理按用户确认与 Claude Code / Codex 对齐：只记录实际版本，不做版本白名单、不提示“未验证版本”。公共版本日志探测继承 spawn 环境，fx 的 `--version` 和 ACP/help 均关闭自动升级；不新增安装器或升级机制。
-- 平台按用户确认只写文档；不新增 Windows 专用判断、禁用 UI 或不可用提示。命令缺失沿用现有启动失败处理。服务安装时的公共 PATH 检查已有 fx，本次不重复修改。
-- 已将 fx pinned/latest 接入现有 protocol-compat workflow 和 agent-versions 记录；仍沿用手动触发，未开启新的定时任务。CI 需要仓库 secret `AI_GATEWAY_API_KEY`，缺失会明确失败。编写 CI 配置不等于 GitHub Actions 已运行通过。
-- 官方安装器接受显式版本参数；worker Dockerfile 增加固定 v0.0.17 安装，使用已有 `/home/node` volume 保留 `.fx`。独立 Docker 安装阶段验证通过（node:24-bookworm-slim，以 node 用户运行 0.0.17）；未据此宣称完整 worker 镜像发布或跨架构验收。
-- 当前 full-access 真实生命周期、本地真实 hub 调用均通过；新增 task7 录制保持原始握手模式，离线 schema 和 Provider 回放通过。测试入口见 fixtures README。
-- 原 Python 验证器需要保留的断言已迁入 `protocol/fx/recordings.test.ts`，包括独立格式的 HTTP 服务端日志。现有 codec/schema、Provider、管理器、live 测试接管其余当前产品检查后，清理本地 fx 探针及对应字节码；不删除其他 `.dev` 内容，保留所有有回归价值的录制。
-- 公开文档补充会话安装、登录、平台与功能差异；Loop 文档描述已有选择器与权限限制，不宣称完整 Loop/Reviewer/Commander 验收。Docker 文档给出现有镜像手动安装方式，不把尚未发布的预装变更冒充已发布行为。
+### 已交付及证据
 
-### 本轮已完成的验证与发布影响
+- 实际 CLI 版本沿用公共日志记录；ACP、ask、help 和版本探测均设置 `FX_AUTO_UPGRADE=0`。实际缺少能力、握手失败或协议损坏时明确报错；不增加未验证版本提示、安装器或升级机制。
+- 会话、执行器和定时任务均使用 `full-access`。Plan 通过每条提示词的只读约束实现，不提供技术只读保证；2026-11-18 决策替代历史 auto / 禁用 Plan 策略。
+- 服务 PATH 检查从 `AGENT_CLI_COMMANDS` 包含 fx，缺失只报告。worker Dockerfile 固定安装 v0.0.17，沿用 home volume 保存 `.fx`；此前独立安装阶段通过，不等于完整镜像已经发布。
+- 正式 `fx.live.test.ts` 与 pinned/latest protocol-compat CI 已接入；录制离线 schema / codec / Provider 回放及 HTTP 日志格式检查已存在。按用户 2026-11-18 确认，本轮不配置 GitHub 付费凭据、不要求 CI 实跑；记录为“本机实测通过，GitHub CI 未实跑”，不作为验收阻碍。workflow 保留手动触发。本轮增加 `agent` 可选筛选，默认 `all`，选择 `fx` 仅跑该 agent 的 pinned/latest；不需要另外两家的凭据。
+- 任务 9 的 siggst hub → ubuntu worker 真实 Review、Loop、Commander 及浏览器路径通过；任务 10 的认证 / 模型、任务 11 的附件 / 切换 / 分支 / 项目指令 / UI 生命周期均有记录。见各节及已提交的结果摘录。
+- 原 Python 检查由 `protocol/fx/recordings.test.ts` 和正式 Provider / live 测试接管。本工作区再次检查没有 `.dev/scripts/fx-acp-*.py` 或 `verify-fx-recordings.py`，无需删除；矩阵、fixtures 和 README 保留，正式复验不依赖 `.dev`。
+
+### 平台验收范围
+
+| 项目 | 当前证据 / 后续动作 |
+| --- | --- |
+| macOS / arm64 | fx 0.0.17 的真实 Provider 生命周期、执行器输出 / 停止、cron 报告落库通过，详见下节。未在 Mac 重跑浏览器 / Reviewer / Loop / Commander；这些入口的真实远端验收见 Ubuntu 记录。Linux arm64 和 macOS x86_64 不在本轮实机覆盖内，不据此声称全平台验收。 |
+
+### 功能差异与确认状态
+
+| 差异 | 当前处理 / 确认状态 |
+| --- | --- |
+| Plan 无技术只读隔离 | 用户 2026-11-18 已选择提示词约束方案；不再请求重复确认。 |
+| Windows 无 fx 原生版本 | 任务 12 已确认明确不支持；仅文档说明。 |
+| 无后台任务条和单任务 Stop | 任务 12 已确认单任务停止不支持；停止回合不保证结束已 yield 的 shell，公开文档保留说明。 |
+| 提问与答案提交 | fx ACP 工具立即返回仅交互 shell 可用，卡片答案作为普通后续消息。Claude Code 在产品中禁用 AskUserQuestion、改用文本问答；Codex 映射请求为同一问题卡片，但当前答案提交也是 sendMessage，未接 requestUserInput 的专用响应。因此不能将阻塞式工具回填当作现有产品已交付基线，不再作为 fx 独有差异请求确认。 |
+| 历史恢复 | 三种 agent 共用产品历史重放到新会话；工具内容截断、thinking 和复合消息限制见任务 11。属于共有行为，不是 fx 对齐缺口，不请求额外确认。 |
+| 编辑卡片 | fx 与 Claude Code 的 Edit 共用 old_string/new_string 局部替换卡片，已对齐该基线。Codex FileChange 则展示上游提供的 diff（若有）；这是卡片数据格式 / 展示差异，不能称 Codex 保证整个文件的完整前后差异。无需为“完整文件 diff”新增基线承诺。 |
+
+无新增“延期”决定。动态模型发现、原地换模型、执行器 ACP 流式工具展示、原生磁盘清理等“超出基线（不做）”继续按既定范围，不逐项请求确认。
+
+### 2026-11-18 本轮回归与发布影响
+
+- 实测 CLI：fx **0.0.17**、Claude Code **2.1.325**、Codex **0.159.2**，Linux x86_64；沿用原登录，不升级 CLI 或复制 OAuth 凭据。最新版 CI 尚未执行。
+- 前后端 `tsc --noEmit`、`pnpm build:main`、`pnpm build:docs` 通过；修正 Codex live 测试后后端 tsc 再次通过。生成 HTML 的 fx 锚点、登录 / 诊断命令及执行器链接已检查。
+- 两端全量 Vitest（`--maxWorkers=2`，未开启重试）：后端 **249 文件 / 3652 tests passed**、2 文件 / 11 tests 按既有配置跳过；前端 **187 文件 / 1729 tests passed**。后端包含兼容注册表 **7/7**、正式 fx Provider / codec / schema / 录制回放。
+- fx 真实生命周期 **1/1**，本机执行器 live **3/3** 通过（包括历史 auto 失败、full-access 显式规则、真实模型输出 / 停止 / cron 报告）。这些结果不替代远端验收。
+- Claude 基础对话、工具、多轮、一次性执行 **4/4** 通过；Codex 握手、usage、命令、编辑、取消、一次性执行及两项 MCP **8/8** 通过。扩大回归时原有两个 Codex 审批测试首次失败：`on-request` 下普通 echo 不会要求审批，accept 测试未收到请求，decline 测试也未实际回复过拒绝。已将提示词明确为请求提权，并为 decline 补“确实收到审批请求”和协议校验断言，为 accept 补实际输出断言；这是测试前提修正，没有修改产品权限。修正后两项真实测试 **2/2** 通过（`--retry 0`）；保留首次失败，不称整个 live 套件首次全绿。
+- `actionlint` 通过；从 workflow 提取 matrix 生成代码执行，`all` 为 6 cells，三个单 agent 筛选各为 pinned/latest 2 cells。GitHub Actions 未实跑；按用户决定不作为本轮完成条件，未来需要时再配置专用凭据并手动运行。
+- `classify-diff` 对 origin/main、v0.3.58 均为 **gray**；本轮相对 HEAD 的文档 / workflow / live 测试为 **non-runtime**；追加结果 JSON 被分类器保守标为 **gray**，人工核对仅为验收证据，不作为产品运行输入。本轮不改变隧道方法、payload 或能力注册表，不单独要求 worker 发布。
+- 已构建当前源码，并用隔离 hub / worker 对 npm 最新 **0.3.58** 运行跨版本验收：**49 passed / 0 missing / 0 failed**。未操作现有 worker 服务。
+- **整个 fx 分支仍需要发布 npm 并升级 worker**：旧 worker 不会因只部署 server 获得 fx Provider、ask 执行器及 Verdict 解析修复。Docker 预装也需要新镜像发布。旧 worker 既有能力兼容通过不代表旧 worker 已支持 fx；发布说明应保留这一区别。本轮未发布或部署。
+- 已再次核对[官方安装说明](https://fx.sh/docs/getting-started/installation)和[认证说明](https://fx.sh/docs/getting-started/authentication)，公开文档补充 worker 同用户登录、认证后重发、status/doctor 与模型权限；保留平台实测边界。
+
+### 任务 7 追加：Ubuntu 跨机器最终验收（2026-11-18）
+
+用户授权 Mac / ubuntu 远程测试。Mac 为 Darwin arm64；经用户授权安装 fx 0.0.17 并由用户完成登录；后续平台测试结果见 macOS 追加记录。Ubuntu 为 Linux x86_64，已有 fx **0.0.17 / revision d1d4a883382d** 和原始 Gateway 登录。Mac 到 Ubuntu 直连超时；改用当前开发机 **worker3 运行隔离 hub，ubuntu 运行隔离 worker**，经 Ubuntu 已有 SSH 连接的回环转发承载产品 reverse-connect WebSocket。两端只监听回环，不开放无鉴权公网服务。两端 bundle SHA-256 同为 `6beb7fd7d22a46f5a412b0fb3aaff53a7b13474b743ddf1b5fe1f6eb0adcc726`。
+
+| 场景 | 实际断言与结果 |
+| --- | --- |
+| 执行器成功 | hub 创建 fx prompt executor 并指定 Ubuntu；返回 remote process ID，hub WebSocket 收到 stdout `FX_REMOTE_EXEC_OK`、finished exitCode 0 和同样的 finalResult。 |
+| 执行器停止 | 真实 fx 调用 sleep 30 后，由 hub Stop 路由停止；WebSocket 收到非零退出，结束时确认临时工作区无遗留进程。 |
+| 执行器失败 | 仅重启临时 worker，使用无凭据的隔离 HOME / XDG / FX_HOME；真实 fx ask 报 Gateway 登录错误，hub 收到原始 stderr 和 exitCode 1。未读取、复制或更改用户凭据。 |
+| 定时任务成功 | hub 的真实 cron 自动触发（未调用 run-now），target 为 Ubuntu；run 的 remote process ID、completed、exit_code 0、output/report `FX_REMOTE_CRON_OK` 均通过详情 API 核对。触发后禁用测试 schedule，只有一次运行。 |
+| 定时任务超时 | 独立 cron 的 timeout_seconds=3；实际远端任务被停止，run.status 为 `timeout`，没有误报 completed；测试 schedule 已禁用。 |
+| fx 与 hub MCP | 实际产品管理器启动本机 fx 0.0.17，会话调用 remote list / remote_bash（Ubuntu 实际输出 `FX_MCP_REMOTE_OK`）及 propose_task。提议未接受，未创建任务。 |
+| MCP 授权撤销 | 在真实 worker 打开并 ping 临时 stdio MCP broker；通过产品消息路由将测试会话 grantedRemoteIds 清空。随后 HTTP MCP 客户端使用同 token 调用 remote_bash 及已有 handle，均返回 isError / not granted，列表为空。此处是直接客户端验证拒绝，不声称模型在撤权后继续调用。 |
+
+临时 hub 的 canonical `local` tenant、会话、签名 token 和授权均为隔离测试 fixture；MCP liveness 使用真实产品会话，没有 mock `getSessionProcessAlive`。测试使用真实 Provider、网关和 worker；broker 的 stdio 服务是最小测试 fixture，不是模型替身。
+
+保留首次脚本失败：cron 查询变量遮蔽导致驱动报 ReferenceError；修正后只读核对原两次 run，不重复付费执行。MCP 第一次激活因 fixture owner 与 canonical local 不匹配被 400 拒绝，修正测试 fixture 后成功；没有修改产品鉴权。原失败及后续实测摘录见 [task7-remote-results.json](../packages/vibedeckx/src/protocol/fx/__fixtures__/task7-remote-results.json)。它是产品验收证据，不是 ACP 原始录制，也不作为运行时输入。
+
+结束后停止测试 source 会话、hub、worker、SSH 转发与 broker，确认远端临时工作区无剩余进程；轮换并删除临时连接令牌、删除本轮远端临时目录。生产 worker 未发布、升级或重启。本轮不修改产品运行时代码，沿用上节已通过的全量回归；追加证据后正式 recordings / Provider 回放 **14/14** 通过，JSON 证据及 gateway audit 一致性检查、`git diff --check` 通过。公开生产部署仍是发布动作，不能把隔离验收写成已经上线。
+
+复验：两台机器使用同一待验收 bundle 和各自兼容的 Node/native modules，以隔离 data-dir 启动 hub / worker；确认 reverse-connect online，创建绑定远端目录的项目，通过 hub 创建 fx executor / schedule，并按上表核对 WebSocket 和 schedule run 详情。失败场景只对临时 worker 隔离认证环境。MCP 使用真实产品源会话和测试授权，先实际成功调用，再撤销授权核对同 token 与已有 handle；不要操作生产授权或复制个人 OAuth 凭据。正式本机用例仍见 `fx-executor.live.test.ts` / `fx-hub.live.test.ts`；本轮临时驱动不是正式测试的运行依赖。
+
+### 任务 7 追加：macOS arm64 验收（2026-11-18）
+
+用户授权安装后，使用官方安装脚本安装 fx **0.0.17 / revision d1d4a883382d**，确认 Mach-O arm64；用户自行完成 Gateway 登录。Node **22.16.0**，所有 fx 子进程仍设置 `FX_AUTO_UPGRADE=0`，没有复制凭据或修改默认模型。
+
+复用正式 `fx.live.test.ts` 与 `fx-executor.live.test.ts` 的测试体和生产模块，在本地 esbuild 打包后传至 Mac 临时目录。Mac 使用临时串行 Node runner，以 `node:assert` 适配测试注册、断言和 waitFor；原生 SQLite / node-pty 复用已安装 worker 的模块。**这是实际产品模块测试，不声称在 Mac 执行了 Vitest 全量套件**；没有改动生产 worker 或安装额外依赖。四项首次通过，无重试：
+
+- 真实 ACP：排队的两轮记忆、thinking、工具执行、取消与后续继续；重启切换 grok-4.7 → gpt-5.4-mini，确认新会话 ID、选定模型和历史标记；每条消息校验协议契约，用户 settings 字节不变。
+- 历史 auto 非交互权限失败：真实 CLI + 本地合成模型，明确返回 `NonInteractivePermissionRequired`。
+- 产品 full-access argv：真实 CLI + 本地合成模型，即使显式 ask 规则也完成测试文件写入；只发生在隔离目录。
+- 真实 ProcessManager / Scheduler / SQLite：沿用用户默认 `zai/glm-5.3-flashx-legal`，收到 `FX_PRODUCT_OK`、exitCode 0 与 finalResult；启动 sleep 后 Stop 收到非零退出且不再运行；真实 cron 自动触发，completed / exit_code 0 / `FX_CRON_OK` 报告落库。
+
+测试 hooks 完成后，显式停止仍保留事件循环的临时 runner，确认其无子进程，并删除该测试目录。未发布、升级或重启生产 worker。Mac 未重复浏览器及 Reviewer / Loop / Commander 验收；这些入口沿用已记录的 Ubuntu 跨机器证据，Linux arm64 / macOS x86_64 不作实测声明。
+
+结果见 `task7-remote-results.json` 的 `macInspection`；真实 ACP 录制为 `task7-macos-fx-lifecycle-{1,2}.jsonl` 及相邻版本 metadata，HOME / 工作区路径已脱敏。正式 schema 自动纳入新录制，Provider 回放参数化覆盖 Linux 与 Mac，**8 文件 / 86 tests passed**；后端 `tsc --noEmit`、证据脱敏 / JSON 校验及 `git diff --check` 通过。再次运行 `classify-diff HEAD`：测试和文档为 non-runtime，新 fixtures 为保守 gray；均非运行时输入，无隧道契约变化，本次 Mac 验证不新增 worker 发布要求。临时适配 runner 不作为长期第二套测试；复验使用仓库正式 live 用例（`FX_EXECUTOR_LIVE=1`），不依赖 `.dev` 或本次临时脚本。
+
+### 2026-11-16 历史回归记录
 
 - 前后端 `tsc --noEmit`、`pnpm build:docs` 通过；生成页面的 fx 锚点与安装命令已检查。
 - 后端全量 Vitest：247 文件通过、2 文件跳过，**3602 passed / 11 skipped**。前端全量首次 **1722 passed / 1 failed**，失败为此前已记录的 Shiki `startIndex` 异常（未改动的 `symbol-tokens.test.ts`）；单文件允许一次重试后 8/8 通过，随后全量 `vitest run --retry 1` **187 文件 / 1723 项通过**，该次全量未发生重试。未修改 UI 或 Shiki 实现。
@@ -27,23 +97,10 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 - `actionlint`、workflow 内 shell 语法与 worker build.sh 语法检查通过；固定版本 Docker 安装阶段通过。
 - `node scripts/classify-diff.mjs`（默认 origin/main）与 `node scripts/classify-diff.mjs HEAD` 均为 gray / non-runtime，无 wire-contract 变更。公共版本探测继承 spawn 环境属于 worker 可达代码，需要 worker npm 发布才在已安装 worker 生效；Docker 预装需发布新镜像。隧道方法、payload、能力注册表均未修改，不新增隧道版本门槛；fixtures 只是测试数据。
 
-### 仍未满足的最终验收条件
 
-| 项目 | 当前证据 / 后续动作 |
-| --- | --- |
-| 执行器、定时任务 | 已接入 `fx ask`；本机真实运行、输出、停止及 cron 报告落库通过。远端 worker 实机验收待提供目标；详见任务 8 验证记录。 |
-| Reviewer、Loop、Commander 派生 | 类型及选择器共用路径已有 fx，但完整产品验收属于任务 9；不能写成所有入口已通过。 |
-| 模型/登录失败诊断、附件、切换 agent、分支、指令、文件清理 | 任务 10/11 尚未完成最终验收；保留各行真实状态。 |
-| 限制处理结论 | 任务 12 已完成（2026-11-18），见“任务 12：限制处理结论”；第 2、3 项“明确不支持”已经用户确认；B 部分按用户决定不做。 |
-| 真实远端 worker | 本轮可访问列表为空，已请求授权；未部署线上 hub，未运行远端六入口验收。 |
-| macOS / arm64 | 官方支持的平台不等于本轮实测；本轮证据仅 Linux x86_64。 |
-| CI | 配置已接入且 actionlint 通过；只读检查确认仓库尚无 `AI_GATEWAY_API_KEY` secret，GitHub Actions 未实跑。 |
+## 历史权限决策（2026-11-16；Plan 已由 11-18 决策替代）
 
-当前需在最终收尾明确列出的差异：Plan 仅靠提示词约束、无技术只读保证（2026-11-18 决定，替代原禁用）；ACP 阻塞式提问不支持、以普通后续消息替代；无后台任务条和单任务 Stop；停止回合不保证结束已 yield 的 shell；历史重放非无损；编辑卡片只有局部 old/new 而非原生完整 diff。这些记录不是用户对所有缺口的最终验收确认。版本与 Windows 提示按本轮用户要求不再是待实现项。
-
-## 当前权限决策更新（2026-11-16）
-
-用户明确要求与现有 Claude Code / Codex 一样不等待人工工具审批，**edit 改为 full-access**，替代原任务的 auto 决策。启动使用进程级 `fx acp --permission-mode full-access`，握手必须确认 `currentModeId=full-access` 后才发送消息；auto、ask 或未知模式均明确报错。此模式关闭 fx 权限检查及自动模型审查，操作系统权限和 hub 远端授权仍生效。plan 继续禁用，不调用会持久化配置的 `session/set_mode`。
+用户明确要求与现有 Claude Code / Codex 一样不等待人工工具审批，**edit 改为 full-access**，替代原任务的 auto 决策。启动使用进程级 `fx acp --permission-mode full-access`，握手必须确认 `currentModeId=full-access` 后才发送消息；auto、ask 或未知模式均明确报错。此模式关闭 fx 权限检查及自动模型审查，操作系统权限和 hub 远端授权仍生效。当时 plan 禁用，11-18 已改为提示词约束支持；仍不调用会持久化配置的 `session/set_mode`。
 
 按用户要求删除 fx 专用审批 UI、审批状态和人工回传接线；正常 full-access 会话没有已知会触发审批的场景。协议解析仅保留直接回复 `outcome: cancelled` 并显示错误的分支，不创建卡片、不等待用户、不默认批准。下文任务 4/5 及原探针中的 auto 记录是历史验证结果，不代表当前 edit 映射。
 
@@ -58,10 +115,10 @@ A 部分六项汇总。第 2、3 项“明确不支持”已于 2026-11-18 经�
 | 项 | 状态 | 当前限制 | 本次处理 / 用户看到什么 | 证据 |
 | --- | --- | --- | --- | --- |
 | 1. Plan | **已支持，弱于基线** | fx 只有 ask / auto / full-access，plan 返回 Unknown mode；无沙箱，无技术只读手段 | UI 与其他 agent 相同可切 Plan；plan 期间每条 prompt 前加只读约束（不入库），进程仍 full-access；切回 edit 靠 UI 切换（同 Codex），无 ExitPlanMode。fx 可作 Reviewer。公开文档注明“仅提示词约束” | 0.0.16 探针（Unknown mode）；0.0.17 真实 live：plan 中拒绝写文件/改 README/`git add`，切 edit 后正常写入。单次样本。见“Plan 决策更新” |
-| 2. Windows worker | **明确不支持**（上游无发布） | fx 官方只发布 macOS / Linux（x86_64、arm64） | 按用户决定只写文档；不做平台检测或 UI 禁用，命令缺失走现有“未安装”启动错误。macOS / arm64 **未验证**（仅 Linux x86_64 实测） | 官方发布范围；本机 Linux x86_64 |
+| 2. Windows worker | **明确不支持**（上游无发布） | fx 官方只发布 macOS / Linux（x86_64、arm64） | 按用户决定只写文档；不做平台检测或 UI 禁用，命令缺失走现有“未安装”启动错误。macOS / arm64 已补 Provider / 执行器 / cron 实测（见任务 7）；不扩大为全部架构已验证 | 官方发布范围；本机 Linux x86_64 |
 | 3. 停止单个后台任务 | **明确不支持**（与 Codex 一致） | `shell action=stop` 工具可停 shell，但 ACP 无可配对的后台任务 ID / 生命周期事件；取消回合不保证结束已 yield 的 shell | 不显示后台任务条和单任务 Stop（现有逻辑按 provider 是否实现 `formatStopBackgroundTask`）；只能停整个回合 / 会话 | 0.0.17 任务 5 录制 |
 | 4. 费用 / 用量 | **已对齐基线** | ACP 无成本字段；有 input/output/cacheRead/reasoning(/cacheWrite) token 与上下文占用 | 完成提示显示 token 数，同 Codex；无成本不显示 $0；其余字段不展示（现有 agent 无对应 UI，超出基线）。这只是提示信息，不是计费 | 0.0.16 探针 + 0.0.17 Provider |
-| 5. 稳定性 / 版本 | **已处理**（按用户决定与 Claude/Codex 对齐） | fx 0.0.x、默认自动升级 | 所有 fx 进程设 `FX_AUTO_UPGRADE=0`；只记录实际版本，不设白名单、不提示“未验证版本”。新版验证：protocol-compat workflow 的 fx pinned/latest live 契约测试（手动触发）。**缺口**：仓库无 `AI_GATEWAY_API_KEY` secret，CI 未实跑 | 任务 7 |
+| 5. 稳定性 / 版本 | **已处理**（按用户决定与 Claude/Codex 对齐） | fx 0.0.x、默认自动升级 | 所有 fx 进程设 `FX_AUTO_UPGRADE=0`；只记录实际版本，不设白名单、不提示“未验证版本”。新版验证：protocol-compat workflow 的 fx pinned/latest live 契约测试（手动触发）。本机实测通过，GitHub CI 未实跑；用户已确认本轮无需配置该 secret 或实跑 CI，不作为缺口 | 任务 7 |
 | 6. 执行隔离与自动审查 | **已核实** | fx 无沙箱：0.0.17 设置 schema 中 `sandbox` 为 “No longer used; fx ignores it”；full-access 关闭 fx 权限规则与 auto 模型审查 | 会话与执行器 / 定时任务均 full-access，与 Codex edit 的 `danger-full-access` 同级；agent 以运行 Vibedeckx 的用户权限执行，hub 远端授权仍生效。公开文档（quickstart、connect-a-machine）已说明 | 0.0.17 `fx config schema`；执行器 live 用例 |
 
 B 部分（替代方案研究：真正只读的 Plan、Windows 可行性、上游停止后台任务计划）按用户决定（2026-11-18）不做；有实际需求时再另行评估。
@@ -279,7 +336,7 @@ load 和 resume 请求都使用 `{sessionId,cwd,mcpServers}`。主实验进程�
 
 ## 功能对齐矩阵
 
-Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端到端验收；“共用路径”也不等于每种组合都测过。fx 的待实现项不表示协议实验已通过。
+Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端到端验收；“共用路径”也不等于每种组合都测过。协议实验、产品验收和上游平台支持分别列明，不互相替代。
 
 | 功能 | Claude Code 基线 | Codex 基线 | fx 状态（0.0.16 探针 / 0.0.17 产品） / 后续责任 |
 | --- | --- | --- | --- |
@@ -295,20 +352,20 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | 图片与文件附件 | 内容转换及工具读取路径 | image prompt / imageView 映射 | 已验证：页面上传普通文件、内联 PNG、超过 5 MiB PNG 的文件路径降级；见任务 11 |
 | 模型选择 | spawn --model | app-server -c model | 已实现；任务 10 验证默认配置、静态建议与手输、回合间新进程换模型；busy 拒绝、切 agent 清空模型有回归 |
 | 费用与用量 | result 成本字段 | tokenUsage 缓存到 result；不等同成本支持 | **已对齐基线**：完成提示显示 input+output token 数（同 Codex），无成本时不显示 $0；cache/reasoning/上下文占用不展示（超出基线）。Claude 实际也不显示成本（读 `cost_usd`，CLI 输出 `total_cost_usd`，Claude 侧既有缺陷）。见任务 12 |
-| hub vibedeckx HTTP MCP | --mcp-config HTTP bearer | -c mcp_servers / token env | 已接入；本地真实 hub + fx 调用通过，线上需部署协议协商修复 |
-| cross-remote HTTP MCP | 同上 | 同上 | 已接入；本地真实 hub 调用通过；线上握手修复待部署、授权远端与撤销完整验收未完成 |
+| hub vibedeckx HTTP MCP | --mcp-config HTTP bearer | -c mcp_servers / token env | 已验证；本地及隔离跨机器真实 hub + fx 调用通过，见任务 7；生产上线仍需部署协议协商修复 |
+| cross-remote HTTP MCP | 同上 | 同上 | 已验证；真实 fx 调用 Ubuntu 远端命令；撤销测试会话授权后，同 token 的下一次远端调用及已有 MCP handle 均被拒绝，见任务 7；未部署生产 |
 | 休眠唤醒 | 管理器历史重放 | 共用管理器历史重放 | 已实现；管理器子进程 + SQLite 休眠唤醒回归通过；首版不用 load/resume |
 | 切换 agent | 共用管理器迁移历史 | 共用管理器迁移历史 | 已验证：Claude/Codex ↔ fx 四向真实切换、历史继续使用、模型清空；见任务 11 |
 | 分支 / 截断分支 | 共用分支历史复制 | 共用分支历史复制 | 已验证：Codex ↔ fx、fx → fx 截断分支、独立原生 id，页面双向回传；见任务 11 |
-| 执行器 | prompt executor Claude CLI | codex exec CLI | `fx ask --permission-mode full-access --json`（2026-11-18 按用户决定与会话一致，原为 auto）；stdout 最终 Markdown、stderr 进度，退出码判定，进程树停止；本机实测通过，远端实机待验收 |
-| 定时任务 | scheduler 调用执行器 | scheduler 传递 prompt_provider | 同一 ProcessManager 路径，cron 触发、output/report/exit_code 落库；本机实测通过，远端实机待验收 |
+| 执行器 | prompt executor Claude CLI | codex exec CLI | `fx ask --permission-mode full-access --json`（2026-11-18 按用户决定与会话一致，原为 auto）；stdout 最终 Markdown、stderr 进度，退出码判定，进程树停止；本机及 worker3 hub → ubuntu worker 跨机器实测通过，见任务 7 追加记录 |
+| 定时任务 | scheduler 调用执行器 | scheduler 传递 prompt_provider | 同一 ProcessManager 路径，cron 触发、output/report/exit_code 落库；本机及 worker3 hub → ubuntu worker 跨机器实测通过，见任务 7 追加记录 |
 | 执行器 ACP 流式工具调用展示 | stream-json | 最终结果基线 | 超出基线（不做）；不创建另一套 ACP 生命周期 |
 | Reviewer | 现有产品入口，具体 agent 组合未复核 | 同左 | 本机 Claude ↔ fx 两个方向均已有两阶段启动、讨论、修复 / 复审及自动修复通过记录（2026-11-18）；fx Plan 为提示词约束，无技术只读保证；模型漏写结论等失败记录见任务 9。siggst hub → ubuntu worker 的双向真实 Review 及浏览器 fx reviewer 验收通过，详见任务 9 追加记录 |
 | Loop | workflow-repeat-loop 传 agentType | 同左 | 本机 fx 0.0.17 产品路径已验证：多项、新会话、done 与校验失败即停；ubuntu 隔离 hub/worker 及 siggst hub → ubuntu worker 跨机器路径通过；浏览器创建 / Done / 失败门已核对，见任务 9 |
 | Commander 派生 | 现有会话/MCP/执行器路径 | 现有共用路径，组合未复核 | 本机真实 Main Chat → fx spawn、续发、两次结果回传、单一 turn 收尾通过；ubuntu 隔离 hub/worker 及 siggst hub → ubuntu worker 跨机器路径通过；页面派生 / 审批续发 / 回传 / 单一 turn 收尾通过，见任务 9 |
 | Windows | binary 检测有 win32 分支；本轮未实跑 | 同左 | fx 官方无 Windows 原生版本；按用户决定仅文档说明，沿用命令缺失错误，不做平台专用检测或 UI 禁用 |
-| macOS | 现有非 win32 检测路径；本轮未实跑 | 同左 | 未验证；对应平台接入任务 |
-| Linux | 现有 Provider；本轮未重跑 | 同左 | 已验证；Linux 基础会话产品验收见任务 4；MCP 为原探针证据，业务接入仍待后续任务 |
+| macOS / arm64 | 现有非 win32 检测路径；本轮未实跑 | 同左 | fx 0.0.17 实机 Provider 生命周期、执行器 / 停止和 cron 报告通过；Reviewer / Loop / Commander 与浏览器未在 Mac 重跑，见任务 7 平台范围 |
+| Linux | 现有 Provider；本轮未重跑 | 同左 | 已验证 Linux x86_64；会话、执行器、模型及附件见任务 4/8/10/11，跨机器工作流见任务 9；HTTP MCP 授权边界单列 |
 | 未登录错误 | 有启动错误路径 | 有启动错误路径 | 任务 10 已实现握手阶段认证分类、登录命令及原始错误；真实隔离 HOME 验证失败收尾，见下节 |
 | 未安装 / 模型错误 | 安装提示 / 原始错误 | 安装提示 / 原始错误 | 未安装提示已有管理器回归；无效模型原始 HTTP 错误保持可见，失败结束等待 |
 | 动态发现可用模型 | 无 | 无 | 超出基线（不做） |
@@ -322,13 +379,13 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 
 - 长驻 shell、subagent 生命周期：**已补测 → 任务 5**，具体覆盖与差异见上节；取消 shell 回合不保证结束已 yield 的进程。
 - ask_user_question：**已补测 → 任务 5**，0.0.17 ACP 不等待答案，复用问题卡片发送普通后续消息。
-- 内联图片 prompt：**未验证 → 任务 11**。
+- 内联图片 prompt：**已验证，任务 11**；页面内联 PNG 与超过 5 MiB 的文件路径降级均有证据。
 - usage_update.used/size 及 prompt response.usage token 字段：**已验证**；未出现成本字段；任务 12 判定已对齐 Codex 基线，不再补测跨模型成本。
 - 未登录错误：**任务 10 已补认证分类与真实管理器验证**。错误发生在 initialize，不是仅退出进程。
-- 额度用尽：**未验证 → 任务 10**；未耗尽额度取样。版本按用户决定只记录供排查，不再要求版本范围提示。
+- 额度用尽细分诊断：**超出基线（不做）**，保留原始错误；未耗尽真实额度取样，不称其为实测。版本只记录供排查。
 - stdio MCP：不属于本任务要求，未验证；此范围豁免不表示三方都没有该能力。
 
-## 建议：继续做产品接入，首版按上述边界收敛
+## 历史探针建议（产品接入已完成，当前验收见顶部）
 
 五个阻塞项都有真实录制，两个决策已定：禁用 plan，恢复只实现新会话加历史重放。无需因协议可行性放弃；优先补齐 Provider 状态机、MCP 命名规范化与审批类型缺口，再推进产品入口。
 
@@ -348,20 +405,20 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 ## 任务 8：一次性执行器与定时任务
 
 - 协议构造和最终 JSON 解析位于 `protocol/fx/cli.ts`。使用 argv 直传（无 shell/PTY），`FX_AUTO_UPGRADE=0`，关闭 stdin；stderr 实时显示进度，stdout 在完成后解析 `output` 和 `final_output`。原生退出码和 JSON `exit_code` 任一非零都视为失败；非法 JSON 不能算成功。停止复用进程树终止，信号退出不能算成功或继续列为运行中。
-- 产品权限策略：固定 `auto`，保留权限规则和自动审核，绝不因失败改为 full-access；表单说明无人值守审批会失败。此策略独立于交互式 ACP 会话的 full-access 策略。
+- 当前产品权限策略：2026-11-18 按用户决定固定 `full-access`，与会话一致，不改用户全局设置。下列 auto 录制是历史实验；真实 full-access + 显式 ask 规则及真实模型复验见“执行器权限决策更新”。
 - 本机 fx **0.0.17**（不是原始任务中的 0.0.16）实测 `ask --help` 支持上述 flag。真实 `auto --json` 文本请求退出 0；`ask --json` 的 shell 审批请求在 1.84 秒退出 1，JSON error 为 `NonInteractivePermissionRequired`，stderr 含 `noninteractive_permission_prompt_unavailable`。非法 `--config permission.bash.*=ask` 退出 2 / `InvalidAskArgs`，因此没有用它声称验证 auto 的显式 ask 规则。未修改用户设置或复制凭据。
 - 真实 CLI 记录：`protocol/fx/__fixtures__/task8-ask.json`。产品测试：`FX_EXECUTOR_LIVE=1 PATH=/usr/bin:$PATH pnpm --filter vibedeckx test:compat src/protocol/live/fx-executor.live.test.ts --retry 0`，覆盖输出/最终结果、停止、真正 cron 定时触发及 SQLite 详细结果里的 report。第一次探针误从不含 report 的列表接口读取报告，改为 getById 后通过；不将该首次失败称为产品失败。
 - 远端仍走 worker 的同一 `POST /api/path/execute` 与 ProcessManager；worker 现在原样接受 `prompt_provider: "fx"`（未知值 400）。不做旧 worker 兼容：旧 worker 会把 fx 强转为 Claude，所以必须在使用前统一升级所有 worker。日志、停止、finished/finalResult 帧不变。
 - `/compat-check` 注册表对账通过；origin/main 与 v0.3.58 两个 classify-diff 均为 wire-contract + gray（也包含分支已有的改动）；当前 server 对已发布 worker **0.3.58**：49 smokes passed，0 missing，0 failed。未新增 tunnel 入口，注册表快照不变。**需要发布 npm 并升级 worker** 才能在远端使用此功能。
 - 使用隔离 FX_HOME、无认证的本地合成模型服务，再以真实 fx 0.0.17 执行 auto + `permission.bash["*"] = "ask"`：0.04 秒退出 1，`NonInteractivePermissionRequired`，stderr 明确 `permission required by configured rule`。记录为 `task8-auto-explicit-ask.json`，live 测试可复现。这验证真实 ask 的权限执行，不是 ACP 推论，也不是外部模型验收；原用户设置/凭据未改动。
 - 检查结果：前后端 `tsc --noEmit` 通过；后端全量 248 个文件 / 3619 tests 通过（11 skipped），后续受影响用例复跑通过；前端全量 `--maxWorkers=2` 187 个文件 / 1729 tests 通过。首轮高负载下 Shiki symbol-tokens 出错，独立复跑和降低并发后的完整套件均通过，未修改该模块。真实 fx live 两项通过；`git diff --check` 通过。
-- 尚未完成：外部远端 worker 的真实模型/停止/定时验收（待指定连接目标）。不能把本地合成模型、旧 worker 兼容检查或本机 cron 测试当作该验收的替代。
+- 此处原保留的外部远端真实模型 / 停止 / 定时验收已由 2026-11-18 任务 7 的 worker3 hub → ubuntu worker 实测补齐，见下列追加记录；不是以本机或合成模型结果替代。
 
 协议参考：[fx ask 官方说明](https://fx.sh/docs/using-fx/fx-ask)。
 
 ## 任务 9：Reviewer、Loop、Commander 派生（2026-11-17）
 
-**本任务尚未完成验收。** 本机 Linux x86_64、fx 0.0.17；以下是实际运行的产品服务集成测试，不代表浏览器交互或外部远端 worker 已验收。所有测试使用隔离临时仓库和 SQLite、真实 `createServer` 与原始登录凭据，不修改线上配置。
+**以下为 2026-11-17 阶段记录；剩余验收已在 11-18 跨机器及浏览器追加记录中补齐。** 本机 Linux x86_64、fx 0.0.17；以下是实际运行的产品服务集成测试，不代表浏览器交互或外部远端 worker 已验收。所有测试使用隔离临时仓库和 SQLite、真实 `createServer` 与原始登录凭据，不修改线上配置。
 
 - Loop：真实 fx 连续处理 alpha / beta，两项使用不同会话，第二项 `Status: done` 后不创建第三项；另一次运行的校验命令退出 7 后停在 `waiting_resume`，不派发下一项。离线回归另覆盖失败回合即使含 `Status: done` 也不能成功、fx/model 逐轮保留。
 - Commander：真实 Main Chat 模型（DeepSeek）派生 fx，收到第一轮完成事件，再发送固定第二条消息，收到第二轮完成事件；断言 fx 两个 `turn_end`、Commander 一个 `turn_end` 且 turn 清空。事件唤醒后的 send 沿用 Main Chat 审批卡，测试只通过正常审批入口批准固定的无工具消息；没有关闭审批或伪造完成事件。首次测试遗漏这一步，停在审批卡而超时，补齐用户动作后通过。

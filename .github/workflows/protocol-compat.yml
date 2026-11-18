@@ -7,6 +7,15 @@ on:
         description: "Run the live matrix even if no new version detected"
         type: boolean
         default: true
+      agent:
+        description: "Agent to verify (requires credentials only for the selected agent)"
+        type: choice
+        default: all
+        options:
+          - all
+          - claude-code
+          - codex
+          - fx
   # Enable after the matrix has run clean a few times via workflow_dispatch AND a lastSeen-bump step closes the loop — otherwise every upstream release makes the daily cron run the paid matrix forever (agent-versions.json lastSeen is never auto-updated).
   # schedule:
   #   - cron: "17 3 * * *" # daily; version-check only — matrix runs when a new version appears
@@ -22,8 +31,25 @@ jobs:
       claude_latest: ${{ steps.check.outputs.claude_latest }}
       codex_latest: ${{ steps.check.outputs.codex_latest }}
       fx_latest: ${{ steps.check.outputs.fx_latest }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
+      - id: matrix
+        env:
+          AGENT_FILTER: ${{ inputs.agent || 'all' }}
+        run: |
+          node --input-type=module <<'JS'
+          import { appendFileSync } from 'node:fs';
+          const agents = [
+            { agent: 'claude-code', package: '@anthropic-ai/claude-code', file: 'claude.live.test.ts' },
+            { agent: 'codex', package: '@openai/codex', file: 'codex.live.test.ts' },
+            { agent: 'fx', file: 'fx.live.test.ts' },
+          ];
+          const selected = agents.filter(a => process.env.AGENT_FILTER === 'all' || a.agent === process.env.AGENT_FILTER);
+          if (!selected.length) throw new Error('Unknown agent filter');
+          const include = selected.flatMap(a => ['pinned', 'latest'].map(channel => ({ ...a, channel })));
+          appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify({ include })}\n`);
+          JS
       - id: check
         run: |
           CLAUDE_LATEST=$(npm view @anthropic-ai/claude-code version)
@@ -48,30 +74,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - agent: claude-code
-            package: "@anthropic-ai/claude-code"
-            file: claude.live.test.ts
-            channel: pinned
-          - agent: claude-code
-            package: "@anthropic-ai/claude-code"
-            file: claude.live.test.ts
-            channel: latest
-          - agent: codex
-            package: "@openai/codex"
-            file: codex.live.test.ts
-            channel: pinned
-          - agent: codex
-            package: "@openai/codex"
-            file: codex.live.test.ts
-            channel: latest
-          - agent: fx
-            file: fx.live.test.ts
-            channel: pinned
-          - agent: fx
-            file: fx.live.test.ts
-            channel: latest
+      matrix: ${{ fromJSON(needs.version-check.outputs.matrix) }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

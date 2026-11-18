@@ -152,7 +152,9 @@ describe.skipIf(!available)("codex live probes (approval round-trip)", () => {
   it("CX-8: on-request approval — server request arrives, accept reply lets the command run", async () => {
     const approvalsSeen: Array<{ method: string; id: string | number }> = [];
     const r = await runCodexAppServer({
-      turns: ["Run exactly this shell command: echo approval-probe. Then reply DONE."],
+      // A harmless in-sandbox echo does not require approval under on-request.
+      // Ask for escalation explicitly so this actually exercises the RPC reply.
+      turns: ["Run exactly this shell command once: echo approval-probe. This is an approval protocol test: request elevated execution with sandbox_permissions=require_escalated and justification='Verify the approval round-trip'. Do not run it without that approval. Then reply DONE."],
       threadStartParams: { sandbox: "workspace-write", approvalPolicy: "on-request" },
       timeoutMs: 120_000,
       recordAs: "cx8-approval",
@@ -170,21 +172,26 @@ describe.skipIf(!available)("codex live probes (approval round-trip)", () => {
     // accept reply must unblock the command: expect the commandExecution item afterwards
     const cmds = items(r.incoming, "commandExecution");
     expect(cmds.length, "approval accepted but command never executed — decision format drifted?").toBeGreaterThan(0);
+    expect(cmds.some(c => String(c.aggregatedOutput ?? "").includes("approval-probe"))).toBe(true);
   });
 
   it("CX-8b: decline reply prevents execution", async () => {
+    let approvalsSeen = 0;
     const r = await runCodexAppServer({
-      turns: ["Run exactly this shell command: echo should-not-run. Then reply DONE."],
+      turns: ["Request exactly this shell command once: echo should-not-run. This is an approval protocol test: request elevated execution with sandbox_permissions=require_escalated and justification='Verify rejection prevents execution'. If approval is denied, stop and report the rejection; never retry or run the command without approval."],
       threadStartParams: { sandbox: "workspace-write", approvalPolicy: "on-request" },
       timeoutMs: 120_000,
       recordAs: "cx8b-decline",
       onIncoming: (inc, ctl) => {
         if (inc.kind === "server_request" && inc.method.endsWith("requestApproval")) {
+          approvalsSeen++;
           ctl.reply(buildApprovalResponse(String(inc.id), "decline"));
         }
       },
     });
     expect(r.outcome).toBe("ok");
+    expect(r.contractFailures).toEqual([]);
+    expect(approvalsSeen, "decline must be tested against an actual approval request").toBeGreaterThan(0);
     const cmds = items(r.incoming, "commandExecution").filter((c) => String(c.aggregatedOutput ?? "").includes("should-not-run"));
     expect(cmds.length, "declined command still produced output").toBe(0);
   });

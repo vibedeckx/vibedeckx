@@ -19,22 +19,24 @@ Install using the [official installer](https://fx.sh/docs/getting-started/instal
 
 ```bash
 curl -fsSL https://fx.sh/setup.sh | bash
-fx login
+fx login vercel
 ```
 
-The installer uses `~/.local/bin`. `fx login` signs in to Vercel AI Gateway; fx also offers `fx login codex`, `fx login grok` and `fx login vercel --api-key`. Use `fx doctor` if the CLI cannot authenticate. Keep the original login and profile available to the worker user: Linux Gateway OAuth uses `~/.fx/auth.json`, while other login methods may use different files or the macOS Keychain. `~/.fx/api-key` is not the only credential location. In a container, keep the home volume so the `.fx` profile survives recreation.
+The installer uses `~/.local/bin`. `fx login` signs in to Vercel AI Gateway; fx also offers `fx login codex`, `fx login grok` and `fx login vercel --api-key`. Use `fx status --json` and `fx doctor --json` to inspect the selected provider and diagnose authentication failures. Vibedeckx does not open an interactive login window: after signing in on the worker machine, resend your message. Keep the original login and profile available to the worker user: Linux Gateway OAuth uses `~/.fx/auth.json`, while other login methods may use different files or the macOS Keychain. `~/.fx/api-key` is not the only credential location. In a container, keep the home volume so the `.fx` profile survives recreation.
 
 Vibedeckx records the CLI version for troubleshooting and disables fx's background auto-upgrade for the processes it starts. You can upgrade fx yourself; versions are not restricted to a tested list.
 
+Leaving the model at **Default** uses fx's own configuration. Suggested models and custom model names still require access through your selected provider; suggestions do not guarantee account access.
+
 The current fx session integration differs from Claude Code and Codex:
 
-- **Permissions:** sessions use fx's `full-access` mode, without interactive tool approval. fx has no read-only mode or sandbox of its own, so **Plan mode is enforced by instructions only**: while a session is in Plan mode, Vibedeckx tells fx not to change files or run commands with side effects (formatters, installs, git writes), and real runs follow it, but nothing blocks a write technically. This also applies when fx is the reviewer in a review. Switch to Edit as usual when changes should be made.
+- **Permissions:** sessions use fx's `full-access` mode, without interactive tool approval. fx has no read-only mode or sandbox of its own, so **Plan mode is enforced by instructions only**: while a session is in Plan mode, Vibedeckx tells fx not to change files or run commands with side effects (formatters, installs, git writes), but nothing blocks a write technically. This also applies when fx is the reviewer in a review. Switch to Edit as usual when changes should be made.
 - **Conversation recovery:** waking or restarting a session replays saved conversation context into a new fx session. This is not a lossless restore of an fx-native session.
 - **Tools:** common file, shell and search tools use the existing cards; unfamiliar tools show their arguments and results. File edits show the supplied old/new text, not an fx-provided full-file diff.
 - **Questions:** question cards send a normal follow-up message. fx's ACP interface does not wait for a blocking question response.
 - **Background commands:** there is no fx background-task bar or individual task Stop button. Stopping a turn does not guarantee that an already-running shell command has exited.
 
-These notes describe session behavior. They do not imply support for every executor or workflow entry point; the [Loops page](/loops) lists its available agents.
+See [Loops](/loops) for repeated sessions and [prompt executors and schedules](/quickstart#fx-prompt-executors-and-schedules) for one-shot tasks and their worker upgrade requirement.
 
 ## Install as a service
 

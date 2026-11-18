@@ -1,0 +1,326 @@
+{
+  "date": "2026-11-18",
+  "scope": "Real cross-machine product acceptance; not ACP wire replay data.",
+  "initialExecutorAndCronDriver": {
+    "hub": "worker3/Linux x86_64",
+    "worker": "ubuntu/Linux x86_64",
+    "fx": "0.0.17",
+    "bundleSha256": "6beb7fd7d22a46f5a412b0fb3aaff53a7b13474b743ddf1b5fe1f6eb0adcc726",
+    "checks": [
+      {
+        "name": "remote executor output",
+        "passed": true,
+        "evidence": {
+          "executorId": "d4b5ffcb-821f-497a-9698-ea59575e1606",
+          "processId": "remote-d4b5ffcb-821f-497a-9698-ea59575e1606-5bdb0d4d-2686-41c1-b74b-060fe52d7103",
+          "finished": {
+            "type": "finished",
+            "exitCode": 0,
+            "finalResult": "FX_REMOTE_EXEC_OK"
+          },
+          "output": [
+            {
+              "type": "stderr",
+              "data": "Full access enabled: fx permission checks disabled\n"
+            },
+            {
+              "type": "stdout",
+              "data": "FX_REMOTE_EXEC_OK"
+            }
+          ]
+        }
+      },
+      {
+        "name": "remote executor stop",
+        "passed": true,
+        "evidence": {
+          "executorId": "506fc0ea-c46a-42d9-89b2-d47546abfbcd",
+          "processId": "remote-506fc0ea-c46a-42d9-89b2-d47546abfbcd-b840f7f4-1664-4ecb-93f0-6c875b84bc37",
+          "finished": {
+            "type": "finished",
+            "exitCode": 1
+          },
+          "output": [
+            {
+              "type": "stderr",
+              "data": "Running sleep 30\n"
+            }
+          ]
+        }
+      },
+      {
+        "name": "remote cron report",
+        "passed": false,
+        "error": "ReferenceError: Cannot access 'run' before initialization"
+      },
+      {
+        "name": "remote cron timeout",
+        "passed": false,
+        "error": "ReferenceError: Cannot access 'run' before initialization"
+      }
+    ],
+    "projectId": "f40a48de-3b56-47b8-9b27-423bcdb28097"
+  },
+  "cronReadOnlyAuditOfSameRuns": [
+    {
+      "schedule": "cron success",
+      "passed": true,
+      "run": {
+        "id": "be43fc76-75a1-4989-970b-f4ae2d056329",
+        "schedule_id": "74320380-5710-406c-a08b-2619f76400fc",
+        "project_id": "f40a48de-3b56-47b8-9b27-423bcdb28097",
+        "status": "completed",
+        "exit_code": 0,
+        "output": "FX_REMOTE_CRON_OK",
+        "report": "FX_REMOTE_CRON_OK",
+        "process_id": "remote-schedule-74320380-5710-406c-a08b-2619f76400fc-schedule-run-be43fc76-75a1-4989-970b-f4ae2d056329",
+        "started_at": "2026-11-18 14:25:50",
+        "finished_at": "2026-11-18 14:25:58"
+      }
+    },
+    {
+      "schedule": "cron timeout",
+      "passed": true,
+      "run": {
+        "id": "d183cb2f-28b6-41c1-b1eb-0e65e7d313c8",
+        "schedule_id": "7804963b-ed57-4d00-a588-d88f4bd14ca7",
+        "project_id": "f40a48de-3b56-47b8-9b27-423bcdb28097",
+        "status": "timeout",
+        "exit_code": null,
+        "output": "",
+        "report": null,
+        "process_id": "remote-schedule-7804963b-ed57-4d00-a588-d88f4bd14ca7-schedule-run-d183cb2f-28b6-41c1-b1eb-0e65e7d313c8",
+        "started_at": "2026-11-18 14:26:00",
+        "finished_at": "2026-11-18 14:26:03"
+      }
+    }
+  ],
+  "executorCredentialFreeFailure": {
+    "hub": "worker3/Linux x86_64",
+    "worker": "ubuntu/Linux x86_64",
+    "fx": "0.0.17",
+    "bundleSha256": "6beb7fd7d22a46f5a412b0fb3aaff53a7b13474b743ddf1b5fe1f6eb0adcc726",
+    "checks": [
+      {
+        "name": "remote executor authentication failure",
+        "passed": true,
+        "evidence": {
+          "executorId": "e4e890a2-ad85-426d-a43d-89afed21cfa1",
+          "processId": "remote-e4e890a2-ad85-426d-a43d-89afed21cfa1-75427a6a-a625-4c21-98b1-5b8c357da7eb",
+          "finished": {
+            "type": "finished",
+            "exitCode": 1
+          },
+          "output": [
+            {
+              "type": "stderr",
+              "data": "Full access enabled: fx permission checks disabled\n"
+            },
+            {
+              "type": "stderr",
+              "data": "fx ask: fx needs access to Vercel AI Gateway. Run fx login to sign in, fx login vercel --api-key to use an API key, or set AI_GATEWAY_API_KEY.\n"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "mcp": {
+    "passed": true,
+    "sourceSessionId": "d3cab911-f80d-409f-b53b-8b15459e5b6e",
+    "remoteId": "117caebf-3d0d-44c7-a406-29130597ba46",
+    "tools": [
+      "remote_bash",
+      "propose_task"
+    ],
+    "brokerOpenedAndPinged": true,
+    "revokedBash": {
+      "jsonrpc": "2.0",
+      "id": "bb0b2b1a-eea6-41fb-9e90-353d8f2f7ccb",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "remote not granted to this session; ask the user to allow it from the composer's + menu (Remote access)"
+          }
+        ],
+        "isError": true
+      }
+    },
+    "revokedHandle": {
+      "jsonrpc": "2.0",
+      "id": "56e081d4-4494-4cb9-9673-9cef9c3262ab",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "remote not granted to this session; ask the user to allow it from the composer's + menu (Remote access)"
+          }
+        ],
+        "isError": true
+      }
+    },
+    "listAfterRevocation": {
+      "jsonrpc": "2.0",
+      "id": "f066fd79-9442-4fe1-99f8-03192a8d1f44",
+      "result": {
+        "content": [
+          {
+            "type": "text",
+            "text": "[]"
+          }
+        ]
+      }
+    }
+  },
+  "mcpProductToolEvents": [
+    {
+      "type": "tool_use",
+      "tool": "mcp__cross-remote__list_accessible_remotes",
+      "input": {}
+    },
+    {
+      "type": "tool_result",
+      "tool": "mcp__cross-remote__list_accessible_remotes",
+      "output": "{\"server\":\"cross-remote\",\"tool\":\"mcp_cross-remote_list_accessible_remotes\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"[\\n  {\\n    \\\"id\\\": \\\"117caebf-3d0d-44c7-a406-29130597ba46\\\",\\n    \\\"name\\\": \\\"fx"
+    },
+    {
+      "type": "tool_use",
+      "tool": "mcp__cross-remote__remote_bash",
+      "input": {
+        "remoteId": "117caebf-3d0d-44c7-a406-29130597ba46",
+        "command": "printf FX_MCP_REMOTE_OK"
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "mcp__cross-remote__remote_bash",
+      "output": "{\"server\":\"cross-remote\",\"tool\":\"mcp_cross-remote_remote_bash\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\n  \\\"stdout\\\": \\\"FX_MCP_REMOTE_OK\\\",\\n  \\\"stderr\\\": \\\"\\\",\\n  \\\"exitCode\\\": 0,\\n  \\\"timedOut"
+    },
+    {
+      "type": "tool_use",
+      "tool": "mcp__vibedeckx__propose_task",
+      "input": {
+        "tasks": [
+          {
+            "title": "FX7 acceptance proposal — do not accept",
+            "description": "Disposable integration test proposal only."
+          }
+        ]
+      }
+    },
+    {
+      "type": "tool_result",
+      "tool": "mcp__vibedeckx__propose_task",
+      "output": "{\"server\":\"vibedeckx\",\"tool\":\"mcp_vibedeckx_propose_task\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Proposal shown to the user as a confirmation card. Nothing has been created yet — the user decid"
+    }
+  ],
+  "fixtureNotes": [
+    "Initial cron result polling shadowed its run variable; original failures are retained. The original cron runs were audited via their detail API, without repeating paid executions.",
+    "MCP source is a real local fx product session; actual gateway calls traverse the real reverse-connect worker. The signing key, grants and local tenant belong only to the disposable hub fixture.",
+    "Initial MCP activation was rejected because fixture ownership did not match the canonical local tenant; corrected before the successful model turn. No product code was changed.",
+    "After revocation, direct HTTP MCP calls using the same token verify rejection of remote_bash and an already-open broker handle. They are not a second model attempting an unauthorized action.",
+    "The broker stdio server is a minimal fixture on the real worker; no synthetic model was used for executor success, cron success or the fx MCP turn.",
+    "Product tool-result output fields are persisted excerpts and may be truncated/escaped; the gateway audit independently verifies command exit code 0 and denied post-revocation calls. Initial supplementary audit assertions used unescaped JSON and a guessed rejected status; corrected against actual escaped excerpts and the persisted denied enum, without rerunning model calls."
+  ],
+  "cleanup": {
+    "hubStopped": true,
+    "workerStopped": true,
+    "sshForwardStopped": true,
+    "remoteWorkspaceProcessesRemaining": 0,
+    "remoteTemporaryDirectoryRemoved": true,
+    "connectionTokenRotatedAndRemoved": true,
+    "productionWorkerModified": false
+  },
+  "macInspection": {
+    "platform": "Darwin arm64",
+    "fxInstalled": true,
+    "fxVersion": "0.0.17",
+    "binaryArchitecture": "Mach-O 64-bit executable arm64",
+    "macosAcceptancePassed": true,
+    "status": "Passed scoped macOS provider/executor/cron acceptance; not a browser or cross-machine hub run",
+    "buildRevision": "d1d4a883382d",
+    "auth": "User completed fx login; credentials not copied",
+    "nodeVersion": "22.16.0",
+    "defaultExecutorModel": "zai/glm-5.3-flashx-legal",
+    "lifecycleModels": [
+      "spacexai/grok-4.7",
+      "openai/gpt-5.4-mini"
+    ],
+    "testSourceFiles": [
+      "src/protocol/live/fx.live.test.ts",
+      "src/protocol/live/fx-executor.live.test.ts"
+    ],
+    "runner": "Locally esbuild-bundled unchanged test bodies and production modules; temporary serial Node runner adapts Vitest registration/assertions/waitFor to node:assert. Not Vitest execution on Mac. Native modules reused from installed runtime. No retries.",
+    "bundleSha256": "4b7fa6b9957acb216a6e9cbb715378441b14e0e20ff8ad09a71d20a6a455de06",
+    "tests": [
+      {
+        "name": "streams, queues, cancels, restarts with replay and honors a new spawn model without changing user settings",
+        "passed": true,
+        "durationMs": 28436
+      },
+      {
+        "name": "historical: auto with an explicit ask rule fails unattended (real CLI, synthetic model)",
+        "passed": true,
+        "durationMs": 194
+      },
+      {
+        "name": "product executor argv (full-access) runs a shell call despite an explicit ask rule",
+        "passed": true,
+        "durationMs": 5680
+      },
+      {
+        "name": "captures output, stops a run, and persists a cron-triggered report",
+        "passed": true,
+        "durationMs": 23459
+      }
+    ],
+    "settingsUnchanged": true,
+    "cleanup": {
+      "testHooksCompleted": true,
+      "runnerStopped": true,
+      "runnerChildrenRemaining": 0,
+      "temporaryDirectoryRemoved": true,
+      "productionWorkerModified": false
+    },
+    "scope": "Real provider ACP lifecycle and real ProcessManager/Scheduler/SQLite paths. Two permission cases use a synthetic local model, lifecycle and executor/cron use real Gateway models. Reviewer/Loop/Commander and browser acceptance remain covered by Ubuntu evidence, not independently repeated on Mac."
+  },
+  "mcpGatewayAudit": [
+    {
+      "tool_name": "remote_bash",
+      "exit_code": 0,
+      "status": "ok",
+      "created_at": "2026-11-18T14:27:47.081Z"
+    },
+    {
+      "tool_name": "remote_mcp_open",
+      "exit_code": null,
+      "status": "ok",
+      "created_at": "2026-11-18T14:27:53.271Z"
+    },
+    {
+      "tool_name": "remote_mcp_ping",
+      "exit_code": null,
+      "status": "ok",
+      "created_at": "2026-11-18T14:27:54.085Z"
+    },
+    {
+      "tool_name": "remote_bash",
+      "exit_code": null,
+      "status": "denied",
+      "created_at": "2026-11-18T14:27:56.115Z"
+    },
+    {
+      "tool_name": "remote_mcp_ping",
+      "exit_code": null,
+      "status": "denied",
+      "created_at": "2026-11-18T14:27:56.118Z"
+    },
+    {
+      "tool_name": "remote_mcp_close",
+      "exit_code": null,
+      "status": "ok",
+      "created_at": "2026-11-18T14:27:56.596Z"
+    }
+  ]
+}

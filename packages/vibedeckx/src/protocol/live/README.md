@@ -37,13 +37,28 @@ The existing `protocol-compat` workflow has pinned/latest fx cells. Versions com
 from `.github/agent-versions.json` or the official release feed, and the official
 installer receives the resolved version explicitly. This pins CI only, not user
 installations. The workflow remains manually triggered; no schedule is enabled.
+The optional `agent` input defaults to `all`. Select `fx` to run only its
+pinned/latest cells, without requiring Claude or Codex credentials. Once this
+workflow revision is on the branch being tested, dispatch it with:
 
-Configure the repository secret `AI_GATEWAY_API_KEY`. On the fresh CI runner,
+```bash
+gh workflow run protocol-compat.yml --ref <branch> -f agent=fx -f force_matrix=true
+```
+
+GitHub execution is optional for the current fx integration acceptance: local
+real-CLI probes passed, while GitHub CI has not been run. No CI credentials are
+required to use fx in the product or to run these probes with a local login.
+
+If you choose to run the fx cells on GitHub, configure the repository secret
+`AI_GATEWAY_API_KEY`. On the fresh CI runner,
 `fx provider gateway` selects Gateway and fx reads the key from the environment
 ([fx authentication documentation](https://fx.sh/docs/getting-started/authentication)).
 No personal OAuth file is copied into CI. Missing credentials fail the job with
 an explicit message. Live recordings are local job diagnostics, not automatically
 published artifacts.
+Selecting `all` also requires `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` for the
+other agents. A successful local probe does not certify the GitHub runner or
+an untested latest version.
 
 ### Real hub smoke test
 

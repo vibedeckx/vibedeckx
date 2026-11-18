@@ -32,11 +32,11 @@ function replay(file: string, prefix = "task5") {
   return { events, resultsAt };
 }
 describe("fx 0.0.17 tool recordings", () => {
-  it("replays current full-access lifecycle recordings without adapting the handshake", () => {
-    const first = replay("fx-lifecycle-1", "task7");
+  it.each(["task7", "task7-macos"])("replays %s full-access lifecycle recordings without adapting the handshake", (prefix) => {
+    const first = replay("fx-lifecycle-1", prefix);
     expect(first.events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["success", "success", "cancelled", "success", "success"]);
     expect(first.events.some(e => e.type === "tool_result" && e.output.includes("FX_TOOL_OK"))).toBe(true);
-    const second = replay("fx-lifecycle-2", "task7");
+    const second = replay("fx-lifecycle-2", prefix);
     expect(second.events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["success"]);
     expect(second.events.filter(e => e.type === "text").map(e => e.content).join("")).toContain("LIFECYCLE731");
     expect(second.events.find(e => e.type === "native_session_id")).not.toEqual(first.events.find(e => e.type === "native_session_id"));
