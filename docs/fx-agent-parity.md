@@ -34,7 +34,7 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 | 执行器、定时任务 | 已接入 `fx ask`；本机真实运行、输出、停止及 cron 报告落库通过。远端 worker 实机验收待提供目标；详见任务 8 验证记录。 |
 | Reviewer、Loop、Commander 派生 | 类型及选择器共用路径已有 fx，但完整产品验收属于任务 9；不能写成所有入口已通过。 |
 | 模型/登录失败诊断、附件、切换 agent、分支、指令、文件清理 | 任务 10/11 尚未完成最终验收；保留各行真实状态。 |
-| 限制处理结论 | 任务 12 待办；不在本次擅自将未验证项判为不支持或延期。 |
+| 限制处理结论 | 任务 12 已完成（2026-11-18），见“任务 12：限制处理结论”；第 2、3 项“明确不支持”已经用户确认；B 部分按用户决定不做。 |
 | 真实远端 worker | 本轮可访问列表为空，已请求授权；未部署线上 hub，未运行远端六入口验收。 |
 | macOS / arm64 | 官方支持的平台不等于本轮实测；本轮证据仅 Linux x86_64。 |
 | CI | 配置已接入且 actionlint 通过；只读检查确认仓库尚无 `AI_GATEWAY_API_KEY` secret，GitHub Actions 未实跑。 |
@@ -50,6 +50,21 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 本次变更验证：fx 协议、Provider、录制回放与管理器共 105 项测试通过，后端 `tsc --noEmit` 通过。真实 fx 0.0.17 生命周期测试通过，确认 full-access 启动、工具回合无审批请求、多轮/取消/重建换模型正常，用户 settings 文件逐字节未变。旧工具录制保持原样，仅测试回放时适配握手模式，不将历史 auto 录制冒充 full-access 实测。
 
 删除审批 UI 后验证：后端相关测试 100/100、UI 工具卡片与权限入口测试 23/23、前后端 `tsc --noEmit` 均通过。
+
+## 任务 12：限制处理结论（2026-11-18，fx 0.0.17，Linux x86_64）
+
+A 部分六项汇总。第 2、3 项“明确不支持”已于 2026-11-18 经用户确认。
+
+| 项 | 状态 | 当前限制 | 本次处理 / 用户看到什么 | 证据 |
+| --- | --- | --- | --- | --- |
+| 1. Plan | **已支持，弱于基线** | fx 只有 ask / auto / full-access，plan 返回 Unknown mode；无沙箱，无技术只读手段 | UI 与其他 agent 相同可切 Plan；plan 期间每条 prompt 前加只读约束（不入库），进程仍 full-access；切回 edit 靠 UI 切换（同 Codex），无 ExitPlanMode。fx 可作 Reviewer。公开文档注明“仅提示词约束” | 0.0.16 探针（Unknown mode）；0.0.17 真实 live：plan 中拒绝写文件/改 README/`git add`，切 edit 后正常写入。单次样本。见“Plan 决策更新” |
+| 2. Windows worker | **明确不支持**（上游无发布） | fx 官方只发布 macOS / Linux（x86_64、arm64） | 按用户决定只写文档；不做平台检测或 UI 禁用，命令缺失走现有“未安装”启动错误。macOS / arm64 **未验证**（仅 Linux x86_64 实测） | 官方发布范围；本机 Linux x86_64 |
+| 3. 停止单个后台任务 | **明确不支持**（与 Codex 一致） | `shell action=stop` 工具可停 shell，但 ACP 无可配对的后台任务 ID / 生命周期事件；取消回合不保证结束已 yield 的 shell | 不显示后台任务条和单任务 Stop（现有逻辑按 provider 是否实现 `formatStopBackgroundTask`）；只能停整个回合 / 会话 | 0.0.17 任务 5 录制 |
+| 4. 费用 / 用量 | **已对齐基线** | ACP 无成本字段；有 input/output/cacheRead/reasoning(/cacheWrite) token 与上下文占用 | 完成提示显示 token 数，同 Codex；无成本不显示 $0；其余字段不展示（现有 agent 无对应 UI，超出基线）。这只是提示信息，不是计费 | 0.0.16 探针 + 0.0.17 Provider |
+| 5. 稳定性 / 版本 | **已处理**（按用户决定与 Claude/Codex 对齐） | fx 0.0.x、默认自动升级 | 所有 fx 进程设 `FX_AUTO_UPGRADE=0`；只记录实际版本，不设白名单、不提示“未验证版本”。新版验证：protocol-compat workflow 的 fx pinned/latest live 契约测试（手动触发）。**缺口**：仓库无 `AI_GATEWAY_API_KEY` secret，CI 未实跑 | 任务 7 |
+| 6. 执行隔离与自动审查 | **已核实** | fx 无沙箱：0.0.17 设置 schema 中 `sandbox` 为 “No longer used; fx ignores it”；full-access 关闭 fx 权限规则与 auto 模型审查 | 会话与执行器 / 定时任务均 full-access，与 Codex edit 的 `danger-full-access` 同级；agent 以运行 Vibedeckx 的用户权限执行，hub 远端授权仍生效。公开文档（quickstart、connect-a-machine）已说明 | 0.0.17 `fx config schema`；执行器 live 用例 |
+
+B 部分（替代方案研究：真正只读的 Plan、Windows 可行性、上游停止后台任务计划）按用户决定（2026-11-18）不做；有实际需求时再另行评估。
 
 ## Plan 决策更新（2026-11-18，fx 0.0.17）
 
@@ -256,7 +271,7 @@ load 和 resume 请求都使用 `{sessionId,cwd,mcpServers}`。主实验进程�
 | formatApprovalResponse | 保留服务端 request id 与 optionId，发送 outcome.selected；allow_always 行为未测。 |
 | formatInterrupt | session/cancel 通知，等待原 prompt 响应后进入下一轮；已验证。 |
 | task_started / task_finished / task_list_changed / formatStopBackgroundTask | 任务 5 已补测：子 agent 利用 prompt 收尾；shell 无独立配对事件，不生成后台账本或停止按钮，不从 prompt 完成推断进程已结束。 |
-| result 用量与成本 | response.usage.inputTokens/outputTokens 可映射；cacheReadTokens/reasoningTokens 额外字段，mini 另有 cacheWriteTokens；usage_update.used/size 是上下文占用，不能当本轮 token 用量。成本未出现，不填 0；任务 12。 |
+| result 用量与成本 | response.usage.inputTokens/outputTokens 可映射；cacheReadTokens/reasoningTokens 额外字段，mini 另有 cacheWriteTokens；usage_update.used/size 是上下文占用，不能当本轮 token 用量。成本未出现，不填 0；任务 12 结论：已对齐 Codex 基线。 |
 | error | JSON-RPC error.code/message，包含认证 -32600、参数 -32602；要区分初始化/请求错误并停止失败初始化。 |
 | onSessionCreated / onSessionDestroyed | 分配/清理 RPC、原生 id、工具/用量状态；不得跨会话泄漏。 |
 
@@ -279,7 +294,7 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | 中断 | 进程/管理器路径 | turn/interrupt | 已实现；真实 fx cancelled 后续问及管理器 Stop 保活测试通过 |
 | 图片与文件附件 | 内容转换及工具读取路径 | image prompt / imageView 映射 | 已验证：页面上传普通文件、内联 PNG、超过 5 MiB PNG 的文件路径降级；见任务 11 |
 | 模型选择 | spawn --model | app-server -c model | 已实现；任务 10 验证默认配置、静态建议与手输、回合间新进程换模型；busy 拒绝、切 agent 清空模型有回归 |
-| 费用与用量 | result 成本字段 | tokenUsage 缓存到 result；不等同成本支持 | 已验证；token/上下文字段已录到；成本未验证 → 任务 12 |
+| 费用与用量 | result 成本字段 | tokenUsage 缓存到 result；不等同成本支持 | **已对齐基线**：完成提示显示 input+output token 数（同 Codex），无成本时不显示 $0；cache/reasoning/上下文占用不展示（超出基线）。Claude 实际也不显示成本（读 `cost_usd`，CLI 输出 `total_cost_usd`，Claude 侧既有缺陷）。见任务 12 |
 | hub vibedeckx HTTP MCP | --mcp-config HTTP bearer | -c mcp_servers / token env | 已接入；本地真实 hub + fx 调用通过，线上需部署协议协商修复 |
 | cross-remote HTTP MCP | 同上 | 同上 | 已接入；本地真实 hub 调用通过；线上握手修复待部署、授权远端与撤销完整验收未完成 |
 | 休眠唤醒 | 管理器历史重放 | 共用管理器历史重放 | 已实现；管理器子进程 + SQLite 休眠唤醒回归通过；首版不用 load/resume |
@@ -308,7 +323,7 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 - 长驻 shell、subagent 生命周期：**已补测 → 任务 5**，具体覆盖与差异见上节；取消 shell 回合不保证结束已 yield 的进程。
 - ask_user_question：**已补测 → 任务 5**，0.0.17 ACP 不等待答案，复用问题卡片发送普通后续消息。
 - 内联图片 prompt：**未验证 → 任务 11**。
-- usage_update.used/size 及 prompt response.usage token 字段：**已验证**；未出现成本字段、跨模型统计细节 **未验证 → 任务 12**。
+- usage_update.used/size 及 prompt response.usage token 字段：**已验证**；未出现成本字段；任务 12 判定已对齐 Codex 基线，不再补测跨模型成本。
 - 未登录错误：**任务 10 已补认证分类与真实管理器验证**。错误发生在 initialize，不是仅退出进程。
 - 额度用尽：**未验证 → 任务 10**；未耗尽额度取样。版本按用户决定只记录供排查，不再要求版本范围提示。
 - stdio MCP：不属于本任务要求，未验证；此范围豁免不表示三方都没有该能力。
