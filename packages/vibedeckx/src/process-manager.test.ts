@@ -27,7 +27,7 @@ describe("ProcessManager prompt commands (protocol layer)", () => {
   it("runs claude and fx over pipes and only codex as a shell command", () => {
     clearBinaryCaches();
     expect(pm.pipedPromptRun("hi", "claude")?.shell).toBe(false);
-    expect(pm.pipedPromptRun("hi", "fx")).toMatchObject({ shell: false, args: ["ask", "--permission-mode", "auto", "--json", "--", "hi"] });
+    expect(pm.pipedPromptRun("hi", "fx")).toMatchObject({ shell: false, args: ["ask", "--permission-mode", "full-access", "--json", "--", "hi"] });
     expect(pm.pipedPromptRun("hi", "codex")).toBeUndefined();
     expect(() => pm.buildPromptCommand("hi", "claude")).toThrow(/Unsupported shell prompt provider/);
   });

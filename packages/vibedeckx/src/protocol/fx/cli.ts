@@ -37,11 +37,15 @@ export function buildFxSpawnConfig(binary: string | null, model?: string | null,
   return { command: binary ?? "fx", args, env: { FX_AUTO_UPGRADE: "0" }, shell: false };
 }
 
-/** Unattended requests retain permission checks; never retry with full-access. */
+/**
+ * Unattended requests use full-access, matching interactive fx sessions and the
+ * Claude / Codex executors: no tool call may wait for (or fail on) an approval
+ * that nobody can give. Request-local flag; global settings are untouched.
+ */
 export function buildFxAskSpawnConfig(binary: string | null, prompt: string): SpawnConfig {
   return {
     command: binary ?? "fx",
-    args: ["ask", "--permission-mode", "auto", "--json", "--", prompt],
+    args: ["ask", "--permission-mode", "full-access", "--json", "--", prompt],
     env: { FX_AUTO_UPGRADE: "0" },
     shell: false,
   };

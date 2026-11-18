@@ -16,7 +16,7 @@ describe("fx ask boundary", () => {
 
   it("passes prompt literally and retains unattended permission checks", () => {
     expect(buildFxAskSpawnConfig("/bin/fx", "--full-access $(touch bad)\n'quote'")).toEqual({
-      command: "/bin/fx", args: ["ask", "--permission-mode", "auto", "--json", "--", "--full-access $(touch bad)\n'quote'"],
+      command: "/bin/fx", args: ["ask", "--permission-mode", "full-access", "--json", "--", "--full-access $(touch bad)\n'quote'"],
       env: { FX_AUTO_UPGRADE: "0" }, shell: false,
     });
   });

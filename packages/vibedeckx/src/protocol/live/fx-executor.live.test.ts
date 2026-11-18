@@ -3,18 +3,19 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 // Opt-in product-path acceptance with the installed fx and original credentials.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { ProcessManager, type LogMessage } from "../../process-manager.js";
 import { SchedulerService } from "../../scheduler.js";
 import { createSqliteStorage } from "../../storage/sqlite.js";
 import type { Executor } from "../../storage/types.js";
+import { buildFxAskSpawnConfig } from "../fx/cli.js";
 
 describe.skipIf(process.env.FX_EXECUTOR_LIVE !== "1")("real fx executor and cron", () => {
   let cleanup: (() => Promise<void>) | undefined;
   afterEach(async () => { await cleanup?.(); });
-  it("auto with an explicit ask rule fails unattended (real CLI, synthetic model)", async () => {
+  it("historical: auto with an explicit ask rule fails unattended (real CLI, synthetic model)", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "fx8-permission-"));
     const server = createServer((req, res) => {
       req.resume();
@@ -46,6 +47,45 @@ describe.skipIf(process.env.FX_EXECUTOR_LIVE !== "1")("real fx executor and cron
     expect(result.code).toBe(1);
     expect(JSON.parse(result.stdout)).toMatchObject({ exit_code: 1, error: "NonInteractivePermissionRequired" });
     expect(result.stderr).toContain("permission required by configured rule");
+  });
+
+  it("product executor argv (full-access) runs a shell call despite an explicit ask rule", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "fx-full-access-"));
+    let requests = 0;
+    const server = createServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      const chunk = (choice: object) => res.write(`data: ${JSON.stringify({ id: "probe", object: "chat.completion.chunk", choices: [choice] })}\n\n`);
+      if (requests++ === 0) {
+        const tool = { index: 0, id: "probe", type: "function", function: {
+          name: "shell", arguments: JSON.stringify({ action: "run", command: "touch FX_FULL_ACCESS_MARKER" }),
+        } };
+        chunk({ index: 0, delta: { role: "assistant", tool_calls: [tool] }, finish_reason: null });
+        chunk({ index: 0, delta: {}, finish_reason: "tool_calls" });
+      } else {
+        chunk({ index: 0, delta: { role: "assistant", content: "FX_FULL_ACCESS_DONE" }, finish_reason: null });
+        chunk({ index: 0, delta: {}, finish_reason: "stop" });
+      }
+      res.end("data: [DONE]\n\n");
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    const profile = path.join(dir, "profile");
+    mkdirSync(profile, { mode: 0o700 });
+    writeFileSync(path.join(profile, "settings.json"), JSON.stringify({
+      permission: { bash: { "*": "ask" } },
+      providers: { probe: { protocol: "openai-chat-completions", base_url: `http://127.0.0.1:${port}/v1`,
+        auth: { type: "none" }, model_metadata: { probe: { context_window: 32768, max_output_tokens: 2048, supports_tool_use: true } } } },
+      models: { probe: "probe" },
+    }), { mode: 0o600 });
+    cleanup = async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(dir, { recursive: true, force: true }); };
+    const config = buildFxAskSpawnConfig("fx", "Create the marker file with shell.");
+    const [subcommand, ...rest] = config.args;
+    const result = await promisify(execFile)(config.command, [subcommand, "--provider", "probe", "--model", "probe", "--no-save", ...rest], {
+      cwd: dir, env: { ...process.env, ...config.env, FX_HOME: profile }, timeout: 20000,
+    });
+    expect(JSON.parse(result.stdout)).toMatchObject({ exit_code: 0, final_output: "FX_FULL_ACCESS_DONE" });
+    expect(existsSync(path.join(dir, "FX_FULL_ACCESS_MARKER"))).toBe(true);
   });
 
   it("captures output, stops a run, and persists a cron-triggered report", async () => {

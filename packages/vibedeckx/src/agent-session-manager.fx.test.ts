@@ -9,6 +9,7 @@ import { getProvider } from "./providers/index.js";
 import type { Storage } from "./storage/types.js";
 import * as sessionMcp from "./session-tools-mcp.js";
 import type { AgentMessage } from "./agent-types.js";
+import { FX_PLAN_MODE_INSTRUCTIONS } from "./protocol/fx/codec.js";
 
 // A real stdio child process and real SQLite, with only the external fx binary
 // replaced. This exercises manager close/Stop/wake/state/turn_end ordering.
@@ -444,16 +445,23 @@ describe("fx manager lifecycle", () => {
     expect(manager.getSession(id)?.status).toBe("error");
   });
 
-  it("rejects plan before creating a row or killing an existing process", async () => {
-    await expect(manager.createNewSession("p", null, dir, false, "plan", "fx")).rejects.toThrow(/plan/);
+  it("runs plan sessions with prompt instructions, keeps the transcript raw, and drops them after switching to edit", async () => {
+    const id = await manager.createNewSession("p", null, dir, false, "plan", "fx");
+    await manager.sendUserMessage(id, "plan it", dir); await completed(id, 1);
+    const planned = wire().filter(m => m.method === "session/prompt");
+    expect(planned.at(-1)!.params.prompt!.map(part => part.text)).toEqual([FX_PLAN_MODE_INSTRUCTIONS, "plan it"]);
+    expect((await entries(id)).filter(e => e.type === "user").map(e => JSON.stringify(e))).not.toContain(expect.stringContaining("vibedeckx-plan-mode"));
+    expect(JSON.stringify(await entries(id))).not.toContain("vibedeckx-plan-mode");
+    expect(await manager.switchMode(id, dir, "edit")).toBe(true);
+    await manager.sendUserMessage(id, "now edit", dir);
+    await waitFor(() => wire().some(m => m.method === "session/prompt" && m.params.prompt!.some(part => part.text === "now edit")));
+    const edited = wire().filter(m => m.method === "session/prompt" && m.params.prompt!.some(part => part.text === "now edit")).at(-1)!;
+    expect(edited.params.prompt!.map(part => part.text)).not.toContain(FX_PLAN_MODE_INSTRUCTIONS);
+    expect((await storage.agentSessions.getById(id))!.permission_mode).toBe("edit");
     await expect(manager.prepareSessionRow({ sessionId: "reviewer", projectId: "p", branch: null, projectPath: dir,
       permissionMode: "plan", agentType: "fx", model: null, purpose: "workflow_review", owner: null,
       prepareOperationId: "operation", pendingExpiresAt: Date.now() + 60_000,
-    })).rejects.toThrow(/plan/);
-    expect(await storage.agentSessions.getAll()).toHaveLength(0);
-    const id = await newSession();
-    await expect(manager.switchMode(id, dir, "plan")).rejects.toThrow(/plan/);
-    await manager.sendUserMessage(id, "still usable", dir); await completed(id, 1);
-    expect((await storage.agentSessions.getById(id))!.permission_mode).toBe("edit");
+    })).resolves.toBeDefined();
   });
+
 });

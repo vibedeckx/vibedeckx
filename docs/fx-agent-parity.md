@@ -39,7 +39,7 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 | macOS / arm64 | 官方支持的平台不等于本轮实测；本轮证据仅 Linux x86_64。 |
 | CI | 配置已接入且 actionlint 通过；只读检查确认仓库尚无 `AI_GATEWAY_API_KEY` secret，GitHub Actions 未实跑。 |
 
-当前需在最终收尾明确列出的差异：Plan 禁用（已有决定）；ACP 阻塞式提问不支持、以普通后续消息替代；无后台任务条和单任务 Stop；停止回合不保证结束已 yield 的 shell；历史重放非无损；编辑卡片只有局部 old/new 而非原生完整 diff。这些记录不是用户对所有缺口的最终验收确认。版本与 Windows 提示按本轮用户要求不再是待实现项。
+当前需在最终收尾明确列出的差异：Plan 仅靠提示词约束、无技术只读保证（2026-11-18 决定，替代原禁用）；ACP 阻塞式提问不支持、以普通后续消息替代；无后台任务条和单任务 Stop；停止回合不保证结束已 yield 的 shell；历史重放非无损；编辑卡片只有局部 old/new 而非原生完整 diff。这些记录不是用户对所有缺口的最终验收确认。版本与 Windows 提示按本轮用户要求不再是待实现项。
 
 ## 当前权限决策更新（2026-11-16）
 
@@ -50,6 +50,20 @@ fx 状态含义：**已验证**＝固定版本真实实验有录制，仅证明�
 本次变更验证：fx 协议、Provider、录制回放与管理器共 105 项测试通过，后端 `tsc --noEmit` 通过。真实 fx 0.0.17 生命周期测试通过，确认 full-access 启动、工具回合无审批请求、多轮/取消/重建换模型正常，用户 settings 文件逐字节未变。旧工具录制保持原样，仅测试回放时适配握手模式，不将历史 auto 录制冒充 full-access 实测。
 
 删除审批 UI 后验证：后端相关测试 100/100、UI 工具卡片与权限入口测试 23/23、前后端 `tsc --noEmit` 均通过。
+
+## Plan 决策更新（2026-11-18，fx 0.0.17）
+
+用户决定以提示词约束支持 fx 的 Plan，使各 agent 在 UI 上无差别；替代下文“首版禁用”。实现：
+
+- `FxProvider` 不再声明 `planMode: false`，创建 / 切换 / 切 agent / Commander / Reviewer 的 plan 均放行（通用 capability 判断保留给未来 provider）。两种模式启动参数完全相同（`full-access`）。
+- plan 模式下 `flush` 在每条 `session/prompt` 前插入独立文本块 `FX_PLAN_MODE_INSTRUCTIONS`（`protocol/fx/codec.ts`）：禁止任何方式写文件；禁止有副作用的命令（格式化、`--fix`、代码生成、依赖安装、向工作区写产物的构建/测试、git 写操作）；允许只读检查。该块只在 wire 上，不写入 transcript；切到 edit 时进程重建、历史重放不带该块。
+- 用户确认不做事后 `git status` 检测（第 4 项）。
+
+验证：provider 单测（文本/图片前缀、edit 不加、plan 与 edit 启动参数一致）；管理器子进程 + SQLite（plan 会话 wire 含约束、存储不含、switchMode 到 edit 后不再发送、Reviewer `prepareSessionRow` plan 放行）；真实 fx 0.0.17 live（`fx-parity.live.test.ts` “plan mode”）：plan 中明确要求建文件、改 README、`git add -A`，三者均未发生、`git status` 不变；切 edit 后同类请求正常建文件。单次样本，不代表所有模型都必然遵守。
+
+## 执行器权限决策更新（2026-11-18，fx 0.0.17）
+
+用户决定一次性执行器与定时任务和交互会话保持一致，`fx ask` 由 `--permission-mode auto` 改为 `full-access`（仍为单次请求参数，不改全局设置）。原因：auto 下用户配置里的显式 ask 规则会让无人值守运行以 `NonInteractivePermissionRequired` 失败（`task8-auto-explicit-ask.json`）。新增 live 用例：真实 fx 0.0.17 + 合成模型 + `permission.bash["*"]="ask"`，按产品 argv 运行，shell 调用实际执行、exit_code 0；原 auto 用例保留为历史证据。真实模型的执行器 / 停止 / cron 用例复跑通过。fx 0.0.17 设置 schema 中 `sandbox` 标为 “No longer used; fx ignores it”，即 fx 无自带沙箱；公开文档 quickstart 已同步说明。
 
 ## 任务 6 产品接入（2026-11-16，fx 0.0.17）
 
@@ -208,7 +222,7 @@ load 和 resume 请求都使用 `{sessionId,cwd,mcpServers}`。主实验进程�
 
 ## 首版边界决策
 
-### Plan：首版禁用
+### Plan：首版禁用（已被 2026-11-18 “Plan 决策更新”替代）
 
 实测 modes 只有 auto/ask/full-access，plan 返回 Unknown mode；ask 能批准修改，不具备只读规划语义，故按任务要求确定首版禁用 fx plan；后续实现必须 UI 隐藏/置灰且后端拒绝 `permissionMode: "plan"`，不能将 ask 当 plan，也不引入通用权限引擎。此处是产品范围决定，**不是证明 fx 绝对无法支持只读**。本任务不改 UI/后端，不伪造 ExitPlanMode。
 
@@ -228,7 +242,7 @@ load 和 resume 请求都使用 `{sessionId,cwd,mcpServers}`。主实验进程�
 
 | 接口或事件 | 映射结论与实现边界 |
 | --- | --- |
-| detectBinary / buildSpawnConfig | fx acp，env FX_AUTO_UPGRADE=0，传 --model；plan 后端拒绝。注意 set_mode 持久化默认值的副作用。 |
+| detectBinary / buildSpawnConfig | fx acp，env FX_AUTO_UPGRADE=0，传 --model；plan 与 edit 启动参数相同（2026-11-18 起 plan 靠提示词约束，原为后端拒绝）。注意 set_mode 持久化默认值的副作用。 |
 | getInitializationMessages / stdin_write | initialize 成功后再 new，new 成功后才发送积压 prompt。维护双向 RPC id 和应用 id → fx id；不得靠固定延时。 |
 | formatUserInput | 文本 → session/prompt.prompt 文本块；图片任务 11。 |
 | text / thinking | agent_message_chunk / agent_thought_chunk 的 content.text 可直接映射。 |
@@ -258,7 +272,7 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | thinking | thinking 事件 | reasoning 文本映射 | 已实现；真实 Provider 与录制契约验证见任务 4 |
 | 工具卡片 | tool_use/result | item 事件映射 | 已实现；任务 5 归一到已有专用卡片，未知工具通用显示，真实录制回放与 UI 组件验证 |
 | 审批 | edit 使用跳过权限；plan 原生模式 | 有 command/fileChange 映射；默认 approvalPolicy never | edit 使用 full-access，无人工审批 UI；权限请求仅直接取消并显示错误，见最新决策 |
-| plan 与 ExitPlanMode | 原生 plan；产品接受计划后切 edit | plan 采用 read-only sandbox；非 Claude ExitPlanMode 协议 | 首版已禁用；UI capabilities 与后端显式拒绝，按已选决策执行 |
+| plan 与 ExitPlanMode | 原生 plan；产品接受计划后切 edit | plan 采用 read-only sandbox；非 Claude ExitPlanMode 协议 | **已支持，弱于基线**（2026-11-18，fx 0.0.17）：UI 与其他 agent 相同可切 Plan；进程仍为 full-access，plan 期间每条 prompt 前加只读约束块（不入库）。无技术只读保证；与 Codex 一样通过 UI 切换退出 plan，无 ExitPlanMode。真实 fx 实测遵守，见“Plan 决策更新” |
 | AskUserQuestion | CLI 禁用该工具，退化为普通对话提问 | userInput request 映射 AskUserQuestion 工具事件；完整交互非本轮验收 | 0.0.17 ACP 明确不支持阻塞式提问；任务 5 复用问题卡片发送普通后续消息 |
 | 后台任务显示 | 任务开始/结束/集合事件 | subagent 生命周期、outOfTurn 处理 | 子 agent 报告已验证先于 prompt response；shell 无可配对的独立生命周期事件，按任务 5 原则不显示后台条 |
 | 后台任务单独停止 | stop_task | 无等价接口，退化为停止会话 | shell stop 工具调用已实测；产品没有后台条或单任务停止按钮，见任务 5 差异 |
@@ -271,10 +285,10 @@ Claude/Codex 列是当前仓库代码基线阅读结果，非本轮跨平台端�
 | 休眠唤醒 | 管理器历史重放 | 共用管理器历史重放 | 已实现；管理器子进程 + SQLite 休眠唤醒回归通过；首版不用 load/resume |
 | 切换 agent | 共用管理器迁移历史 | 共用管理器迁移历史 | 已验证：Claude/Codex ↔ fx 四向真实切换、历史继续使用、模型清空；见任务 11 |
 | 分支 / 截断分支 | 共用分支历史复制 | 共用分支历史复制 | 已验证：Codex ↔ fx、fx → fx 截断分支、独立原生 id，页面双向回传；见任务 11 |
-| 执行器 | prompt executor Claude CLI | codex exec CLI | `fx ask --permission-mode auto --json`；stdout 最终 Markdown、stderr 进度，退出码判定，进程树停止；本机实测通过，远端实机待验收 |
+| 执行器 | prompt executor Claude CLI | codex exec CLI | `fx ask --permission-mode full-access --json`（2026-11-18 按用户决定与会话一致，原为 auto）；stdout 最终 Markdown、stderr 进度，退出码判定，进程树停止；本机实测通过，远端实机待验收 |
 | 定时任务 | scheduler 调用执行器 | scheduler 传递 prompt_provider | 同一 ProcessManager 路径，cron 触发、output/report/exit_code 落库；本机实测通过，远端实机待验收 |
 | 执行器 ACP 流式工具调用展示 | stream-json | 最终结果基线 | 超出基线（不做）；不创建另一套 ACP 生命周期 |
-| Reviewer | 现有产品入口，具体 agent 组合未复核 | 同左 | Claude reviewer → fx 作者两阶段启动、讨论、修复 / 复审本机通过；fx reviewer 被 plan 要求阻塞，待权限决定；ubuntu Claude → fx 路径通过，跨机器网络验收未完成，见任务 9 |
+| Reviewer | 现有产品入口，具体 agent 组合未复核 | 同左 | Claude reviewer → fx 作者两阶段启动、讨论、修复 / 复审本机通过；fx reviewer 随 Plan 提示词约束解除阻塞（真实 Review 流程未单独复跑）；ubuntu Claude → fx 路径通过，跨机器网络验收未完成，见任务 9 |
 | Loop | workflow-repeat-loop 传 agentType | 同左 | 本机 fx 0.0.17 产品路径已验证：多项、新会话、done 与校验失败即停；ubuntu 隔离 hub/worker 路径通过；跨机器网络验收未完成，见任务 9 |
 | Commander 派生 | 现有会话/MCP/执行器路径 | 现有共用路径，组合未复核 | 本机真实 Main Chat → fx spawn、续发、两次结果回传、单一 turn 收尾通过；ubuntu 隔离 hub/worker 路径通过；跨机器网络验收未完成，见任务 9 |
 | Windows | binary 检测有 win32 分支；本轮未实跑 | 同左 | fx 官方无 Windows 原生版本；按用户决定仅文档说明，沿用命令缺失错误，不做平台专用检测或 UI 禁用 |

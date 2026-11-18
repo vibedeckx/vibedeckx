@@ -23,9 +23,11 @@ Choose **fx** in a prompt executor or scheduled prompt to run `fx ask`. Install
 and authenticate fx on the machine that will run the task. Progress appears
 during the run; the answer and scheduled report appear when it finishes.
 
-These runs use fx's **auto** permission checks. They cannot accept interactive
-approval, so actions requiring approval fail with a diagnostic. Vibedeckx does
-not retry with full access. You can stop an active executor from its output view.
+These runs use fx's **full-access** permission mode, the same as interactive fx
+sessions: tool calls never wait for approval, and permission rules in your fx
+settings are not applied. fx has no sandbox of its own, so the agent acts with
+the permissions of the user running Vibedeckx. You can stop an active executor
+from its output view.
 
 Remote execution requires an updated worker. Upgrade every worker before running
 fx executors remotely.

@@ -104,7 +104,7 @@ describe("agent session model routes", () => {
       await app.register(agentSessionRoutes);
       const res = await app.inject({ method: "GET", url: "/api/agent-providers" });
       expect(res.json().providers.find((p: { type: string }) => p.type === "fx")).toMatchObject({
-        displayName: "fx", capabilities: { planMode: false },
+        displayName: "fx", capabilities: { planMode: true },
         models: ["spacexai/grok-4.7", "openai/gpt-5.4-mini"],
       });
       expect(detection).not.toHaveBeenCalled();

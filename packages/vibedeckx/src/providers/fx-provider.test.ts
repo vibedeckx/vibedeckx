@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { FxProvider } from "./fx-provider.js";
+import { FX_PLAN_MODE_INSTRUCTIONS } from "../protocol/fx/codec.js";
 import type { ParsedAgentEvent } from "../agent-provider.js";
 
 const response = (id: number, result: unknown) => JSON.stringify({ jsonrpc: "2.0", id, result });
 const writes = (events: ParsedAgentEvent[]) => events.filter(e => e.type === "stdin_write").map(e => JSON.parse(e.content));
-function ready(p: FxProvider, app = "app", native = "native") {
-  p.onSessionCreated(app, "edit");
+function ready(p: FxProvider, app = "app", native = "native", mode: "plan" | "edit" = "edit") {
+  p.onSessionCreated(app, mode);
   expect(JSON.parse(p.getInitializationMessages(app, { cwd: "/workspace" })!).method).toBe("initialize");
   expect(writes(p.parseStdoutLine(response(1, { protocolVersion: 1 }), app))[0]).toMatchObject({ id: 2, method: "session/new", params: { cwd: "/workspace" } });
   expect(p.parseStdoutLine(response(2, { sessionId: native, modes: { currentModeId: "full-access" } }), app)).toEqual([{ type: "native_session_id", id: native }]);
@@ -188,11 +189,22 @@ describe("FxProvider lifecycle", () => {
     p.onSessionDestroyed("a"); ready(p, "a", "new-a");
     expect(JSON.parse(p.formatUserInput("replayed history", "a")).params.sessionId).toBe("new-a");
   });
-  it("rejects plan and reports missing binary without a fallback", () => {
+  it("plan mode prefixes instructions as a separate block on every prompt; edit sends content untouched", () => {
+    const p = new FxProvider();
+    expect((p as { getCapabilities?: unknown }).getCapabilities).toBeUndefined();
+    ready(p, "plan", "native", "plan");
+    const first = JSON.parse(p.formatUserInput("plan the change", "plan"));
+    expect(first.params.prompt).toEqual([{ type: "text", text: FX_PLAN_MODE_INSTRUCTIONS }, { type: "text", text: "plan the change" }]);
+    p.parseStdoutLine(response(first.id, { stopReason: "end_turn" }), "plan");
+    const image = JSON.parse(p.formatUserInput([{ type: "image", mediaType: "image/png", data: "AA==" }], "plan"));
+    expect(image.params.prompt).toEqual([{ type: "text", text: FX_PLAN_MODE_INSTRUCTIONS }, { type: "image", mimeType: "image/png", data: "AA==" }]);
+    // Mode switch respawns with onSessionCreated(newMode): edit drops the block.
+    p.onSessionDestroyed("plan"); ready(p, "plan", "native", "edit");
+    expect(JSON.parse(p.formatUserInput("now edit", "plan")).params.prompt).toEqual([{ type: "text", text: "now edit" }]);
+  });
+  it("starts plan with the same full-access process and reports missing binary without a fallback", () => {
     const p = new FxProvider(); vi.spyOn(p, "detectBinary").mockReturnValue(null);
-    expect(p.getCapabilities()).toEqual({ planMode: false });
-    expect(() => p.onSessionCreated("plan", "plan")).toThrow(/plan/);
-    expect(() => p.buildSpawnConfig("/work", "plan")).toThrow(/plan/);
+    expect(p.buildSpawnConfig("/work", "plan")).toEqual(p.buildSpawnConfig("/work", "edit"));
     expect(p.buildSpawnConfig("/work", "edit", undefined, "new-model")).toMatchObject({ command: "fx", args: ["acp", "--model", "new-model"] });
     expect(p.getInstallHint()).toContain("https://fx.sh");
   });

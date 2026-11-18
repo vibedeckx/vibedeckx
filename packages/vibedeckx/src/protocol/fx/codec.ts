@@ -61,6 +61,26 @@ export function buildSessionNew(id: number, options: FxSessionOptions): string {
 export function buildSetMode(id: number, sessionId: string): string {
   return line({ id, method: FX_METHODS.setMode, params: { sessionId, modeId: "auto" } });
 }
+/**
+ * fx has no read-only mode (only ask / auto / full-access, and no sandbox), so
+ * vibedeckx plan mode for fx is enforced by instructions alone. Sent ahead of
+ * every prompt while the session is in plan mode; never stored in the
+ * transcript, so switching to edit (which respawns and replays history) drops it.
+ */
+export const FX_PLAN_MODE_INSTRUCTIONS = `<vibedeckx-plan-mode>
+You are in PLAN MODE. Nothing enforces this technically, so you must follow these rules yourself until a message arrives without this block:
+- Do not create, modify, delete, move or rename any file, by any means: no edit/write tools, no shell redirection, no sed -i, no scripts that write files.
+- Do not run commands that change the workspace or repository as a side effect: formatters, linters with --fix, code generators, dependency installs (npm/pnpm/yarn/pip install and similar), builds or test runs that write output into the workspace, or git write operations (add, commit, stash, checkout, switch, reset, restore, merge, rebase, pull, push, branch or tag changes).
+- Read-only inspection is allowed: reading and searching files, git status/log/diff/show, and commands that only print information.
+- Reply with your plan or the requested analysis. The user will switch to edit mode when changes should be made.
+</vibedeckx-plan-mode>`;
+
+/** Prefix plan-mode instructions as their own text block, ahead of the user's content. */
+export function withFxPlanModeInstructions(content: string | ContentPart[]): ContentPart[] {
+  const parts: ContentPart[] = typeof content === "string" ? [{ type: "text", text: content }] : content;
+  return [{ type: "text", text: FX_PLAN_MODE_INSTRUCTIONS }, ...parts];
+}
+
 export function buildPrompt(id: number, sessionId: string, content: string | ContentPart[]): string {
   const parts = typeof content === "string" ? [{ type: "text" as const, text: content }] : content;
   return line({ id, method: FX_METHODS.prompt, params: { sessionId, prompt: parts.map(p => p.type === "text" ? p : { type: "image", mimeType: p.mediaType, data: p.data }) } });

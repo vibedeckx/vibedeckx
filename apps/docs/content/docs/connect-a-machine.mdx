@@ -28,7 +28,7 @@ Vibedeckx records the CLI version for troubleshooting and disables fx's backgrou
 
 The current fx session integration differs from Claude Code and Codex:
 
-- **Permissions:** edit sessions use fx's `full-access` mode, without interactive tool approval. Plan mode is unavailable.
+- **Permissions:** sessions use fx's `full-access` mode, without interactive tool approval. fx has no read-only mode or sandbox of its own, so **Plan mode is enforced by instructions only**: while a session is in Plan mode, Vibedeckx tells fx not to change files or run commands with side effects (formatters, installs, git writes), and real runs follow it, but nothing blocks a write technically. This also applies when fx is the reviewer in a review. Switch to Edit as usual when changes should be made.
 - **Conversation recovery:** waking or restarting a session replays saved conversation context into a new fx session. This is not a lossless restore of an fx-native session.
 - **Tools:** common file, shell and search tools use the existing cards; unfamiliar tools show their arguments and results. File edits show the supplied old/new text, not an fx-provided full-file diff.
 - **Questions:** question cards send a normal follow-up message. fx's ACP interface does not wait for a blocking question response.

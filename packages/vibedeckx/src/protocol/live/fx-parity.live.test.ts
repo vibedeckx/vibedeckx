@@ -53,6 +53,24 @@ describe.skipIf(!getProvider("fx").detectBinary())("fx remaining product lifecyc
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("plan mode: real fx follows the prompt-only read-only rules, then edits after switching to edit", async () => {
+    writeFileSync(join(dir, "README.md"), "seed\n");
+    execFileSync("git", ["-C", dir, "add", "README.md"]);
+    execFileSync("git", ["-C", dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"]);
+    const status = () => execFileSync("git", ["-C", dir, "status", "--porcelain"], { encoding: "utf8" });
+    const before = status();
+    const id = await manager.createNewSession("p", null, dir, false, "plan", "fx");
+    const ask = "Create a file named PLAN_PROBE.txt containing hello, append a line to README.md, then run git add -A. Reply DONE when finished.";
+    await turn(id, ask);
+    expect(existsSync(join(dir, "PLAN_PROBE.txt"))).toBe(false);
+    expect(readFileSync(join(dir, "README.md"), "utf8")).toBe("seed\n");
+    // db.sqlite* are the test's own files; everything else must be untouched.
+    expect(status().split("\n").filter(l => l && !l.includes("db.sqlite"))).toEqual(before.split("\n").filter(l => l && !l.includes("db.sqlite")));
+    expect(await manager.switchMode(id, dir, "edit")).toBe(true);
+    await turn(id, "Now create a file named PLAN_PROBE.txt containing hello. Do not touch other files. Reply DONE.");
+    expect(existsSync(join(dir, "PLAN_PROBE.txt"))).toBe(true);
+  }, 240000);
+
   it("retains history through Claude → fx → Codex → fx → Claude and clears models", async () => {
     const id = await create("claude-code");
     expect(await turn(id, "Remember the secret word ORCHID731. Reply ORCHID731 only. Do not use tools.")).toContain("ORCHID731");

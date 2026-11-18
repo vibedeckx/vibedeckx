@@ -268,7 +268,7 @@ const instructionSchema = z.string().trim().min(1).max(8_000);
 const createSessionSchema = z.object({
   workspaceId: selectorSchema.optional(),
   instruction: instructionSchema,
-  permissionMode: z.enum(["plan", "edit"]).optional().describe("Defaults to edit. Plan requires agent plan-mode support; fx does not support plan mode."),
+  permissionMode: z.enum(["plan", "edit"]).optional().describe("Defaults to edit. Plan requires agent plan-mode support."),
   agentType: z.enum(AGENT_TYPES).optional(),
   model: z.string().trim().min(1).max(MODEL_CHAR_LIMIT).nullable().optional(),
 }).strict();

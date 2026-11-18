@@ -5,7 +5,7 @@ import type { SessionToolsMcpConfig } from "../session-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import { buildFxSpawnConfig } from "../protocol/fx/cli.js";
 import { formatFxRequestFailure } from "../protocol/fx/diagnostics.js";
-import { buildInitialize, buildSessionNew, buildPrompt, buildCancel, buildPermissionDenied, buildFxMcpServers, buildUnsupportedRequest, parseFxLine, toolOutput, unwrapFxMcpOutput, type FxSessionOptions } from "../protocol/fx/codec.js";
+import { buildInitialize, buildSessionNew, buildPrompt, buildCancel, buildPermissionDenied, buildFxMcpServers, withFxPlanModeInstructions, buildUnsupportedRequest, parseFxLine, toolOutput, unwrapFxMcpOutput, type FxSessionOptions } from "../protocol/fx/codec.js";
 import { FX_BINARY_NAME, FX_METHODS, FxInitializeResultSchema, FxNewResultSchema, FxPromptResultSchema } from "../protocol/fx/schema.js";
 import { normalizeFxTool } from "../protocol/fx/tool-mapping.js";
 
@@ -16,6 +16,8 @@ interface FxSessionState {
   nativeId: string | null;
   phase: "created" | "initializing" | "ready" | "failed";
   options: FxSessionOptions;
+  /** plan = full-access process + FX_PLAN_MODE_INSTRUCTIONS on every prompt. */
+  mode: "plan" | "edit";
   queue: Input[];
   promptId: number | null;
   failure?: string;
@@ -29,20 +31,16 @@ export class FxProvider implements AgentProvider {
   private sessions = new Map<string, FxSessionState>();
   getAgentType() { return "fx" as const; }
   getDisplayName() { return "fx"; }
-  getCapabilities() { return { planMode: false }; }
   getInstallHint() { return "fx is not installed. Install it from https://fx.sh and make sure the fx binary is on PATH; use fx 0.0.17 or newer and run fx login before starting a session."; }
   detectBinary() { return detectBinary(FX_BINARY_NAME, { refresh: true }); }
-  buildSpawnConfig(_cwd: string, mode: "plan" | "edit", _cross?: CrossRemoteMcpConfig, model?: string | null, _tools?: SessionToolsMcpConfig): SpawnConfig {
-    this.assertMode(mode);
+  // Both modes start full-access: fx has no read-only mode. Plan is carried by
+  // the per-prompt instructions (see flush), not by the process.
+  buildSpawnConfig(_cwd: string, _mode: "plan" | "edit", _cross?: CrossRemoteMcpConfig, model?: string | null, _tools?: SessionToolsMcpConfig): SpawnConfig {
     buildFxMcpServers({ cwd: _cwd, crossRemoteMcp: _cross, sessionToolsMcp: _tools });
     return buildFxSpawnConfig(this.detectBinary(), model);
   }
-  private assertMode(mode: "plan" | "edit") {
-    if (mode === "plan") throw new Error("fx does not support plan mode; choose edit mode.");
-  }
   onSessionCreated(id: string, mode: "plan" | "edit" = "edit") {
-    this.assertMode(mode);
-    this.sessions.set(id, { nextId: 1, pending: new Map(), nativeId: null, phase: "created", options: { cwd: process.cwd() }, queue: [], promptId: null, tools: new Map() });
+    this.sessions.set(id, { nextId: 1, pending: new Map(), nativeId: null, phase: "created", options: { cwd: process.cwd() }, mode, queue: [], promptId: null, tools: new Map() });
   }
   onSessionDestroyed(id: string) { this.sessions.delete(id); }
   private state(id: string): FxSessionState {
@@ -76,7 +74,7 @@ export class FxProvider implements AgentProvider {
     // onSessionDestroyed removes the session state.
     return this.request(state, FX_METHODS.prompt, id => {
       state.promptId = id;
-      return buildPrompt(id, state.nativeId!, content);
+      return buildPrompt(id, state.nativeId!, state.mode === "plan" ? withFxPlanModeInstructions(content) : content);
     });
   }
   formatInterrupt(id: string): string | null {
