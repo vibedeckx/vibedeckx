@@ -196,7 +196,7 @@ describe("FxProvider lifecycle", () => {
   it("starts plan with the same full-access process and reports missing binary without a fallback", () => {
     const p = new FxProvider(); vi.spyOn(p, "detectBinary").mockReturnValue(null);
     expect(p.buildSpawnConfig("/work", "plan")).toEqual(p.buildSpawnConfig("/work", "edit"));
-    expect(p.buildSpawnConfig("/work", "edit", undefined, "new-model")).toMatchObject({ command: "fx", args: ["acp", "--model", "new-model"] });
+    expect(p.buildSpawnConfig("/work", "edit", undefined, "new-model")).toMatchObject({ command: "fx", args: ["acp", "--permission-mode", "full-access", "--model", "new-model"] });
     expect(p.getInstallHint()).toContain("https://fx.sh");
   });
 });
