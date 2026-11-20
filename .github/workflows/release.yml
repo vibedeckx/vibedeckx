@@ -372,11 +372,19 @@ jobs:
       # The registry can lag a fresh publish by a minute or two. Wait for the
       # linux-x64 platform package too: it is an optionalDependency, so npm
       # would silently install vibedeckx without it.
+      # Check the abbreviated "install" document (the Accept header below),
+      # not `npm view`: `npm view` reads the full document, which the registry
+      # CDN caches separately, so it can show the new version while the
+      # document `npm install` reads is still stale (v0.3.60 failed this way).
       - name: Wait for vibedeckx@${{ github.ref_name }} on npm
         run: |
+          has_version() {
+            curl -fsS -H 'Accept: application/vnd.npm.install-v1+json' \
+              "https://registry.npmjs.org/$1" \
+              | jq -e --arg v "$VERSION" '.versions[$v]' >/dev/null 2>&1
+          }
           for i in $(seq 1 30); do
-            if npm view "vibedeckx@$VERSION" version >/dev/null 2>&1 \
-              && npm view "@vibedeckx/linux-x64@$VERSION" version >/dev/null 2>&1; then
+            if has_version vibedeckx && has_version @vibedeckx/linux-x64; then
               exit 0
             fi
             sleep 10
