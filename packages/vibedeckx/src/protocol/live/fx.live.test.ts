@@ -47,7 +47,8 @@ describe.skipIf(!available)("fx live provider lifecycle", () => {
       const deadline = Date.now() + 90_000;
       while (!predicate()) {
         if (failure) throw failure;
-        const error = events.find(e => e.type === "result" && e.subtype === "error");
+        // The deliberate cancel below ends its prompt as a non-end_turn result.
+        const error = events.find(e => e.type === "result" && e.subtype === "error" && e.error !== "fx stopped: cancelled");
         if (error?.type === "result") throw new Error(error.error);
         if (Date.now() > deadline) throw new Error("Timed out waiting for fx lifecycle event");
         await new Promise(r => setTimeout(r, 20));
