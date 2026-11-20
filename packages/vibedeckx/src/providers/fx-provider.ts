@@ -5,7 +5,7 @@ import type { SessionToolsMcpConfig } from "../session-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
 import { buildFxSpawnConfig } from "../protocol/fx/cli.js";
 import { formatFxRequestFailure } from "../protocol/fx/diagnostics.js";
-import { buildInitialize, buildSessionNew, buildPrompt, buildCancel, buildPermissionDenied, buildFxMcpServers, withFxPlanModeInstructions, buildUnsupportedRequest, parseFxLine, toolOutput, unwrapFxMcpOutput, type FxSessionOptions } from "../protocol/fx/codec.js";
+import { buildInitialize, buildSessionNew, buildPrompt, buildCancel, buildPermissionDenied, withFxPlanModeInstructions, buildUnsupportedRequest, parseFxLine, toolOutput, unwrapFxMcpOutput, type FxSessionOptions } from "../protocol/fx/codec.js";
 import { FX_BINARY_NAME, FX_METHODS, FxInitializeResultSchema, FxNewResultSchema, FxPromptResultSchema } from "../protocol/fx/schema.js";
 import { normalizeFxTool } from "../protocol/fx/tool-mapping.js";
 
@@ -34,7 +34,6 @@ export class FxProvider implements AgentProvider {
   // Both modes start full-access: fx has no read-only mode. Plan is carried by
   // the per-prompt instructions (see flush), not by the process.
   buildSpawnConfig(_cwd: string, _mode: "plan" | "edit", _cross?: CrossRemoteMcpConfig, model?: string | null, _tools?: SessionToolsMcpConfig): SpawnConfig {
-    buildFxMcpServers({ cwd: _cwd, crossRemoteMcp: _cross, sessionToolsMcp: _tools });
     return buildFxSpawnConfig(this.detectBinary(), model);
   }
   onSessionCreated(id: string, mode: "plan" | "edit" = "edit") {

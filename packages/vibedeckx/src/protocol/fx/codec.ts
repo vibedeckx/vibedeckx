@@ -6,10 +6,6 @@ export interface FxSessionOptions { cwd: string; systemPrompt?: string; crossRem
 export function buildFxMcpServers(options: FxSessionOptions) {
   return ([['cross-remote', options.crossRemoteMcp], ['vibedeckx', options.sessionToolsMcp]] as const).flatMap(([name, config]) => {
     if (!config) return [];
-    const url = new URL(config.url);
-    if (url.username || url.password || !(url.protocol === 'https:' || (url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '[::1]' || /^127\./.test(url.hostname))))) {
-      throw new Error(`fx MCP ${name} requires HTTPS or a loopback HTTP URL.`);
-    }
     return [{ type: 'http' as const, name, url: config.url, headers: [{ name: 'Authorization', value: `Bearer ${config.token}` }] }];
   });
 }
