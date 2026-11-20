@@ -1,36 +1,44 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono, Instrument_Serif, Inter, JetBrains_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import { ClientProviders } from "@/components/auth/client-providers";
 import { ThemedToaster } from "@/components/auth/themed-toaster";
 import { CHUNK_RECOVERY_SCRIPT } from "@/lib/chunk-recovery";
 import "./globals.css";
 
-const geistSans = Geist({
+// Fonts are bundled (latin subset, from @fontsource) instead of loaded via
+// next/font/google: the Google variant downloads CSS at build time, and when
+// Google serves `/l/font?kit=…&skey=…` URLs Turbopack fails the build
+// ("next/font/google queries have exactly one entry"). See app/fonts/README.md.
+const geistSans = localFont({
+  src: "./fonts/geist-latin-wght-normal.woff2",
   variable: "--font-geist-sans",
-  subsets: ["latin"],
+  weight: "100 900",
 });
 
-const geistMono = Geist_Mono({
+const geistMono = localFont({
+  src: "./fonts/geist-mono-latin-wght-normal.woff2",
   variable: "--font-geist-mono",
-  subsets: ["latin"],
+  weight: "100 900",
 });
 
-const inter = Inter({
+const inter = localFont({
+  src: "./fonts/inter-latin-wght-normal.woff2",
   variable: "--font-inter",
-  subsets: ["latin"],
+  weight: "100 900",
 });
 
-const instrumentSerif = Instrument_Serif({
+const instrumentSerif = localFont({
+  src: [
+    { path: "./fonts/instrument-serif-latin-400-normal.woff2", weight: "400", style: "normal" },
+    { path: "./fonts/instrument-serif-latin-400-italic.woff2", weight: "400", style: "italic" },
+  ],
   variable: "--font-instrument-serif",
-  weight: ["400"],
-  style: ["normal", "italic"],
-  subsets: ["latin"],
 });
 
-const jetbrainsMono = JetBrains_Mono({
+const jetbrainsMono = localFont({
+  src: "./fonts/jetbrains-mono-latin-wght-normal.woff2",
   variable: "--font-jetbrains-mono",
-  weight: ["400", "500", "600"],
-  subsets: ["latin"],
+  weight: "100 800",
 });
 
 export const metadata: Metadata = {
