@@ -42,6 +42,8 @@ interface ModelPickerProps {
    * session) the next turn spawns a fresh process, so the pick is live.
    */
   locked: boolean;
+  /** Fired each time the panel opens, so the caller can revalidate `models`. */
+  onOpen?: () => void;
 }
 
 const DEFAULT_LABEL = "Default";
@@ -121,6 +123,7 @@ export function ModelPicker({
   value,
   onChange,
   locked,
+  onOpen,
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -192,7 +195,13 @@ export function ModelPicker({
   };
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) onOpen?.();
+      }}
+    >
       {/* Only once the label clips: otherwise the bubble just repeats the chip. */}
       <Hint label={clipped ? label : null}>
         <PopoverTrigger asChild>

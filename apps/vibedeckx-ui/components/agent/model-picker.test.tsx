@@ -116,6 +116,20 @@ describe("ModelPicker rendering", () => {
     expect(trigger!.textContent).toContain("Default");
   });
 
+  it("reports each open so the caller can revalidate its list, but not a close", async () => {
+    const onOpen = vi.fn();
+    await act(async () => {
+      root.render(<ModelPicker models={["opus"]} value={null} onChange={vi.fn()} locked={false} onOpen={onOpen} />);
+    });
+    const trigger = container.querySelector("button")!;
+    await act(async () => { trigger.click(); });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    await act(async () => { trigger.click(); });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    await act(async () => { trigger.click(); });
+    expect(onOpen).toHaveBeenCalledTimes(2);
+  });
+
   it("does not set a placeholder on the model search input", async () => {
     await act(async () => {
       root.render(

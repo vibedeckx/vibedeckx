@@ -73,6 +73,9 @@ export const WORKER_CAPABILITIES: Record<string, WorkerCapability> = {
   "http:POST /api/agent-sessions/:param/restart": { since: "0.2.0", summary: "重启会话进程" },
   "http:POST /api/agent-sessions/:param/agent-type": { since: "0.2.0", summary: "切换 agent 类型" },
   "http:POST /api/agent-sessions/:param/model": { since: "0.2.0", summary: "切换会话模型" },
+  // Additive: an older worker 404s it and the hub answers the static
+  // MODEL_SUGGESTIONS — exactly the picker the UI had before this route.
+  "http:GET /api/agent-providers/:param/models": { since: "0.3.61", summary: "本机 CLI 可用模型列表(fx models)" },
   // Additive: an older worker 404s it, and the UI degrades by hiding the
   // "keep running" button — that worker has no park deadline to defuse.
   "http:POST /api/agent-sessions/:param/background-tasks/:param/keep": { since: "0.3.28", summary: "为后台任务背书,免于超时收尾" },

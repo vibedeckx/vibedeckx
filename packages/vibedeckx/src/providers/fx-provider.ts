@@ -3,13 +3,16 @@ import type { ContentPart } from "../agent-types.js";
 import type { CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import type { SessionToolsMcpConfig } from "../session-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
-import { buildFxSpawnConfig } from "../protocol/fx/cli.js";
+import { execFile } from "child_process";
+import { buildFxModelsSpawnConfig, buildFxSpawnConfig, parseFxModelsResult } from "../protocol/fx/cli.js";
 import { formatFxRequestFailure } from "../protocol/fx/diagnostics.js";
 import { buildInitialize, buildSessionNew, buildPrompt, buildCancel, buildPermissionDenied, withFxPlanModeInstructions, buildUnsupportedRequest, parseFxLine, toolOutput, unwrapFxMcpOutput, type FxSessionOptions } from "../protocol/fx/codec.js";
 import { FX_BINARY_NAME, FX_METHODS, FxInitializeResultSchema, FxNewResultSchema, FxPromptResultSchema } from "../protocol/fx/schema.js";
 import { normalizeFxTool } from "../protocol/fx/tool-mapping.js";
 
 type Input = string | ContentPart[];
+/** `fx models` asks the provider over the network; ~1s normally. */
+const FX_MODELS_TIMEOUT_MS = 15_000;
 interface FxSessionState {
   nextId: number;
   pending: Map<string | number, string>;
@@ -35,6 +38,22 @@ export class FxProvider implements AgentProvider {
   // the per-prompt instructions (see flush), not by the process.
   buildSpawnConfig(_cwd: string, _mode: "plan" | "edit", _cross?: CrossRemoteMcpConfig, model?: string | null, _tools?: SessionToolsMcpConfig): SpawnConfig {
     return buildFxSpawnConfig(this.detectBinary(), model);
+  }
+  listModels(): Promise<string[]> {
+    const binary = this.detectBinary();
+    if (!binary) return Promise.reject(new Error("fx is not installed"));
+    const config = buildFxModelsSpawnConfig(binary);
+    return new Promise((resolve, reject) => {
+      execFile(config.command, config.args, {
+        env: { ...process.env, ...config.env },
+        timeout: FX_MODELS_TIMEOUT_MS,
+        maxBuffer: 4 * 1024 * 1024,
+        windowsHide: true,
+      }, (err, stdout) => {
+        if (err) return reject(err);
+        try { resolve(parseFxModelsResult(stdout)); } catch (parseErr) { reject(parseErr); }
+      });
+    });
   }
   onSessionCreated(id: string, mode: "plan" | "edit" = "edit") {
     this.sessions.set(id, { nextId: 1, pending: new Map(), nativeId: null, phase: "created", options: { cwd: process.cwd() }, mode, queue: [], promptId: null, tools: new Map() });

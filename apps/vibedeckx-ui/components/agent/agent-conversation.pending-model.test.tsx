@@ -171,6 +171,8 @@ vi.mock("@/hooks/use-marker-keyboard-nav", () => ({
 // Two agents so the header renders the agent DROPDOWN rather than a static
 // label — the pre-session branch of that dropdown is the second reset site.
 vi.mock("@/lib/api", () => ({
+  // Rejected → the picker keeps the static suggestions these tests assert on.
+  getAgentModels: vi.fn().mockRejectedValue(new Error("not under test")),
   getAgentProviders: vi.fn().mockResolvedValue([
     { type: "claude-code", displayName: "Claude Code", models: ["opus", "sonnet"] },
     { type: "codex", displayName: "Codex", models: ["gpt-5.6-sol"] },

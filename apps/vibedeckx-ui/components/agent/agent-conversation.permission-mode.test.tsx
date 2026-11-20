@@ -109,6 +109,8 @@ vi.mock("@/hooks/use-marker-keyboard-nav", () => ({
 }));
 
 vi.mock("@/lib/api", () => ({
+  // Rejected → the picker keeps the static suggestions these tests assert on.
+  getAgentModels: vi.fn().mockRejectedValue(new Error("not under test")),
   getAgentProviders: vi.fn().mockResolvedValue([
     { type: "claude-code", displayName: "Claude Code", models: ["opus"] },
   ]),

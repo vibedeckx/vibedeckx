@@ -1,5 +1,6 @@
 import type { SpawnConfig } from "../../agent-provider.js";
 import type { PipedRunSpec } from "../shared/piped-run.js";
+import { FxModelsResultSchema } from "./schema.js";
 
 export function buildFxSpawnConfig(binary: string | null, model?: string | null): SpawnConfig {
   // Process-local override (fx >= 0.0.17); global settings are untouched. The
@@ -68,4 +69,15 @@ export function buildFxAskRun(binary: string | null, prompt: string): PipedRunSp
       },
     },
   };
+}
+
+/** Lists the models this machine's fx login can use (see FxModelsResultSchema). */
+export function buildFxModelsSpawnConfig(binary: string | null): SpawnConfig {
+  return { command: binary ?? "fx", args: ["models", "--json"], env: { FX_AUTO_UPGRADE: "0" }, shell: false };
+}
+
+/** Model ids from `fx models --json` stdout, deduped and order-preserving. Throws on any other shape. */
+export function parseFxModelsResult(stdout: string): string[] {
+  const parsed = FxModelsResultSchema.parse(JSON.parse(stdout));
+  return [...new Set(parsed.ids.map((id) => id.trim()).filter(Boolean))];
 }

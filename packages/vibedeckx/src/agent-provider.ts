@@ -134,6 +134,14 @@ export interface AgentProvider {
    */
   formatStopBackgroundTask?(taskId: string, sessionId: string): string | null;
 
+  /**
+   * List the model names THIS machine's CLI install can use (optional). Only
+   * for CLIs whose catalog depends on the local login — e.g. fx, whose list
+   * follows the active provider. Rejects when the CLI is missing or answers
+   * unexpectedly; callers fall back to MODEL_SUGGESTIONS. Never a whitelist.
+   */
+  listModels?(): Promise<string[]>;
+
   /** Human-readable display name for this agent. */
   getDisplayName(): string;
 

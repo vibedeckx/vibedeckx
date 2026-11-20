@@ -39,6 +39,16 @@ export const FxPermissionParamsSchema = z.looseObject({
   sessionId: z.string(), toolCall: z.looseObject({ toolCallId: z.string() }),
   options: z.array(z.looseObject({ optionId: z.string(), kind: z.string() })),
 });
+/**
+ * `fx models --json` (fx >= 0.0.17). The list is whatever the machine's active
+ * provider (`fx provider`: Vercel AI Gateway, Codex or Grok subscription)
+ * offers this login, so it differs between machines.
+ */
+export const FxModelsResultSchema = z.looseObject({
+  kind: z.literal("models"),
+  ids: z.array(z.string()),
+});
+
 export const FX_CONTRACTS: ContractItem[] = [
   ["FX-RPC-envelope", FxEnvelopeSchema], ["FX-RESP-initialize", FxInitializeResultSchema],
   ["FX-RESP-new", FxNewResultSchema], ["FX-RESP-prompt", FxPromptResultSchema],

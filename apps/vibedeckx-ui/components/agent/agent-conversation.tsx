@@ -79,6 +79,7 @@ import { useAgentTabFocus } from "@/hooks/agent-tab-focus-context";
 import { useConversationSettings } from "@/hooks/use-conversation-settings";
 import type { Project, ExecutionMode, AgentType, AgentProviderInfo, WorkflowRun, Task } from "@/lib/api";
 import { getAgentProviders, translateText, branchAgentSession, sendAgentSessionMessage, api } from "@/lib/api";
+import { useMachineModels } from "@/hooks/use-machine-models";
 import { toast } from "sonner";
 import { UserInputMarkers } from "./user-input-markers";
 import { useMarkerKeyboardNav } from "@/hooks/use-marker-keyboard-nav";
@@ -524,6 +525,18 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   const onActiveSessionChangeRef = useRef(onActiveSessionChange);
   onActiveSessionChangeRef.current = onActiveSessionChange;
   useEffect(() => () => onActiveSessionChangeRef.current?.(null), []);
+
+  // The target machine's own catalog (fx: its provider login's models), shown
+  // once it arrives; the static suggestions stand in until then.
+  // widthCandidates stays on the static lists so the chip does not resize.
+  // An existing session lists on the machine it runs on (where a pick is sent),
+  // not on the project's current target, which may have been switched since.
+  const { models: machineModels, refresh: refreshMachineModels } = useMachineModels({
+    sessionId: session?.id ?? null,
+    projectId,
+    agentTarget: project?.agent_mode,
+    agentType,
+  });
 
   // Fetch supported agent providers on mount; installation is checked at spawn.
   useEffect(() => {
@@ -1544,7 +1557,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             </>
           )}
           <ModelPicker
-            models={providers.find((p) => p.type === agentType)?.models ?? []}
+            models={machineModels ?? providers.find((p) => p.type === agentType)?.models ?? []}
             widthCandidates={providers.flatMap((p) => p.models ?? [])}
             value={session ? (session.model ?? null) : pendingModel}
             // Before a session exists the pick is held locally and spent on
@@ -1556,6 +1569,7 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             // respawn-shaped change in this row: only a turn in flight on a
             // session that already has history is too late to change.
             locked={session != null && status === "running" && messages.length > 0}
+            onOpen={refreshMachineModels}
           />
           <PermissionModeToggle
             mode={permissionMode}

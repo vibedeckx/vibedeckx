@@ -1459,6 +1459,32 @@ export async function getAgentProviders(): Promise<AgentProviderInfo[]> {
   return data.providers;
 }
 
+/**
+ * The models the project's current agent target can use for one agent type —
+ * the machine's own CLI catalog when it has one (fx: `fx models`, which follows
+ * that machine's provider login), else the same static suggestions as
+ * `AgentProviderInfo.models`. Still not a whitelist.
+ */
+export interface MachineModelList {
+  models: string[];
+  source: "machine" | "suggestions";
+}
+
+/**
+ * Where to list models: an existing session's own machine (where a model change
+ * is sent), or — before a session exists — the project's current agent target.
+ */
+export type ModelListScope = { sessionId: string } | { projectId: string };
+
+export async function getAgentModels(scope: ModelListScope, agentType: AgentType): Promise<MachineModelList> {
+  const base = "sessionId" in scope
+    ? `/api/agent-sessions/${encodeURIComponent(scope.sessionId)}`
+    : `/api/projects/${encodeURIComponent(scope.projectId)}`;
+  const res = await authFetch(`${getApiBase()}${base}/agent-providers/${encodeURIComponent(agentType)}/models`);
+  if (!res.ok) throw new Error("Failed to load models");
+  return res.json();
+}
+
 // ---- Notification inbox ----
 // The server database is authoritative for both the list and the read state;
 // `notification:created` SSE is only a low-latency hint that a new row exists.

@@ -4,7 +4,8 @@ import fp from "fastify-plugin";
 import { DEFAULT_AGENT_TYPE, invalidAgentTypeMessage, isAgentType, resolveAgentType } from "../agent-types.js";
 import type { AgentMessage, AgentType, ContentPart } from "../agent-types.js";
 import { ConversationPatch } from "../conversation-patch.js";
-import { getAllProviders } from "../providers/index.js";
+import { getAllProviders, getProvider } from "../providers/index.js";
+import { listMachineModels, suggestedModelList, type MachineModelList } from "../machine-models.js";
 import { proxyStatus, proxyToRemoteAuto } from "../utils/remote-proxy.js";
 import { projectIdFromRemoteSessionId } from "./remote-status-bridge.js";
 import { requireAuth as requireRawAuth } from "../server.js";
@@ -408,6 +409,82 @@ const routes: FastifyPluginAsync = async (fastify) => {
     });
     return reply.code(200).send({ providers });
   });
+
+  // Machine-level: the models THIS machine's CLI install offers for one agent
+  // type (fx follows its active provider/login). Called by the hub over the
+  // tunnel for a remote project, and directly by the hub route below for a
+  // local one. Trusted-proxy auth, like the /api/path/* routes.
+  fastify.get<{ Params: { type: string } }>("/api/agent-providers/:type/models", async (req, reply) => {
+    if (requireRawAuth(req, reply) === null) return;
+    if (!isAgentType(req.params.type)) {
+      return reply.code(400).send({ error: invalidAgentTypeMessage(req.params.type) });
+    }
+    return reply.code(200).send(await listMachineModels(getProvider(req.params.type)));
+  });
+
+  // The model list for one execution target: this hub machine ("local") or a
+  // worker over the tunnel. Never fails: an old worker (404), an offline one,
+  // or a CLI error all degrade to the static suggestions, which is what the
+  // picker showed before.
+  async function modelsForTarget(target: string, type: AgentType): Promise<MachineModelList> {
+    if (target === "local") return listMachineModels(getProvider(type));
+    const result = await proxyAuto(target, "GET", `/api/agent-providers/${encodeURIComponent(type)}/models`);
+    const data = result.data as Partial<MachineModelList> | undefined;
+    if (result.ok && Array.isArray(data?.models) && data.models.every((m) => typeof m === "string")) {
+      return { models: data.models, source: data.source === "machine" ? "machine" : "suggestions" };
+    }
+    if (result.status !== 404) {
+      console.warn("[API] Remote model listing failed; using suggestions:", result.status);
+    }
+    return suggestedModelList(type);
+  }
+
+  // Before a session exists: the project's current agent target — the machine
+  // a new session would be spawned on.
+  fastify.get<{ Params: { projectId: string; type: string } }>(
+    "/api/projects/:projectId/agent-providers/:type/models",
+    async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const { type } = req.params;
+      if (!isAgentType(type)) {
+        return reply.code(400).send({ error: invalidAgentTypeMessage(type) });
+      }
+      const project = await fastify.storage.projects.getById(req.params.projectId, userId);
+      if (!project) {
+        return reply.code(404).send({ error: "Project not found" });
+      }
+      return reply.code(200).send(await modelsForTarget(project.agent_mode, type));
+    },
+  );
+
+  // An existing session: the machine it actually runs on, which is where
+  // POST /api/agent-sessions/:id/model sends the pick — NOT the project's
+  // current target, which the user may have switched since. Same ownership
+  // gates as that route.
+  fastify.get<{ Params: { sessionId: string; type: string } }>(
+    "/api/agent-sessions/:sessionId/agent-providers/:type/models",
+    async (req, reply) => {
+      const userId = requireAuth(req, reply);
+      if (userId === null) return;
+      const { type } = req.params;
+      if (!isAgentType(type)) {
+        return reply.code(400).send({ error: invalidAgentTypeMessage(type) });
+      }
+      if (req.params.sessionId.startsWith("remote-")) {
+        const remoteInfo = await getAuthorizedRemoteSessionInfo(req.params.sessionId, userId);
+        if (!remoteInfo) {
+          return reply.code(404).send({ error: "Remote session not found" });
+        }
+        return reply.code(200).send(await modelsForTarget(remoteInfo.remoteServerId, type));
+      }
+      const row = await fastify.storage.agentSessions.getById(req.params.sessionId);
+      if (!row || !(await fastify.storage.projects.getById(row.project_id, userId))) {
+        return reply.code(404).send({ error: "Session not found" });
+      }
+      return reply.code(200).send(await modelsForTarget("local", type));
+    },
+  );
 
   // Start agent session at a path (path-based, for remote execution)
   fastify.post<{

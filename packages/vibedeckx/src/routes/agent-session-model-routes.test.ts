@@ -18,6 +18,7 @@ vi.mock("../utils/remote-proxy.js", async (importOriginal) => {
 
 import { getProvider } from "../providers/index.js";
 import agentSessionRoutes from "./agent-session-routes.js";
+import { clearMachineModelCache } from "../machine-models.js";
 
 const SESSION_ID = "created-session";
 
@@ -113,6 +114,98 @@ describe("agent session model routes", () => {
         expect(provider).not.toHaveProperty("available");
       }
     } finally { detection.mockRestore(); }
+  });
+
+  describe("machine model listing", () => {
+    afterEach(() => { clearMachineModelCache(); vi.restoreAllMocks(); proxyToRemoteAuto.mockClear(); });
+
+    it("the machine route answers this machine's fx catalog", async () => {
+      vi.spyOn(getProvider("fx"), "listModels").mockResolvedValue(["anthropic/claude-opus-5.5", "openai/gpt-5.4-mini"]);
+      ({ app } = makeApp());
+      await app.register(agentSessionRoutes);
+      const res = await app.inject({ method: "GET", url: "/api/agent-providers/fx/models" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ models: ["anthropic/claude-opus-5.5", "openai/gpt-5.4-mini"], source: "machine" });
+    });
+
+    it("rejects an unknown agent type", async () => {
+      ({ app } = makeApp());
+      await app.register(agentSessionRoutes);
+      const res = await app.inject({ method: "GET", url: "/api/agent-providers/nope/models" });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it("a local project lists on the hub machine; claude-code keeps its suggestions", async () => {
+      vi.spyOn(getProvider("fx"), "listModels").mockResolvedValue(["x/local"]);
+      ({ app } = makeApp());
+      await app.register(agentSessionRoutes);
+      const fx = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models" });
+      expect(fx.json()).toEqual({ models: ["x/local"], source: "machine" });
+      const claude = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/claude-code/models" });
+      expect(claude.json()).toEqual({ models: ["opus", "sonnet", "haiku", "fable"], source: "suggestions" });
+      expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+    });
+
+    function remoteApp() {
+      const made = makeApp();
+      (made.app.storage.projects as { getById: unknown }).getById = async () => ({ id: "p1", path: null, agent_mode: "srv-1" });
+      return made;
+    }
+
+    it("a remote project asks the worker that would spawn the session", async () => {
+      proxyToRemoteAuto.mockResolvedValueOnce({ ok: true, status: 200, data: { models: ["y/remote"], source: "machine" } } as never);
+      ({ app } = remoteApp());
+      await app.register(agentSessionRoutes);
+      const res = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models" });
+      expect(res.json()).toEqual({ models: ["y/remote"], source: "machine" });
+      expect(proxyToRemoteAuto).toHaveBeenCalledWith("srv-1", "GET", "/api/agent-providers/fx/models", undefined, expect.anything());
+    });
+
+    it("an existing remote session lists on ITS worker, not the project's current target", async () => {
+      // Project target is srv-1, but the session was created on srvA — the
+      // model route sends the pick to srvA, so the list must come from srvA.
+      proxyToRemoteAuto.mockResolvedValueOnce({ ok: true, status: 200, data: { models: ["a/only-on-srvA"], source: "machine" } } as never);
+      ({ app } = remoteApp());
+      app.remoteSessionMap.set("remote-srvA-p1-rs1", { remoteServerId: "srvA", remoteSessionId: "rs1", branch: null });
+      await app.register(agentSessionRoutes);
+      const res = await app.inject({ method: "GET", url: "/api/agent-sessions/remote-srvA-p1-rs1/agent-providers/fx/models" });
+      expect(res.json()).toEqual({ models: ["a/only-on-srvA"], source: "machine" });
+      expect(proxyToRemoteAuto).toHaveBeenCalledWith("srvA", "GET", "/api/agent-providers/fx/models", undefined, expect.anything());
+    });
+
+    it("an existing local session lists on the hub even when the project now targets a worker", async () => {
+      vi.spyOn(getProvider("fx"), "listModels").mockResolvedValue(["x/hub"]);
+      ({ app } = remoteApp());
+      await app.register(agentSessionRoutes);
+      const res = await app.inject({ method: "GET", url: `/api/agent-sessions/${SESSION_ID}/agent-providers/fx/models` });
+      expect(res.json()).toEqual({ models: ["x/hub"], source: "machine" });
+      expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+    });
+
+    it("404s a session the caller cannot reach", async () => {
+      ({ app } = makeApp());
+      await app.register(agentSessionRoutes);
+      const remote = await app.inject({ method: "GET", url: "/api/agent-sessions/remote-srvX-p1-nope/agent-providers/fx/models" });
+      expect(remote.statusCode).toBe(404);
+      (app.storage.agentSessions as { getById: unknown }).getById = async () => undefined;
+      const local = await app.inject({ method: "GET", url: "/api/agent-sessions/missing/agent-providers/fx/models" });
+      expect(local.statusCode).toBe(404);
+      expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { ok: false, status: 404, data: { error: "Not Found" } },
+      { ok: false, status: 503, data: { error: "offline" } },
+      { ok: true, status: 200, data: { models: "junk" } },
+    ])("degrades to the suggestions when the worker cannot answer (%o)", async (reply) => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      proxyToRemoteAuto.mockResolvedValueOnce(reply as never);
+      ({ app } = remoteApp());
+      await app.register(agentSessionRoutes);
+      const res = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models" });
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toEqual({ models: ["spacexai/grok-4.7", "openai/gpt-5.4-mini"], source: "suggestions" });
+    });
   });
 
   it("passes the model into createNewSession and echoes it back", async () => {
