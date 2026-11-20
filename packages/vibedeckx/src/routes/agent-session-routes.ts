@@ -2092,7 +2092,7 @@ const routes: FastifyPluginAsync = async (fastify) => {
         return reply.code(proxyStatus(result)).send(result.data);
       }
 
-      const stopped = await fastify.agentSessionManager.stopSession(req.params.sessionId, { interruptOnly: true });
+      const stopped = await fastify.agentSessionManager.stopSession(req.params.sessionId);
       if (!stopped) {
         return reply.code(404).send({ error: "Session not found" });
       }

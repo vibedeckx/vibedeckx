@@ -53,13 +53,13 @@ describe("FxProvider lifecycle", () => {
     expect(third.params.prompt[0].text).toBe("three");
     expect(p.parseStdoutLine(response(third.id, { stopReason: "end_turn" }), "app")).toHaveLength(1);
   });
-  it("waits for cancelled response before sending post-Stop input, then remains usable", () => {
+  it("ends a cancelled prompt as an error result, then sends the queued input", () => {
     const p = new FxProvider(); ready(p);
     const first = JSON.parse(p.formatUserInput("one", "app"));
     expect(JSON.parse(p.formatInterrupt("app")!)).toEqual({ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "native" } });
     expect(p.formatUserInput("after stop", "app")).toBe("");
     const events = p.parseStdoutLine(response(first.id, { stopReason: "cancelled" }), "app");
-    expect(events[0]).toMatchObject({ type: "result", subtype: "cancelled" });
+    expect(events[0]).toMatchObject({ type: "result", subtype: "error", error: "fx stopped: cancelled" });
     expect(writes(events)[0].params.prompt[0].text).toBe("after stop");
   });
   it.each([3, "server-id"])("cancels unexpected approval id %s without opening a card or waiting for user input", serverId => {
@@ -119,7 +119,7 @@ describe("FxProvider lifecycle", () => {
     if (stopReason === "cancelled") p.formatInterrupt("app");
     const events = p.parseStdoutLine(stopReason === "error" ? JSON.stringify({ jsonrpc: "2.0", id: prompt.id, error: { code: -32000, message: "Failed" } }) : response(prompt.id, { stopReason }), "app");
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ type: "result", subtype: stopReason === "end_turn" ? "success" : stopReason });
+    expect(events[0]).toMatchObject({ type: "result", subtype: stopReason === "end_turn" ? "success" : "error" });
     expect(JSON.parse(p.formatUserInput("next", "app")).method).toBe("session/prompt");
   });
   it("preserves yielded shell identity and output across prompts and empty progress", () => {
@@ -174,14 +174,6 @@ describe("FxProvider lifecycle", () => {
     const p = new FxProvider();
     expect(p.parseStdoutLine(response(1, {}), "gone")).toEqual([]);
     expect(() => p.formatUserInput("oops", "gone")).toThrow(/not been created/);
-  });
-  it("reports queued messages discarded by Stop", () => {
-    const p = new FxProvider(); ready(p);
-    const prompt = JSON.parse(p.formatUserInput("go", "app"));
-    p.formatUserInput("queued", "app"); p.formatInterrupt("app");
-    const events = p.parseStdoutLine(response(prompt.id, { stopReason: "cancelled" }), "app");
-    expect(events).toEqual([{ type: "system", content: expect.stringContaining("1 queued message") }, expect.objectContaining({ type: "result", subtype: "cancelled" })]);
-    expect(writes(events)).toEqual([]);
   });
   it("fresh process/session state never reuses another native id or pending input", () => {
     const p = new FxProvider(); ready(p, "a", "native-a"); ready(p, "b", "native-b");

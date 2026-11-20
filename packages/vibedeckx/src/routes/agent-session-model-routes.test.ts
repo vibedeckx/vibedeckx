@@ -66,12 +66,12 @@ describe("agent session model routes", () => {
   let app: FastifyInstance;
   afterEach(async () => { await app?.close(); });
 
-  it("explicitly opts the user Stop route into process-preserving cancellation", async () => {
+  it("the user Stop route stops the session", async () => {
     ({ app } = makeApp());
     await app.register(agentSessionRoutes);
     const res = await app.inject({ method: "POST", url: `/api/agent-sessions/${SESSION_ID}/stop` });
     expect(res.statusCode).toBe(200);
-    expect(app.agentSessionManager.stopSession).toHaveBeenCalledWith(SESSION_ID, { interruptOnly: true });
+    expect(app.agentSessionManager.stopSession).toHaveBeenCalledWith(SESSION_ID);
   });
 
   it("GET /api/agent-providers returns a suggestion list per provider", async () => {

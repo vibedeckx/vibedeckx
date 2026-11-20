@@ -137,6 +137,12 @@ B 部分（替代方案研究：真正只读的 Plan、Windows 可行性、上�
 
 用户决定一次性执行器与定时任务和交互会话保持一致，`fx ask` 由 `--permission-mode auto` 改为 `full-access`（仍为单次请求参数，不改全局设置）。原因：auto 下用户配置里的显式 ask 规则会让无人值守运行以 `NonInteractivePermissionRequired` 失败（`docs/fx-acceptance/task8-auto-explicit-ask.json`）。新增 live 用例：真实 fx 0.0.17 + 合成模型 + `permission.bash["*"]="ask"`，按产品 argv 运行，shell 调用实际执行、exit_code 0；原 auto 用例保留为历史证据。真实模型的执行器 / 停止 / cron 用例复跑通过。fx 0.0.17 设置 schema 中 `sandbox` 标为 “No longer used; fx ignores it”，即 fx 无自带沙箱；公开文档 quickstart 已同步说明。
 
+## Stop 决策更新（2026-11-20）
+
+用户决定 fx 的 Stop 与 Claude Code / Codex 一致：发送 `session/cancel` 后直接终止进程，会话进入休眠，下一条消息重新握手并重放历史。原因：保活取消需要取消超时、二次 Stop 强杀、与 stdout 串行的计时器校验和独立的 `cancelled` 结果分支，只服务于 fx 一个场景，维护成本高于省下的一次重启与重放。
+
+已删除 `keepAliveOnInterrupt`、`interruptOnly`、`cancelGraceMs`、取消计时器、`cancelled` 结果子类型和“Stop 取消了 N 条排队消息”提示（排队消息已在历史中，随重放送达）。provider 若仍收到 `stopReason: cancelled`，按普通非 `end_turn` 结果处理。下文任务 4/5 中关于保活取消、同进程续问和取消后迟到报告沿用原卡片的记录是历史验证结果，不代表当前行为。
+
 ## 任务 6 产品接入（2026-11-16，fx 0.0.17）
 
 **代码已接入，本机真实 hub 调用通过；线上 hub / 授权远端完整验收尚未通过。用户于 2026-11-16 明确要求提交并关闭任务，按此决定收尾；关闭不代表下述待验收项已通过。**

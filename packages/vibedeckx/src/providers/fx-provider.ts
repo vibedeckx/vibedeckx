@@ -21,12 +21,10 @@ interface FxSessionState {
   queue: Input[];
   promptId: number | null;
   failure?: string;
-  discardedOnStop?: number;
   tools: Map<string, { name: string; input: unknown; meta?: unknown; content: unknown[]; emitted: boolean; completed: boolean; lastOutput?: string }>;
 }
 
 export class FxProvider implements AgentProvider {
-  readonly keepAliveOnInterrupt = true;
   readonly requiresExplicitTurnResult = true;
   private sessions = new Map<string, FxSessionState>();
   getAgentType() { return "fx" as const; }
@@ -80,8 +78,6 @@ export class FxProvider implements AgentProvider {
   formatInterrupt(id: string): string | null {
     const state = this.sessions.get(id);
     if (!state) return null;
-    state.discardedOnStop = (state.discardedOnStop ?? 0) + state.queue.length;
-    state.queue = [];
     if (!state.nativeId || state.promptId === null) return null;
     return buildCancel(state.nativeId);
   }
@@ -93,10 +89,6 @@ export class FxProvider implements AgentProvider {
     return [...(cancel ? [{ type: "stdin_write" as const, content: cancel }] : []), { type: "result", subtype: "error", error: message, restartRequired: true }];
   }
   private finishPrompt(state: FxSessionState, events: ParsedAgentEvent[]): ParsedAgentEvent[] {
-    if (state.discardedOnStop) {
-      events.unshift({ type: "system", content: `Stop cancelled ${state.discardedOnStop} queued message(s) before they were sent to fx. Resend them to continue.` });
-      state.discardedOnStop = 0;
-    }
     const content = this.flush(state);
     // Close the previous turn before opening the queued prompt.
     if (content) events.push({ type: "turn_started" }, { type: "stdin_write", content });
@@ -149,8 +141,8 @@ export class FxProvider implements AgentProvider {
         state.promptId = null;
         const { stopReason, usage } = result.data;
         const events: ParsedAgentEvent[] = [{
-          type: "result", subtype: stopReason === "end_turn" ? "success" : stopReason === "cancelled" ? "cancelled" : "error",
-          ...(stopReason !== "end_turn" && stopReason !== "cancelled" ? { error: `fx stopped: ${stopReason}` } : {}),
+          type: "result", subtype: stopReason === "end_turn" ? "success" : "error",
+          ...(stopReason !== "end_turn" ? { error: `fx stopped: ${stopReason}` } : {}),
           input_tokens: usage?.inputTokens, output_tokens: usage?.outputTokens,
         }];
         return this.finishPrompt(state, events);

@@ -127,7 +127,7 @@ describe.skipIf(!available)("fx live provider lifecycle", () => {
       write(child, p.formatUserInput("Use the shell tool to run: sleep 20; printf CANCEL_ME. Do not run any other commands.", "live"));
       await waitFor(() => results().length === 3);
       expect(toolWasCancelled).toBe(true);
-      expect(results()[2]).toMatchObject({ subtype: "cancelled" });
+      expect(results()[2]).toMatchObject({ subtype: "error", error: "fx stopped: cancelled" });
       write(child, p.formatUserInput("Reply only AFTER_CANCEL LIFECYCLE731.", "live"));
       await waitFor(() => results().length === 4);
       expect(results()[3].subtype).toBe("success");

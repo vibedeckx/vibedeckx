@@ -34,7 +34,7 @@ function replay(file: string, prefix = "task5") {
 describe("fx 0.0.17 tool recordings", () => {
   it.each(["task7", "task7-macos"])("replays %s full-access lifecycle recordings without adapting the handshake", (prefix) => {
     const first = replay("fx-lifecycle-1", prefix);
-    expect(first.events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["success", "success", "cancelled", "success", "success"]);
+    expect(first.events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["success", "success", "error", "success", "success"]);
     expect(first.events.some(e => e.type === "tool_result" && e.output.includes("FX_TOOL_OK"))).toBe(true);
     const second = replay("fx-lifecycle-2", prefix);
     expect(second.events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["success"]);
@@ -62,7 +62,7 @@ describe("fx 0.0.17 tool recordings", () => {
   });
   it("finishes cancelled shell, failed shell command and no-wait subagent turns", () => {
     const { events, resultsAt } = replay("shell-cancel-failure");
-    expect(events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["cancelled", "success", "success", "success"]);
+    expect(events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["error", "success", "success", "success"]);
     expect(events.some(e => e.type === "tool_result" && e.output.includes("FAILURE_OUTPUT"))).toBe(true);
     const report = events.findIndex(e => e.type === "tool_result" && e.output.includes("CHILD_NOWAIT_DONE"));
     expect(report).toBeGreaterThan(resultsAt[2]);
@@ -80,7 +80,7 @@ describe("fx 0.0.17 tool recordings", () => {
     expect(reports[1].output).toContain("Subagent report");
     expect(events.indexOf(reports[1])).toBeGreaterThan(resultsAt[0]);
     expect(events.indexOf(reports[1])).toBeLessThan(resultsAt[1]);
-    expect(events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["cancelled", "success", "success", "success"]);
+    expect(events.filter(e => e.type === "result").map(e => e.subtype)).toEqual(["error", "success", "success", "success"]);
     expect(events.some(e => e.type === "tool_use" && e.tool === "Bash" && (e.input as { action?: string }).action === "stop")).toBe(true);
   });
 });

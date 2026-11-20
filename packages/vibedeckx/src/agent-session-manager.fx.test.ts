@@ -19,16 +19,15 @@ const rl = require('node:readline').createInterface({ input: process.stdin });
 const send = x => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...x }) + '\n');
 let active, timer;
 const activeText = () => active?.params.prompt.map(p => p.text || '').join('');
-process.on('SIGTERM', () => { if (activeText() !== 'IGNORE_TERM') process.exit(0); });
+process.on('SIGTERM', () => process.exit(0));
 rl.on('line', line => {
  if (!line) return;
  const m = JSON.parse(line);
  fs.appendFileSync(process.env.FX_TEST_LOG, JSON.stringify({ ...m, pid: process.pid, model: process.env.FX_TEST_MODEL }) + '\n');
  if (m.method === 'initialize') send({ id: m.id, result: { protocolVersion: 1 } });
  if (m.method === 'session/new') send({ id: m.id, result: { sessionId: 'native-' + process.pid, modes: { currentModeId: 'full-access' } } });
- if (m.method === 'session/set_mode') send({ id: m.id, result: null });
  if (m.method === 'session/cancel' && active) {
-   if (activeText() === 'IGNORE_CANCEL' || activeText() === 'IGNORE_TERM') return;
+   if (activeText() === 'IGNORE_CANCEL') return;
    clearTimeout(timer); send({ id: active.id, result: { stopReason: activeText() === 'CANCEL_RACE' ? 'end_turn' : 'cancelled' } }); active = null;
  }
  if (m.id === 'approval' && m.result && active) { send({ id: active.id, result: { stopReason: 'end_turn' } }); active = null; }
@@ -41,12 +40,12 @@ rl.on('line', line => {
      for (const name of ['shell', 'subagent']) send({ method: 'session/update', params: { sessionId: m.params.sessionId, update: { sessionUpdate: 'tool_call', toolCallId: name, name, rawInput: { action: 'run', command: 'sleep 30' }, status: 'in_progress' } } });
      if (text === 'TOOLS_ERROR') { send({ id: m.id, error: { code: -32000, message: 'Failed with tools in progress' } }); active = null; return; }
    }
-   if (text === 'IGNORE_CANCEL' || text === 'IGNORE_TERM') return;
+   if (text === 'IGNORE_CANCEL') return;
    if (text === 'PROMPT_ERROR') { send({ id: m.id, error: { code: -32000, message: 'Rate limit' } }); active = null; return; }
    if (text === 'CRASH') { process.exit(1); }
    if (text === 'MALFORMED') { process.stdout.write('broken-json\n'); return; }
    timer = setTimeout(() => {
-     if (text === 'TOOLS_REPORT' || text === 'LATE_REPORT') {
+     if (text === 'TOOLS_REPORT') {
        for (const text of ['Sent to child', 'CHILD_DONE', 'CHILD_DONE']) send({ method: 'session/update', params: { sessionId: m.params.sessionId, update: { sessionUpdate: 'tool_call_update', toolCallId: 'subagent', status: 'completed', content: [{ type: 'content', content: { type: 'text', text } }] } } });
      }
      for (const [kind, text] of [['agent_thought_chunk', 'think '], ['agent_thought_chunk', 'more'], ['agent_message_chunk', 'ans'], ['agent_message_chunk', 'wer']]) {
@@ -162,7 +161,7 @@ describe("fx manager lifecycle", () => {
     const id = await newSession();
     await manager.sendUserMessage(id, scenario, dir);
     await waitFor(async () => (await entries(id)).filter(e => e.type === "tool_use").length === 2);
-    if (scenario === "TOOLS_CANCEL") await manager.stopSession(id, { interruptOnly: true });
+    if (scenario === "TOOLS_CANCEL") await manager.stopSession(id);
     await completed(id, 1);
     expect(manager.getSession(id)?.status).toBe("stopped");
     expect((await entries(id)).filter(e => e.type === "turn_end").map(e => e.outcome)).toEqual([scenario === "TOOLS_SUCCESS" ? "completed" : scenario === "TOOLS_CANCEL" ? "stopped" : "failed"]);
@@ -181,25 +180,7 @@ describe("fx manager lifecycle", () => {
     expect(manager.getSession(id)?.status).toBe("stopped");
   });
 
-  it("preserves the original tool cards in storage when reports arrive in the next turn after cancellation", async () => {
-    const id = await newSession();
-    await manager.sendUserMessage(id, "TOOLS_CANCEL", dir);
-    await waitFor(async () => (await entries(id)).filter(e => e.type === "tool_use").length === 2);
-    await manager.stopSession(id, { interruptOnly: true });
-    await completed(id, 1);
-    const originalCalls = (await entries(id)).filter(e => e.type === "tool_use");
-    await manager.sendUserMessage(id, "LATE_REPORT", dir);
-    await completed(id, 2);
-    const persisted = await entries(id);
-    expect(persisted.filter(e => e.type === "tool_use")).toEqual(originalCalls);
-    expect(persisted.filter(e => e.type === "tool_result")).toEqual([
-      expect.objectContaining({ tool: "Agent", toolUseId: "subagent", output: "CHILD_DONE" }),
-    ]);
-    expect(persisted.filter(e => e.type === "turn_end").map(e => e.outcome)).toEqual(["stopped", "completed"]);
-    expect(manager.getSession(id)?.status).toBe("stopped");
-  });
-
-  it("queues turns with distinct end markers, keeps Stop's process and permits a following turn", async () => {
+  it("queues turns with distinct end markers; Stop ends the process and a following turn starts a new one", async () => {
     const turnWrites = vi.spyOn(storage.agentSessions, "upsertTurnEndWithOutbox");
     const id = await newSession();
     await manager.sendUserMessage(id, "one", dir);
@@ -210,7 +191,13 @@ describe("fx manager lifecycle", () => {
     expect((await entries(id)).filter(e => e.type === "thinking").map(e => e.content)).toEqual(["think more", "think more"]);
     await manager.sendUserMessage(id, "HOLD", dir);
     await waitFor(() => wire().filter(m => m.method === "session/prompt").length === 3);
-    await manager.stopSession(id, { interruptOnly: true });
+    // The child may die from SIGTERM before it reads the cancel, so check the
+    // parent's write rather than the child's log.
+    const stoppedProc = manager.getSession(id)!.process!;
+    const stdinWrites = vi.spyOn(stoppedProc.stdin!, "write");
+    await manager.stopSession(id);
+    expect(stdinWrites.mock.calls.some(([chunk]) => String(chunk).includes('"session/cancel"'))).toBe(true);
+    await waitFor(() => stoppedProc.exitCode !== null || stoppedProc.signalCode !== null);
     await completed(id, 3);
     const stoppedEntries = await entries(id);
     expect(stoppedEntries.filter(e => e.type === "turn_end").map(e => e.outcome)).toEqual(["completed", "completed", "stopped"]);
@@ -220,11 +207,10 @@ describe("fx manager lifecycle", () => {
     expect(stoppedEntries.some(e => e.type === "system" && e.content === "Session stopped by user.")).toBe(true);
     await manager.sendUserMessage(id, "after cancel", dir);
     await completed(id, 4);
-    expect(new Set(wire().map(m => m.pid)).size).toBe(1);
-    expect(wire().some(m => m.method === "session/cancel")).toBe(true);
+    expect(new Set(wire().map(m => m.pid)).size).toBe(2);
     expect(manager.getSession(id)?.status).toBe("stopped");
   });
-  it.each([true, false])("mirrors stopped branch activity to remote subscribers (interruptOnly=%s)", async interruptOnly => {
+  it("mirrors stopped branch activity to remote subscribers", async () => {
     const id = await newSession();
     const frames: Array<{ branchActivity?: { activity: string; since: number } }> = [];
     const socket = { send: (raw: string) => frames.push(JSON.parse(raw)) } as unknown as Parameters<typeof manager.subscribe>[1];
@@ -232,13 +218,13 @@ describe("fx manager lifecycle", () => {
     try {
       await manager.sendUserMessage(id, "HOLD", dir);
       await waitFor(() => wire().some(m => m.method === "session/prompt"));
-      await manager.stopSession(id, { interruptOnly });
+      await manager.stopSession(id);
       await completed(id, 1);
       await waitFor(() => frames.some(frame => frame.branchActivity?.activity === "stopped"));
       const stopped = frames.filter(frame => frame.branchActivity?.activity === "stopped");
       expect(stopped).toHaveLength(1);
       expect(stopped[0].branchActivity?.since).toEqual(expect.any(Number));
-      expect(Boolean(manager.getSession(id)?.process)).toBe(interruptOnly);
+      expect(manager.getSession(id)?.process).toBeNull();
       expect((await entries(id)).filter(e => e.type === "turn_end").map(e => e.outcome)).toEqual(["stopped"]);
     } finally { unsubscribe?.(); }
   });
@@ -248,7 +234,7 @@ describe("fx manager lifecycle", () => {
     const id = await newSession();
     await manager.sendUserMessage(id, "CANCEL_RACE", dir);
     await waitFor(() => wire().some(m => m.method === "session/prompt"));
-    await manager.stopSession(id, { interruptOnly: true });
+    await manager.stopSession(id);
     await completed(id, 1);
     expect(writes).toHaveBeenCalledTimes(1);
     expect(JSON.parse(writes.mock.calls[0][0].entryData).outcome).toBe("stopped");
@@ -295,7 +281,7 @@ describe("fx manager lifecycle", () => {
     expect(await storage.agentSessions.getAll()).toHaveLength(1);
   });
 
-  it("ordinary stop without a note terminates fx instead of preserving its process", async () => {
+  it("Stop terminates the fx process even when cancel is not acknowledged", async () => {
     const id = await newSession();
     await manager.sendUserMessage(id, "IGNORE_CANCEL", dir);
     await waitFor(() => wire().some(m => m.method === "session/prompt"));
@@ -305,48 +291,6 @@ describe("fx manager lifecycle", () => {
     expect(manager.getSession(id)?.process).toBeNull();
     expect(manager.getSession(id)?.dormant).toBe(true);
     await completed(id, 1);
-  });
-
-  it("a second user Stop force-stops an unacknowledged cancel", async () => {
-    const id = await newSession();
-    await manager.sendUserMessage(id, "IGNORE_CANCEL", dir);
-    await waitFor(() => wire().some(m => m.method === "session/prompt"));
-    const proc = manager.getSession(id)!.process!;
-    await manager.stopSession(id, { interruptOnly: true });
-    expect(manager.getSession(id)?.process).toBe(proc);
-    await manager.stopSession(id, { interruptOnly: true });
-    expect(proc.exitCode !== null || proc.signalCode !== null).toBe(true);
-    expect(manager.getSession(id)?.interruptTimer).toBeUndefined();
-    await completed(id, 1);
-  });
-
-  it("times out a missing cancel response and escalates when SIGTERM is ignored", async () => {
-    const id = await newSession();
-    await manager.sendUserMessage(id, "IGNORE_TERM", dir);
-    await waitFor(() => wire().some(m => m.method === "session/prompt"));
-    const proc = manager.getSession(id)!.process!;
-    await manager.stopSession(id, { interruptOnly: true, cancelGraceMs: 30 });
-    await waitFor(() => proc.signalCode === "SIGKILL");
-    expect(manager.getSession(id)?.status).toBe("stopped");
-    expect((await entries(id)).some(e => e.type === "system" && e.content.includes("did not acknowledge"))).toBe(true);
-    await completed(id, 1);
-    await manager.sendUserMessage(id, "after timeout", dir); await completed(id, 2);
-  }, 10000);
-
-  it("retires the cancel deadline before starting a queued next turn on the same process", async () => {
-    const id = await newSession();
-    await manager.sendUserMessage(id, "HOLD", dir);
-    await waitFor(() => wire().filter(m => m.method === "session/prompt").length === 1);
-    const proc = manager.getSession(id)!.process!;
-    await manager.stopSession(id, { interruptOnly: true, cancelGraceMs: 500 });
-    await manager.sendUserMessage(id, "HOLD", dir);
-    await completed(id, 1);
-    await waitFor(() => wire().filter(m => m.method === "session/prompt").length === 2);
-    await new Promise(r => setTimeout(r, 600));
-    expect(manager.getSession(id)?.process).toBe(proc);
-    expect(manager.getSession(id)?.status).toBe("running");
-    expect(manager.getSession(id)?.interruptTimer).toBeUndefined();
-    await manager.stopSessionAndWait(id); await completed(id, 2);
   });
 
   it("hibernates and wakes through a fresh handshake with history exactly once; model changes survive replay", async () => {

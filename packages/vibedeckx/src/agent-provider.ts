@@ -34,7 +34,7 @@ export type ParsedAgentEvent =
   | { type: "thinking"; content: string; delta?: true }
   | { type: "system"; content: string }
   | { type: "error"; message: string }
-  | { type: "result"; subtype: "success" | "error" | "cancelled"; restartRequired?: true; error?: string; duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number }
+  | { type: "result"; subtype: "success" | "error"; restartRequired?: true; error?: string; duration_ms?: number; cost_usd?: number; input_tokens?: number; output_tokens?: number }
   // Background-task lifecycle (Claude Code `system/task_started` and
   // `system/task_notification` stream events). The session manager keeps a
   // per-session ledger of these so a `result` arriving while background tasks
@@ -119,9 +119,6 @@ export interface AgentProvider {
    * or null to fall back to SIGTERM.
    */
   formatInterrupt?(sessionId: string): string | null;
-
-  /** Cancel completes through the original prompt response; keep the connection alive. */
-  readonly keepAliveOnInterrupt?: boolean;
 
   /**
    * Format a "stop this one background task" message for stdin, or null when

@@ -252,8 +252,6 @@ interface RunningSession {
   checkoutPath: string | null;
   process: ChildProcess | null;
   dormant: boolean; // true when restored from DB (no process yet)
-  /** Deadline for a user-requested, process-preserving interrupt. */
-  interruptTimer?: NodeJS.Timeout;
   /**
    * How many operations are currently on their way to spawning a process for
    * this session — a wake, or a restart. Incremented SYNCHRONOUSLY before the
@@ -2041,7 +2039,6 @@ export class AgentSessionManager {
 
   /** Discard all turn-completion state (fresh spawn / stop / hibernate / agent switch). */
   private resetCompletion(session: RunningSession): void {
-    this.clearInterruptTimer(session);
     this.clearGraceTimer(session);
     session.completion.reset();
     this.syncParkTimer(session);
@@ -2488,8 +2485,6 @@ export class AgentSessionManager {
         break;
 
       case "result":
-        // Stop owns the disposition even if completion races the cancel RPC.
-        if (session.interruptTimer && !event.restartRequired) event = { ...event, subtype: "cancelled", error: undefined };
         console.log(`[Agent:result] sessionId=${sessionId} subtype=${event.subtype} prevStatus=${session.status}`);
         // Protocol-drift check: the model asked for background execution this
         // turn, but no task_started system event ever arrived. Most likely
@@ -2513,13 +2508,6 @@ export class AgentSessionManager {
             message: event.error,
             timestamp,
           }, true);
-        }
-
-        if (event.subtype === "cancelled") {
-          this.resetCompletion(session);
-          await this.pushEntry(sessionId, { type: "system", content: "Session stopped by user.", timestamp }, true);
-          await this.endActiveTurn(session, "stopped");
-          await this.publishStoppedStatus(session);
         }
 
         if (event.subtype === "error") {
@@ -2953,7 +2941,6 @@ export class AgentSessionManager {
     session: RunningSession,
     outcome: Exclude<TurnOutcome, "server_restart">,
   ): Promise<number | null> {
-    this.clearInterruptTimer(session);
     if (session.turnOpenSince === null) return null; // no turn in flight
     const endedAt = Date.now(); // single clock read: timestamp === end bound of durationMs
     const durationMs = endedAt - session.turnOpenSince;
@@ -3391,11 +3378,6 @@ export class AgentSessionManager {
     return session?.status === "running";
   }
 
-  private clearInterruptTimer(session: RunningSession): void {
-    if (session.interruptTimer) clearTimeout(session.interruptTimer);
-    session.interruptTimer = undefined;
-  }
-
   /** Publish Stop to local subscribers and mirror its activity to remote hubs. */
   private async publishStoppedStatus(session: RunningSession): Promise<void> {
     session.status = "stopped";
@@ -3431,13 +3413,10 @@ export class AgentSessionManager {
    * next user message will spawn a fresh process with full context replay.
    * The WebSocket stays alive so the UI remains connected.
    *
-   * Only the user Stop route opts into `interruptOnly`: capable providers may
-   * keep their process after cancelling the turn. A second Stop or a missing
-   * acknowledgement forces process termination instead.
    * `opts.note` overrides the system entry written into the conversation, for
    * stops the user did not press Stop for (e.g. the worktree being deleted).
    */
-  async stopSession(sessionId: string, opts?: { note?: string; interruptOnly?: boolean; cancelGraceMs?: number }): Promise<boolean> {
+  async stopSession(sessionId: string, opts?: { note?: string }): Promise<boolean> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       return false;
@@ -3445,31 +3424,14 @@ export class AgentSessionManager {
 
     try {
       const proc = session.process;
-      if (opts?.interruptOnly && session.interruptTimer) {
-        return await this.stopSessionAndWait(sessionId, { note: "Session force-stopped after repeated Stop." });
-      }
 
       // Try provider-specific interrupt first (e.g. turn/interrupt for Codex)
       const provider = getProvider(session.agentType);
       const interruptMsg = provider.formatInterrupt?.(sessionId);
       if (interruptMsg && proc?.stdin) {
         proc.stdin.write(interruptMsg);
-        if (provider.keepAliveOnInterrupt && opts?.interruptOnly) {
-          // Serialize the deadline with stdout so an acknowledgement already
-          // being processed can retire it before the next turn begins.
-          const timer = setTimeout(() => {
-            this.enqueueSessionWork(session, async () => {
-              if (session.interruptTimer !== timer || session.process !== proc) return;
-              await this.stopSessionAndWait(sessionId, { note: "Agent did not acknowledge cancellation; process stopped." });
-            }, "interrupt-timeout");
-          }, opts.cancelGraceMs ?? 5000);
-          session.interruptTimer = timer;
-          timer.unref();
-          return true;
-        }
       }
 
-      this.clearInterruptTimer(session);
       // Clear session.process before killing so the process close handler
       // (which checks session.process !== childProcess) skips its cleanup —
       // we handle status + broadcast here instead.
@@ -5022,7 +4984,6 @@ export class AgentSessionManager {
       try {
         getProvider(session.agentType).onSessionDestroyed?.(id);
       } catch { /* ignore - provider cleanup is best-effort */ }
-      this.clearInterruptTimer(session);
       this.clearGraceTimer(session);
       this.killProcess(session.process);
     }
