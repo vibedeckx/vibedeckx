@@ -6,7 +6,9 @@
 import type { SpawnConfig } from "../../agent-provider.js";
 import type { CrossRemoteMcpConfig } from "../../cross-remote-mcp-config.js";
 import { SESSION_TOOLS_MCP_SERVER_NAME, type SessionToolsMcpConfig } from "../../session-tools-mcp.js";
-import { CODEX_NPM_PACKAGE } from "./schema.js";
+import type { LineProbe } from "../shared/line-probe.js";
+import { CODEX_CLIENT_METHODS, CODEX_NPM_PACKAGE, CodexModelListResultSchema } from "./schema.js";
+import { buildInitialize } from "./codec.js";
 
 const CROSS_REMOTE_MCP_TOKEN_ENV = "VIBEDECKX_CROSS_REMOTE_MCP_TOKEN";
 const SESSION_TOOLS_MCP_TOKEN_ENV = "VIBEDECKX_SESSION_MCP_TOKEN";
@@ -69,4 +71,43 @@ export function buildCodexExecCommand(
   const lastMessageArg = outputLastMessageFile ? ` --output-last-message '${outputLastMessageFile}'` : "";
   const base = nativeBinary ?? `npx -y ${CODEX_NPM_PACKAGE}`;
   return `${base} --dangerously-bypass-approvals-and-sandbox exec '${escapedPrompt}'${lastMessageArg}`;
+}
+
+/** Upper bound on `model/list` pages, in case a server keeps returning cursors. */
+const MAX_MODEL_PAGES = 20;
+
+/**
+ * Lists the models this machine's codex login offers via app-server's
+ * `model/list`, following `nextCursor`. Hidden entries are dropped; the value
+ * is `model` (what `-c model=` takes), falling back to `id`.
+ */
+export function buildCodexModelsProbe(nativeBinary: string | null, timeoutMs: number): { config: SpawnConfig; probe: LineProbe<string[]> } {
+  const config = nativeBinary
+    ? { command: nativeBinary, args: ["app-server"], shell: false }
+    : { command: "npx", args: ["-y", CODEX_NPM_PACKAGE, "app-server"], shell: false };
+  const rpc = (payload: Record<string, unknown>) => JSON.stringify({ jsonrpc: "2.0", ...payload }) + "\n";
+  const listRequest = (id: number, cursor?: string) =>
+    rpc({ id, method: CODEX_CLIENT_METHODS.modelList, params: cursor ? { cursor } : {} });
+  const models: string[] = [];
+  let page = 1;
+  return {
+    config,
+    probe: {
+      initial: [buildInitialize(1), rpc({ method: "initialized" }), listRequest(100 + page)],
+      onLine: (line) => {
+        let value: { id?: unknown; result?: unknown; error?: { message?: string } };
+        try { value = JSON.parse(line); } catch { return; }
+        if (value?.id !== 100 + page) return;
+        if (value.error) throw new Error(`model/list failed: ${value.error.message ?? "unknown error"}`);
+        const result = CodexModelListResultSchema.parse(value.result);
+        for (const m of result.data) if (!m.hidden) models.push((m.model ?? m.id).trim());
+        if (result.nextCursor && page < MAX_MODEL_PAGES) {
+          page += 1;
+          return { write: listRequest(100 + page, result.nextCursor) };
+        }
+        return { done: [...new Set(models.filter(Boolean))] };
+      },
+      timeoutMs,
+    },
+  };
 }

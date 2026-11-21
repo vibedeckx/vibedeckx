@@ -135,10 +135,11 @@ export interface AgentProvider {
   formatStopBackgroundTask?(taskId: string, sessionId: string): string | null;
 
   /**
-   * List the model names THIS machine's CLI install can use (optional). Only
-   * for CLIs whose catalog depends on the local login — e.g. fx, whose list
-   * follows the active provider. Rejects when the CLI is missing or answers
-   * unexpectedly; callers fall back to MODEL_SUGGESTIONS. Never a whitelist.
+   * List the model names THIS machine's CLI install can use (optional) — the
+   * catalog depends on the local login (fx: `fx models`; Claude Code: the
+   * `initialize` handshake's `models`; Codex: app-server `model/list`).
+   * Rejects when the CLI is missing or answers unexpectedly; callers fall
+   * back to MODEL_SUGGESTIONS. Never a whitelist.
    */
   listModels?(): Promise<string[]>;
 

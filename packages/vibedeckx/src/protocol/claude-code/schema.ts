@@ -206,3 +206,19 @@ export const CLAUDE_CONTRACTS: ContractItem[] = [
   { id: "CC-OUT-result", schema: ClaudeResultMessageSchema, consumers: ["src/providers/claude-code-provider.ts parseStdoutLine", "src/process-manager.ts startClaudeStreamProcess"] },
   { id: "CC-OUT-content_blocks", schema: ClaudeContentBlockSchema, consumers: ["src/providers/claude-code-provider.ts parseStdoutLine", "apps/vibedeckx-ui/components/agent/agent-message.tsx"] },
 ];
+
+/**
+ * The `models` field of the `initialize` control_response (Claude Code
+ * 2.1.x) — what the Agent SDK's supportedModels() reads. Aliases ("opus") and
+ * full ids, already filtered to what this machine's account can use.
+ */
+export const ClaudeInitializeModelsSchema = z.looseObject({
+  type: z.literal("control_response"),
+  response: z.looseObject({
+    subtype: z.literal("success"),
+    request_id: z.string(),
+    response: z.looseObject({
+      models: z.array(z.looseObject({ value: z.string() })),
+    }),
+  }),
+});

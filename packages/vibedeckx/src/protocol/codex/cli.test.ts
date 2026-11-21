@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCodexAppServerSpawnConfig, buildCodexExecCommand } from "./cli.js";
+import { buildCodexAppServerSpawnConfig, buildCodexExecCommand, buildCodexModelsProbe } from "./cli.js";
 
 describe("codex CLI builders", () => {
   it("builds app-server spawn config for a native binary", () => {
@@ -150,5 +150,33 @@ describe("codex CLI builders", () => {
       "-c",
       'model="we\\"ird"',
     ]);
+  });
+});
+
+describe("codex models probe", () => {
+  const page = (id: number, data: unknown[], nextCursor: string | null = null) => JSON.stringify({ id, result: { data, nextCursor } });
+
+  it("starts app-server and sends initialize, initialized and the first model/list", () => {
+    const { config, probe } = buildCodexModelsProbe("/bin/codex", 5000);
+    expect(config).toEqual({ command: "/bin/codex", args: ["app-server"], shell: false });
+    expect(probe.initial.map((l) => JSON.parse(l))).toEqual([
+      expect.objectContaining({ id: 1, method: "initialize" }),
+      { jsonrpc: "2.0", method: "initialized" },
+      { jsonrpc: "2.0", id: 101, method: "model/list", params: {} },
+    ]);
+  });
+
+  it("follows nextCursor, drops hidden models and prefers `model` over `id` (0.170.0 shape)", () => {
+    const { probe } = buildCodexModelsProbe("/bin/codex", 5000);
+    expect(probe.onLine(JSON.stringify({ id: 1, result: { userAgent: "x" } }))).toBeUndefined();
+    const next = probe.onLine(page(101, [{ id: "gpt-6.2-sol", model: "gpt-6.2-sol", hidden: false }, { id: "internal", hidden: true }], "c2"));
+    expect(next && "write" in next && JSON.parse(next.write)).toEqual({ jsonrpc: "2.0", id: 102, method: "model/list", params: { cursor: "c2" } });
+    expect(probe.onLine(page(101, [{ id: "stale-page" }]))).toBeUndefined();
+    expect(probe.onLine(page(102, [{ id: "gpt-5.6-luna" }, { id: "gpt-6.2-sol" }]))).toEqual({ done: ["gpt-6.2-sol", "gpt-5.6-luna"] });
+  });
+
+  it("fails on a model/list error", () => {
+    const { probe } = buildCodexModelsProbe("/bin/codex", 5000);
+    expect(() => probe.onLine(JSON.stringify({ id: 101, error: { code: -32601, message: "Method not found" } }))).toThrow(/Method not found/);
   });
 });

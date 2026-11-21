@@ -6,8 +6,8 @@ import { MODEL_SUGGESTIONS } from "./protocol/model-suggestions.js";
  * The model list the composer's picker offers for one agent type on THIS
  * machine — the one that would spawn the session.
  *
- * `source: "machine"` is the CLI's own catalog for this machine's login (fx:
- * `fx models`, which follows the active provider). `source: "suggestions"` is
+ * `source: "machine"` is the CLI's own catalog for this machine's login (see
+ * AgentProvider.listModels: fx, Claude Code and Codex each have one). `source: "suggestions"` is
  * the static MODEL_SUGGESTIONS fallback: the provider has no listing, the CLI
  * is missing, or it failed. Neither is a whitelist — the picker still accepts
  * free text.
@@ -17,7 +17,7 @@ export interface MachineModelList {
   source: "machine" | "suggestions";
 }
 
-/** A login/provider switch shows up within this long; `fx models` costs a network round-trip. */
+/** A login/provider switch shows up within this long; each listing spawns the CLI. */
 const CACHE_TTL_MS = 5 * 60 * 1000;
 /** A failure is retried sooner, so a transient network error does not pin the fallback. */
 const FAILURE_TTL_MS = 30 * 1000;

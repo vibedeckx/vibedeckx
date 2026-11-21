@@ -3,7 +3,8 @@
  * one-shot stream-json executor mode, and -p print mode.
  */
 import type { SpawnConfig } from "../../agent-provider.js";
-import { CLAUDE_NPM_PACKAGE } from "./schema.js";
+import type { LineProbe } from "../shared/line-probe.js";
+import { CLAUDE_NPM_PACKAGE, ClaudeInitializeModelsSchema } from "./schema.js";
 
 const STREAM_JSON_ARGS = ["--output-format=stream-json", "--input-format=stream-json"] as const;
 
@@ -103,4 +104,30 @@ export function buildClaudePrintCommand(nativeBinary: string | null, prompt: str
   const escapedPrompt = prompt.replace(/'/g, "'\\''");
   const base = nativeBinary ?? `npx -y ${CLAUDE_NPM_PACKAGE}`;
   return `${base} -p '${escapedPrompt}' --dangerously-skip-permissions --verbose`;
+}
+
+const MODELS_REQUEST_ID = "vibedeckx-models";
+
+/**
+ * Reads the model catalog from the `initialize` control handshake: no prompt
+ * is sent, so no model is called. "default" is dropped — the picker's own
+ * Default (no --model) already means the same thing.
+ */
+export function buildClaudeModelsProbe(nativeBinary: string | null, timeoutMs: number): { config: SpawnConfig; probe: LineProbe<string[]> } {
+  return {
+    config: withNpxFallback(nativeBinary, [...STREAM_JSON_ARGS, "--verbose"]),
+    probe: {
+      initial: [JSON.stringify({ type: "control_request", request_id: MODELS_REQUEST_ID, request: { subtype: "initialize" } }) + "\n"],
+      onLine: (line) => {
+        let value: unknown;
+        try { value = JSON.parse(line); } catch { return; }
+        if ((value as { type?: unknown })?.type !== "control_response") return;
+        const parsed = ClaudeInitializeModelsSchema.parse(value);
+        if (parsed.response.request_id !== MODELS_REQUEST_ID) return;
+        const models = parsed.response.response.models.map((m) => m.value.trim()).filter((m) => m && m !== "default");
+        return { done: [...new Set(models)] };
+      },
+      timeoutMs,
+    },
+  };
 }

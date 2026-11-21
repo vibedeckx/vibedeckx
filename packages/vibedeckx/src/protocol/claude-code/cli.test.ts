@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildClaudeMcpConfigArg,
+  buildClaudeModelsProbe,
   buildClaudePrintCommand,
   buildClaudeSessionSpawnConfig,
   buildClaudeStreamExecutorSpawn,
@@ -160,5 +161,36 @@ describe("claude CLI builders", () => {
       "--mcp-config",
       '{"mcpServers":{}}',
     ]);
+  });
+});
+
+describe("claude models probe", () => {
+  const response = (models: unknown[], requestId = "vibedeckx-models") => JSON.stringify({
+    type: "control_response",
+    response: { subtype: "success", request_id: requestId, response: { commands: [], models } },
+  });
+
+  it("spawns stream-json without a prompt and sends only the initialize control request", () => {
+    const { config, probe } = buildClaudeModelsProbe("/bin/claude", 5000);
+    expect(config).toEqual({ command: "/bin/claude", args: ["--output-format=stream-json", "--input-format=stream-json", "--verbose"] });
+    expect(probe.initial.map((l) => JSON.parse(l))).toEqual([
+      { type: "control_request", request_id: "vibedeckx-models", request: { subtype: "initialize" } },
+    ]);
+  });
+
+  it("answers the model values minus 'default', deduped (2.1.325 shape)", () => {
+    const { probe } = buildClaudeModelsProbe(null, 5000);
+    expect(probe.onLine('{"type":"system","subtype":"hook"}')).toBeUndefined();
+    expect(probe.onLine("not json")).toBeUndefined();
+    expect(probe.onLine(response([{ value: "x" }], "other-request"))).toBeUndefined();
+    expect(probe.onLine(response([
+      { value: "default", resolvedModel: "claude-opus-5-5", displayName: "Default (recommended)" },
+      { value: "opus" }, { value: "claude-opus-5" }, { value: "opus" },
+    ]))).toEqual({ done: ["opus", "claude-opus-5"] });
+  });
+
+  it("fails on a control_response without a models list", () => {
+    const { probe } = buildClaudeModelsProbe(null, 5000);
+    expect(() => probe.onLine(JSON.stringify({ type: "control_response", response: { subtype: "error", request_id: "vibedeckx-models" } }))).toThrow();
   });
 });

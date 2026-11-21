@@ -135,15 +135,28 @@ describe("agent session model routes", () => {
       expect(res.statusCode).toBe(400);
     });
 
-    it("a local project lists on the hub machine; claude-code keeps its suggestions", async () => {
+    it("a local project lists on the hub machine, for every agent type", async () => {
       vi.spyOn(getProvider("fx"), "listModels").mockResolvedValue(["x/local"]);
+      vi.spyOn(getProvider("claude-code"), "listModels").mockResolvedValue(["opus", "claude-opus-5"]);
+      vi.spyOn(getProvider("codex"), "listModels").mockResolvedValue(["gpt-6.2-sol"]);
       ({ app } = makeApp());
       await app.register(agentSessionRoutes);
       const fx = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models" });
       expect(fx.json()).toEqual({ models: ["x/local"], source: "machine" });
       const claude = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/claude-code/models" });
-      expect(claude.json()).toEqual({ models: ["opus", "sonnet", "haiku", "fable"], source: "suggestions" });
+      expect(claude.json()).toEqual({ models: ["opus", "claude-opus-5"], source: "machine" });
+      const codex = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/codex/models" });
+      expect(codex.json()).toEqual({ models: ["gpt-6.2-sol"], source: "machine" });
       expect(proxyToRemoteAuto).not.toHaveBeenCalled();
+    });
+
+    it("a CLI that cannot list falls back to that agent's suggestions", async () => {
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      vi.spyOn(getProvider("claude-code"), "listModels").mockRejectedValue(new Error("claude is not installed"));
+      ({ app } = makeApp());
+      await app.register(agentSessionRoutes);
+      const claude = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/claude-code/models" });
+      expect(claude.json()).toEqual({ models: ["opus", "sonnet", "haiku", "fable"], source: "suggestions" });
     });
 
     function remoteApp() {

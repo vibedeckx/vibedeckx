@@ -10,10 +10,12 @@ import {
   type SessionToolsMcpConfig,
 } from "../session-tools-mcp.js";
 import { detectBinary } from "../protocol/shared/binary.js";
+import { runLineProbe } from "../protocol/shared/line-probe.js";
 import { parseClaudeLine, serializeUserInput, extractImageToolResults } from "../protocol/claude-code/codec.js";
 import {
   buildClaudeMcpConfigArg,
   buildClaudeSessionSpawnConfig,
+  buildClaudeModelsProbe,
   type ClaudeHttpMcpServer,
 } from "../protocol/claude-code/cli.js";
 import {
@@ -26,6 +28,9 @@ import {
   TERMINAL_TASK_STATUSES,
 } from "../protocol/claude-code/schema.js";
 
+/** Spawn + handshake; ~1–3 s normally. */
+const MODELS_PROBE_TIMEOUT_MS = 20_000;
+
 export class ClaudeCodeProvider implements AgentProvider {
   getAgentType(): AgentType {
     return "claude-code";
@@ -37,6 +42,18 @@ export class ClaudeCodeProvider implements AgentProvider {
 
   getInstallHint(): string {
     return "Claude Code doesn't seem to be installed. Install it with `npm i -g @anthropic-ai/claude-code`, or make sure the `claude` binary is on your PATH. (It also runs via `npx`, which requires network access on first use.)";
+  }
+
+  /**
+   * This machine's catalog over the CLI's own handshake (no prompt sent).
+   * Native binary only: an npx fallback would download the package on a
+   * picker open, so a missing binary answers the static suggestions instead.
+   */
+  listModels(): Promise<string[]> {
+    const binary = this.detectBinary();
+    if (!binary) return Promise.reject(new Error("claude is not installed"));
+    const { config, probe } = buildClaudeModelsProbe(binary, MODELS_PROBE_TIMEOUT_MS);
+    return runLineProbe(config, probe);
   }
 
   detectBinary(): string | null {

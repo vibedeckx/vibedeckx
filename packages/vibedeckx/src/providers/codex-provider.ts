@@ -4,6 +4,7 @@ import type { CrossRemoteMcpConfig } from "../cross-remote-mcp-config.js";
 import { canonicalizeSessionToolName, type SessionToolsMcpConfig } from "../session-tools-mcp.js";
 import { qualifiedMcpToolName } from "../protocol/mcp/tool-names.js";
 import { detectBinary } from "../protocol/shared/binary.js";
+import { runLineProbe } from "../protocol/shared/line-probe.js";
 import {
   buildApprovalResponse,
   buildInitialize,
@@ -12,7 +13,7 @@ import {
   buildTurnStart,
   parseCodexLine,
 } from "../protocol/codex/codec.js";
-import { buildCodexAppServerSpawnConfig } from "../protocol/codex/cli.js";
+import { buildCodexAppServerSpawnConfig, buildCodexModelsProbe } from "../protocol/codex/cli.js";
 import {
   CODEX_BINARY_NAME,
   CODEX_CLIENT_METHODS,
@@ -89,6 +90,9 @@ interface CodexSessionState {
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+/** Spawn + handshake; ~1–3 s normally. */
+const MODELS_PROBE_TIMEOUT_MS = 20_000;
+
 export class CodexProvider implements AgentProvider {
   private sessions = new Map<string, CodexSessionState>();
   private static idCounter = 0;
@@ -104,6 +108,18 @@ export class CodexProvider implements AgentProvider {
 
   getInstallHint(): string {
     return "Codex doesn't seem to be installed. Install it with `npm i -g @openai/codex`, or make sure the `codex` binary is on your PATH. (It also runs via `npx`, which requires network access on first use.)";
+  }
+
+  /**
+   * This machine's catalog over the CLI's own handshake (no prompt sent).
+   * Native binary only: an npx fallback would download the package on a
+   * picker open, so a missing binary answers the static suggestions instead.
+   */
+  listModels(): Promise<string[]> {
+    const binary = this.detectBinary();
+    if (!binary) return Promise.reject(new Error("codex is not installed"));
+    const { config, probe } = buildCodexModelsProbe(binary, MODELS_PROBE_TIMEOUT_MS);
+    return runLineProbe(config, probe);
   }
 
   detectBinary(): string | null {

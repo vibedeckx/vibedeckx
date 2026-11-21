@@ -23,6 +23,9 @@ export const CODEX_CLIENT_METHODS = {
   // request, `turn/interrupt` with params `{ threadId, turnId }` (turn UUID,
   // not the JSON-RPC id), per `codex app-server generate-json-schema`.
   turnInterrupt: "turn/interrupt",
+  // Catalog for this machine's login, paginated by `cursor`/`nextCursor`
+  // (verified live, 0.170.0).
+  modelList: "model/list",
 } as const;
 
 export const CODEX_NOTIFICATIONS = {
@@ -242,3 +245,9 @@ export const CODEX_CONTRACTS: ContractItem[] = [
   { id: "CX-REQ-file_change_approval", schema: FileChangeApprovalParamsSchema, consumers: ["src/providers/codex-provider.ts handleServerRequest"] },
   { id: "CX-REQ-user_input", schema: UserInputParamsSchema, consumers: ["src/providers/codex-provider.ts handleServerRequest", "apps/vibedeckx-ui/components/agent/ask-user-question.tsx"] },
 ];
+
+/** `model/list` result page (codex app-server 0.170.0). */
+export const CodexModelListResultSchema = z.looseObject({
+  data: z.array(z.looseObject({ id: z.string(), model: z.string().optional(), hidden: z.boolean().optional() })),
+  nextCursor: z.string().nullable().optional(),
+});
