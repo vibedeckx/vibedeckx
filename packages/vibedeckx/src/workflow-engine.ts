@@ -276,7 +276,7 @@ const VERDICT_INSTRUCTIONS = [
   "Both halves matter equally: solve real problems, and do not over-engineer.",
   "Return the complete review in your final response. Do not create a plan file, ask to start implementation, or replace the verdict with a reference to an earlier message or file.",
   "\nEnd your final message with:",
-  "1. Verdict — exactly one of: ship / needs-changes / cannot-verify. Use cannot-verify when you could not gather enough evidence to judge, rather than guessing.",
+  "1. Verdict — exactly one of: ship / needs-changes / cannot-verify, alone on its own line (e.g. `Verdict: ship`). Use cannot-verify when you could not gather enough evidence to judge, rather than guessing.",
   "2. Blocking findings — what must change before shipping, each specific and actionable (say explicitly when there are none).",
   "3. Non-blocking notes — style and polish, briefly, clearly separated from the blocking list.",
 ] as const;

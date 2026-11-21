@@ -27,6 +27,10 @@ function bareValue(line: string): string {
  * values is `null`, which the workflow treats like `cannot-verify`: the human
  * decides. The cost of a false `null` is one click; a false `ship` ends a loop.
  *
+ * One relaxation: the value may be followed by further sentences on the same
+ * line (`Verdict: ship. No blocking findings.`) — a full stop right after it
+ * closes the value; anything else after it still makes the line unreadable.
+ *
  * The LAST line mentioning "verdict" wins (a review may discuss verdicts
  * before giving one). If that line carries only the label, the value is taken
  * from the next non-empty line, under the same exact-match rule.
@@ -46,7 +50,14 @@ export function parseVerdict(text: string | null | undefined): WorkflowVerdict |
     if (next === undefined) return null;
     value = bareValue(next);
   }
-  return (VERDICTS as readonly string[]).includes(value) ? (value as WorkflowVerdict) : null;
+  if ((VERDICTS as readonly string[]).includes(value)) return value as WorkflowVerdict;
+  // `**Verdict — ship.** No blocking findings. …` (2026-11-21 live run): the
+  // value is a complete sentence and the rest of the line is a separate one.
+  // Only a FULL STOP ends the value — a comma, dash, slash or parenthesis
+  // continues it (`ship (with notes)`, `needs-changes, but close`), and a
+  // value that does not START the line (`do not ship.`) never matches.
+  const sentence = /^(ship|needs-changes|cannot-verify)(?:[.!]\s|[。！])/.exec(value);
+  return sentence ? (sentence[1] as WorkflowVerdict) : null;
 }
 
 // ---------- repeat-loop closing fields ----------

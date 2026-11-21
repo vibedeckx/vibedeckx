@@ -31,6 +31,19 @@ describe("parseVerdict", () => {
     expect(parseVerdict("**1. Verdict — do not ship**")).toBeNull();
   });
 
+  it("reads a value that ends its own sentence, with more prose after it on the line", () => {
+    // 2026-11-21 live run: the whole closing verdict as one bold sentence.
+    expect(parseVerdict("**Verdict — ship.** No blocking findings. The change is small, the constants are documented.")).toBe("ship");
+    expect(parseVerdict("Verdict: needs-changes. See the blocking list below.")).toBe("needs-changes");
+    expect(parseVerdict("1. Verdict: cannot-verify! Tests could not run.")).toBe("cannot-verify");
+    expect(parseVerdict("1. **Verdict：** ship。没有阻塞问题。")).toBe("ship");
+    // The full stop must follow the value directly, and the value must open the line.
+    expect(parseVerdict("Verdict: do not ship. Too risky.")).toBeNull();
+    expect(parseVerdict("Verdict: ship it. Looks good.")).toBeNull();
+    expect(parseVerdict("Verdict: ship — once the race is fixed. Otherwise fine.")).toBeNull();
+    expect(parseVerdict("Verdict: shipping.")).toBeNull();
+  });
+
   it("refuses the option list echoed back", () => {
     expect(parseVerdict("1. Verdict — exactly one of: ship / needs-changes / cannot-verify")).toBeNull();
     expect(parseVerdict("Verdict: ship / needs-changes")).toBeNull();
