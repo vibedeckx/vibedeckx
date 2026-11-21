@@ -1,7 +1,7 @@
 "use client";
 
 import { useLayoutEffect, useRef, useState } from "react";
-import { ChevronDown, Info } from "lucide-react";
+import { ChevronDown, Info, RefreshCw } from "lucide-react";
 import {
   Command,
   CommandEmpty,
@@ -44,6 +44,14 @@ interface ModelPickerProps {
   locked: boolean;
   /** Fired each time the panel opens, so the caller can revalidate `models`. */
   onOpen?: () => void;
+  /**
+   * Re-reads the list from the machine's CLI. The list is cached and rarely
+   * changes, so this is the user's way to pick up a CLI upgrade or a login
+   * switch. No button without it.
+   */
+  onRefresh?: () => void;
+  /** A refresh is in flight: the button spins and is disabled. */
+  refreshing?: boolean;
 }
 
 const DEFAULT_LABEL = "Default";
@@ -124,6 +132,8 @@ export function ModelPicker({
   onChange,
   locked,
   onOpen,
+  onRefresh,
+  refreshing = false,
 }: ModelPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -305,6 +315,21 @@ export function ModelPicker({
             )}
           </CommandList>
         </Command>
+        {onRefresh && (
+          // Outside the Command: a CommandItem would be filtered by the query
+          // and picked by Enter, and this is neither a model nor a choice.
+          <div className="border-t p-1">
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={refreshing}
+              className="flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-xs text-muted-foreground hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-60"
+            >
+              <RefreshCw aria-hidden className={cn("h-3 w-3", refreshing && "animate-spin")} />
+              {refreshing ? "Refreshing…" : "Refresh list"}
+            </button>
+          </div>
+        )}
       </PopoverContent>
     </Popover>
   );

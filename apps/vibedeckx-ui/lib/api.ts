@@ -1468,6 +1468,12 @@ export async function getAgentProviders(): Promise<AgentProviderInfo[]> {
 export interface MachineModelList {
   models: string[];
   source: "machine" | "suggestions";
+  /**
+   * Time left on the machine's cache entry — relative, so it is added to this
+   * browser's clock and never compared with the server's. Asking again before
+   * then returns the same list.
+   */
+  expiresInMs?: number;
 }
 
 /**
@@ -1476,11 +1482,13 @@ export interface MachineModelList {
  */
 export type ModelListScope = { sessionId: string } | { projectId: string };
 
-export async function getAgentModels(scope: ModelListScope, agentType: AgentType): Promise<MachineModelList> {
+/** `refresh` skips the machine's cache and re-runs the CLI (the picker's refresh button). */
+export async function getAgentModels(scope: ModelListScope, agentType: AgentType, options?: { refresh?: boolean }): Promise<MachineModelList> {
   const base = "sessionId" in scope
     ? `/api/agent-sessions/${encodeURIComponent(scope.sessionId)}`
     : `/api/projects/${encodeURIComponent(scope.projectId)}`;
-  const res = await authFetch(`${getApiBase()}${base}/agent-providers/${encodeURIComponent(agentType)}/models`);
+  const query = options?.refresh ? "?refresh=1" : "";
+  const res = await authFetch(`${getApiBase()}${base}/agent-providers/${encodeURIComponent(agentType)}/models${query}`);
   if (!res.ok) throw new Error("Failed to load models");
   return res.json();
 }

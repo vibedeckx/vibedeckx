@@ -529,12 +529,19 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
   // The target machine's own catalog (fx: its provider login's models), shown
   // once it arrives; the static suggestions stand in until then.
   // widthCandidates stays on the static lists so the chip does not resize.
-  // An existing session lists on the machine it runs on (where a pick is sent),
-  // not on the project's current target, which may have been switched since.
-  const { models: machineModels, refresh: refreshMachineModels } = useMachineModels({
+  // Keyed by machine + agent type, not by session: an existing session lists
+  // on the machine it runs on (where a pick is sent), a new conversation on
+  // the project's target, and both share the same list when that is one machine.
+  const {
+    models: machineModels,
+    refreshing: machineModelsRefreshing,
+    revalidate: revalidateMachineModels,
+    refresh: refreshMachineModels,
+  } = useMachineModels({
     sessionId: session?.id ?? null,
     projectId,
     agentTarget: project?.agent_mode,
+    knownRemoteIds: remotes.map((r) => r.remote_server_id),
     agentType,
   });
 
@@ -1569,7 +1576,9 @@ export const AgentConversation = forwardRef<AgentConversationHandle, AgentConver
             // respawn-shaped change in this row: only a turn in flight on a
             // session that already has history is too late to change.
             locked={session != null && status === "running" && messages.length > 0}
-            onOpen={refreshMachineModels}
+            onOpen={revalidateMachineModels}
+            onRefresh={refreshMachineModels}
+            refreshing={machineModelsRefreshing}
           />
           <PermissionModeToggle
             mode={permissionMode}

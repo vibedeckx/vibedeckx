@@ -130,6 +130,34 @@ describe("ModelPicker rendering", () => {
     expect(onOpen).toHaveBeenCalledTimes(2);
   });
 
+  it("offers a refresh row only when the caller can refresh, and spins while it runs", async () => {
+    const onRefresh = vi.fn();
+    const render = async (refreshing: boolean) => act(async () => {
+      root.render(<ModelPicker models={["opus"]} value={null} onChange={vi.fn()} locked={false} onRefresh={onRefresh} refreshing={refreshing} />);
+    });
+    await render(false);
+    await act(async () => { container.querySelector("button")!.click(); });
+    const button = () => Array.from(document.querySelectorAll<HTMLButtonElement>("[data-slot='popover-content'] button"))
+      .find((b) => b.textContent?.includes("Refresh"))!;
+    expect(button().textContent).toBe("Refresh list");
+    await act(async () => { button().click(); });
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    // A click is not a pick: the panel stays open.
+    expect(document.querySelector("[data-slot='popover-content']")).not.toBeNull();
+    await render(true);
+    expect(button().disabled).toBe(true);
+    expect(button().textContent).toBe("Refreshing…");
+    expect(button().querySelector("svg")!.getAttribute("class")).toContain("animate-spin");
+  });
+
+  it("has no refresh row without onRefresh", async () => {
+    await act(async () => {
+      root.render(<ModelPicker models={["opus"]} value={null} onChange={vi.fn()} locked={false} />);
+    });
+    await act(async () => { container.querySelector("button")!.click(); });
+    expect(document.querySelector("[data-slot='popover-content']")!.textContent).not.toContain("Refresh");
+  });
+
   it("does not set a placeholder on the model search input", async () => {
     await act(async () => {
       root.render(

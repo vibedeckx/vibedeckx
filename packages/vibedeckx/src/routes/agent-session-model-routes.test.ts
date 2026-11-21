@@ -125,7 +125,19 @@ describe("agent session model routes", () => {
       await app.register(agentSessionRoutes);
       const res = await app.inject({ method: "GET", url: "/api/agent-providers/fx/models" });
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ models: ["anthropic/claude-opus-5.5", "openai/gpt-5.4-mini"], source: "machine" });
+      expect(res.json()).toMatchObject({ models: ["anthropic/claude-opus-5.5", "openai/gpt-5.4-mini"], source: "machine" });
+    });
+
+    it("?refresh=1 skips the cache on the machine route", async () => {
+      const list = vi.spyOn(getProvider("fx"), "listModels").mockResolvedValueOnce(["old/model"]).mockResolvedValueOnce(["new/model"]);
+      ({ app } = makeApp());
+      await app.register(agentSessionRoutes);
+      await app.inject({ method: "GET", url: "/api/agent-providers/fx/models" });
+      const cached = await app.inject({ method: "GET", url: "/api/agent-providers/fx/models" });
+      expect(cached.json().models).toEqual(["old/model"]);
+      const refreshed = await app.inject({ method: "GET", url: "/api/agent-providers/fx/models?refresh=1" });
+      expect(refreshed.json().models).toEqual(["new/model"]);
+      expect(list).toHaveBeenCalledTimes(2);
     });
 
     it("rejects an unknown agent type", async () => {
@@ -142,11 +154,11 @@ describe("agent session model routes", () => {
       ({ app } = makeApp());
       await app.register(agentSessionRoutes);
       const fx = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models" });
-      expect(fx.json()).toEqual({ models: ["x/local"], source: "machine" });
+      expect(fx.json()).toMatchObject({ models: ["x/local"], source: "machine" });
       const claude = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/claude-code/models" });
-      expect(claude.json()).toEqual({ models: ["opus", "claude-opus-5"], source: "machine" });
+      expect(claude.json()).toMatchObject({ models: ["opus", "claude-opus-5"], source: "machine" });
       const codex = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/codex/models" });
-      expect(codex.json()).toEqual({ models: ["gpt-6.2-sol"], source: "machine" });
+      expect(codex.json()).toMatchObject({ models: ["gpt-6.2-sol"], source: "machine" });
       expect(proxyToRemoteAuto).not.toHaveBeenCalled();
     });
 
@@ -156,7 +168,7 @@ describe("agent session model routes", () => {
       ({ app } = makeApp());
       await app.register(agentSessionRoutes);
       const claude = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/claude-code/models" });
-      expect(claude.json()).toEqual({ models: ["opus", "sonnet", "haiku", "fable"], source: "suggestions" });
+      expect(claude.json()).toMatchObject({ models: ["opus", "sonnet", "haiku", "fable"], source: "suggestions" });
     });
 
     function remoteApp() {
@@ -170,7 +182,7 @@ describe("agent session model routes", () => {
       ({ app } = remoteApp());
       await app.register(agentSessionRoutes);
       const res = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models" });
-      expect(res.json()).toEqual({ models: ["y/remote"], source: "machine" });
+      expect(res.json()).toMatchObject({ models: ["y/remote"], source: "machine" });
       expect(proxyToRemoteAuto).toHaveBeenCalledWith("srv-1", "GET", "/api/agent-providers/fx/models", undefined, expect.anything());
     });
 
@@ -182,8 +194,25 @@ describe("agent session model routes", () => {
       app.remoteSessionMap.set("remote-srvA-p1-rs1", { remoteServerId: "srvA", remoteSessionId: "rs1", branch: null });
       await app.register(agentSessionRoutes);
       const res = await app.inject({ method: "GET", url: "/api/agent-sessions/remote-srvA-p1-rs1/agent-providers/fx/models" });
-      expect(res.json()).toEqual({ models: ["a/only-on-srvA"], source: "machine" });
+      expect(res.json()).toMatchObject({ models: ["a/only-on-srvA"], source: "machine" });
       expect(proxyToRemoteAuto).toHaveBeenCalledWith("srvA", "GET", "/api/agent-providers/fx/models", undefined, expect.anything());
+    });
+
+    it("forwards ?refresh=1 to the worker, and omits it otherwise", async () => {
+      proxyToRemoteAuto.mockResolvedValue({ ok: true, status: 200, data: { models: ["y/remote"], source: "machine" } } as never);
+      ({ app } = remoteApp());
+      app.remoteSessionMap.set("remote-srvA-p1-rs1", { remoteServerId: "srvA", remoteSessionId: "rs1", branch: null });
+      await app.register(agentSessionRoutes);
+      await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models?refresh=1" });
+      await app.inject({ method: "GET", url: "/api/agent-sessions/remote-srvA-p1-rs1/agent-providers/fx/models?refresh=1" });
+      await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models" });
+      expect(proxyToRemoteAuto.mock.calls.map((c) => [c[0], c[2]])).toEqual([
+        ["srv-1", "/api/agent-providers/fx/models?refresh=1"],
+        ["srvA", "/api/agent-providers/fx/models?refresh=1"],
+        ["srv-1", "/api/agent-providers/fx/models"],
+      ]);
+      proxyToRemoteAuto.mockReset();
+      proxyToRemoteAuto.mockImplementation(async () => ({ ok: true, status: 200, data: { success: true, model: "gpt-5.6-sol" } }));
     });
 
     it("an existing local session lists on the hub even when the project now targets a worker", async () => {
@@ -191,7 +220,7 @@ describe("agent session model routes", () => {
       ({ app } = remoteApp());
       await app.register(agentSessionRoutes);
       const res = await app.inject({ method: "GET", url: `/api/agent-sessions/${SESSION_ID}/agent-providers/fx/models` });
-      expect(res.json()).toEqual({ models: ["x/hub"], source: "machine" });
+      expect(res.json()).toMatchObject({ models: ["x/hub"], source: "machine" });
       expect(proxyToRemoteAuto).not.toHaveBeenCalled();
     });
 
@@ -206,6 +235,18 @@ describe("agent session model routes", () => {
       expect(proxyToRemoteAuto).not.toHaveBeenCalled();
     });
 
+    it("passes the worker's expiresInMs through, and fills one in when it is missing", async () => {
+      proxyToRemoteAuto
+        .mockResolvedValueOnce({ ok: true, status: 200, data: { models: ["y/remote"], source: "machine", expiresInMs: 1234 } } as never)
+        .mockResolvedValueOnce({ ok: true, status: 200, data: { models: ["y/remote"], source: "machine" } } as never);
+      ({ app } = remoteApp());
+      await app.register(agentSessionRoutes);
+      const withExpiry = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models" });
+      expect(withExpiry.json()).toEqual({ models: ["y/remote"], source: "machine", expiresInMs: 1234 });
+      const without = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models" });
+      expect(without.json().expiresInMs).toBe(60 * 60 * 1000);
+    });
+
     it.each([
       { ok: false, status: 404, data: { error: "Not Found" } },
       { ok: false, status: 503, data: { error: "offline" } },
@@ -217,7 +258,7 @@ describe("agent session model routes", () => {
       await app.register(agentSessionRoutes);
       const res = await app.inject({ method: "GET", url: "/api/projects/p1/agent-providers/fx/models" });
       expect(res.statusCode).toBe(200);
-      expect(res.json()).toEqual({ models: ["spacexai/grok-4.7", "openai/gpt-5.4-mini"], source: "suggestions" });
+      expect(res.json()).toMatchObject({ models: ["spacexai/grok-4.7", "openai/gpt-5.4-mini"], source: "suggestions" });
     });
   });
 
