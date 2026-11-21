@@ -52,4 +52,21 @@ describe("Hint", () => {
     await wait(50);
     expect(tooltip()).toContain("New Conversation");
   });
+
+  it("wraps prose balanced within max-w-72, but keeps an identifier whole on one line", async () => {
+    const contentClass = () => document.querySelector("[data-slot='tooltip-content']")!.className.split(/\s+/);
+    await act(async () => { button.dispatchEvent(new MouseEvent("pointermove", { bubbles: true })); });
+    await wait(350);
+    expect(contentClass()).toEqual(expect.arrayContaining(["max-w-72", "text-balance"]));
+
+    await act(async () => {
+      root.render(<Hint label="deepseek/deepseek-v4.1-flash-1017-ultrafast" identifier><button type="button">+</button></Hint>);
+    });
+    await wait(50);
+    const cls = contentClass();
+    // cn() must drop the base text-balance, not just add text-nowrap after it.
+    expect(cls).toEqual(expect.arrayContaining(["max-w-none", "text-nowrap"]));
+    expect(cls).not.toContain("text-balance");
+    expect(cls).not.toContain("max-w-72");
+  });
 });

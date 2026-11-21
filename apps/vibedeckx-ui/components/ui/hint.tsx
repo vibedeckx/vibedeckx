@@ -31,10 +31,17 @@ export function Hint({
   label,
   children,
   side = "bottom",
+  identifier = false,
 }: {
   label: ReactNode | null;
   children: ReactNode;
   side?: "top" | "right" | "bottom" | "left";
+  /**
+   * The label is an identifier (a model id, a path), not prose: shown whole on
+   * one line. Prose wraps balanced within max-w-72, which splits a long id at
+   * its first hyphen and leaves the box half empty.
+   */
+  identifier?: boolean;
 }) {
   return (
     <TooltipProvider delayDuration={300}>
@@ -42,7 +49,11 @@ export function Hint({
         <TooltipTrigger asChild onFocus={openOnKeyboardFocusOnly}>
           {children}
         </TooltipTrigger>
-        {label != null && <TooltipContent side={side} className="max-w-72">{label}</TooltipContent>}
+        {label != null && (
+          <TooltipContent side={side} className={identifier ? "max-w-none text-nowrap" : "max-w-72"}>
+            {label}
+          </TooltipContent>
+        )}
       </Tooltip>
     </TooltipProvider>
   );

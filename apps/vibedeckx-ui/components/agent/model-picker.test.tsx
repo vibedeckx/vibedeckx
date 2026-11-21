@@ -2,7 +2,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ModelPicker, modelLabel, shouldOfferCustom, shouldWidenPanel } from "./model-picker";
+import { ModelPicker, modelLabel, needsRoomyPanel, shouldOfferCustom, shouldWidenPanel } from "./model-picker";
 
 /** jsdom lays nothing out: make the chip's visible label report the given widths. */
 function setLabelGeometry(chip: Element, scrollWidth: number, clientWidth: number) {
@@ -72,6 +72,13 @@ describe("model picker logic", () => {
       expect(shouldWidenPanel({ textWidth: 500, narrowFieldWidth: 0, wide: false })).toBe(false);
       expect(shouldWidenPanel({ textWidth: 0, narrowFieldWidth: 0, wide: true })).toBe(true);
     });
+  });
+
+  it("widens the panel only for suggestion lists with long names", () => {
+    expect(needsRoomyPanel(["opus", "sonnet", "haiku", "fable"])).toBe(false);
+    expect(needsRoomyPanel(["gpt-6.2-sol", "gpt-5.6-terra"])).toBe(false);
+    expect(needsRoomyPanel(["spacexai/grok-4.7", "anthropic/claude-opus-5.5"])).toBe(true);
+    expect(needsRoomyPanel([])).toBe(false);
   });
 
   it("offers a custom entry only for a non-empty query outside the suggestions", () => {
@@ -394,6 +401,24 @@ describe("ModelPicker panel width wiring", () => {
 
     // Reading the note is not picking the row: the panel stays open.
     expect(document.querySelector("[data-slot='popover-content']")).not.toBeNull();
+  });
+
+  it("opens wider, with one-line rows, when the suggestions are long names (a machine catalog)", async () => {
+    stubGeometry(78, 8);
+    await openPicker(["anthropic/claude-opus-5.5-fast", "openai/gpt-5.4-mini"]);
+
+    expect(panelClass()).toContain("w-60");
+    expect(panelClass()).not.toContain("w-[var(--radix-popover-trigger-width)]");
+    const row = Array.from(document.querySelectorAll("[data-slot='command-item']"))
+      .find((el) => el.textContent === "anthropic/claude-opus-5.5-fast")!;
+    expect(row.querySelector("span.truncate")!.textContent).toBe("anthropic/claude-opus-5.5-fast");
+  });
+
+  it("keeps the list short enough not to hang far over the conversation", async () => {
+    stubGeometry(78, 8);
+    await openPicker(["gpt-5.6-codex"]);
+
+    expect(document.querySelector("[data-slot='command-list']")!.className).toContain("max-h-52");
   });
 
   it("opens at the chip's width", async () => {

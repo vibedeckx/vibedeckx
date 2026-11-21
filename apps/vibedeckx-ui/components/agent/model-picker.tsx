@@ -119,6 +119,43 @@ export function shouldOfferCustom(query: string, models: string[]): boolean {
   return trimmed.length > 0 && !models.includes(trimmed);
 }
 
+/**
+ * Suggestions this long don't fit a chip-width panel on one line — a machine
+ * catalog like fx's (`anthropic/claude-opus-5.5-fast`). The panel then opens
+ * at ROOMY_PANEL instead: ~35 characters, which fits ~96% of fx's catalog
+ * whole (median 21, max 43). Wider would only add blank space to every row
+ * for the last few names, which keep their full name in a tooltip.
+ */
+const ROOMY_NAME_CHARS = 18;
+const ROOMY_PANEL = "w-60";
+
+export function needsRoomyPanel(models: string[]): boolean {
+  return models.some((m) => m.length > ROOMY_NAME_CHARS);
+}
+
+/**
+ * One suggestion, on one line. Model names share long prefixes and differ at
+ * the end, so a clipped row carries its full name in a tooltip — measured on
+ * the way in, so rows that fit get none.
+ */
+function ModelRow({ model, onPick }: { model: string; onPick: () => void }) {
+  const [clipped, setClipped] = useState(false);
+  return (
+    <CommandItem value={model} onSelect={onPick} className="text-xs">
+      {/* Around the text, not the row: a tooltip trigger would take over the
+          row's own data-slot. A clipped span fills the row's width anyway. */}
+      <Hint label={clipped ? model : null} side="right" identifier>
+        <span
+          className="min-w-0 truncate"
+          onPointerEnter={(e) => setClipped(e.currentTarget.scrollWidth > e.currentTarget.clientWidth)}
+        >
+          {model}
+        </span>
+      </Hint>
+    </CommandItem>
+  );
+}
+
 /** Whether the chip's visible label (ReservedWidthLabel's truncating span) is cut off. */
 function isClipped(chip: HTMLElement): boolean {
   const text = chip.querySelector<HTMLElement>(".truncate");
@@ -232,10 +269,15 @@ export function ModelPicker({
       {/* Same width as the collapsed chip, so the panel reads as that chip
           opening rather than as a separate surface. The reserved label slot makes
           that width constant, so it does not move with the choice — it only
-          widens when a typed name needs the room. */}
+          widens when a typed name needs the room, or when the suggestions
+          themselves are long names (a machine catalog; see needsRoomyPanel). */}
       {/* No width transition: the measurement below reads the field's width, and
           an animating width would be caught mid-flight. */}
-      <PopoverContent className={wide ? "w-56" : "w-[var(--radix-popover-trigger-width)]"}>
+      <PopoverContent
+        className={
+          needsRoomyPanel(models) ? ROOMY_PANEL : wide ? "w-56" : "w-[var(--radix-popover-trigger-width)]"
+        }
+      >
         {/* Renders the query in the field's own font, out of flow, so its width
             can be compared against the field's without the panel's current width
             feeding back into the comparison. */}
@@ -255,7 +297,9 @@ export function ModelPicker({
             value={query}
             onValueChange={setQuery}
           />
-          <CommandList>
+          {/* Lower than the default 300px: a long catalog would otherwise
+              hang the panel far down over the conversation. ~8 one-line rows. */}
+          <CommandList className="max-h-52">
             {/* Short enough not to wrap at this width. */}
             <CommandEmpty>No match.</CommandEmpty>
             <CommandGroup>
@@ -291,9 +335,7 @@ export function ModelPicker({
                 <span className="sr-only">{DEFAULT_HINT}</span>
               </CommandItem>
               {models.map((m) => (
-                <CommandItem key={m} value={m} onSelect={() => pick(m)} className="text-xs">
-                  {m}
-                </CommandItem>
+                <ModelRow key={m} model={m} onPick={() => pick(m)} />
               ))}
             </CommandGroup>
             {showCustom && (
