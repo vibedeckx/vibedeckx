@@ -2,6 +2,7 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 import { ChevronDown, Info, RefreshCw } from "lucide-react";
+import { useCommandState } from "cmdk";
 import {
   Command,
   CommandEmpty,
@@ -84,10 +85,10 @@ export function modelLabel(value: string | null): string {
 }
 
 /**
- * The panel opens at the collapsed chip's width so it reads as that chip
- * expanding, and widens only once the typed name no longer fits the search
- * field. A suggestion never triggers it: the chip already reserves room for the
- * longest one.
+ * Query-driven widening: at the collapsed chip's width the panel reads as that
+ * chip expanding, and widens only once the typed name no longer fits the search
+ * field. Only the query is measured here; a list of long suggestion names opens
+ * the panel wider on its own (needsRoomyPanel), and this does not apply then.
  *
  * Both measurements are independent of the panel's current width — the mirrored
  * text width and the field width recorded while narrow — so the decision cannot
@@ -135,20 +136,27 @@ export function needsRoomyPanel(models: string[]): boolean {
 
 /**
  * One suggestion, on one line. Model names share long prefixes and differ at
- * the end, so a clipped row carries its full name in a tooltip — measured on
- * the way in, so rows that fit get none.
+ * the end, so a clipped row shows its full name in a tooltip while it is the
+ * highlighted row. Highlight, not hover: cmdk keeps focus in the search field
+ * and moves the highlight with the arrow keys (and with the pointer), so this
+ * is the one state both keyboard and mouse users reach.
  */
 function ModelRow({ model, onPick }: { model: string; onPick: () => void }) {
+  const highlighted = useCommandState((state) => state.value === model);
+  const textRef = useRef<HTMLSpanElement>(null);
   const [clipped, setClipped] = useState(false);
+  // Measured when the row becomes the highlighted one, so rows that fit never
+  // get a tooltip and an idle list of 265 rows measures nothing.
+  useLayoutEffect(() => {
+    const text = textRef.current;
+    if (highlighted && text) setClipped(text.scrollWidth > text.clientWidth);
+  }, [highlighted, model]);
   return (
     <CommandItem value={model} onSelect={onPick} className="text-xs">
       {/* Around the text, not the row: a tooltip trigger would take over the
           row's own data-slot. A clipped span fills the row's width anyway. */}
-      <Hint label={clipped ? model : null} side="right" identifier>
-        <span
-          className="min-w-0 truncate"
-          onPointerEnter={(e) => setClipped(e.currentTarget.scrollWidth > e.currentTarget.clientWidth)}
-        >
+      <Hint label={clipped ? model : null} side="right" identifier open={highlighted && clipped}>
+        <span ref={textRef} className="min-w-0 truncate">
           {model}
         </span>
       </Hint>
@@ -185,14 +193,19 @@ export function ModelPicker({
    * rendering, and "iiiiiiiiii" is not "WWWWWWWWWW".
    */
   const narrowFieldWidth = useRef(0);
+  const roomy = needsRoomyPanel(models);
 
   useLayoutEffect(() => {
     const input = inputRef.current;
     const mirror = mirrorRef.current;
     if (!input || !mirror) return;
     // Only meaningful while narrow — re-read on every pass so a resize or a
-    // font-size change is picked up instead of cached from first open.
-    if (!wide) narrowFieldWidth.current = input.clientWidth;
+    // font-size change is picked up instead of cached from first open. A roomy
+    // panel's field is not the narrow field: recording it would let a later
+    // switch back to chip width (a refresh that returns only short names) keep
+    // a query that no longer fits. This effect re-runs when `roomy` flips, and
+    // then records the real narrow field before deciding.
+    if (!wide && !roomy) narrowFieldWidth.current = input.clientWidth;
     setWide(
       shouldWidenPanel({
         textWidth: mirror.offsetWidth,
@@ -200,7 +213,7 @@ export function ModelPicker({
         wide,
       }),
     );
-  }, [open, query, wide]);
+  }, [open, query, wide, roomy]);
 
   const label = modelLabel(value);
   // A hand-typed name can be arbitrarily long, so the reserved slot is capped
@@ -275,7 +288,7 @@ export function ModelPicker({
           an animating width would be caught mid-flight. */}
       <PopoverContent
         className={
-          needsRoomyPanel(models) ? ROOMY_PANEL : wide ? "w-56" : "w-[var(--radix-popover-trigger-width)]"
+          roomy ? ROOMY_PANEL : wide ? "w-56" : "w-[var(--radix-popover-trigger-width)]"
         }
       >
         {/* Renders the query in the field's own font, out of flow, so its width

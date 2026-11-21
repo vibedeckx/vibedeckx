@@ -157,6 +157,43 @@ describe("ModelPicker rendering", () => {
     expect(button().querySelector("svg")!.getAttribute("class")).toContain("animate-spin");
   });
 
+  it("shows a clipped name in full on the arrow-key highlighted row, where focus never leaves the search field", async () => {
+    // jsdom has no layout: a .truncate span is clipped when its text is over 20 chars.
+    Object.defineProperty(HTMLSpanElement.prototype, "scrollWidth", {
+      configurable: true,
+      get(this: HTMLElement) { return (this.textContent?.length ?? 0) * 10; },
+    });
+    Object.defineProperty(HTMLSpanElement.prototype, "clientWidth", {
+      configurable: true,
+      get(this: HTMLElement) { return this.classList.contains("truncate") ? 200 : (this.textContent?.length ?? 0) * 10; },
+    });
+    try {
+      const long = "deepseek/deepseek-v4.1-flash-1017-ultrafast";
+      await act(async () => {
+        root.render(<ModelPicker models={[long, "openai/gpt-5.4-mini"]} value={null} onChange={vi.fn()} locked={false} />);
+      });
+      await act(async () => { container.querySelector("button")!.click(); });
+      const input = document.querySelector<HTMLInputElement>("[data-slot='command-input']")!;
+      const press = (key: string) => act(async () => {
+        input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+      });
+      const tooltip = () => document.querySelector("[data-slot='tooltip-content']")?.textContent ?? null;
+
+      expect(document.activeElement).toBe(input);
+      await press("ArrowDown"); // Default → the long name
+      expect(tooltip()).toContain(long);
+      expect(document.activeElement).toBe(input);
+
+      await press("ArrowDown"); // → a name that fits: no tooltip
+      expect(tooltip()).toBeNull();
+    } finally {
+      // @ts-expect-error restoring jsdom's own getters
+      delete HTMLSpanElement.prototype.scrollWidth;
+      // @ts-expect-error restoring jsdom's own getters
+      delete HTMLSpanElement.prototype.clientWidth;
+    }
+  });
+
   it("has no refresh row without onRefresh", async () => {
     await act(async () => {
       root.render(<ModelPicker models={["opus"]} value={null} onChange={vi.fn()} locked={false} />);
@@ -419,6 +456,28 @@ describe("ModelPicker panel width wiring", () => {
     await openPicker(["gpt-5.6-codex"]);
 
     expect(document.querySelector("[data-slot='command-list']")!.className).toContain("max-h-52");
+  });
+
+  it("re-measures the narrow field when a refresh swaps long names for short ones while a query is typed", async () => {
+    stubGeometry(78, 8);
+    // The field is as wide as its panel: 200px in the roomy panel, 78px at chip width.
+    Object.defineProperty(HTMLInputElement.prototype, "clientWidth", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.closest("[data-slot='popover-content']")?.className.includes("w-60") ? 200 : 78;
+      },
+    });
+    const render = (models: string[]) => act(async () => {
+      root.render(<ModelPicker models={models} value={null} onChange={vi.fn()} locked={false} />);
+    });
+    await render(["anthropic/claude-opus-5.5-fast"]);
+    await act(async () => { container.querySelector("button")!.click(); });
+    await type("abcdefghijk"); // 88px — fits the roomy field, not the narrow one
+    expect(panelClass()).toContain("w-60");
+
+    await render(["opus", "sonnet"]); // the refreshed list is all short names
+
+    expect(panelClass()).toContain("w-56");
   });
 
   it("opens at the chip's width", async () => {

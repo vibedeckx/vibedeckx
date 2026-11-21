@@ -32,6 +32,7 @@ export function Hint({
   children,
   side = "bottom",
   identifier = false,
+  open,
 }: {
   label: ReactNode | null;
   children: ReactNode;
@@ -42,10 +43,16 @@ export function Hint({
    * its first hyphen and leaves the box half empty.
    */
   identifier?: boolean;
+  /**
+   * Controlled visibility, for a trigger that never takes focus or hover — a
+   * row highlighted by arrow keys while focus stays in a search field. Omit it
+   * to open on hover / keyboard focus as usual.
+   */
+  open?: boolean;
 }) {
   return (
     <TooltipProvider delayDuration={300}>
-      <Tooltip>
+      <Tooltip open={open}>
         <TooltipTrigger asChild onFocus={openOnKeyboardFocusOnly}>
           {children}
         </TooltipTrigger>
