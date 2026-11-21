@@ -48,6 +48,11 @@ const COVERED_BY = {
   "http:POST /api/agent-sessions/:param/switch-mode": { file: "packages/vibedeckx/src/routes/agent-session-workflow-guard-routes.test.ts", marker: "switch-mode" },
   "http:POST /api/agent-sessions/:param/accept-plan": { file: "packages/vibedeckx/src/routes/agent-session-workflow-guard-routes.test.ts", marker: "accept-plan" },
   "http:POST /api/agent-sessions/:param/model": { file: "packages/vibedeckx/src/routes/agent-session-model-routes.test.ts", marker: "/model" },
+  // The hub's model-list routes never fail: an old worker's 404 degrades to the
+  // static suggestions, so a smoke through the hub could not tell "expected gap"
+  // from "broken". The route test pins both halves — the worker's own machine
+  // route and the hub proxying to the right worker (with ?refresh=1).
+  "http:GET /api/agent-providers/:param/models": { file: "packages/vibedeckx/src/routes/agent-session-model-routes.test.ts", marker: '"/api/agent-providers/fx/models"' },
   "http:POST /api/path/agent-sessions/:param/branch": { file: "packages/vibedeckx/src/routes/agent-session-branch-routes.test.ts", marker: "/branch" },
   "http:POST /api/path/cross-remote/exec": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/exec" },
   "http:POST /api/path/cross-remote/read-file": { file: "packages/vibedeckx/src/routes/cross-remote-target-routes.test.ts", marker: "/api/path/cross-remote/read-file" },
